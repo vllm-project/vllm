@@ -97,7 +97,7 @@ from vllm.transformers_utils.processor import (
     cached_get_image_processor,
 )
 from vllm.transformers_utils.utils import convert_model_repo_to_path
-from vllm.utils.collection_utils import flatten_2d_lists
+from vllm.utils.collection_utils import flatten_2d_lists, is_list_of
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -1258,15 +1258,15 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                 image_embeds=image_embeds,
             )
 
-        assert isinstance(pixel_values, list)
-        pixel_values_list: list[torch.Tensor] = []
+        assert is_list_of(pixel_values, list, check="all")
+        pixel_values_list: list[list[torch.Tensor]] = []
         for pixel_value in pixel_values:
-            assert isinstance(pixel_value, torch.Tensor)
+            assert is_list_of(pixel_value, torch.Tensor, check="all")
             pixel_values_list.append(pixel_value)
         tgt_sizes = kwargs.pop("tgt_sizes")
 
         num_slices_flat = torch.tensor([len(ps) for ps in pixel_values_list])
-        pixel_values_flat = flatten_bn(pixel_values_list)
+        pixel_values_flat = flatten_2d_lists(pixel_values_list)
         tgt_sizes_flat = flatten_bn(tgt_sizes, concat=True)
 
         return MiniCPMVImagePixelInputs(
