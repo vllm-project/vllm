@@ -167,6 +167,7 @@ class RequestState:
             self.prompt_token_ids, self.prompt_embeds
         )
         self.logprobs_processor = logprobs_processor
+        self.prompt_token_logprobs: list[dict[int, float] | None] | None = None
         self.detokenizer = detokenizer
         self.max_tokens_param = max_tokens_param
         self.top_p = top_p
@@ -383,6 +384,7 @@ class RequestState:
             prompt=self.prompt,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
+            prompt_token_logprobs=self.prompt_token_logprobs,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
@@ -688,6 +690,14 @@ class OutputProcessor:
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
+                if engine_core_output.prompt_token_logprobs is not None:
+                    scores_for_chunk: list[dict[int, float] | None] = (
+                        engine_core_output.prompt_token_logprobs.to_dicts()
+                    )
+                    if req_state.prompt_token_logprobs is None:
+                        req_state.prompt_token_logprobs = scores_for_chunk
+                    else:
+                        req_state.prompt_token_logprobs.extend(scores_for_chunk)
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(

@@ -21,7 +21,12 @@ from vllm.v1.metrics.stats import (
     RequestSpecDecodeMetrics,
     SchedulerStats,
 )
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplingMaskLists
+from vllm.v1.outputs import (
+    LogprobsLists,
+    LogprobsTensors,
+    PromptTokenLogprobsTensors,
+    SamplingMaskLists,
+)
 from vllm.v1.serial_utils import UtilityResult
 
 # Type for pause_generation mode parameter.
@@ -232,6 +237,9 @@ class EngineCoreOutput(
     # Per-request spec-decode acceptance; attached only on the final output.
     # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+
+    # Keep optional additions at the end to preserve array-like serialization.
+    prompt_token_logprobs: PromptTokenLogprobsTensors | None = None
 
     @property
     def finished(self) -> bool:

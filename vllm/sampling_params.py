@@ -28,6 +28,9 @@ _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
 
 MAX_LOGPROB_TOKEN_IDS = 128
+# Prompt scoring gathers one row per prompt position, so OPD's global union
+# can be much larger than the decode-only fixed-ID request limit.
+MAX_PROMPT_LOGPROB_TOKEN_IDS = 16384
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
@@ -291,6 +294,10 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
+    prompt_logprob_token_ids: list[int] | None = None
+    """Token IDs to score at selected causal prompt rows."""
+    prompt_logprob_start: int | None = None
+    """First causal prompt row to score; defaults to the first row."""
     logprob_token_ids: list[int] | None = None
     """Specific token IDs to return logprobs for. More efficient than
     logprobs=-1 when you only need logprobs for a small set of tokens.
@@ -399,6 +406,7 @@ class SamplingParams(
         min_tokens: int = 0,
         logprobs: int | None = None,
         prompt_logprobs: int | None = None,
+        prompt_logprob_token_ids: list[int] | None = None,
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
@@ -414,6 +422,7 @@ class SamplingParams(
         routed_experts_prompt_start: int = 0,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
+        prompt_logprob_start: int | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -464,6 +473,8 @@ class SamplingParams(
             min_tokens=min_tokens,
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
+            prompt_logprob_token_ids=prompt_logprob_token_ids,
+            prompt_logprob_start=prompt_logprob_start,
             logprob_token_ids=logprob_token_ids,
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
@@ -540,7 +551,10 @@ class SamplingParams(
             # If prefix caching is enabled,
             # the output of prompt logprobs may less than n_prompt_tokens,
             # we need to skip reading cache at this request.
-            self.skip_reading_prefix_cache = self.prompt_logprobs is not None
+            self.skip_reading_prefix_cache = (
+                self.prompt_logprobs is not None
+                or self.prompt_logprob_token_ids is not None
+            )
 
     def _verify_args(self) -> None:
         _verify_num_sequences(self.n, "n")
@@ -787,6 +801,7 @@ class SamplingParams(
         tokenizer: TokenizerLike | None,
     ) -> None:
         self._validate_logprobs(model_config)
+        self._validate_prompt_logprob_token_ids(model_config)
         self._validate_logit_bias(model_config)
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
@@ -884,6 +899,43 @@ class SamplingParams(
                 parameter="stop_token_ids",
                 value=invalid_token_ids,
             )
+
+    def _validate_prompt_logprob_token_ids(self, model_config: ModelConfig) -> None:
+        if self.prompt_logprob_token_ids is not None:
+            n = len(self.prompt_logprob_token_ids)
+            if n == 0 or n > MAX_PROMPT_LOGPROB_TOKEN_IDS:
+                raise VLLMValidationError(
+                    f"Requested prompt_logprob_token_ids length must be in "
+                    f"[1, {MAX_PROMPT_LOGPROB_TOKEN_IDS}], got {n}",
+                    parameter="prompt_logprob_token_ids",
+                    value=n,
+                )
+            vocab_size = model_config.get_vocab_size()
+            invalid_token_ids = [
+                token_id
+                for token_id in self.prompt_logprob_token_ids
+                if token_id < 0 or token_id >= vocab_size
+            ]
+            if invalid_token_ids:
+                raise VLLMValidationError(
+                    f"token_id(s) {invalid_token_ids} in "
+                    f"prompt_logprob_token_ids contain out-of-vocab token ids. "
+                    f"Vocabulary size: {vocab_size}",
+                    parameter="prompt_logprob_token_ids",
+                    value=invalid_token_ids,
+                )
+            if len(set(self.prompt_logprob_token_ids)) != n:
+                raise VLLMValidationError(
+                    "prompt_logprob_token_ids must not contain duplicates.",
+                    parameter="prompt_logprob_token_ids",
+                    value=self.prompt_logprob_token_ids,
+                )
+            if self.prompt_logprob_start is not None and self.prompt_logprob_start < 0:
+                raise VLLMValidationError(
+                    "prompt_logprob_start must be non-negative.",
+                    parameter="prompt_logprob_start",
+                    value=self.prompt_logprob_start,
+                )
 
     def _validate_logit_bias(self, model_config: ModelConfig) -> None:
         """Validate logit_bias token IDs are within vocabulary range."""
