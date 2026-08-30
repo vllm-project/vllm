@@ -1658,7 +1658,11 @@ def test_cache_key_salting():
     block_hashes = req0.block_hashes
     assert len(block_hashes) == 3
     assert block_hashes[0] == sha256(
-        (kv_cache_utils.NONE_HASH, tuple(token_ids[:block_size]), ("salt1",))
+        (
+            kv_cache_utils.NONE_HASH,
+            tuple(token_ids[:block_size]),
+            (("cache_salt", "salt1"),),
+        )
     )
     assert block_hashes[1] == sha256(
         (block_hashes[0], tuple(token_ids[block_size : block_size * 2]), None)
@@ -1703,7 +1707,11 @@ def test_cache_key_salting():
     block_hashes = req2.block_hashes
     assert len(block_hashes) == 3
     assert block_hashes[0] == sha256(
-        (kv_cache_utils.NONE_HASH, tuple(token_ids[:block_size]), ("salt2",))
+        (
+            kv_cache_utils.NONE_HASH,
+            tuple(token_ids[:block_size]),
+            (("cache_salt", "salt2"),),
+        )
     )
     assert block_hashes[1] == sha256(
         (block_hashes[0], tuple(token_ids[block_size : block_size * 2]), None)
