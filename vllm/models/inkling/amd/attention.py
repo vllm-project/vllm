@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
+    is_quantized_kv_cache,
 )
 
 from ..configs import InklingModelConfig
@@ -166,6 +167,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
+        self._validate_kv_cache_dtype(self.kv_cache_dtype)
         self.register_buffer("k_scale", torch.ones((), dtype=torch.float32))
         self.register_buffer("v_scale", torch.ones((), dtype=torch.float32))
 
@@ -193,6 +195,19 @@ class InklingAttention(nn.Module, AttentionLayerBase):
                 ),
             )
         )
+
+    @staticmethod
+    def _validate_kv_cache_dtype(kv_cache_dtype: str) -> None:
+        # No quantized KV path is wired for the ROCm kernels; without
+        # this gate a uint8 cache reaches them and dies at warmup with
+        # a dtype error far from the cause. Non-quantized overrides
+        # ("float16"/"bfloat16") pass through unchanged.
+        if is_quantized_kv_cache(kv_cache_dtype):
+            raise NotImplementedError(
+                "Inkling on ROCm does not support a quantized KV cache; "
+                f"--kv-cache-dtype {kv_cache_dtype!r} is not implemented "
+                "on this platform"
+            )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return FlashAttentionBackend
