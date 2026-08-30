@@ -653,7 +653,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.speculator is not None:
             # After set_attn, so the speculator can size its cudagraph mode
             # to its own attention support.
-            self.speculator.init_cudagraph_manager(cudagraph_mode)
+            self.speculator.init_cudagraph_manager(
+                self.speculator.resolve_cudagraph_mode(cudagraph_mode)
+            )
 
         self.kv_caches: list[torch.Tensor] = []
         kv_caches_dict = init_kv_cache(

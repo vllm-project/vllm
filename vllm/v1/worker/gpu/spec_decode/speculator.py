@@ -45,6 +45,9 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 
 
 class BaseSpeculator(ABC):
+    def resolve_cudagraph_mode(self, cudagraph_mode: CUDAGraphMode) -> CUDAGraphMode:
+        return cudagraph_mode
+
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass
@@ -85,6 +88,11 @@ class BaseSpeculator(ABC):
 
 
 class DraftModelSpeculator(BaseSpeculator):
+    def resolve_cudagraph_mode(self, cudagraph_mode: CUDAGraphMode) -> CUDAGraphMode:
+        if self.speculative_config.enforce_eager:
+            return CUDAGraphMode.NONE
+        return cudagraph_mode
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.device = device
