@@ -469,6 +469,8 @@ class LLMEngine:
             return
         self._shutdown = True
         try:
+            if finalizer := getattr(self, "_finalizer", None):
+                finalizer()
             if renderer := getattr(self, "renderer", None):
                 renderer.shutdown()
         finally:
