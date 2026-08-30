@@ -152,6 +152,12 @@ llm = LLM(model="facebook/opt-125m")
     export VLLM_USE_MODELSCOPE=True
     ```
 
+    To download models from [AtomGit](https://atomgit.com/) instead, set `VLLM_USE_ATOMGIT` in the environment before the Python process imports vLLM (it redirects the HuggingFace Hub endpoint at import time). Nested repo ids with 3+ path segments are collapsed into AtomGit's `owner/repo` form (e.g. `hf_mirrors/Qwen/Qwen2.5-7B-Instruct` becomes `hf_mirrors-Qwen/Qwen2.5-7B-Instruct`). If both `VLLM_USE_ATOMGIT` and `VLLM_USE_MODELSCOPE` are set, AtomGit takes precedence.
+
+    ```shell
+    export VLLM_USE_ATOMGIT=True
+    ```
+
 Now, the fun part! The outputs are generated using `llm.generate`. It adds the input prompts to the vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of `RequestOutput` objects, which include all of the output tokens.
 
 ```python

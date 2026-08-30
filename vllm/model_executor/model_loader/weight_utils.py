@@ -162,7 +162,7 @@ def maybe_download_from_modelscope(
 
     Returns the path to the downloaded model, or None if the model is not
     downloaded from ModelScope."""
-    if envs.VLLM_USE_MODELSCOPE:
+    if envs.VLLM_USE_MODELSCOPE and not envs.VLLM_USE_ATOMGIT:
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
         # pylint: disable=C.
