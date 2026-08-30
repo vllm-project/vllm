@@ -120,7 +120,7 @@ uv pip install -r requirements/docs.txt
     (e.g., `mkdocs-awesome-nav` requires Python 3.10+)
 
 MkDocs comes with a built-in dev-server that lets you preview your documentation as you work on it.
-From the root of the repository, run:
+From the root of the repository, run the following. Note that by default, the dev-server will run on `127.0.0.1:8000`. Should you want to run the dev-server on a different port, use -a such as `mkdocs serve -a localhost:8090`. 
 
 ```bash
 mkdocs serve                           # with API ref (~10 minutes)
