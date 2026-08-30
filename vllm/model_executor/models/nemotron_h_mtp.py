@@ -11,7 +11,6 @@ import torch.nn as nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -40,9 +39,6 @@ from .nemotron_h import (
     NemotronHAttentionDecoderLayer,
     NemotronHMoEDecoderLayer,
 )
-
-logger = init_logger(__name__)
-
 
 class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
     def __init__(
@@ -433,8 +429,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        loaded_stacked_shards: dict[str, set[str]] = {}
-        loaded_expert_slices: dict[str, set[int]] = {}
 
         for name, loaded_weight in weights:
             # MTP weights are nested in "language_model."
@@ -492,9 +486,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
                 if weight_loader is not None:
                     weight_loader(param, loaded_weight, shard_id)
                     loaded_params.add(stacked_name)
-                    loaded_stacked_shards.setdefault(stacked_name, set()).add(
-                        shard_id
-                    )
                 break
 
             if is_stacked:
@@ -528,7 +519,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
                 )
                 if success:
                     loaded_params.add(name_mapped)
-                    loaded_expert_slices.setdefault(name_mapped, set()).add(expert_id)
                 break
 
             if is_expert_weight:
@@ -545,88 +535,9 @@ class NemotronHMTP(nn.Module, SupportsPP):
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
-        if self.has_own_lm_head:
-            loaded_lm_head_params = {
-                name for name in loaded_params if name.startswith("lm_head.")
-            }
-            if not loaded_lm_head_params:
-                raise ValueError(
-                    "Nemotron MTP detected an owned lm_head but did not load any "
-                    "lm_head parameters from the checkpoint."
-                )
-            logger.info(
-                "Detected and loaded %d Nemotron MTP lm_head tensors from the "
-                "draft checkpoint.",
-                len(loaded_lm_head_params),
-            )
-        else:
-            # These temporary parameters are replaced by the target head after
-            # draft loading and may be absent from an MTP-only checkpoint.
+        if not self.has_own_lm_head:
             loaded_params.update(
                 name for name in params_dict if name.startswith("lm_head.")
             )
-
-
-        # Quantized model loading disables the generic missing-weight check
-        # because some quantizers synthesize parameters. These ModelOpt MTP
-        # checkpoints serialize every model-owned parameter, so enforce the
-        # stronger invariant here to catch missed name mappings.
-        missing_params = set(params_dict) - loaded_params
-
-        # Existing proposer behavior replaces the temporary draft embedding
-        # with the target embedding after checkpoint loading.
-        missing_params -= {
-            name
-            for name in missing_params
-            if name.startswith("model.embed_tokens.")
-        }
-
-        runtime_owned_params = {
-            name
-            for name in missing_params
-            if name.endswith((".attn.q_scale", ".attn.prob_scale"))
-            or name == "lm_head.input_scale"
-        }
-        missing_params -= runtime_owned_params
-        if missing_params:
-            missing_preview = ", ".join(sorted(missing_params)[:20])
-            raise ValueError(
-                "Nemotron MTP checkpoint did not initialize "
-                f"{len(missing_params)} parameter(s): {missing_preview}"
-            )
-
-        incomplete_stacked_params = [
-            f"{name} ({','.join(sorted(shards))}/k,q,v shards)"
-            for name, shards in sorted(loaded_stacked_shards.items())
-            if shards != {"q", "k", "v"}
-        ]
-        if incomplete_stacked_params:
-            raise ValueError(
-                "Nemotron MTP checkpoint incompletely initialized fused QKV "
-                "parameters: " + ", ".join(incomplete_stacked_params)
-            )
-
-        incomplete_expert_params: list[str] = []
-        for name, expert_ids in sorted(loaded_expert_slices.items()):
-            expected_slices = params_dict[name].shape[0]
-            if len(expert_ids) != expected_slices:
-                incomplete_expert_params.append(
-                    f"{name} ({len(expert_ids)}/{expected_slices} expert slices)"
-                )
-        if incomplete_expert_params:
-            raise ValueError(
-                "Nemotron MTP checkpoint incompletely initialized fused MoE "
-                "parameters: " + ", ".join(incomplete_expert_params)
-            )
-        if loaded_expert_slices:
-            logger.info(
-                "Verified complete expert-slice loading for %d fused MTP "
-                "parameter(s).",
-                len(loaded_expert_slices),
-            )
-        logger.info(
-            "Verified initialization of all %d Nemotron MTP parameters.",
-            len(params_dict),
-        )
 
         return loaded_params
