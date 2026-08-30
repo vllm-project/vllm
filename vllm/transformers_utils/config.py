@@ -94,6 +94,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     glm5_next_vision="Glm5NextVisionConfig",
     hyperclovax="HyperCLOVAXConfig",
     hy_v3="HYV3Config",
+    hy_v4="HYV4Config",
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",

@@ -110,6 +110,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.cache import LRUCache
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -581,6 +582,7 @@ class Qwen3_VisionTransformer(nn.Module):
             else []
         )
         self.num_grid_per_side = int(self.num_position_embeddings**0.5)
+        self._rot_pos_ids_cache = LRUCache(capacity=1024)
 
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
@@ -672,9 +674,11 @@ class Qwen3_VisionTransformer(nn.Module):
     def device(self) -> torch.device:
         return self.patch_embed.proj.weight.device
 
-    @staticmethod
-    @lru_cache(maxsize=1024)
-    def rot_pos_ids(h: int, w: int, spatial_merge_size: int) -> torch.Tensor:
+    def rot_pos_ids(self, h: int, w: int, spatial_merge_size: int) -> torch.Tensor:
+        cache_key = (h, w, spatial_merge_size)
+        if cache_key in self._rot_pos_ids_cache:
+            return self._rot_pos_ids_cache[cache_key]
+
         hpos_ids = np.broadcast_to(np.arange(h).reshape(h, 1), (h, w))
         h_div = h // spatial_merge_size
         w_div = w // spatial_merge_size
@@ -697,7 +701,9 @@ class Qwen3_VisionTransformer(nn.Module):
         wpos_ids = wpos_ids.transpose(0, 2, 1, 3)
         wpos_ids = wpos_ids.flatten()
 
-        return torch.from_numpy(np.stack([hpos_ids, wpos_ids], axis=-1))
+        result = torch.from_numpy(np.stack([hpos_ids, wpos_ids], axis=-1))
+        self._rot_pos_ids_cache[cache_key] = result
+        return result
 
     def rot_pos_emb(self, grid_thw: list[list[int]]):
         max_grid_size = max(max(h, w) for _, h, w in grid_thw)
@@ -1753,7 +1759,7 @@ class Qwen3VLForConditionalGeneration(
     SupportsEagle3,
     SupportsMultiModalPruning,
 ):
-    packed_modules_mapping = {
+    packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
             "q_proj",
             "k_proj",

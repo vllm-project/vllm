@@ -3161,9 +3161,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         parallel_config = get_current_vllm_config().parallel_config
         # Avoid requiring an initialized DCP group in tests.
         self.dcp_world_size: int = parallel_config.decode_context_parallel_size
-        self.cp_kv_cache_interleave_size: int = (
-            parallel_config.cp_kv_cache_interleave_size
-        )
 
     @abstractmethod
     def forward_mqa(
