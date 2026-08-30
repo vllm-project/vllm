@@ -888,6 +888,19 @@ class Qwen3_VisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+class Qwen3VLMultiModalDataParser(Qwen2VLMultiModalDataParser):
+    # Timestamps are part of the prompt replacement (each frame group's
+    # "<X.X seconds>" text), so they size the placeholder range and must
+    # travel with the grid when embeddings are delivered out of band.
+    embedding_fields = {
+        **Qwen2VLMultiModalDataParser.embedding_fields,
+        "video": {
+            **Qwen2VLMultiModalDataParser.embedding_fields["video"],
+            "timestamps": "metadata",
+        },
+    }
+
+
 class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen3VLConfig)
@@ -906,7 +919,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         return self.get_hf_processor(**kwargs).video_processor
 
     def get_data_parser(self):
-        return Qwen2VLMultiModalDataParser(
+        return Qwen3VLMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
             expected_hidden_size=self._get_expected_hidden_size(),
@@ -1514,18 +1527,11 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             if is_list_of(sampled_fps, float):
                 sampled_fps = sampled_fps[item_idx]
 
-            timestamps_elem = out_item.get("timestamps")
-            if timestamps_elem is not None:
-                timestamps = timestamps_elem.data
-                assert len(timestamps) == grid_thw[0], (
-                    f"The timestamps length({len(timestamps)}) should be equal "
-                    f"video length ({grid_thw[0]})."
-                )
-            else:
-                # Embeds-only inputs (e.g. an EC consumer that receives just the
-                # grid metadata) carry no timestamps; synthesize one per
-                # temporal grid so the placeholder range can be sized.
-                timestamps = [float(i) for i in range(int(grid_thw[0]))]
+            timestamps = out_item["timestamps"].data
+            assert len(timestamps) == grid_thw[0], (
+                f"The timestamps length({len(timestamps)}) should be equal "
+                f"video length ({grid_thw[0]})."
+            )
 
             # Compute tokens per frame, with EVS / VidCom2 support
             num_frames = int(grid_thw[0])
@@ -1588,7 +1594,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
     def get_video_repl(
         *,
         tokens_per_frame: list[int],
-        timestamps: list[float | int],
+        timestamps: list[float | int] | torch.Tensor,
         tokenizer: TokenizerLike,
         vision_start_token_id: int,
         vision_end_token_id: int,
