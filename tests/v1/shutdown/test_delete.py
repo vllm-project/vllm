@@ -181,3 +181,6 @@ def test_llm_delete_inprocess_direct(
                 else SHUTDOWN_TEST_TIMEOUT_SEC
             ),
         )
+
+        # A later engine must not reuse the CUDA graph pool just torn down.
+        LLM(model).shutdown()
