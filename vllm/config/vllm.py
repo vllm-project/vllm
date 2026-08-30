@@ -1078,6 +1078,27 @@ class VllmConfig:
 
         self._resolve_mm_encoder_only()
 
+        # Mamba prefix caching relies on the checkpoints it materializes
+        # (all: one per block; align: step ends) actually being retained.
+        # The sparse retention default (interval 0 = semantic checkpoints
+        # only) interacts with the speculative-decoding last-block drop to
+        # zero realized SSM reuse. Default mamba modes to dense retention;
+        # an explicit positive interval still bounds retention as
+        # documented. Must run here (config construction) so the value is
+        # in place before get_kv_cache_configs copies it into KVCacheConfig.
+        if (
+            self.cache_config.mamba_cache_mode in ("all", "align")
+            and self.cache_config.prefix_cache_retention_interval == 0
+        ):
+            logger.info_once(
+                "mamba_cache_mode='%s': prefix_cache_retention_interval 0 "
+                "(sparse) would disable SSM prefix reuse; using dense "
+                "retention (None). Set a positive interval to bound "
+                "retained checkpoints.",
+                self.cache_config.mamba_cache_mode,
+            )
+            self.cache_config.prefix_cache_retention_interval = None
+
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
