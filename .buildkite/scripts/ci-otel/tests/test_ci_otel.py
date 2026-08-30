@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import binascii
 import json
 import os
 import shlex
@@ -33,8 +32,8 @@ def _span(**attributes) -> Span:
     )
 
 
-def _encoded(value: str) -> str:
-    return binascii.b2a_base64(value.encode(), newline=False).decode()
+def _quoted(value: str) -> str:
+    return shlex.quote(value)
 
 
 def test_context_continues_traceparent(monkeypatch):
@@ -340,8 +339,8 @@ def test_pytest_spans_are_spooled_incrementally(monkeypatch):
 
 
 def test_shell_wrapper_records_commands_without_changing_shell_state(tmp_path):
-    first = f"ci_otel_start 1 {_encoded('export VALUE=ready')}"
-    second = f"ci_otel_start 2 {_encoded('check VALUE')}"
+    first = f"ci_otel_start 1 {_quoted('export VALUE=ready')}"
+    second = f"ci_otel_start 2 {_quoted('check VALUE')}"
     shell = (
         f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; {first}; '
         f"export VALUE=ready; ci_otel_finish 0; {second}; "
@@ -369,7 +368,7 @@ def test_shell_wrapper_records_commands_without_changing_shell_state(tmp_path):
 def test_shell_wrapper_preserves_failure_status(tmp_path):
     shell = (
         f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; '
-        f"ci_otel_start 1 {_encoded('false')}; false; status=$?; "
+        f"ci_otel_start 1 {_quoted('false')}; false; status=$?; "
         'ci_otel_finish "$status"; exit "$status"'
     )
 
@@ -391,8 +390,8 @@ def test_shell_wrapper_preserves_failure_status(tmp_path):
 def test_ci_otel_run_records_command_and_preserves_status(tmp_path):
     shell = (
         f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; '
-        f"ci_otel_run 1 {_encoded('true')} true; "
-        f"ci_otel_run 2 {_encoded('false')} false; "
+        f"ci_otel_run 1 {_quoted('true')} true; "
+        f"ci_otel_run 2 {_quoted('false')} false; "
         'echo "status=$?"'
     )
 
@@ -421,7 +420,7 @@ def test_ci_otel_run_fail_open_when_tracing_unavailable(tmp_path):
     shell = (
         f'CI_INFRA_OTEL_DIR="{tmp_path / "missing"}"; export CI_INFRA_OTEL_DIR; '
         f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; '
-        f"ci_otel_run 1 {_encoded('echo ran')} echo ran"
+        f"ci_otel_run 1 {_quoted('echo ran')} echo ran"
     )
 
     result = subprocess.run(
@@ -500,7 +499,7 @@ def test_helper_failure_cannot_change_job_status(tmp_path, failure):
     fake_python.chmod(0o755)
     shell = (
         f'PATH="{fake_bin}:$PATH"; . "{SCRIPTS_DIR / "ci_otel.sh"}"; '
-        f"ci_otel_start 1 {_encoded('true')}; ci_otel_finish 0; echo ran"
+        f"ci_otel_start 1 {_quoted('true')}; ci_otel_finish 0; echo ran"
     )
 
     result = subprocess.run(
@@ -547,7 +546,7 @@ def test_flush_failure_preserves_job_status(tmp_path):
 def test_shell_wrapper_uses_private_trace_ids(tmp_path):
     shell = (
         f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; '
-        f"ci_otel_start 1 {_encoded('true')}; "
+        f"ci_otel_start 1 {_quoted('true')}; "
         'expected="$CI_INFRA_TRACE_ID"; '
         "CI_INFRA_TRACE_ID=corrupted; CI_INFRA_COMMAND_SPAN_ID=corrupted; "
         'ci_otel_finish 0; printf "%s" "$expected"'
@@ -710,7 +709,7 @@ def test_pytest_shim_records_distinct_test_intervals_with_pythonpath_override(
     pytest_executable.chmod(0o755)
     shell = (
         f'. "{SCRIPTS_DIR / "ci_otel.sh"}"\n'
-        f"ci_otel_start 1 {_encoded('pytest tests')}\n"
+        f"ci_otel_start 1 {_quoted('pytest tests')}\n"
         f"PYTHONPATH={shlex.quote(str(workspace))} "
         f"pytest -q {shlex.quote(str(test_file))}\n"
         "status=$?\n"

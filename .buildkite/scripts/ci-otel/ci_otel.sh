@@ -66,8 +66,7 @@ _ci_otel_python() {
 
 ci_otel_start() {
   _CI_INFRA_OTEL_COMMAND_INDEX="$1"
-  _CI_INFRA_OTEL_COMMAND_LABEL="$(printf '%s' "$2" | base64 --decode 2>/dev/null)" ||
-    _CI_INFRA_OTEL_COMMAND_LABEL="command ${_CI_INFRA_OTEL_COMMAND_INDEX}"
+  _CI_INFRA_OTEL_COMMAND_LABEL="${2:-command ${_CI_INFRA_OTEL_COMMAND_INDEX}}"
   _CI_INFRA_OTEL_CONTEXT="$(_ci_otel_python "${CI_INFRA_OTEL_DIR}/ci_otel.py" new-context)" ||
     return 0
   # The helper prints four whitespace-free fields.
