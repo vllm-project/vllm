@@ -342,7 +342,7 @@ class TestStreamingScheduler(unittest.TestCase):
             ModelRunnerOutput(
                 req_ids=[session.request_id],
                 req_id_to_index={session.request_id: 0},
-                sampled_token_ids=[[STOP_TOKEN]],
+                sampled_token_ids=[[1000]],
                 logprobs=None,
                 prompt_logprobs_dict={session.request_id: None},
                 pooler_output=[],
@@ -357,18 +357,40 @@ class TestStreamingScheduler(unittest.TestCase):
         assert first_stats.num_prefill_chunks == 1
         assert session.prefill_stats is None
 
-        # Continue the same session with enough new input to fill another
-        # cache block. The terminating sampled token from chunk 1 is discarded,
-        # so only these 17 input tokens belong to chunk 2's logical accounting.
+        # Compute one generated token, then sample a terminating token. The
+        # generated token retains valid KV in the next partial cache block;
+        # only the uncomputed terminating token is discarded at continuation.
+        decode_schedule = scheduler.schedule()
+        scheduler.update_from_output(
+            decode_schedule,
+            ModelRunnerOutput(
+                req_ids=[session.request_id],
+                req_id_to_index={session.request_id: 0},
+                sampled_token_ids=[[STOP_TOKEN]],
+                logprobs=None,
+                prompt_logprobs_dict={session.request_id: None},
+                pooler_output=[],
+            ),
+        )
+        assert session.num_computed_tokens == 17
+
+        # Add exactly one cache block of new input. The block ending at token
+        # 32 contains one retained generated token and 15 new prompt tokens;
+        # the sixteenth new token remains in the trailing partial block.
         next_request = DummyRequest(
             request_id=session.request_id,
-            prompt_token_ids=list(range(100, 117)),
+            prompt_token_ids=list(range(100, 116)),
         )
         scheduler.add_request(next_request)
 
+        assert session.prompt_token_ids == [
+            *range(16),
+            1000,
+            *range(100, 116),
+        ]
         assert session.prefill_stats is not None
-        assert session.prefill_stats.num_prompt_tokens == 17
-        assert session.prefill_stats.num_computed_tokens == 17
+        assert session.prefill_stats.num_prompt_tokens == 16
+        assert session.prefill_stats.num_computed_tokens == 16
         assert session.prefill_stats.num_cached_tokens == 0
 
         second_schedule = scheduler.schedule()
@@ -385,10 +407,10 @@ class TestStreamingScheduler(unittest.TestCase):
         )
         second_stats = second_outputs[session.client_index].outputs[0].prefill_stats
         assert second_stats is not None
-        assert second_stats.num_prompt_tokens == 17
-        assert second_stats.num_computed_tokens == 17
+        assert second_stats.num_prompt_tokens == 16
+        assert second_stats.num_computed_tokens == 16
         assert second_stats.num_cached_tokens == 0
-        assert second_stats.num_cache_creation_tokens == 16
+        assert second_stats.num_cache_creation_tokens == 15
         assert second_stats.num_prefill_chunks == 1
         assert second_stats.num_new_full_blocks >= 1
         assert second_stats.num_block_allocations >= 1

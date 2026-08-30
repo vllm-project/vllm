@@ -1472,12 +1472,12 @@ class Scheduler(SchedulerInterface):
 
         # Start a fresh scheduler-side accumulator for this input chunk. The
         # output processor merges emitted chunk snapshots for the public,
-        # session-cumulative view. Capture the baseline before extending the
-        # prompt so retained session KV is not reported as new cache creation.
+        # session-cumulative view. The continuation starts after every token
+        # with valid retained KV, including generated tokens in a partial
+        # cache block, so none of that prior state is reported as new cache
+        # creation.
         session.prefill_stats = PrefillStats()
-        session.prefill_stats_cache_baseline = (
-            self.kv_cache_manager.estimate_cached_tokens(session)
-        )
+        session.prefill_stats_cache_creation_start = session.num_computed_tokens
         new_prompt_tokens = update.prompt_token_ids or ()
         session.prefill_stats.set(
             num_prompt_tokens=len(new_prompt_tokens),
@@ -2035,7 +2035,7 @@ class Scheduler(SchedulerInterface):
                         max(
                             0,
                             current_cached_tokens
-                            - request.prefill_stats_cache_baseline,
+                            - request.prefill_stats_cache_creation_start,
                         )
                     )
 
