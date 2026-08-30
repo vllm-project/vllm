@@ -797,6 +797,14 @@ class MmapNgramEmbedding(nn.Module):
         self.table: MmapPleTable | None = None
         self.weight_scale_loaded = False
         self.weights_streamed = False
+        # (total_ms, sync_ms, gather_ms, h2d_ms) per forward call that
+        # actually gathered — the table-unset zero-fill path never reaches
+        # _record_forward_timing. pinned engagement is tracked separately in
+        # _fwd_pinned_since_log -- see _record_forward_timing.
+        self._fwd_timings_ms: list[tuple[float, float, float, float]] = []
+        self._fwd_rows_since_log = 0
+        self._fwd_pinned_since_log = 0
+        self._fwd_last_log = time.monotonic()
         self.register_buffer(
             "weight_scale",
             torch.tensor(1.0, dtype=torch.bfloat16),
@@ -816,8 +824,14 @@ class MmapNgramEmbedding(nn.Module):
                 dtype=self.torch_dtype,
                 device=ids.device,
             )
+        sync_t = time.monotonic()
         ids_np = ids.detach().to("cpu", non_blocking=False).numpy().reshape(-1)
+        # gather_t doubles as sync_t's end-of-window read: nothing runs
+        # between the two, so one monotonic() call marks both boundaries.
+        gather_t = time.monotonic()
+        sync_ms = (gather_t - sync_t) * 1000.0
         rows = table.gather(ids_np)  # uint8 [N, row_bytes], fresh & writable
+        gather_ms = (time.monotonic() - gather_t) * 1000.0
         itemsize = table.itemsize
         if table.row_bytes != self.embedding_dim * itemsize:
             raise ValueError(
@@ -825,13 +839,112 @@ class MmapNgramEmbedding(nn.Module):
                 f"match embedding_dim={self.embedding_dim} * "
                 f"itemsize={itemsize}"
             )
+        h2d_t = time.monotonic()
         out = torch.from_numpy(rows).view(table.torch_dtype)
         # non_blocking=True has no effect here: `rows` (from table.gather)
         # is pageable host memory, not pinned, so this H2D copy is
         # effectively synchronous. Pinned staging (Phase-4 lever 5) is a
         # separate, not-yet-pulled lever, not something this line hides.
         out = out.to(ids.device, non_blocking=True)
+        h2d_ms = (time.monotonic() - h2d_t) * 1000.0
+        self._record_forward_timing(
+            ids_np.size, sync_ms, gather_ms, h2d_ms, pinned=False
+        )
         return out.reshape(*ids.shape, self.embedding_dim)
+
+    def _record_forward_timing(
+        self,
+        rows: int,
+        sync_ms: float,
+        gather_ms: float,
+        h2d_ms: float,
+        *,
+        pinned: bool,
+    ) -> None:
+        """Rate-limited log of this instance's forward CPU-blocking time.
+
+        Always on: matches MmapPleTable._record's always-on, 60s-rate-
+        limited posture, and costs six time.monotonic() calls (five in
+        forward -- the sync/gather boundary shares one read, since nothing
+        runs between them -- one here) plus a list append per forward —
+        negligible next to the gather itself — adding one log line per
+        PLE-layer instance per rank (doubling, not exploding, the existing
+        gather-side log volume).
+
+        sync_ms/gather_ms/h2d_ms are each "time this call blocked the
+        calling thread", the number that actually feeds inter-token
+        latency. The h2d_call_ms fields are NOT a bandwidth figure: on the
+        pageable arm they are the real (synchronous) copy cost, on the
+        pinned arm the staging copy plus the async-enqueue time — the
+        `pinned` field makes each line self-attributing about which of those
+        two it reports, instead of relying on a distant info_once.
+
+        The window mixes two populations (decode: small, frequent; prefill:
+        large, rare), so the p99 sample alone is virtually always a prefill
+        call and says nothing about what most calls actually cost. `n=`
+        (the window's sample count) plus a p50 split alongside p99 — the
+        list is already sorted, so this is nearly free — gives a reader
+        both ends without guessing which population p99 came from.
+
+        `pinned=` reports a per-window engaged/total count, not the p99
+        sample's own flag: a window can mix an engaged call with one that
+        fell back to the pageable path, and the p99 sample -- by
+        construction the window's biggest call -- would misreport
+        whichever way that happened to sort.
+        """
+        total_ms = sync_ms + gather_ms + h2d_ms
+        self._fwd_timings_ms.append((total_ms, sync_ms, gather_ms, h2d_ms))
+        self._fwd_rows_since_log += rows
+        if pinned:
+            self._fwd_pinned_since_log += 1
+        now = time.monotonic()
+        if now - self._fwd_last_log < _LOG_INTERVAL_S:
+            return
+        # Sorted by total_ms, same as MmapPleTable._record: the p50/p99
+        # samples' own splits are reported, not an average across fast and
+        # slow calls.
+        timings = sorted(self._fwd_timings_ms)
+        n = len(timings)
+        p50_idx = max(0, math.ceil(n * 0.50) - 1)
+        p99_idx = max(0, math.ceil(n * 0.99) - 1)
+        p50_total, p50_sync, p50_gather, p50_h2d = (
+            timings[p50_idx] if timings else (0.0, 0.0, 0.0, 0.0)
+        )
+        p99_total, p99_sync, p99_gather, p99_h2d = (
+            timings[p99_idx] if timings else (0.0, 0.0, 0.0, 0.0)
+        )
+        # Every key below is unique within this line and is not a substring of
+        # any gather-side key: fwd_rows=/fwd_p99_ms= are prefixed because
+        # MmapPleTable._record already owns bare rows=/p99_ms=, and every
+        # percentile-scoped field spells out its own p50_/p99_ prefix rather
+        # than leaving one of the pair bare -- a bare sync_ms= would be a
+        # substring of p50_sync_ms=, so `grep -o 'sync_ms=[0-9.]*'` would hand
+        # a reader after the p99 split the p50 value instead, silently. The
+        # containment is one-way, not symmetric: bare rows=/p99_ms= DO match
+        # this line's prefixed keys, so a gather-side grep has to anchor on a
+        # key this line does not carry (copy_ms=, runs=, errors=).
+        logger.info(
+            "PLE mmap forward: fwd_rows=%d n=%d p50_ms=%.2f p50_sync_ms=%.2f "
+            "p50_gather_ms=%.2f p50_h2d_call_ms=%.2f fwd_p99_ms=%.2f "
+            "p99_sync_ms=%.2f p99_gather_ms=%.2f p99_h2d_call_ms=%.2f "
+            "pinned=%d/%d",
+            self._fwd_rows_since_log,
+            n,
+            p50_total,
+            p50_sync,
+            p50_gather,
+            p50_h2d,
+            p99_total,
+            p99_sync,
+            p99_gather,
+            p99_h2d,
+            self._fwd_pinned_since_log,
+            n,
+        )
+        self._fwd_timings_ms.clear()
+        self._fwd_rows_since_log = 0
+        self._fwd_pinned_since_log = 0
+        self._fwd_last_log = now
 
 
 def set_weight_scale(

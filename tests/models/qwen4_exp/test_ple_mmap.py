@@ -15,6 +15,7 @@ import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
@@ -583,6 +584,22 @@ def _record_plain_warnings(
         ple_mmap.logger,
         "warning",
         lambda msg, *args, **kwargs: recorded.append((msg, args)),
+    )
+    return recorded
+
+
+def _record_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, tuple[Any, ...]]]:
+    """Capture plain logger.info calls, the rate-limited-log-line pattern
+    shared by MmapPleTable._record and MmapNgramEmbedding._record_forward_timing.
+
+    Args are typed Any, not object like the warning recorders above: callers
+    unpack these %-format args and do arithmetic on the numeric ones.
+    """
+    recorded: list[tuple[str, tuple[Any, ...]]] = []
+    monkeypatch.setattr(
+        ple_mmap.logger, "info", lambda msg, *args: recorded.append((msg, args))
     )
     return recorded
 
@@ -1546,6 +1563,89 @@ def test_placeholder_forward_gathers_from_attached_table(tmp_path: Path) -> None
     assert out.shape == (2, 2, 2)
     assert out.dtype == torch.float8_e4m3fn
     assert torch.equal(out.reshape(-1, 2), full[ids.reshape(-1)])
+
+
+# --------------------------------------------------------------------------- #
+# Forward timing instrument (sync_ms / gather_ms / h2d_ms)
+# --------------------------------------------------------------------------- #
+
+
+def test_forward_timing_instrument_logs_the_rate_limited_split(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The split line fires only once per _LOG_INTERVAL_S — poked directly
+    via ``_fwd_last_log``, the same way this file already pokes
+    ``table._last_log``, rather than sleeping or monkeypatching
+    time.monotonic — and reports the window's sample count plus a p50 and
+    p99 split of the three CPU-blocking components and the pinned= arm
+    field."""
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5)
+    embedding = _attached_embedding(
+        tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5
+    )
+    logged = _record_info(monkeypatch)
+    ids = torch.tensor([0, 8], dtype=torch.long)
+
+    embedding(ids)  # first call: buffers a sample, does not log yet
+    assert logged == []
+
+    embedding._fwd_last_log = 0.0  # simulate the interval having elapsed
+    embedding(ids)
+
+    assert len(logged) == 1
+    msg, args = logged[0]
+    assert "pinned" in msg
+    # rows=/p99_ms= are the gather-side log's own keys (MmapPleTable._record);
+    # this line's fwd_rows=/fwd_p99_ms= are namespaced so no key of this line
+    # ever matches a gather-side one. The converse is one-way and not asserted
+    # here: bare rows=/p99_ms= DO match the prefixed keys below, so a
+    # gather-side grep anchors on a key this line does not carry.
+    assert msg.count("rows=") == 1  # only as fwd_rows=, no bare rows= too
+    assert msg.count("p99_ms=") == 1  # only as fwd_p99_ms=
+    # Every percentile-scoped component spells out its own prefix: a bare
+    # sync_ms= would be a substring of p50_sync_ms=, so a reader grepping for
+    # the p99 split would silently get the p50 value instead.
+    for key in ("sync_ms=", "gather_ms=", "h2d_call_ms="):
+        assert f"p50_{key}" in msg and f"p99_{key}" in msg
+        assert msg.count(key) == 2  # only ever as those two prefixed twins
+    (
+        fwd_rows,
+        n,
+        p50_ms,
+        p50_sync_ms,
+        p50_gather_ms,
+        p50_h2d_ms,
+        fwd_p99_ms,
+        p99_sync_ms,
+        p99_gather_ms,
+        p99_h2d_ms,
+        pinned_engaged,
+        pinned_total,
+    ) = args
+    assert fwd_rows == 2 * ids.numel()
+    assert n == 2  # both calls landed in this window
+    for value in (
+        p50_ms,
+        p50_sync_ms,
+        p50_gather_ms,
+        p50_h2d_ms,
+        fwd_p99_ms,
+        p99_sync_ms,
+        p99_gather_ms,
+        p99_h2d_ms,
+    ):
+        assert value >= 0.0
+    # Each percentile sample's own total must equal the sum of its own split
+    # -- an arg-order regression inside either group desyncs this.
+    assert fwd_p99_ms == pytest.approx(p99_sync_ms + p99_gather_ms + p99_h2d_ms)
+    assert p50_ms == pytest.approx(p50_sync_ms + p50_gather_ms + p50_h2d_ms)
+    # p99 indexes at or above p50 into a sorted window, so it can never come
+    # out below it -- this is what a wholesale p50/p99 group swap breaks, and
+    # what the two per-group sum checks above would survive.
+    assert fwd_p99_ms >= p50_ms
+    # pinned= is engaged/total across the window, not the p99 sample's own
+    # flag -- neither call here engaged pinned staging, so 0 of both.
+    assert (pinned_engaged, pinned_total) == (0, n)
 
 
 # --------------------------------------------------------------------------- #
