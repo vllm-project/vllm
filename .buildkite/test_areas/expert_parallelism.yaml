@@ -2,7 +2,7 @@ group: Expert Parallelism
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) EPLB Algorithm"
+- label: ":nvidia: (H200 MIG 18GB) EPLB Algorithm"
   key: eplb-algorithm
   timeout_in_minutes: 20
   device: h200_18gb
