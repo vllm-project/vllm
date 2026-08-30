@@ -110,16 +110,9 @@ class XPressRefinerHead(nn.Module):
         anchor_ids: torch.Tensor,         # [N] verified token (block slot 0)
         tok_am1_ids: torch.Tensor,        # [N] token BEFORE the anchor
         num_passes: int,
-        candidate_topc: int = 0,
     ) -> torch.Tensor:
         """T=0 par-K Jacobi block refine (greedy argmax every pass; deterministic, so
         settled prefixes stay settled). Returns draft ids [N, B-1].
-
-        candidate_topc > 0 restricts every pass's argmax to the top-C tokens of
-        the base logits per slot. The w2 columns and base scores for those
-        candidates are gathered once, so each pass scores [N, B, C] instead of
-        materializing [N, B, V] — the refine bias is a low-rank correction, so
-        the refined argmax falling outside base top-C is rare (validate via AL).
         """
         N, B, _ = base_logits_full.shape
         hcache = self.hidden_cache(h_full)
@@ -127,18 +120,6 @@ class XPressRefinerHead(nn.Module):
         blk = torch.empty(N, B, dtype=torch.long, device=h_full.device)
         blk[:, 0] = anchor_ids
         blk[:, 1:] = base_logits_full[:, 1:, :].argmax(dim=-1)      # drafter seed
-        if candidate_topc > 0:
-            base_cand, cand = base_logits_full.topk(candidate_topc, dim=-1)
-            w2_cand = self.w2.weight[cand]                # [N, B, C, r], gathered once
-            for _ in range(num_passes):
-                prev = blk.roll(shifts=1, dims=1)
-                prev[:, 0] = tok_am1_ids
-                x = latent_fn(prev, hcache)     # [N, B, r]
-                scores = base_cand + torch.einsum("nbcr,nbr->nbc", w2_cand, x)
-                blk[:, 1:] = cand[:, 1:].gather(
-                    -1, scores[:, 1:].argmax(dim=-1, keepdim=True)
-                ).squeeze(-1)
-            return blk[:, 1:]
         # Fused-latent path (CUDA): 3 kernels per pass (latent / w2 GEMM / add+argmax
         # writing straight into blk) with persistent scratch -- minimizes launch count
         # and CUDA-graph nodes. Float reassociation only (same class as torch.compile).
@@ -244,43 +225,6 @@ class XPressRefinerHead(nn.Module):
                 "w2_t": self.w2.weight.detach().t().contiguous(),
             }
         return self._fused_buf
-
-    def jacobi_refine_greedy_fused(
-        self,
-        base_logits_full: torch.Tensor,
-        h_full: torch.Tensor,
-        anchor_ids: torch.Tensor,
-        tok_am1_ids: torch.Tensor,
-        num_passes: int,
-        candidate_topc: int,
-    ) -> torch.Tensor:
-        """Single-launch Triton version of the candidate-restricted refine.
-        Same semantics as jacobi_refine_greedy(candidate_topc=C); one kernel
-        runs all K passes with the latent resident on-chip. Imports vLLM's
-        kernel module, so unlike the rest of this file it needs the full tree."""
-        from vllm.v1.worker.gpu.spec_decode.xpress.kernels import (
-            xpress_jacobi_fused,
-        )
-
-        buf = self.fused_buffers()
-        hcache = self.hidden_cache(h_full)
-        xh = hcache @ buf["whc_t"]
-        base_cand, cand = base_logits_full.topk(candidate_topc, dim=-1)
-        w2_cand = self.w2.weight[cand]
-        blk = torch.empty(
-            *base_logits_full.shape[:2], dtype=torch.long, device=h_full.device
-        )
-        blk[:, 0] = anchor_ids
-        blk[:, 1:] = base_logits_full[:, 1:, :].argmax(dim=-1)
-        xpress_jacobi_fused(
-            blk=blk, tok_am1=tok_am1_ids, xh=xh,
-            base_cand=base_cand, cand=cand, w2_cand=w2_cand,
-            w1_weight=self.w1.weight,
-            wlat_t=buf["wlat_t"], mix_l_kjc=buf["mix_kjc"],
-            wg_t=buf["wg_t"], wu_t=buf["wu_t"], wd_t=buf["wd_t"],
-            num_passes=num_passes,
-        )
-        return blk[:, 1:]
 
     # training-repo state-dict key mapping (HybridRefinerHead -> this module)
     HYBRID_KEY_MAP = {

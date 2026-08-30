@@ -124,11 +124,9 @@ class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
         anchor_ids: torch.Tensor,
         tok_am1_ids: torch.Tensor,
         num_passes: int,
-        candidate_topc: int = 0,
     ) -> torch.Tensor:
         return self.model.xpress_head.jacobi_refine_greedy(
-            base_logits_full, h_full, anchor_ids, tok_am1_ids, num_passes,
-            candidate_topc=candidate_topc,
+            base_logits_full, h_full, anchor_ids, tok_am1_ids, num_passes
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

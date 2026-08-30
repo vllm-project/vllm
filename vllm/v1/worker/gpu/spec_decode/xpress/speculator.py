@@ -41,15 +41,6 @@ class XPressSpeculator(DFlashSpeculator):
             os.environ.get("XPRESS_NUM_PASSES") or getattr(hf, "xpress_num_passes", 6)
         )
         logger.info("XPress: K=%d Jacobi passes", self.num_jacobi_passes)
-        # 0 (DEFAULT): full-vocab scoring — exact reference semantics.
-        # >0: OPT-IN speedup — restrict per-pass argmax to the base-logits top-C
-        # (one-time w2 column gather; ~10x less readout traffic). Measured
-        # AL-neutral at C=256 but NOT mathematically identical to full-vocab;
-        # keep 0 for released/paper numbers.
-        self.candidate_topc = int(getattr(hf, "xpress_candidate_topc", 0))
-        # Single-launch Triton refine (all K passes on-chip). Latency lever for
-        # small batches; needs candidate_topc > 0. Off until GPU-validated.
-        self.use_fused_kernel = bool(getattr(hf, "xpress_fused_kernel", False))
         # Block slot 0 is the anchor: it is a verified token, so its refined output is
         # discarded and only its latent matters, reaching the draft slots through the
         # single mixer column L[:, k, 0]. Its own prev token therefore has a narrow
@@ -105,16 +96,7 @@ class XPressSpeculator(DFlashSpeculator):
         anchor_ids = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
         tok_am1 = anchor_ids                              # see the note in __init__
         head = self.model.model.xpress_head
-        # fused single-launch kernel is per-request-persistent: wins while
-        # launch-latency-bound, loses to cuBLAS weight reuse at large batch
-        if self.use_fused_kernel and self.candidate_topc > 0 and num_reqs <= 4:
-            draft = head.jacobi_refine_greedy_fused(
-                base_full, h_full, anchor_ids, tok_am1,
-                self.num_jacobi_passes, self.candidate_topc,
-            )
-        else:
-            draft = head.jacobi_refine_greedy(
-                base_full, h_full, anchor_ids, tok_am1, self.num_jacobi_passes,
-                candidate_topc=self.candidate_topc,
-            )                                             # [R, N]
+        draft = head.jacobi_refine_greedy(
+            base_full, h_full, anchor_ids, tok_am1, self.num_jacobi_passes
+        )                                                 # [R, N]
         self.draft_tokens[:num_reqs, : self.num_speculative_steps] = draft

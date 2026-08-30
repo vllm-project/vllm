@@ -8,10 +8,9 @@ milliseconds. They pin three things that are easy to break silently:
 * the mixer fold (``L*tril + I`` baked into the parameter, residual add dropped),
   which is what makes serving equal training;
 * causality across the block, without which Jacobi iteration is not valid;
-* candidate-topc scoring, which must reduce to full-vocab scoring when C >= V.
+* greedy refine being deterministic, which is what lets a settled prefix stay settled.
 """
 
-import pytest
 import torch
 
 from vllm.model_executor.models.xpress_head import XPressRefinerHead
@@ -99,29 +98,6 @@ def test_block_mixing_is_causal():
     )
 
 
-@pytest.mark.parametrize("num_passes", [1, 3, 6])
-def test_candidate_topc_reduces_to_full_vocab(num_passes):
-    """``candidate_topc >= V`` restricts nothing, so it must match ``topc=0``.
-
-    The fast path gathers w2 columns for the top-C base candidates; with C >= V
-    that gather is the identity, which is the only setting where the two paths
-    are required to agree exactly.
-    """
-    head = _head()
-    head.fold_from_raw_(torch.randn(R, B, B, dtype=torch.float64) * 0.3)
-    torch.manual_seed(11)
-    n = 3
-    base = torch.randn(n, B, V, dtype=torch.float64)
-    h = torch.randn(n, B, H, dtype=torch.float64)
-    anchor = torch.randint(0, V, (n,))
-    tok_am1 = torch.randint(0, V, (n,))
-
-    full = head.jacobi_refine_greedy(base, h, anchor, tok_am1, num_passes, 0)
-    topc = head.jacobi_refine_greedy(base, h, anchor, tok_am1, num_passes, V)
-    assert torch.equal(full, topc)
-    assert full.shape == (n, B - 1)
-
-
 def test_jacobi_is_deterministic():
     """Greedy refine has no sampling, so repeated calls must be identical."""
     head = _head()
@@ -132,6 +108,7 @@ def test_jacobi_is_deterministic():
     anchor = torch.randint(0, V, (2,))
     tok_am1 = torch.randint(0, V, (2,))
 
-    first = head.jacobi_refine_greedy(base, h, anchor, tok_am1, 4, 0)
-    second = head.jacobi_refine_greedy(base, h, anchor, tok_am1, 4, 0)
+    first = head.jacobi_refine_greedy(base, h, anchor, tok_am1, 4)
+    second = head.jacobi_refine_greedy(base, h, anchor, tok_am1, 4)
+    assert first.shape == (2, B - 1)
     assert torch.equal(first, second)
