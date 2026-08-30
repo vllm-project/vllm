@@ -9,6 +9,39 @@ import tests.utils as test_utils
 from tests.utils import RemoteOpenAIServer
 
 
+def test_openai_server_redacts_sensitive_values(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    server = object.__new__(RemoteOpenAIServer)
+    popen = Mock()
+    monkeypatch.setattr(test_utils.subprocess, "Popen", popen)
+    monkeypatch.setenv("INHERITED_SECRET", "inherited-secret")
+    serve_args = [
+        "--api-key",
+        "api-secret",
+        "--hf-token=hf-secret",
+        "--max-num-seqs",
+        "2",
+    ]
+
+    server._start_server(
+        "test-model", serve_args, {"OVERRIDE_SECRET": "override-secret"}
+    )
+
+    stdout = capsys.readouterr().out
+    assert "api-secret" not in stdout
+    assert "hf-secret" not in stdout
+    assert "inherited-secret" not in stdout
+    assert "override-secret" not in stdout
+    assert "--api-key ***" in stdout
+    assert "--hf-token=***" in stdout
+    assert "--max-num-seqs 2" in stdout
+    assert popen.call_args.args[0] == ["vllm", "serve", "test-model", *serve_args]
+    child_env = popen.call_args.kwargs["env"]
+    assert child_env["INHERITED_SECRET"] == "inherited-secret"
+    assert child_env["OVERRIDE_SECRET"] == "override-secret"
+
+
 def test_openai_server_shutdown_wait_covers_engine_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ):

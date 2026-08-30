@@ -148,6 +148,20 @@ ROCM_ENGINE_KWARGS: dict = (
 _TILELANG_TVM_PYTHONPATH_FRAGMENT = os.path.join(
     "tilelang", "3rdparty", "tvm", "python"
 )
+_SENSITIVE_CLI_ARGS = frozenset({"--api-key", "--hf-token"})
+
+
+def _redact_sensitive_cli_args(args: Sequence[str]) -> list[str]:
+    redacted_args = list(args)
+    for index, arg in enumerate(args):
+        name, separator, _ = arg.partition("=")
+        if name not in _SENSITIVE_CLI_ARGS:
+            continue
+        if separator:
+            redacted_args[index] = f"{name}=***"
+        elif index + 1 < len(args) and not args[index + 1].startswith("--"):
+            redacted_args[index + 1] = "***"
+    return redacted_args
 
 
 def _sanitize_pythonpath_value(pythonpath: str | None) -> str:
@@ -785,7 +799,8 @@ class RemoteOpenAIServer(RemoteVLLMServer):
             env.update(env_dict)
         _sanitize_pythonpath_env(env)
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
-        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
+        redacted_serve_cmd = _redact_sensitive_cli_args(serve_cmd)
+        print(f"Launching RemoteOpenAIServer with: {' '.join(redacted_serve_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
