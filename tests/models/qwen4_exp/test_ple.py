@@ -5,11 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from torch import nn
-from torch.nn import functional as F
-
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
+from torch import nn
+from torch.nn import functional as F
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.models.qwen4_exp.common.ple import (
@@ -17,6 +16,7 @@ from vllm.models.qwen4_exp.common.ple import (
     compute_ple_shard_overlap,
     copy_ple_embedding_shard_,
 )
+
 from vllm.models.qwen4_exp.nvidia import ple_layer as ple_layer_module
 from vllm.models.qwen4_exp.nvidia.ple_layer import (
     Qwen4ExpNGramEmbedding,
@@ -658,6 +658,101 @@ def test_ple_mixed_checkpoint_uses_declared_fp8_embedding_dtype(
     assert isinstance(method, Qwen4ExpPLEFp8EmbeddingMethod)
 
 
+def _make_ngram_id_test_module(ngram_size: int) -> Qwen4ExpNGramEmbedding:
+    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
+    nn.Module.__init__(module)
+    module.ngram_size = ngram_size
+    module.heads_per_ngram = 2
+    module.embedding_dim = (ngram_size - 1) * module.heads_per_ngram
+    module.head_dim = 1
+    module.eos_token_id = 99
+    module.register_buffer("positions_buffer", torch.arange(256))
+    module.register_buffer("padded_buffer", torch.empty(8, 256, dtype=torch.long))
+    module.register_buffer(
+        "layer_multipliers", torch.tensor([3, 5, 7, 11][:ngram_size])
+    )
+    vocab_sizes = torch.tensor([101, 103, 107, 109, 113, 127][: module.embedding_dim])
+    offsets = torch.cat((torch.zeros(1, dtype=torch.long), vocab_sizes.cumsum(0)))
+    module.register_buffer("ngram_heads_vocab_sizes", vocab_sizes)
+    module.register_buffer("ngram_heads_offsets", offsets[:-1])
+    module.ngram_embedding = nn.Embedding(int(offsets[-1]), 1)
+    module.ngram_embedding.weight.requires_grad_(False)
+    with torch.no_grad():
+        module.ngram_embedding.weight.copy_(
+            torch.arange(int(offsets[-1]), dtype=torch.float32).reshape(-1, 1)
+        )
+    return module
+
+
+@pytest.mark.parametrize("ngram_size", [2, 3, 4])
+def test_ragged_ngram_ids_match_padded_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    ngram_size: int,
+) -> None:
+    module = _make_ngram_id_test_module(ngram_size)
+    input_ids = torch.tensor([4, 11, 99, 13, 17, 19, 23, 99, 29, 31])
+    query_start_loc = torch.tensor([0, 0, 1, 4, 4, 10])
+    context = torch.tensor(
+        [
+            [99, 99, 99],
+            [41, 43, 47],
+            [53, 99, 59],
+            [61, 67, 71],
+            [73, 79, 83],
+        ]
+    )[:, -(ngram_size - 1) :]
+    output_buffer = torch.empty(input_ids.numel(), module.embedding_dim)
+
+    monkeypatch.setattr(ple_layer_module, "is_offload_process", lambda: False)
+    expected = module.forward_impl(
+        torch.empty(input_ids.numel(), 0),
+        input_ids,
+        query_start_loc,
+        context,
+        output_buffer=output_buffer.clone(),
+    )
+    monkeypatch.setattr(ple_layer_module, "is_offload_process", lambda: True)
+    actual = module.forward_impl(
+        torch.empty(input_ids.numel(), 0),
+        input_ids,
+        query_start_loc,
+        context,
+        output_buffer=output_buffer.clone(),
+    )
+
+    assert torch.equal(actual, expected)
+
+
+def test_cpu_offload_dense_fallback_matches_padded_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _make_ngram_id_test_module(3)
+    input_ids = torch.arange(256) % 89
+    input_ids[[0, 63, 191]] = module.eos_token_id
+    query_start_loc = torch.tensor([0, 128, 256])
+    context = torch.tensor([[41, 43], [47, 53]])
+    output_buffer = torch.empty(input_ids.numel(), module.embedding_dim)
+
+    monkeypatch.setattr(ple_layer_module, "is_offload_process", lambda: False)
+    expected = module.forward_impl(
+        torch.empty(input_ids.numel(), 0),
+        input_ids,
+        query_start_loc,
+        context,
+        output_buffer=output_buffer.clone(),
+    )
+    monkeypatch.setattr(ple_layer_module, "is_offload_process", lambda: True)
+    actual = module.forward_impl(
+        torch.empty(input_ids.numel(), 0),
+        input_ids,
+        query_start_loc,
+        context,
+        output_buffer=output_buffer.clone(),
+    )
+
+    assert torch.equal(actual, expected)
+
+
 def test_ngram_cpu_offload_padding_does_not_overwrite_real_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -697,6 +792,38 @@ def test_ngram_cpu_offload_padding_does_not_overwrite_real_tokens(
     )
 
     torch.testing.assert_close(actual[:2], expected)
+    torch.testing.assert_close(actual[2:], expected[1:].expand(2, -1))
+
+
+def test_ragged_graph_padding_matches_dense_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _make_ngram_id_test_module(3)
+    real_input_ids = torch.tensor([11, 13, 17, 19])
+    context = torch.tensor([[23, 29], [31, 37]])
+    output_buffer = torch.empty(8, module.embedding_dim)
+
+    monkeypatch.setattr(ple_layer_module, "is_offload_process", lambda: False)
+    expanded_input_ids = torch.tensor([11, 13, 17, 19, 99, 99])
+    dense = module.forward_impl(
+        torch.empty(6, 0),
+        expanded_input_ids,
+        torch.tensor([0, 3, 6]),
+        context,
+        output_buffer=output_buffer[:6].clone(),
+    )
+    expected = dense[torch.tensor([0, 1, 2, 3, 4, 5, 5, 5])]
+
+    monkeypatch.setattr(ple_layer_module, "is_offload_process", lambda: True)
+    actual = module.forward_impl(
+        torch.empty(8, 0),
+        torch.cat((real_input_ids, torch.tensor([777, 888, 999, 1111]))),
+        torch.tensor([0, 3, 4]),
+        context,
+        output_buffer=output_buffer,
+    )
+
+    assert torch.equal(actual, expected)
 
 
 def test_ngram_fp8_cpu_offload_preserves_quantized_output(

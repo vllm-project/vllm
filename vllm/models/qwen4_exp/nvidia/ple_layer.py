@@ -522,6 +522,92 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
         valid = (source.unsqueeze(0) >= 0) & (position_in_segment >= shift)
         return torch.where(valid, shifted, tokens.new_full((), eos_token_id))
 
+    def _hash_shifted_tokens(self, shifted: list[torch.Tensor]) -> torch.Tensor:
+        id_blocks = []
+        for ngram in range(2, self.ngram_size + 1):
+            start = (ngram - 2) * self.heads_per_ngram
+            end = start + self.heads_per_ngram
+            mixed = shifted[0] * self.layer_multipliers[0]
+            for index in range(1, ngram):
+                mixed = torch.bitwise_xor(
+                    mixed, shifted[index] * self.layer_multipliers[index]
+                )
+            sizes = self.ngram_heads_vocab_sizes[start:end]
+            offsets = self.ngram_heads_offsets[start:end]
+            id_blocks.append(torch.remainder(mixed.unsqueeze(-1), sizes) + offsets)
+        return torch.cat(id_blocks, dim=-1)
+
+    def _compute_ragged_ngram_ids(
+        self,
+        input_ids: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor,
+        num_valid_tokens: int,
+    ) -> torch.Tensor:
+        if num_valid_tokens == 0:
+            return input_ids.new_empty((0, self.ngram_heads_vocab_sizes.numel()))
+
+        positions = self.positions_buffer[:num_valid_tokens]
+        request_indices = torch.searchsorted(query_start_loc[1:], positions, right=True)
+        columns = positions - query_start_loc[request_indices]
+        shifted = [input_ids[:num_valid_tokens]]
+        context_width = ngram_context.shape[1]
+        eos = input_ids.new_full((), self.eos_token_id)
+
+        for shift in range(1, self.ngram_size):
+            history_columns = columns - shift
+            input_positions = (positions - shift).clamp_min(0)
+            context_columns = (history_columns + context_width).clamp(
+                0, context_width - 1
+            )
+            candidates = torch.where(
+                history_columns >= 0,
+                input_ids[input_positions],
+                ngram_context[request_indices, context_columns],
+            )
+            if shift > 1:
+                candidates = torch.where(
+                    shifted[-1] == self.eos_token_id, eos, candidates
+                )
+            shifted.append(candidates)
+
+        return self._hash_shifted_tokens(shifted)
+
+    def _compute_graph_padding_ngram_ids(
+        self,
+        input_ids: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor,
+        num_valid_tokens: int,
+        num_padding_tokens: int,
+        max_seq_len: int,
+    ) -> torch.Tensor:
+        last_request_start = int(query_start_loc[-2].item())
+        last_request_length = num_valid_tokens - last_request_start
+        packed = self.padded_buffer[ngram_context.shape[0] - 1, :max_seq_len]
+        packed.fill_(self.eos_token_id)
+        packed[:last_request_length] = input_ids[last_request_start:num_valid_tokens]
+        context = torch.cat((ngram_context[-1], packed)).unsqueeze(0)
+        positions, position_in_segment = self._shift_precompute(
+            context, self.eos_token_id
+        )
+        shifted = [context]
+        for shift in range(1, self.ngram_size):
+            shifted.append(
+                self._shift_apply(
+                    context,
+                    positions,
+                    position_in_segment,
+                    shift,
+                    self.eos_token_id,
+                )
+            )
+        context_width = ngram_context.shape[1]
+        columns = (
+            self.positions_buffer[:num_padding_tokens] + last_request_length
+        ).clamp_max(max_seq_len - 1)
+        return self._hash_shifted_tokens(shifted)[0, columns + context_width]
+
     def forward_impl(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
@@ -545,70 +631,88 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
                 f"PLE received {num_reqs} requests, but its workspace supports "
                 f"at most {self.padded_buffer.shape[0]}"
             )
-
-        # The CPU-offload subprocess is never captured by a CUDA Graph, so its
-        # pack workspace can narrow to the actual maximum sequence length. The
-        # regular GPU path retains the static maximum-width buffer for capture.
-        if is_offload_process():
-            if num_reqs <= 0:
-                raise ValueError("PLE CPU offload requires at least one request")
-            max_seq_len = max(
-                1,
-                int((query_start_loc[1:] - query_start_loc[:-1]).max().item()),
-            )
-            # The model runner sends the CUDA-graph padded token count together
-            # with an unpadded query_start_loc. Stale padding must not enter the
-            # scatter: its clamped indices would overwrite the last real token.
-            num_valid_tokens = min(int(query_start_loc[-1].item()), num_tokens)
-        else:
-            max_seq_len = self.padded_buffer.shape[1]
-            num_valid_tokens = num_tokens
-
-        positions = self.positions_buffer[:num_tokens]
-        packed = self.padded_buffer[:num_reqs, :max_seq_len]
-        packed.fill_(self.eos_token_id)
-        request_indices = torch.searchsorted(query_start_loc, positions, right=True) - 1
-        request_indices.clamp_(max=num_reqs - 1)
-        columns = (positions - query_start_loc[request_indices]).clamp(
-            0, packed.shape[1] - 1
-        )
-        packed[request_indices[:num_valid_tokens], columns[:num_valid_tokens]] = (
-            input_ids[:num_valid_tokens]
-        )
         ngram_context = ngram_context[:num_reqs].to(
             device=input_ids.device, dtype=torch.long
         )
 
-        context = torch.cat([ngram_context, packed], dim=-1)
-        positions_2d, position_in_segment = self._shift_precompute(
-            context, self.eos_token_id
-        )
-        shifted = [context]
-        for shift in range(1, self.ngram_size):
-            shifted.append(
-                self._shift_apply(
-                    context,
-                    positions_2d,
-                    position_in_segment,
-                    shift,
-                    self.eos_token_id,
-                )
+        use_ragged = False
+        max_seq_len = self.padded_buffer.shape[1]
+        num_valid_tokens = num_tokens
+        if is_offload_process():
+            if num_reqs <= 0:
+                raise ValueError("PLE CPU offload requires at least one request")
+            num_valid_tokens = min(int(query_start_loc[-1].item()), num_tokens)
+            max_seq_len = max(
+                1,
+                int((query_start_loc[1:] - query_start_loc[:-1]).max().item()),
             )
-        adjusted_columns = columns + self.ngram_size - 1
-        id_blocks = []
-        for ngram in range(2, self.ngram_size + 1):
-            start = (ngram - 2) * self.heads_per_ngram
-            end = start + self.heads_per_ngram
-            mixed = shifted[0] * self.layer_multipliers[0]
-            for index in range(1, ngram):
-                mixed = torch.bitwise_xor(
-                    mixed, shifted[index] * self.layer_multipliers[index]
+            padded_tokens = num_reqs * max_seq_len
+            # Dense operations remain faster for long, nearly uniform batches.
+            short_sequences = max_seq_len <= 64
+            substantially_padded = padded_tokens * 2 >= num_valid_tokens * 3
+            use_ragged = short_sequences or substantially_padded
+
+        if use_ragged:
+            ngram_ids = self._compute_ragged_ngram_ids(
+                input_ids,
+                query_start_loc,
+                ngram_context,
+                num_valid_tokens,
+            )
+            if num_valid_tokens < num_tokens:
+                padding = self._compute_graph_padding_ngram_ids(
+                    input_ids,
+                    query_start_loc,
+                    ngram_context,
+                    num_valid_tokens,
+                    num_tokens - num_valid_tokens,
+                    max_seq_len,
                 )
-            sizes = self.ngram_heads_vocab_sizes[start:end]
-            offsets = self.ngram_heads_offsets[start:end]
-            ids = torch.remainder(mixed.unsqueeze(-1), sizes) + offsets
-            id_blocks.append(ids[request_indices, adjusted_columns])
-        ngram_ids = torch.cat(id_blocks, dim=-1)
+                ngram_ids = torch.cat((ngram_ids, padding), dim=0)
+        else:
+            positions = self.positions_buffer[:num_tokens]
+            packed = self.padded_buffer[:num_reqs, :max_seq_len]
+            packed.fill_(self.eos_token_id)
+            request_indices = (
+                torch.searchsorted(query_start_loc, positions, right=True) - 1
+            )
+            request_indices.clamp_(max=num_reqs - 1)
+            columns = (positions - query_start_loc[request_indices]).clamp(
+                0, packed.shape[1] - 1
+            )
+            packed[request_indices[:num_valid_tokens], columns[:num_valid_tokens]] = (
+                input_ids[:num_valid_tokens]
+            )
+            context = torch.cat([ngram_context, packed], dim=-1)
+            positions_2d, position_in_segment = self._shift_precompute(
+                context, self.eos_token_id
+            )
+            shifted = [context]
+            for shift in range(1, self.ngram_size):
+                shifted.append(
+                    self._shift_apply(
+                        context,
+                        positions_2d,
+                        position_in_segment,
+                        shift,
+                        self.eos_token_id,
+                    )
+                )
+            adjusted_columns = columns + self.ngram_size - 1
+            id_blocks = []
+            for ngram in range(2, self.ngram_size + 1):
+                start = (ngram - 2) * self.heads_per_ngram
+                end = start + self.heads_per_ngram
+                mixed = shifted[0] * self.layer_multipliers[0]
+                for index in range(1, ngram):
+                    mixed = torch.bitwise_xor(
+                        mixed, shifted[index] * self.layer_multipliers[index]
+                    )
+                sizes = self.ngram_heads_vocab_sizes[start:end]
+                offsets = self.ngram_heads_offsets[start:end]
+                ids = torch.remainder(mixed.unsqueeze(-1), sizes) + offsets
+                id_blocks.append(ids[request_indices, adjusted_columns])
+            ngram_ids = torch.cat(id_blocks, dim=-1)
         if output_buffer is not None:
             quant_method = getattr(self.ngram_embedding, "quant_method", None)
             if isinstance(quant_method, Qwen4ExpPLENVFp4EmbeddingMethod):
