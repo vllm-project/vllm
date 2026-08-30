@@ -472,6 +472,7 @@ class ParserEngine(Parser):
             record_invocation |= self._in_tool_parser_phase()
             self._check_skip_tool_parsing(request)
             events = self._feed(delta_text, delta_token_ids)
+            record_invocation |= self._in_tool_parser_phase()
             if finished:
                 events.extend(self._engine.finish())
             result = self._events_to_delta(events, finished=finished)
@@ -489,7 +490,7 @@ class ParserEngine(Parser):
             is_tool_called = e
             raise
         finally:
-            if record_invocation or self._in_tool_parser_phase():
+            if record_invocation:
                 record_tool_parser_invocation(
                     is_tool_called=is_tool_called,
                     is_streaming=True,

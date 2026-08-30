@@ -840,6 +840,23 @@ class TestEngineBasedPath:
         engine.parse_delta("Hello", [], mock_request, finished=False)
         assert recorder.call_count == 2
 
+    def test_parse_delta_skips_unfinished_reasoning_at_stream_end(
+        self, mock_request, monkeypatch
+    ):
+        recorder = MagicMock()
+        monkeypatch.setattr(
+            parser_engine_module,
+            "record_tool_parser_invocation",
+            recorder,
+            raising=False,
+        )
+        engine = _make_engine(_combined_config())
+        engine.initialize_streaming()
+
+        engine.parse_delta("thinking", [], mock_request, finished=True)
+
+        recorder.assert_not_called()
+
     @pytest.mark.parametrize(
         ("text", "expected_tool_call"),
         [
