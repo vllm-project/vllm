@@ -1733,16 +1733,6 @@ class rocm_aiter_ops:
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
     """
 
-    # Cached class var like the toggles below; kept in sync by
-    # refresh_env_variables() and init_from_config().
-    _MOE_DISPATCH_POLICY: int = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
-
-    @classmethod
-    @if_aiter_supported
-    def get_moe_dispatch_policy(cls) -> int:
-        """MoE sorting dispatch policy for AITER fused-MoE kernels."""
-        return cls._MOE_DISPATCH_POLICY
-
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
@@ -1760,6 +1750,7 @@ class rocm_aiter_ops:
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+    _MOE_DISPATCH_POLICY: int = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
     # Lazily probed: whether aiter.topk_softmax supports the
@@ -1794,8 +1785,8 @@ class rocm_aiter_ops:
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
-        cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
         cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
+        cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
     @classmethod
     def init_from_config(cls, aiter_config: "AITERConfig") -> None:
@@ -1827,8 +1818,8 @@ class rocm_aiter_ops:
         cls._TRITON_ROTARY_EMBED = aiter_config.triton_rope
         cls._MOE_SHARED_EXPERTS_ENABLED = aiter_config.moe_shared_experts
         cls._MOE_SITUV2_A8W4 = aiter_config.moe_situv2_a8w4
-        cls._TRITON_UNQUANT_GEMM = aiter_config.triton_gemm
         cls._MOE_DISPATCH_POLICY = aiter_config.moe_dispatch_policy
+        cls._TRITON_UNQUANT_GEMM = aiter_config.triton_gemm
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str):
@@ -1944,6 +1935,12 @@ class rocm_aiter_ops:
         # _MOE_SITUV2_A8W4 is a variant of aiter fused moe, so aiter
         # fused moe must be enabled as well.
         return cls.is_fused_moe_enabled() and cls._MOE_SITUV2_A8W4
+
+    @classmethod
+    @if_aiter_supported
+    def get_moe_dispatch_policy(cls) -> int:
+        """MoE sorting dispatch policy for AITER fused-MoE kernels."""
+        return cls._MOE_DISPATCH_POLICY
 
     @classmethod
     @if_aiter_supported
