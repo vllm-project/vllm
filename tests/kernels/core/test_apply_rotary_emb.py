@@ -19,7 +19,6 @@ import torch
 from vllm.config import (
     CompilationConfig,
     VllmConfig,
-    get_cached_compilation_config,
     set_current_vllm_config,
 )
 from vllm.platforms import current_platform
@@ -112,7 +111,6 @@ def run_dispatch_test(
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(custom_ops=["all", "+apply_rotary_emb"])
     )
-    get_cached_compilation_config.cache_clear()
 
     with set_current_vllm_config(vllm_config):
         rope = test_case.rope_class(**test_case.rope_kwargs).to(device=device)

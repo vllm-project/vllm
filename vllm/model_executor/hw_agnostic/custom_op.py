@@ -6,7 +6,7 @@ import inspect
 import torch
 import torch.nn as nn
 
-from vllm.config import get_cached_compilation_config
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
@@ -148,7 +148,7 @@ class CustomOp(nn.Module):
         # The hw-agnostic CustomOp dispatches only between forward_native
         # (in-tree, used on every platform) and forward_oot (overridden by
         # an OOT plugin via register_oot).
-        compilation_config = get_cached_compilation_config()
+        compilation_config = get_current_vllm_config().compilation_config
 
         # NOTE(shen-shanshan): CustomOp object can be enforce enabled, e.g.,
         # enable device-specific kernels in ViT models when enabling graph
@@ -187,7 +187,7 @@ class CustomOp(nn.Module):
             return fn
 
         # Do not compile if global compilation disabled
-        compilation_config = get_cached_compilation_config()
+        compilation_config = get_current_vllm_config().compilation_config
         if compilation_config.mode == CompilationMode.NONE:
             return fn
 
@@ -236,7 +236,7 @@ class CustomOp(nn.Module):
     @classmethod
     def enabled(cls) -> bool:
         # if no name, then it was not registered
-        compilation_config = get_cached_compilation_config()
+        compilation_config = get_current_vllm_config().compilation_config
         custom_ops = compilation_config.custom_ops
         if not hasattr(cls, "name"):
             logger.warning_once(
@@ -261,7 +261,7 @@ class CustomOp(nn.Module):
         When PyTorch Inductor is used, 'none' is the default value,
         otherwise 'all'.
         """
-        compilation_config = get_cached_compilation_config()
+        compilation_config = get_current_vllm_config().compilation_config
         count_none = compilation_config.custom_ops.count("none")
         count_all = compilation_config.custom_ops.count("all")
         assert count_none + count_all == 1
