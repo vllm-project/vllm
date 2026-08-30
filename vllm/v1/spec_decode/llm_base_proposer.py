@@ -1292,25 +1292,6 @@ class SpecDecodeBaseProposer:
         spec_cfg = self.speculative_config
         base = self.vllm_config
 
-        if self.method == "mtp":
-            # The engine config belongs to the target and therefore carries
-            # the target quantization object. MTP modules must be constructed
-            # with the external draft checkpoint's model and quantization
-            # metadata instead.
-            draft_load_config = spec_cfg.draft_load_config or base.load_config
-            draft_quant_config = VllmConfig._get_quantization_config(
-                spec_cfg.draft_model_config, draft_load_config
-            )
-            base = replace(
-                base,
-                model_config=spec_cfg.draft_model_config,
-                quant_config=draft_quant_config,
-            )
-            logger.info(
-                "Using the draft checkpoint quantization config for MTP modules; "
-                "target quantization is not inherited."
-            )
-
         if spec_cfg.moe_backend is not None:
             base = replace(
                 base,
