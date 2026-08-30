@@ -326,6 +326,7 @@ if TYPE_CHECKING:
     VLLM_PLE_MMAP_CHUNK: int = 2048
     VLLM_PLE_MMAP_PREWARM: bool = False
     VLLM_PLE_MMAP_READAHEAD: int = 0
+    VLLM_PLE_MMAP_PINNED: bool = False
     VLLM_ENABLE_HPC_OPS: bool = False
 
 
@@ -2175,6 +2176,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # posix_fadvise(WILLNEED) before copying; 0 disables the readahead
     # pre-pass, and a gather needing more ranges than this skips it.
     "VLLM_PLE_MMAP_READAHEAD": lambda: int(os.getenv("VLLM_PLE_MMAP_READAHEAD", "0")),
+    # Stage each PLE mmap forward's gathered rows through a per-call pinned
+    # host buffer before the H2D copy, instead of copying straight out of
+    # gather()'s pageable numpy array.
+    "VLLM_PLE_MMAP_PINNED": lambda: bool(int(os.getenv("VLLM_PLE_MMAP_PINNED", "0"))),
     # If set to 1, enable the HPC fused kernels (requires the hpc package
     # (.so) and an sm100/sm103 device). Covers:
     #   * the HY V4 iHC ops -- each of the eager HYV4HCPreLayer /
@@ -2351,13 +2356,14 @@ def compile_factors() -> dict[str, object]:
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
-        # PLE mmap gather-pool tuning: affects only the CPU body of a
+        # PLE mmap runtime tuning: affects only the CPU/host body of a
         # split-out op, never the compiled graph. VLLM_PLE_MMAP itself stays
         # a factor since it changes which op the graph splits around.
         "VLLM_PLE_MMAP_WORKERS",
         "VLLM_PLE_MMAP_CHUNK",
         "VLLM_PLE_MMAP_PREWARM",
         "VLLM_PLE_MMAP_READAHEAD",
+        "VLLM_PLE_MMAP_PINNED",
     }
 
     from vllm.config.utils import normalize_value

@@ -47,6 +47,10 @@ Knobs (env, registered in ``vllm/envs.py``):
                              to N coalesced file ranges via
                              posix_fadvise(WILLNEED) so the worker pool
                              faults against in-flight I/O
+  VLLM_PLE_MMAP_PINNED=0     1 = stage each forward's gathered rows through a
+                             per-call pinned host buffer before the H2D
+                             copy, instead of copying straight out of
+                             gather()'s pageable numpy array
 """
 
 from __future__ import annotations
@@ -758,6 +762,77 @@ def compute_prewarm_bound(table_bytes: int, mem_available_bytes: int) -> int:
     return min(table_bytes, max(0, mem_available_bytes - _PREWARM_HEADROOM_BYTES))
 
 
+def _pin_host_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+    """Allocate a pinned host tensor shaped and dtyped like ``cpu_tensor``.
+
+    The sole call to ``pin_memory=True`` in this module, kept behind this
+    one-line indirection (the same monkeypatch-seam style as
+    ``_coalesce_runs``): ``forward``'s ``ids.device.type == "cuda"`` gate
+    makes the pinned branch unreachable on CPU, so an un-monkeypatched call
+    here would only ever run on a real CUDA device — but a naive CPU-only
+    test calling it directly would otherwise init a CUDA context.
+    """
+    return torch.empty_like(cpu_tensor, pin_memory=True)
+
+
+def _stage_pinned(cpu_tensor: torch.Tensor) -> tuple[torch.Tensor, bool]:
+    """Copy ``cpu_tensor`` (pageable) into a fresh pinned host buffer.
+
+    Per-call allocation from torch's caching host allocator, not a
+    persistent grow-only buffer: the allocator only returns a block to the
+    pool once the CUDA events recorded against it by the H2D copy that
+    follows complete (``CachingHostAllocator``'s ``recordEvent`` contract,
+    the same one ``copy_kernel_cuda`` relies on), so a fresh per-call
+    allocation is safe against reuse racing an in-flight async copy.
+
+    Fail-soft: allocation or the copy into it can raise (e.g. cudaHostAlloc
+    exhaustion), in which case the caller's normal pageable H2D runs
+    unchanged — this never costs the request its correctness, only the
+    staging.
+
+    Benign growth: torch's caching host allocator buckets by power-of-2
+    size class, so the pinned pool this repeatedly draws from is bounded
+    to roughly 2x the largest payload observed per class, not unbounded —
+    the answer if a tester reports host memory growing after enabling this.
+
+    Returns:
+        ``(tensor, engaged)``. On success, ``tensor`` is the new pinned
+        buffer holding ``cpu_tensor``'s values and ``engaged`` is True. If
+        either the allocation or the copy into it raises, ``tensor`` is
+        ``cpu_tensor`` itself and ``engaged`` is False.
+    """
+    try:
+        staged = _pin_host_tensor(cpu_tensor)
+        staged.copy_(cpu_tensor)
+    except Exception as exc:
+        # Exception, not just RuntimeError: this guards the copy_ above as
+        # well as the allocation, and neither the allocator nor the copy's
+        # failure modes are contractually limited to RuntimeError -- the
+        # fallback path costs only the staging, never the request's
+        # correctness, so there is no failure mode worth letting through
+        # uncaught.
+        #
+        # type(exc).__name__, not str(exc) or exc itself: warning_once's
+        # lru_cache keys on (msg, *args), an exception instance hashes by
+        # identity (would defeat the dedup and re-emit, traceback and all,
+        # on every failing call), and str(exc) is not safe either -- some
+        # torch allocator errors interpolate the requested/available byte
+        # counts into the message, so a persistently exhausted allocator
+        # would still re-emit on every call as those counts drift. The
+        # exception's type name is stable across calls and still names the
+        # failure mode. scope="process": rank-visible on multi-rank boxes,
+        # unlike the attach-time info_once below (which stays local-scope).
+        logger.warning_once(
+            "PLE mmap: pinned H2D staging failed (%s); falling "
+            "back to the pageable H2D path and disabling pinned staging "
+            "for this layer for the rest of the run",
+            type(exc).__name__,
+            scope="process",
+        )
+        return cpu_tensor, False
+    return staged, True
+
+
 # --------------------------------------------------------------------------- #
 # Placeholder that stands in for VocabParallelEmbedding.
 # --------------------------------------------------------------------------- #
@@ -797,6 +872,12 @@ class MmapNgramEmbedding(nn.Module):
         self.table: MmapPleTable | None = None
         self.weight_scale_loaded = False
         self.weights_streamed = False
+        # Snapshotted from VLLM_PLE_MMAP_PINNED AND torch.cuda.is_available()
+        # once a real table attaches (_attach_table); stays False here so a
+        # table-unset forward (the zero-fill path) never engages it. Folding
+        # is_available() in here too keeps forward's gate to the cheap
+        # device-type check instead of re-querying CUDA every call.
+        self.pinned = False
         # (total_ms, sync_ms, gather_ms, h2d_ms) per forward call that
         # actually gathered — the table-unset zero-fill path never reaches
         # _record_forward_timing. pinned engagement is tracked separately in
@@ -841,14 +922,29 @@ class MmapNgramEmbedding(nn.Module):
             )
         h2d_t = time.monotonic()
         out = torch.from_numpy(rows).view(table.torch_dtype)
-        # non_blocking=True has no effect here: `rows` (from table.gather)
-        # is pageable host memory, not pinned, so this H2D copy is
-        # effectively synchronous. Pinned staging (Phase-4 lever 5) is a
-        # separate, not-yet-pulled lever, not something this line hides.
+        pinned_engaged = False
+        # torch.cuda.is_available() is already folded into self.pinned at
+        # attach time (_attach_table) -- only the per-call device-type check
+        # runs inside this timed window.
+        if self.pinned and ids.device.type == "cuda":
+            out, pinned_engaged = _stage_pinned(out)
+            # A persistently exhausted allocator (e.g. cudaHostAlloc) would
+            # otherwise retry -- and re-raise, re-catch, and re-build a
+            # fallback tensor around -- every single forward, a silent
+            # per-step tax on the ITL path. Resyncing to pinned_engaged is a
+            # no-op on success and latches off on failure, so a call that
+            # will only fail again is paid for at most once (same precedent
+            # as the readahead pre-pass's per-fd latch above).
+            self.pinned = pinned_engaged
+        # Two arms reach this line. Pinned-staged (above): `out` is already
+        # pinned host memory, so non_blocking=True is a genuine async H2D.
+        # Pageable (the default): `out` is still gather()'s pageable numpy
+        # array, so non_blocking=True has no effect and the copy is
+        # effectively synchronous regardless of the flag passed here.
         out = out.to(ids.device, non_blocking=True)
         h2d_ms = (time.monotonic() - h2d_t) * 1000.0
         self._record_forward_timing(
-            ids_np.size, sync_ms, gather_ms, h2d_ms, pinned=False
+            ids_np.size, sync_ms, gather_ms, h2d_ms, pinned=pinned_engaged
         )
         return out.reshape(*ids.shape, self.embedding_dim)
 
@@ -1339,6 +1435,22 @@ def _attach_table(
             readahead=envs.VLLM_PLE_MMAP_READAHEAD,
         )
         embedding.torch_dtype = table.torch_dtype
+        # Snapshotted once here, not read inside forward: forward currently
+        # reads no envs at all, and vllm's envs.__getattr__ re-runs
+        # os.getenv on every access. Combined with torch.cuda.is_available()
+        # here too (also a per-call cost forward would otherwise re-pay):
+        # on a CUDA-less box this is always False, so the gate stays dead
+        # regardless of the env value -- the CPU-path guarantee forward's
+        # device-type check alone no longer has to provide.
+        embedding.pinned = envs.VLLM_PLE_MMAP_PINNED and torch.cuda.is_available()
+        if embedding.pinned:
+            # No layer_idx here: info_once dedups on (msg, *args), so a
+            # per-layer argument would re-log for every PLE layer (same
+            # rationale as the readahead pre-pass breadcrumb above).
+            logger.info_once(
+                "PLE mmap: forward H2D will stage through a pinned host "
+                "buffer on CUDA (VLLM_PLE_MMAP_PINNED=1)"
+            )
         table_bytes = table.rows_total * row_bytes
 
         if envs.VLLM_PLE_MMAP_PREWARM:

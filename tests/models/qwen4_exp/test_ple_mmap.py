@@ -53,6 +53,7 @@ def _reset_ple_mmap_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "VLLM_PLE_MMAP_CHUNK",
         "VLLM_PLE_MMAP_PREWARM",
         "VLLM_PLE_MMAP_READAHEAD",
+        "VLLM_PLE_MMAP_PINNED",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -1527,6 +1528,7 @@ def test_ple_mmap_tuning_knobs_are_not_compile_factors() -> None:
     # An unlisted var becomes a torch.compile cache key, so toggling the
     # readahead knob would force a recompile and poison its own A/B.
     assert "VLLM_PLE_MMAP_READAHEAD" not in factors
+    assert "VLLM_PLE_MMAP_PINNED" not in factors
 
 
 # --------------------------------------------------------------------------- #
@@ -1646,6 +1648,308 @@ def test_forward_timing_instrument_logs_the_rate_limited_split(
     # pinned= is engaged/total across the window, not the p99 sample's own
     # flag -- neither call here engaged pinned staging, so 0 of both.
     assert (pinned_engaged, pinned_total) == (0, n)
+
+
+# --------------------------------------------------------------------------- #
+# Pinned H2D staging (VLLM_PLE_MMAP_PINNED)
+# --------------------------------------------------------------------------- #
+
+
+def test_attach_table_snapshots_pinned_off_by_default(tmp_path: Path) -> None:
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5)
+
+    embedding = _attached_embedding(
+        tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5
+    )
+
+    assert embedding.pinned is False
+
+
+def test_attach_table_snapshots_pinned_on_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """embedding.pinned is env AND torch.cuda.is_available() at attach time
+    (folded in so forward only re-pays the cheap device-type check) —
+    is_available() is mocked True so this asserts the env-reflection half
+    of that AND deterministically, independent of whether this box has a
+    real CUDA device."""
+    monkeypatch.setenv("VLLM_PLE_MMAP_PINNED", "1")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5)
+
+    embedding = _attached_embedding(
+        tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5
+    )
+
+    assert embedding.pinned is True
+
+
+def test_attach_table_snapshots_pinned_off_without_cuda_even_if_env_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CPU-path guarantee: on a CUDA-less box, torch.cuda.is_available()
+    is False at attach time, so the AND keeps the gate dead regardless of
+    the env value."""
+    monkeypatch.setenv("VLLM_PLE_MMAP_PINNED", "1")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5)
+
+    embedding = _attached_embedding(
+        tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5
+    )
+
+    assert embedding.pinned is False
+
+
+def test_pinned_flag_on_cpu_ids_takes_the_unchanged_pageable_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate is `self.pinned and ids.device.type == "cuda"`: on CPU ids
+    (every other test in this suite) it must short-circuit before ever
+    touching the pinned-allocation indirection, proving the flag cannot
+    corrupt — or even reach — the CPU-only path. torch.cuda.is_available()
+    is mocked True so embedding.pinned is deterministically True here
+    regardless of this box's real hardware -- the point under test is the
+    device-type check, not is_available()."""
+    monkeypatch.setenv("VLLM_PLE_MMAP_PINNED", "1")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    full = _write_ple_layer(tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5)
+    embedding = _attached_embedding(
+        tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5
+    )
+    assert embedding.pinned is True
+    calls: list[torch.Tensor] = []
+
+    def _spy(cpu_tensor: torch.Tensor) -> torch.Tensor:
+        calls.append(cpu_tensor)
+        return cpu_tensor
+
+    monkeypatch.setattr(ple_mmap, "_pin_host_tensor", _spy)
+
+    ids = torch.tensor([[0, 8], [3, 3]], dtype=torch.long)
+    out = embedding(ids)
+
+    assert calls == []
+    assert torch.equal(out.reshape(-1, 2), full[ids.reshape(-1)])
+
+
+def test_stage_pinned_falls_back_when_the_indirection_raises(
+    monkeypatch: pytest.MonkeyPatch, caplog_vllm: pytest.LogCaptureFixture
+) -> None:
+    """A RuntimeError from the allocation indirection must not fail the
+    request — the caller gets its own pageable tensor back, unchanged.
+
+    Goes through the REAL warning_once (a real logging.Handler via
+    caplog_vllm, not a monkeypatched recorder that bypasses its lru_cache),
+    and each of the 10 raised errors carries a DIFFERENT message (real
+    torch allocator errors interpolate the requested/available byte counts,
+    which drift call to call): this is the only shape of test that can
+    catch _stage_pinned passing str(exc) (varies -> dedup defeated, fires
+    every call) instead of type(exc).__name__ (constant -> dedups
+    correctly -> fires once)."""
+
+    call_count = 0
+
+    def _raise(cpu_tensor: torch.Tensor) -> torch.Tensor:
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError(f"synthetic cudaHostAlloc exhaustion: {call_count * 4096} B")
+
+    monkeypatch.setattr(ple_mmap, "_pin_host_tensor", _raise)
+    cpu_tensor = torch.arange(6, dtype=torch.uint8).reshape(3, 2)
+
+    with caplog_vllm.at_level(
+        logging.WARNING, logger="vllm.models.qwen4_exp.nvidia.ple_mmap"
+    ):
+        for _ in range(10):
+            staged, engaged = ple_mmap._stage_pinned(cpu_tensor)
+            assert engaged is False
+            assert staged is cpu_tensor
+            assert torch.equal(staged, cpu_tensor)
+
+    emissions = [
+        r for r in caplog_vllm.records if "pinned H2D staging failed" in r.getMessage()
+    ]
+    assert len(emissions) == 1
+
+
+def test_stage_pinned_copies_values_through_a_fake_pinned_indirection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The indirection is monkeypatched UNCONDITIONALLY, even on a
+    CUDA-capable box: a real pin_memory=True call here would init a CUDA
+    context, which this CPU-only suite must never trigger. A plain CPU
+    tensor stands in as the "pinned" buffer to prove _stage_pinned's own
+    copy semantics independent of the real allocator."""
+    monkeypatch.setattr(ple_mmap, "_pin_host_tensor", torch.empty_like)
+    cpu_tensor = torch.arange(6, dtype=torch.uint8).reshape(3, 2)
+
+    staged, engaged = ple_mmap._stage_pinned(cpu_tensor)
+
+    assert engaged is True
+    assert staged is not cpu_tensor
+    assert torch.equal(staged, cpu_tensor)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_pinned_h2d_matches_pageable_h2d_on_a_real_cuda_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag on vs off, same rows, on a real CUDA device: proves the pinned
+    arm cannot silently corrupt values relative to the pageable arm it
+    replaces. Gated on torch.cuda.is_available() alone, so it skips in
+    CPU-only CI; it is the one test in this file that allocates real pinned
+    memory and issues a real H2D rather than standing the allocator in.
+
+    Also spies on _pin_host_tensor (wrapping the real allocator, not
+    replacing it) to prove the knob actually ENGAGED the mechanism rather
+    than merely producing byte-identical output while dead — value
+    equality alone would still pass with a permanently inert gate."""
+    real_pin_host_tensor = ple_mmap._pin_host_tensor
+    calls: list[int] = []
+
+    def _spy(cpu_tensor: torch.Tensor) -> torch.Tensor:
+        calls.append(1)
+        return real_pin_host_tensor(cpu_tensor)
+
+    monkeypatch.setattr(ple_mmap, "_pin_host_tensor", _spy)
+
+    full = _write_ple_layer(tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5)
+    ids = torch.tensor([0, 8, 3, 3], dtype=torch.long, device="cuda")
+
+    outs = []
+    call_counts = []
+    for pinned in (False, True):
+        monkeypatch.setenv("VLLM_PLE_MMAP_PINNED", "1" if pinned else "0")
+        calls.clear()
+        embedding = _attached_embedding(
+            tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5
+        )
+        outs.append(embedding(ids).cpu())
+        call_counts.append(len(calls))
+        assert embedding.table is not None
+        embedding.table.close()  # each arm builds its own table; don't leak it
+
+    assert call_counts[0] == 0  # pageable arm never touches the indirection
+    assert call_counts[1] >= 1  # pinned arm actually engaged it
+    assert torch.equal(outs[0], outs[1])
+    assert torch.equal(outs[0].reshape(-1, 2), full[ids.cpu()])
+
+
+class _SyntheticPinnedAllocError(RuntimeError):
+    """Disjoint RuntimeError subclass for a synthetic allocator failure,
+    raised by both
+    test_pinned_allocation_failure_latches_off_for_the_rest_of_the_instance
+    and
+    test_forward_timing_mixed_window_reports_engaged_over_total_pinned_calls.
+
+    _stage_pinned's warning_once call dedups its process-wide lru_cache key
+    on (msg, type(exc).__name__). A bare RuntimeError here would share that
+    key with test_stage_pinned_falls_back_when_the_indirection_raises's own
+    bare RuntimeError, so whichever of the two tests ran first would consume
+    the shared dedup slot and starve the other regardless of run order
+    (reproduced: running this latch test before the dedup test makes the
+    dedup test observe zero emissions instead of one). A distinct exception
+    type keeps the two tests' cache keys independent -- do not introduce a
+    THIRD bare RuntimeError into a test reaching _stage_pinned; raise this
+    class instead.
+    """
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_pinned_allocation_failure_latches_off_for_the_rest_of_the_instance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A persistently exhausted pinned allocator (e.g. cudaHostAlloc) would
+    otherwise be retried every forward -- a silent per-step tax on the ITL
+    path (raise, catch, rebuild the fallback tensor) that a tester would
+    only ever see once, in the single warning_once emission. forward
+    latches self.pinned = False the first time _stage_pinned reports
+    not-engaged, so the indirection is tried at most once per instance.
+
+    Needs a REAL CUDA device for `ids` -- the pinned gate is
+    `self.pinned and ids.device.type == "cuda"`, unreachable from CPU-only
+    ids (the same reason _stage_pinned is unit-tested directly rather than
+    through forward elsewhere in this file)."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    calls = 0
+
+    def _raise(cpu_tensor: torch.Tensor) -> torch.Tensor:
+        nonlocal calls
+        calls += 1
+        raise _SyntheticPinnedAllocError("synthetic cudaHostAlloc exhaustion")
+
+    monkeypatch.setattr(ple_mmap, "_pin_host_tensor", _raise)
+    monkeypatch.setenv("VLLM_PLE_MMAP_PINNED", "1")
+    full = _write_ple_layer(tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5)
+    embedding = _attached_embedding(
+        tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5
+    )
+    assert embedding.pinned is True
+    ids = torch.tensor([0, 8, 3, 3], dtype=torch.long, device="cuda")
+
+    out1 = embedding(ids)
+    assert embedding.pinned is False  # latched off after the failed call
+
+    out2 = embedding(ids)
+
+    assert calls == 1  # the indirection was never retried on the second call
+    for out in (out1, out2):
+        assert torch.equal(out.cpu().reshape(-1, 2), full[ids.cpu()])
+
+    assert embedding.table is not None
+    embedding.table.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_forward_timing_mixed_window_reports_engaged_over_total_pinned_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The latch is what makes a mixed window reachable at all: the first
+    call here engages pinned staging, the second's allocation fails and
+    latches self.pinned off for the rest of the run. Keying the
+    forward-timing log's pinned= field on the p99 SAMPLE's own flag would
+    report whichever of those two calls happened to sort last as the
+    window's total_ms max, not the window's actual engagement; this test
+    drives exactly that mixed shape and asserts the rendered pair is the
+    window's true engaged/total count regardless of which call was
+    biggest."""
+    monkeypatch.setenv("VLLM_PLE_MMAP_PINNED", "1")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5)
+    embedding = _attached_embedding(
+        tmp_path, layer_idx=0, vocab=9, parts=3, cols=2, scale=0.5
+    )
+    assert embedding.pinned is True
+    real_pin_host_tensor = ple_mmap._pin_host_tensor
+    call_count = 0
+
+    def _pin_once_then_fail(cpu_tensor: torch.Tensor) -> torch.Tensor:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return real_pin_host_tensor(cpu_tensor)
+        raise _SyntheticPinnedAllocError("synthetic cudaHostAlloc exhaustion")
+
+    monkeypatch.setattr(ple_mmap, "_pin_host_tensor", _pin_once_then_fail)
+    logged = _record_info(monkeypatch)
+    ids = torch.tensor([0, 8, 3, 3], dtype=torch.long, device="cuda")
+
+    embedding(ids)  # call 1: pinned engages
+    assert embedding.pinned is True
+    assert logged == []  # buffers a sample, does not log yet
+
+    embedding._fwd_last_log = 0.0  # simulate the interval having elapsed
+    embedding(ids)  # call 2: allocation fails, latches pinned off
+    assert embedding.pinned is False
+
+    assert len(logged) == 1
+    msg, args = logged[0]
+    pinned_engaged, pinned_total = args[-2:]
+    assert (pinned_engaged, pinned_total) == (1, 2)
+
+    assert embedding.table is not None
+    embedding.table.close()
 
 
 # --------------------------------------------------------------------------- #
