@@ -77,6 +77,10 @@ def _cast_if_autocast_enabled(device_type: str, *args):
     )
 
 
+def _is_gguf(quant_config: QuantizationConfig | None) -> bool:
+    return quant_config is not None and quant_config.get_name() == "gguf"
+
+
 class NemotronLayerNorm1P(nn.LayerNorm):
     def __init__(
         self,
@@ -86,8 +90,10 @@ class NemotronLayerNorm1P(nn.LayerNorm):
         bias: bool = True,
         device=None,
         dtype=None,
+        add_unit_offset: bool = True,
     ):
         super().__init__(normalized_shape, eps, elementwise_affine, bias, device, dtype)
+        self.add_unit_offset = add_unit_offset
 
     def forward(
         self,
@@ -98,8 +104,9 @@ class NemotronLayerNorm1P(nn.LayerNorm):
             x = x + residual
             residual = x
         device_type = x.device.type
+        weight = self.weight + 1 if self.add_unit_offset else self.weight
         args = _cast_if_autocast_enabled(
-            device_type, x, self.normalized_shape, self.weight + 1, self.bias, self.eps
+            device_type, x, self.normalized_shape, weight, self.bias, self.eps
         )
         with torch.amp.autocast(device_type, enabled=False):
             x = torch.nn.functional.layer_norm(*args)
@@ -259,11 +266,16 @@ class NemotronDecoderLayer(nn.Module):
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
         )
+        add_unit_offset = not _is_gguf(quant_config)
         self.input_layernorm = NemotronLayerNorm1P(
-            config.hidden_size, eps=config.norm_eps
+            config.hidden_size,
+            eps=config.norm_eps,
+            add_unit_offset=add_unit_offset,
         )
         self.post_attention_layernorm = NemotronLayerNorm1P(
-            config.hidden_size, eps=config.norm_eps
+            config.hidden_size,
+            eps=config.norm_eps,
+            add_unit_offset=add_unit_offset,
         )
 
     def forward(
@@ -309,6 +321,8 @@ class NemotronModel(nn.Module):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.embed_tokens",
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -323,7 +337,11 @@ class NemotronModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
         if get_pp_group().is_last_rank:
-            self.norm = NemotronLayerNorm1P(config.hidden_size, eps=config.norm_eps)
+            self.norm = NemotronLayerNorm1P(
+                config.hidden_size,
+                eps=config.norm_eps,
+                add_unit_offset=not _is_gguf(quant_config),
+            )
         else:
             self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
