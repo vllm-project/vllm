@@ -442,6 +442,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             specs.append(((num_decode_tokens, top_k), torch.int32))
         workspace = current_workspace_manager().get_simultaneous(*specs)
         kv, combined_indices_out, combined_lens_out = workspace[:3]
+        combined_indices_out.fill_(-1)
 
         if not swa_only:
             assert attn_metadata is not None

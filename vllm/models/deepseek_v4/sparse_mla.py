@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.platforms.interface import DeviceCapability
@@ -261,13 +262,20 @@ class DeepseekV4FlashMLAMetadataBuilder(
         assert cm.positions is not None, (
             "positions is required for C128A metadata build"
         )
-        active_topk_width = min(
-            max(
-                triton.next_power_of_2(max(cm.max_seq_len // self.compress_ratio, 1)),
-                _C128A_TOPK_ALIGNMENT,
-            ),
-            self.c128a_max_compressed,
-        )
+        if envs.VLLM_BATCH_INVARIANT:
+            # Keep metadata shape and workspace offsets independent of the
+            # longest neighboring request in the current batch.
+            active_topk_width = self.c128a_max_compressed
+        else:
+            active_topk_width = min(
+                max(
+                    triton.next_power_of_2(
+                        max(cm.max_seq_len // self.compress_ratio, 1)
+                    ),
+                    _C128A_TOPK_ALIGNMENT,
+                ),
+                self.c128a_max_compressed,
+            )
         block_size = self.kv_cache_spec.block_size // self.compress_ratio
         global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
             cm.positions[:num_total],
