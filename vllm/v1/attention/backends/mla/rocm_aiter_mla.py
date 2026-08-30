@@ -729,7 +729,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             block_table_tensor,
             block_table_tensor.stride(0),
             paged_kv_indptr,
-            seq_lens_for_kernel,
             KERNEL_BLOCK_SIZE=self.kernel_block_size,
             BLOCK_SIZE=1024,
         )
@@ -834,6 +833,26 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
             has_persistent_metadata = True
 
+        # Small-head multi-token verify uses mla_gluon's 4-D MTP entry over the
+        # ordinary per-request paged-KV view, so there is no expanded per-token
+        # buffer to build here. mla_gluon still wants a lower bound on the KV
+        # length it is asked to split; on the verify path that bound is over
+        # active requests, not cudagraph padding rows pinned to max_qo_len.
+        # The .item() below runs in the builder, outside the captured region,
+        # so it does not abort HIP graph capture the way the per-layer syncs
+        # in forward_mqa did.
+        min_kv_seq_len = 1
+        if AiterMLAHelper.use_gluon_verify(
+            self.num_heads, int(max_qo_len), self._kv_cache_dtype_str
+        ):
+            per_req_len = paged_kv_indptr[1:] - paged_kv_indptr[:-1]
+            if pad_uniform_mtp:
+                active = qo_lens_device > 0
+                if active.any():
+                    min_kv_seq_len = int(per_req_len[active].min().item())
+            else:
+                min_kv_seq_len = int(per_req_len.min().item())
+
         attn_metadata = AiterMLADecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_for_kernel,
@@ -843,6 +862,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             qo_indptr=qo_indptr,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
             max_qo_len=max_qo_len,
+            min_kv_seq_len=min_kv_seq_len,
             use_gluon_decode=use_gluon_decode,
             attn_out_dtype=self.decode_attn_out_dtype,
             has_persistent_metadata=has_persistent_metadata,
@@ -884,7 +904,6 @@ def _expand_page_indices_kernel(
     block_table,
     block_table_stride,
     cu_num_tokens,
-    seq_lens,
     KERNEL_BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -904,7 +923,7 @@ def _expand_page_indices_kernel(
     req_idx = tl.program_id(0)
     row_ptr = block_table + req_idx * block_table_stride
     start_idx = tl.load(cu_num_tokens + req_idx)
-    num_tokens = tl.load(seq_lens + req_idx)
+    num_tokens = tl.load(cu_num_tokens + req_idx + 1) - start_idx
 
     offset = tl.arange(0, BLOCK_SIZE)
     for i in tl.range(0, num_tokens, BLOCK_SIZE):
@@ -1056,11 +1075,12 @@ class AiterMLAHelper:
 
     @staticmethod
     def use_gluon_verify(num_heads: int, max_qo_len: int, kv_cache_dtype: str) -> bool:
-        """Whether a small-head multi-token verify is flattened onto Gluon.
+        """Whether a small-head multi-token verify uses native Gluon MTP.
 
-        bf16 has no gqa<16, qseqlen>1 asm kernel, so the verify is flattened
-        into per-token Gluon decodes. fp8 has one via the q-row fold and must
-        not come here: the flatten hands Gluon the batch size its fp8 regime
+        bf16 has no gqa<16, qseqlen>1 asm kernel, so verify goes through
+        ``mla_gluon``'s 4-D MTP entry (``q`` shaped ``[batch, qlen, nhead, dim]``)
+        with ``use_2d_view=False``. fp8 has one via the q-row fold and must not
+        come here: the MTP path hands Gluon the batch size its fp8 regime
         asserts against. A predicate rather than inline in forward_mqa so the
         builder sees the same answer the impl acts on.
         """
@@ -1391,19 +1411,17 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             return o, None
 
         # 12-head (<16) multi-token verify (DSpark): the asm path has no
-        # gqa<16, qseqlen>1 kernel. Flatten each verify token to its own
-        # qseqlen=1 gluon decode, mirroring the TRITON_MLA / sparse-backend
-        # flatten but on the fast gluon kernel. The block is causal -- the
-        # target is checking draft tokens, so position t must not see t+1 --
-        # and attention rows are independent, so giving row t the KV range
-        # [0, context + t] is exactly causal multi-token attention.
+        # gqa<16, qseqlen>1 kernel, so the block goes to the gluon kernel's 4-D
+        # MTP entry, which serves a whole (1 + num_spec) block in one launch.
+        # The block is causal -- the target is checking draft tokens, so
+        # position t must not see t+1 -- and the kernel bounds each query
+        # position's scores itself.
         # Arch, mode and dtype gating all live in use_gluon_verify, so that the
         # builder -- which has to know whether the asm decode will run -- sees
         # the same answer as this branch.
         if AiterMLAHelper.use_gluon_verify(
             self.num_heads, int(decode.max_qo_len), self.kv_cache_dtype
         ):
-            qlen = int(decode.max_qo_len)
             if type(q) is tuple:
                 q_nope, q_pe = q
             else:
@@ -1419,56 +1437,39 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 device=q_nope.device,
             )
             kv_buffer = kv_c_and_k_pe_cache.reshape(-1, kv_c_and_k_pe_cache.shape[-1])
-            # Expand per-request paged-KV to per-verify-token. Row r*qlen+t is
-            # request r's verify token t, and seq_lens counts the tokens
-            # scheduled in this step, so a request's KV range already spans its
-            # whole verify block and context_r = seq_len_r - qlen. Token t may
-            # attend to [0, context_r + t], i.e. seq_len_r - (qlen - 1) + t
-            # entries. paged_kv_indices lists a request's pages in ascending
-            # position order, so each row's causal window is a prefix of that
-            # request's slice and only the row length changes. Rows clamp to
-            # zero for cudagraph padding requests, whose seq_len is 0. Fully
-            # vectorized (no host loop).
-            old_indptr = decode.paged_kv_indptr
-            per_req_len = old_indptr[1:] - old_indptr[:-1]
-            dev = q_nope.device
-            row_req = torch.arange(per_req_len.shape[0], device=dev).repeat_interleave(
-                qlen
+            assert attn_metadata.causal, (
+                "AITER MLA small-head verify MTP is causal-only"
             )
-            row_len = (
-                (
-                    per_req_len.unsqueeze(1)
-                    - (qlen - 1)
-                    + torch.arange(qlen, device=dev, dtype=per_req_len.dtype)
+            # Hand mla_gluon its 4-D MTP entry instead of an expanded
+            # per-verify-token paged-KV view. The flat query layout is already
+            # row-major (r * qlen + t), so unflatten is a free view. mla_gluon
+            # applies the per-position causal bound
+            # score_end = min(split_kv_end, seq_len - qlen + q_pos + 1)
+            # in-kernel, and seq_lens already spans the verify block, so that
+            # bound is context_r + q_pos + 1 -- the same window the expanded
+            # view supplied by truncating each row's page list.
+            qlen = int(decode.max_qo_len)
+            num_reqs = B // qlen
+            if num_reqs * qlen != B:
+                raise ValueError(
+                    f"verify block {B} rows is not a multiple of qlen {qlen}"
                 )
-                .clamp_(min=0)
-                .flatten()
-            )
-            new_indptr = torch.cat([old_indptr.new_zeros(1), row_len.cumsum(0)]).to(
-                torch.int32
-            )
-            total = int(new_indptr[-1].item())
-            within = torch.arange(total, device=dev, dtype=torch.int64) - new_indptr[
-                :-1
-            ].to(torch.int64).repeat_interleave(row_len)
-            src = (
-                old_indptr[row_req].to(torch.int64).repeat_interleave(row_len) + within
-            )
-            new_indices = decode.paged_kv_indices[src]
+            assert decode.paged_kv_indptr is not None
+            assert decode.paged_kv_indices is not None
             mla_gluon = _get_mla_gluon()
             mla_gluon(
-                q_nope=q_nope,
-                q_pe=q_pe,
+                q_nope=q_nope.unflatten(0, (num_reqs, qlen)),
+                q_pe=q_pe.unflatten(0, (num_reqs, qlen)),
                 kv_c=kv_buffer,
-                o=o,
-                page_table=new_indices,
-                seq_info=new_indptr,
+                o=o.unflatten(0, (num_reqs, qlen)),
+                page_table=decode.paged_kv_indices,
+                seq_info=decode.paged_kv_indptr,
                 sm_scale=self.scale,
                 k_pe=None,
                 kv_pe_offset=self.kv_lora_rank,
                 use_2d_view=False,
                 kv_scale=1.0,
-                min_kv_seq_len=int(row_len.min()),
+                min_kv_seq_len=decode.min_kv_seq_len,
             )
             return o, None
 
