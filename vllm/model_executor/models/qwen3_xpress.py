@@ -125,13 +125,20 @@ class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
 
-        skip_substrs = ["mask_embedding"]
+        # These are provided by the target (shared) or reconstructed below, so drop
+        # them before the loader sees them rather than asking it to skip: the
+        # mixer is stored raw in the checkpoint and folded after loading.
+        skip_substrs = ["mask_embedding", "xpress_head.mix_L"]
         if not includes_embed_tokens:
             skip_substrs.append("embed_tokens")
         if not includes_lm_head:
             skip_substrs.append("lm_head")
-        skip_substrs.append("xpress_head.mix_L")
-        loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
+        model_weights = {
+            k: v
+            for k, v in model_weights.items()
+            if not any(sub in k for sub in skip_substrs)
+        }
+        loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items())
         if raw_mix_L is None:
             raise ValueError("XPress checkpoint is missing xpress_head.mix.L")
