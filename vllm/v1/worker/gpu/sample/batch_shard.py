@@ -335,9 +335,22 @@ def _shard_grammar_output(
         cursor += num_req_logits
     if not local_ids:
         return None
+    # PR_C_GRAMMAR_FAIL_CLOSED: num_acceptable_drafts is per request and
+    # ordered with structured_output_request_ids, so shard it the same way.
+    num_acceptable_drafts = grammar_output.num_acceptable_drafts
+    if num_acceptable_drafts is not None:
+        owned_local = set(local_ids)
+        num_acceptable_drafts = [
+            n
+            for req_id, n in zip(
+                grammar_output.structured_output_request_ids, num_acceptable_drafts
+            )
+            if req_id in owned_local
+        ]
     return GrammarOutput(
         structured_output_request_ids=local_ids,
         grammar_bitmask=grammar_output.grammar_bitmask[keep_indices],
+        num_acceptable_drafts=num_acceptable_drafts,
     )
 
 

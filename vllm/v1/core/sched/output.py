@@ -316,3 +316,14 @@ class GrammarOutput:
     structured_output_request_ids: list[str]
     # Bitmask ordered as structured_output_request_ids.
     grammar_bitmask: "npt.NDArray[np.int32]"
+    # PR_C_GRAMMAR_FAIL_CLOSED: per request, ordered as
+    # structured_output_request_ids, how many leading draft tokens were still
+    # real when the bitmask was built -- the index of the first -1 placeholder
+    # in `scheduled_spec_decode_tokens`, or the window length if there is none.
+    #
+    # `grammar_bitmask` fills row i before inspecting token i, so with the first
+    # -1 at index j rows 0..j hold a real mask and rows j+1.. hold the
+    # all-permissive `_full_mask`. Drafts 0..j-1 may be accepted; draft j onward
+    # must not be, because accepting one advances sampling into an unconstrained
+    # row. None means there are no speculative tokens to invalidate.
+    num_acceptable_drafts: list[int] | None = None

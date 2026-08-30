@@ -146,6 +146,40 @@ def test_bonus_position_constrained_after_invalid_drafts(backend):
 
 
 @pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
+def test_rows_after_first_invalid_draft_are_permissive(backend):
+    """Rows past the first -1 allow every token, so their drafts must be rejected.
+
+    #44006 rescued the bonus row; the rows between the first placeholder and it
+    are still filled with `_full_mask`, on the assumption that a -1 marks a
+    draft the sampler will reject anyway. Whoever consumes the bitmask has to
+    keep that assumption true -- these rows are real sampling positions.
+    """
+    tokenizer, manager, request, prompt = _make_manager_and_request(
+        backend, prompt_str='{"a"'
+    )
+    grammar = request.structured_output_request.grammar
+    assert grammar.accept_tokens(request.request_id, prompt)
+
+    valid = tokenizer.encode(":")[0]
+    drafts = [valid, -1, -1, -1]
+    bitmask = manager.grammar_bitmask(
+        requests={request.request_id: request},
+        structured_output_request_ids=[request.request_id],
+        scheduled_spec_decode_tokens={request.request_id: drafts},
+    )
+
+    assert bitmask is not None
+    assert bitmask.shape[0] == len(drafts) + 1
+    # Rows 0 and 1 were filled before their token was inspected.
+    assert not (bitmask[0] == -1).all()
+    assert not (bitmask[1] == -1).all()
+    # Rows 2 and 3 allow the entire vocabulary.
+    assert (bitmask[2] == -1).all()
+    assert (bitmask[3] == -1).all()
+    assert not grammar.is_terminated()
+
+
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
 def test_bitmask_constrained_when_reasoning_ends_midwindow(backend):
     """Drafts after a mid-window reasoning-end marker stay constrained."""
     tokenizer, manager, request, prompt = _make_manager_and_request(backend)

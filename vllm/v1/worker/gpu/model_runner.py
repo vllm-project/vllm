@@ -165,6 +165,46 @@ from vllm.v1.worker.workspace import use_workspace_lane
 logger = init_logger(__name__)
 
 
+def grammar_invalid_draft_positions(
+    input_batch: InputBatch,
+    grammar_req_ids: list[str],
+    num_acceptable_drafts: list[int] | None,
+    device: torch.device,
+) -> torch.Tensor | None:
+    """Entries of the gathered draft vector that must not be accepted.
+
+    A structured-output request's bitmask rows past the first -1 placeholder
+    carry the all-permissive `_full_mask`, so the drafts verified there must be
+    rejected or the request samples with no grammar constraint. Drafts
+    0..num_acceptable-1 were visible to the bitmask builder and may be accepted;
+    draft num_acceptable is the first whose acceptance would advance sampling
+    into an unconstrained row.
+
+    Returns indices into `draft_sampled`, which is gathered through
+    `logits_indices` and read one position ahead of its logits row, or None when
+    there is nothing to invalidate.
+    """  # PR_C_GRAMMAR_FAIL_CLOSED
+    if not grammar_req_ids or input_batch.num_draft_tokens == 0:
+        return None
+    cu_num_logits = input_batch.cu_num_logits_np.tolist()
+    req_id_to_idx = {req_id: i for i, req_id in enumerate(input_batch.req_ids)}
+    positions: list[int] = []
+    for i, req_id in enumerate(grammar_req_ids):
+        req_idx = req_id_to_idx.get(req_id)
+        if req_idx is None:
+            continue
+        # Without the field (an older scheduler, or warmup) fall back to
+        # invalidating the whole window, which is the conservative choice.
+        num_acceptable = (
+            num_acceptable_drafts[i] if num_acceptable_drafts is not None else 0
+        )
+        start = cu_num_logits[req_idx] + 1 + num_acceptable
+        positions.extend(range(start, cu_num_logits[req_idx + 1]))
+    if not positions:
+        return None
+    return torch.tensor(positions, dtype=torch.int64, device=device)
+
+
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
@@ -1405,6 +1445,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
+        invalid_draft_positions = None
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
@@ -1413,6 +1454,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
+            )
+            invalid_draft_positions = grammar_invalid_draft_positions(
+                input_batch,
+                grammar_output.structured_output_request_ids,
+                grammar_output.num_acceptable_drafts,
+                self.device,
             )
 
         sampler_output: SamplerOutput | None
@@ -1432,6 +1479,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                invalid_draft_positions,
             )
 
         if shard_metadata is not None:
