@@ -57,6 +57,7 @@ def _make_builder():
     builder.paged_kv_indptr = torch.zeros(
         max_num_batched_tokens + 1, dtype=torch.int32, device="cpu"
     )
+    builder._use_persistent_metadata = True
     builder._num_attention_heads = 16
     builder._num_compute_units = current_platform.num_compute_units()
     builder._mla_work_meta_data = torch.empty(1, dtype=torch.int32, device="cpu")
@@ -128,6 +129,7 @@ def _patch_build_deps(monkeypatch, events=None):
             synchronize=lambda: events.append("sync") if events is not None else None
         ),
     )
+    return fake_aiter
 
 
 def test_build_populates_decode_only_split_fields(monkeypatch):
@@ -161,6 +163,25 @@ def test_build_populates_mixed_split_fields(monkeypatch):
     assert md.num_decode_tokens == 1
     assert md.prefill_max_seq_len == 0
     assert md.prefill is None
+
+
+def test_sink_build_skips_persistent_metadata(monkeypatch):
+    builder = _make_builder()
+    builder._use_persistent_metadata = False
+    fake_aiter = _patch_build_deps(monkeypatch)
+
+    md = builder.build(
+        common_prefix_len=0, common_attn_metadata=_make_common_metadata()
+    )
+
+    fake_aiter.get_mla_metadata_v1.assert_not_called()
+    assert md.work_meta_data is None
+    assert md.work_indptr is None
+    assert md.work_info_set is None
+    assert md.reduce_indptr is None
+    assert md.reduce_final_map is None
+    assert md.reduce_partial_map is None
+    assert builder._prev_metadata_key is None
 
 
 def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):

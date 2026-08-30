@@ -302,6 +302,10 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_sink(cls) -> bool:
+        return True
+
 
 @dataclass
 class ROCMAiterMLASparseMetadata(AttentionMetadata):
@@ -369,6 +373,14 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
         self.topk_tokens = vllm_config.model_config.hf_config.index_topk
+        attention_context = vllm_config.compilation_config.static_forward_context
+        # Sink decode must use AITER's nonpersistent path. In particular,
+        # gfx942 has no persistent+LSE kernel, and its metadata heuristic
+        # terminates for HY-V4's TP1 H64 shape.
+        self._use_persistent_metadata = all(
+            getattr(attention_context[name].impl, "sinks", None) is None
+            for name in layer_names
+        )
         # Bounds the KV-split heuristic (see `_sparse_decode_max_split`).
         self._num_compute_units = current_platform.num_compute_units()
         self.max_model_len_tensor = torch.tensor(
@@ -567,7 +579,7 @@ class ROCMAiterMLASparseMetadataBuilder(
             clamped_context_lens.tobytes(),
             seg_lengths.tobytes(),
         )
-        if metadata_key != self._prev_metadata_key:
+        if self._use_persistent_metadata and metadata_key != self._prev_metadata_key:
             from aiter import get_mla_metadata_v1
 
             max_split_per_batch = self._sparse_decode_max_split(
@@ -617,12 +629,24 @@ class ROCMAiterMLASparseMetadataBuilder(
             paged_kv_last_page_len=paged_kv_last_page_len,
             paged_kv_indices=paged_kv_indices,
             paged_kv_indptr=paged_kv_indptr,
-            work_meta_data=self._mla_work_meta_data,
-            work_indptr=self._mla_work_indptr,
-            work_info_set=self._mla_work_info_set,
-            reduce_indptr=self._mla_reduce_indptr,
-            reduce_final_map=self._mla_reduce_final_map,
-            reduce_partial_map=self._mla_reduce_partial_map,
+            work_meta_data=(
+                self._mla_work_meta_data if self._use_persistent_metadata else None
+            ),
+            work_indptr=(
+                self._mla_work_indptr if self._use_persistent_metadata else None
+            ),
+            work_info_set=(
+                self._mla_work_info_set if self._use_persistent_metadata else None
+            ),
+            reduce_indptr=(
+                self._mla_reduce_indptr if self._use_persistent_metadata else None
+            ),
+            reduce_final_map=(
+                self._mla_reduce_final_map if self._use_persistent_metadata else None
+            ),
+            reduce_partial_map=(
+                self._mla_reduce_partial_map if self._use_persistent_metadata else None
+            ),
         )
         return metadata
 
@@ -659,6 +683,7 @@ def reference_mla_sparse_prefill(
 class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
     is_sparse = True
     supports_dense_mha_prefill = False
+    supports_dcp = False
 
     def __init__(
         self,
@@ -683,6 +708,20 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
+        sinks = mla_args.pop("sinks", None)
+        if sinks is not None:
+            if sinks.dtype != torch.float32:
+                raise ValueError(
+                    f"ROCm AITER MLA sinks must be float32, got {sinks.dtype}"
+                )
+            if sinks.ndim != 1 or sinks.numel() != num_heads:
+                raise ValueError(
+                    "ROCm AITER MLA sinks must have shape "
+                    f"({num_heads},), got {tuple(sinks.shape)}"
+                )
+            if not sinks.is_contiguous():
+                raise ValueError("ROCm AITER MLA sinks must be contiguous")
+        self.sinks: torch.Tensor | None = sinks
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
@@ -706,46 +745,92 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         q: torch.Tensor,  # [sq, heads, d_qk]
         kv_c_and_k_pe_cache: torch.Tensor,  # [blocks, heads, d_qk]
         attn_metadata: ROCMAiterMLASparseMetadata,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         num_tokens = q.shape[0]
         mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
+        need_lse = self.sinks is not None
+        if (
+            need_lse
+            and q.dtype == torch.bfloat16
+            and kv_c_and_k_pe_cache.dtype == torch.bfloat16
+            and mla_num_heads == 64
+        ):
+            from vllm.platforms.rocm import on_gfx942
+
+            if on_gfx942():
+                raise ValueError(
+                    "ROCm AITER MLA attention sinks do not support BF16 "
+                    "query/KV with 64 padded local heads on gfx942; increase "
+                    "tensor_parallel_size"
+                )
         output = torch.empty(
             [num_tokens, mla_num_heads, self.kv_lora_rank],
             dtype=attn_metadata.attn_out_dtype,
             device=q.device,
         )
 
-        # Build kwargs and forward the persistent MLA metadata when it has
-        # been computed. The aiter mla_decode_fwd switches to its
-        # work-stealing persistent kernel path when work_meta_data is given.
-        mla_kwargs: dict = dict(
-            q_scale=layer._q_scale,
-            kv_scale=layer._k_scale,
-        )
-        if attn_metadata.work_meta_data is not None:
-            mla_kwargs.update(
-                work_meta_data=attn_metadata.work_meta_data,
-                work_indptr=attn_metadata.work_indptr,
-                work_info_set=attn_metadata.work_info_set,
-                reduce_indptr=attn_metadata.reduce_indptr,
-                reduce_final_map=attn_metadata.reduce_final_map,
-                reduce_partial_map=attn_metadata.reduce_partial_map,
+        if need_lse:
+            # gfx942 has no persistent MLA code object that writes final LSE.
+            # The split-KV path consumes the same ragged indices and is exact.
+            lse = rocm_aiter_ops.mla_decode_fwd_lse(
+                q,
+                kv_c_and_k_pe_cache,
+                output,
+                self.scale,
+                attn_metadata.qo_indptr,
+                1,
+                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
+                attn_metadata.paged_kv_last_page_len,
+                q_scale=layer._q_scale,
+                kv_scale=layer._k_scale,
             )
+        else:
+            # Preserve the persistent work-stealing fast path for models that
+            # do not use sinks.
+            mla_kwargs: dict = dict(
+                q_scale=layer._q_scale,
+                kv_scale=layer._k_scale,
+            )
+            if attn_metadata.work_meta_data is not None:
+                mla_kwargs.update(
+                    work_meta_data=attn_metadata.work_meta_data,
+                    work_indptr=attn_metadata.work_indptr,
+                    work_info_set=attn_metadata.work_info_set,
+                    reduce_indptr=attn_metadata.reduce_indptr,
+                    reduce_final_map=attn_metadata.reduce_final_map,
+                    reduce_partial_map=attn_metadata.reduce_partial_map,
+                )
 
-        rocm_aiter_ops.mla_decode_fwd(
-            q,
-            kv_c_and_k_pe_cache,
-            output,
-            self.scale,
-            attn_metadata.qo_indptr,
-            1,
-            attn_metadata.paged_kv_indptr,
-            attn_metadata.paged_kv_indices,
-            attn_metadata.paged_kv_last_page_len,
-            **mla_kwargs,
-        )
+            rocm_aiter_ops.mla_decode_fwd(
+                q,
+                kv_c_and_k_pe_cache,
+                output,
+                self.scale,
+                attn_metadata.qo_indptr,
+                1,
+                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
+                attn_metadata.paged_kv_last_page_len,
+                **mla_kwargs,
+            )
+            lse = None
 
-        return AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
+        output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
+        if lse is not None:
+            lse = AiterMLAHelper.get_mla_unpadded_o(
+                self.num_heads, lse.unsqueeze(-1)
+            ).squeeze(-1)
+
+        if self.sinks is not None:
+            assert lse is not None
+            sink = self.sinks
+            sink_lse = torch.logaddexp(lse, sink)
+            sink_scale = torch.exp(lse - sink_lse)
+            output = (output.float() * sink_scale.unsqueeze(-1)).to(output.dtype)
+            lse = sink_lse
+
+        return output, lse
 
     def forward_mqa(
         self,
@@ -792,8 +877,6 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
                 q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
                 q = q.view(original_q_shape)
         mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
-        attn_out = self._forward_mla(
+        return self._forward_mla(
             layer, mla_padded_q, kv_c_and_k_pe_cache, attn_metadata
         )
-
-        return attn_out, None

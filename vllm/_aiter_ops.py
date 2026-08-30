@@ -637,6 +637,95 @@ def _rocm_aiter_mla_decode_fwd_fake(
     pass
 
 
+def _rocm_aiter_mla_decode_fwd_lse_impl(
+    q: torch.Tensor,
+    kv_buffer: torch.Tensor,
+    o: torch.Tensor,
+    qo_indptr: torch.Tensor,
+    max_seqlen_qo: int,
+    kv_indptr: torch.Tensor | None = None,
+    kv_indices: torch.Tensor | None = None,
+    kv_last_page_lens: torch.Tensor | None = None,
+    sm_scale: float = 1.0,
+    logit_cap: float = 0.0,
+    q_scale: torch.Tensor | None = None,
+    kv_scale: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Run non-persistent AITER MLA decode and return natural-log LSE.
+
+    gfx942 persistent MLA kernels do not provide an LSE code object. Keeping
+    this as a separate op makes that constraint structural: callers that need
+    LSE cannot accidentally forward persistent work metadata.
+    """
+    from aiter.mla import get_meta_param, mla_decode_fwd
+
+    kwargs: dict[str, float | int | torch.Tensor | None | bool] = {
+        "sm_scale": sm_scale,
+        "logit_cap": logit_cap,
+        "return_lse": True,
+    }
+    if _check_aiter_mla_fp8_support():
+        kwargs["q_scale"] = q_scale
+        kwargs["kv_scale"] = kv_scale
+
+    if q.dtype == FP8_DTYPE:
+        assert kv_indices is not None
+        num_kv_splits, num_kv_splits_indptr = get_meta_param(
+            None,
+            qo_indptr.shape[0] - 1,
+            kv_indices.numel(),
+            q.shape[1],
+            max_seqlen_qo,
+            q.dtype,
+        )
+        if num_kv_splits == 1:
+            # gfx942's one-split FP8 asm writes the final output directly but
+            # does not write either LSE buffer. Force the normal split reducer,
+            # which produces both the same output and an accurate natural LSE.
+            num_kv_splits = 2
+            num_kv_splits_indptr = torch.arange(
+                0,
+                (qo_indptr.shape[0]) * num_kv_splits,
+                num_kv_splits,
+                dtype=torch.int32,
+                device=q.device,
+            )
+        kwargs["num_kv_splits"] = num_kv_splits
+        kwargs["num_kv_splits_indptr"] = num_kv_splits_indptr
+
+    _, final_lse = mla_decode_fwd(
+        q,
+        kv_buffer.view(-1, 1, 1, q.shape[-1]),
+        o,
+        qo_indptr,
+        kv_indptr,
+        kv_indices,
+        kv_last_page_lens,
+        max_seqlen_qo,
+        **kwargs,
+    )
+    if final_lse is None:
+        raise RuntimeError("AITER MLA decode did not return the requested LSE")
+    return final_lse
+
+
+def _rocm_aiter_mla_decode_fwd_lse_fake(
+    q: torch.Tensor,
+    kv_buffer: torch.Tensor,
+    o: torch.Tensor,
+    qo_indptr: torch.Tensor,
+    max_seqlen_qo: int,
+    kv_indptr: torch.Tensor | None = None,
+    kv_indices: torch.Tensor | None = None,
+    kv_last_page_lens: torch.Tensor | None = None,
+    sm_scale: float = 1.0,
+    logit_cap: float = 0.0,
+    q_scale: torch.Tensor | None = None,
+    kv_scale: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.empty(q.shape[:-1], dtype=torch.float32, device=q.device)
+
+
 def _rocm_aiter_w8a8_gemm_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -2172,6 +2261,13 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_mla_decode_fwd_lse",
+                op_func=_rocm_aiter_mla_decode_fwd_lse_impl,
+                mutates_args=["o"],
+                fake_impl=_rocm_aiter_mla_decode_fwd_lse_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_w8a8_gemm",
                 op_func=_rocm_aiter_w8a8_gemm_impl,
                 fake_impl=_rocm_aiter_w8a8_gemm_fake,
@@ -2747,6 +2843,37 @@ class rocm_aiter_ops:
             reduce_indptr=reduce_indptr,
             reduce_final_map=reduce_final_map,
             reduce_partial_map=reduce_partial_map,
+        )
+
+    @staticmethod
+    def mla_decode_fwd_lse(
+        q: torch.Tensor,
+        kv_buffer: torch.Tensor,
+        o: torch.Tensor,
+        sm_scale: float,
+        qo_indptr: torch.Tensor,
+        max_seqlen_qo: int,
+        kv_indptr: torch.Tensor | None = None,
+        kv_indices: torch.Tensor | None = None,
+        kv_last_page_lens: torch.Tensor | None = None,
+        logit_cap: float = 0.0,
+        q_scale: torch.Tensor | None = None,
+        kv_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Run MLA decode without persistent metadata and return its LSE."""
+        return torch.ops.vllm.rocm_aiter_mla_decode_fwd_lse(
+            q,
+            kv_buffer.view(-1, 1, 1, q.shape[-1]),
+            o,
+            qo_indptr,
+            max_seqlen_qo,
+            kv_indptr,
+            kv_indices,
+            kv_last_page_lens,
+            sm_scale=sm_scale,
+            logit_cap=logit_cap,
+            q_scale=q_scale,
+            kv_scale=kv_scale,
         )
 
     @staticmethod
