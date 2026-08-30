@@ -13,6 +13,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.attention import unified_kv_cache_update
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -64,6 +65,34 @@ def building_diffusion_draft():
         yield
     finally:
         _BUILDING_DIFFUSION_DRAFT.reset(token)
+
+
+def _force_write_diffusion_kv(
+    attn_diff: Attention, key: torch.Tensor, value: torch.Tensor
+) -> None:
+    """Write the diffusion block's own new key/value into the shared cache.
+
+    ``attn_diff.kv_sharing_target_layer_name`` (set by
+    ``OrthrusProposer._setup_orthrus_kv_sharing``) makes this layer *read*
+    the target layer's paged KV cache, which is what we want. But vLLM's
+    own ``Attention.forward`` also uses that same field to decide whether
+    to *write* this layer's key/value into the cache at all -- it skips
+    the write whenever a kv_sharing target is set (see
+    ``vllm.model_executor.layers.attention.attention.unified_kv_cache_update``'s
+    callers), on the assumption that a kv-sharing layer contributes no new
+    keys of its own (true for the existing supported pattern, Gemma4 MTP's
+    Q-only attention -- no k_proj/v_proj at all -- but not true here:
+    Orthrus's diffusion attention has its own k_proj_diff/v_proj_diff and
+    needs its output written into the *same physical* shared cache so the
+    rest of the block can attend to it in the same forward).
+
+    Calling the low-level cache-update op directly, bypassing
+    ``Attention.forward``'s skip, is the smallest fix that doesn't need a
+    new vLLM-wide kv-sharing variant: ``set_inputs_first_pass`` already
+    computes a real slot_mapping into the target's cache for every
+    position in this block, so this writes to slots nothing else owns.
+    """
+    unified_kv_cache_update(key, value, attn_diff.layer_name)
 
 
 # Orthrus adds a parallel set of "*_diff" attention projections next to the
@@ -194,6 +223,19 @@ class OrthrusAttention(Qwen3Attention):
         when ``self.attn_diff.kv_sharing_target_layer_name`` has been wired
         (by ``OrthrusProposer.load_model``) to the corresponding *target*
         model layer's ``self.attn``, so this reads the target's real cache.
+
+        Force-writes this block's own diffusion key/value into the shared
+        cache before reading it back (see ``_force_write_diffusion_kv``):
+        setting ``kv_sharing_target_layer_name`` makes vLLM's own
+        ``Attention.forward`` skip the cache *write* for this layer
+        entirely (see ``unified_kv_cache_update``'s callers) -- that skip
+        exists for kv-sharing patterns with no new keys to write at all
+        (e.g. Gemma4 MTP's Q-only attention), which reads correctly from
+        the target's pre-existing cache but is wrong here: without this,
+        every position in the proposed block could only ever see the AR
+        history from *before* this round, never any other position's own
+        embedding, regardless of the attention mask used -- measured as
+        acceptance rate staying flat regardless of block length or mask.
         """
         qkv, _ = self.qkv_proj_diff(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -206,6 +248,7 @@ class OrthrusAttention(Qwen3Attention):
         k = k_by_head.view(k.shape)
 
         q, k = self.rotary_emb(positions, q, k)
+        _force_write_diffusion_kv(self.attn_diff, k, v)
         attn_output = self.attn_diff(q, k, v)
         output, _ = self.o_proj_diff(attn_output)
         return output
