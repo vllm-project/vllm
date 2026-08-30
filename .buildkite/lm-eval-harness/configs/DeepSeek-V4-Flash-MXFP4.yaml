@@ -1,0 +1,25 @@
+# DeepSeek-V4-Flash MXFP4 (AMD Quark) accuracy test.
+# Runs on ROCm (gfx950) with the AITER MoE + fused shared-experts path.
+# Reference GSM8K (8-shot, lm-eval): strict 0.9522 / flexible 0.9515 measured
+# on gfx950 TP=4 (AITER_MXFP4_BF16 backend); default rtol=0.08.
+model_name: "amd/DeepSeek-V4-Flash-MXFP4"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.95
+  - name: "exact_match,flexible-extract"
+    value: 0.95
+limit: 1319
+num_fewshot: 8
+max_model_len: 8192
+kv_cache_dtype: fp8
+moe_backend: aiter
+enforce_eager: false
+trust_remote_code: true
+tokenizer_mode: deepseek_v4
+required_gpu_arch:
+- gfx950
+env_vars:
+  VLLM_ROCM_USE_AITER: "1"
+  VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
