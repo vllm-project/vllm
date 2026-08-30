@@ -97,6 +97,7 @@ class EngineClient(ABC):
         priority: int = 0,
         tokenization_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
+        operation_name: str | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model."""
         ...

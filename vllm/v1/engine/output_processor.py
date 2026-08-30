@@ -262,10 +262,9 @@ class RequestState:
             assert request.pooling_params is not None
             output_kind = request.pooling_params.output_kind
 
-        # Endpoints that don't set operation_name explicitly (e.g. the
-        # pooling/embeddings API, which covers embed/classify/score/rerank)
-        # intentionally fall back to "unknown" rather than guessing a
-        # specific GenAI operation name.
+        # Pooling endpoints without a well-known OTel GenAI operation name
+        # (classify, score, pooling) intentionally fall back to "unknown"
+        # rather than guessing one; embeddings sets "embeddings" explicitly.
         operation_name = request.operation_name or "unknown"
 
         assert request.external_req_id is not None

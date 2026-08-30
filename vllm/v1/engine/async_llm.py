@@ -859,6 +859,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         tokenization_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
+        operation_name: str | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -885,6 +886,7 @@ class AsyncLLM(EngineClient):
                 trace_headers=trace_headers,
                 priority=priority,
                 reasoning_ended=reasoning_ended,
+                operation_name=operation_name,
             )
 
             # The output_handler task pushes items into the queue.

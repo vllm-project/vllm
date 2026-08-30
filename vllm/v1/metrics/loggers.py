@@ -38,7 +38,7 @@ WAITING_REASON_DEFERRED = "deferred"
 
 # OTel GenAI semantic convention labels for the gen_ai_server_* histograms.
 GEN_AI_PROVIDER_NAME = "vllm"
-GEN_AI_OPERATION_NAMES = ("chat", "text_completion", "unknown")
+GEN_AI_OPERATION_NAMES = ("chat", "text_completion", "embeddings", "unknown")
 GEN_AI_ERROR_TYPE_NONE = ""
 GEN_AI_ERROR_TYPE_INTERNAL = "internal_error"
 

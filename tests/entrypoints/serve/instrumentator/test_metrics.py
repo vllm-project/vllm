@@ -11,26 +11,60 @@ import openai
 import pytest
 import pytest_asyncio
 import requests
+from prometheus_client import generate_latest
 from prometheus_client.parser import text_string_to_metric_families
 from transformers import AutoTokenizer
 
 from tests.conftest import LocalAssetServer
 from tests.utils import RemoteOpenAIServer
 from vllm import version
+from vllm.engine.arg_utils import EngineArgs
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.loggers import (
     GEN_AI_ERROR_TYPE_INTERNAL,
     GEN_AI_ERROR_TYPE_NONE,
     GEN_AI_PROVIDER_NAME,
+    PrometheusStatLogger,
     gen_ai_error_type,
 )
+from vllm.v1.metrics.prometheus import get_prometheus_registry
+from vllm.v1.metrics.stats import FinishedRequestStats, IterationStats, SchedulerStats
 
 MODELS = {
     "text": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     "multimodal": "HuggingFaceTB/SmolVLM-256M-Instruct",
 }
+EMBED_MODEL = "intfloat/multilingual-e5-small"
 PREV_MINOR_VERSION = version._prev_minor_version()
+
+
+def _get_sample_value(
+    response_text: str, metric_name: str, labels: dict[str, str]
+) -> float:
+    """Return the value of the sample for `metric_name` whose labels match
+    every entry in `labels` (exact match on those keys; other labels on the
+    sample are ignored), or 0.0 if no such sample exists.
+
+    Every gen_ai_* label combination is pre-created as a zero-valued series
+    at startup, so callers must snapshot this before and after an action and
+    assert on the delta -- checking only for a sample's existence would pass
+    even if the real request were misrouted to a different label
+    combination.
+    """
+    for family in text_string_to_metric_families(response_text):
+        for sample in family.samples:
+            if sample.name == metric_name and all(
+                sample.labels.get(k) == v for k, v in labels.items()
+            ):
+                return sample.value
+    return 0.0
+
+
+def _scrape_metrics(server: RemoteOpenAIServer) -> str:
+    response = requests.get(server.url_for("metrics"))
+    assert response.status_code == HTTPStatus.OK
+    return response.text
 
 
 @pytest.mark.cpu_test
@@ -42,6 +76,69 @@ def test_gen_ai_error_type():
         if finish_reason == FinishReason.ERROR:
             continue
         assert gen_ai_error_type(finish_reason) == GEN_AI_ERROR_TYPE_NONE
+
+
+def test_gen_ai_request_duration_error_type_delta():
+    """A request that finishes with FinishReason.ERROR must land on the
+    error_type='internal_error' series of gen_ai_server_request_duration_
+    seconds, not the error_type='' series used by successful requests, and
+    must not affect the other operation's error_type series.
+
+    A genuine engine-level error is not reliably reproducible end-to-end
+    (see FinishReason.ERROR call sites in vllm/v1/engine/core.py, all of
+    which are internal failure paths), so this drives
+    PrometheusStatLogger.record() directly with synthetic
+    FinishedRequestStats, mirroring how tests/v1/metrics/test_stats.py
+    exercises IterationStats without spinning up a full engine.
+    """
+    model_name = MODELS["text"]
+    vllm_config = EngineArgs(model=model_name).create_engine_config()
+    stat_logger = PrometheusStatLogger(vllm_config)
+
+    base_labels = {
+        "gen_ai_operation_name": "chat",
+        "gen_ai_request_model": model_name,
+        "gen_ai_provider_name": GEN_AI_PROVIDER_NAME,
+        "engine": "0",
+    }
+    success_labels = {**base_labels, "error_type": GEN_AI_ERROR_TYPE_NONE}
+    error_labels = {**base_labels, "error_type": GEN_AI_ERROR_TYPE_INTERNAL}
+
+    registry = get_prometheus_registry()
+
+    def _scrape() -> str:
+        return generate_latest(registry).decode()
+
+    metric = "gen_ai_server_request_duration_seconds_count"
+    before_success = _get_sample_value(_scrape(), metric, success_labels)
+    before_error = _get_sample_value(_scrape(), metric, error_labels)
+
+    iteration_stats = IterationStats()
+    iteration_stats.finished_requests = [
+        FinishedRequestStats(
+            finish_reason=FinishReason.STOP,
+            request_id="req-ok",
+            e2e_latency=0.1,
+            operation_name="chat",
+        ),
+        FinishedRequestStats(
+            finish_reason=FinishReason.ERROR,
+            request_id="req-err",
+            e2e_latency=0.2,
+            operation_name="chat",
+        ),
+    ]
+    stat_logger.record(SchedulerStats(), iteration_stats, engine_idx=0)
+
+    after_success = _get_sample_value(_scrape(), metric, success_labels)
+    after_error = _get_sample_value(_scrape(), metric, error_labels)
+
+    assert after_success == before_success + 1, (
+        "successful request should add exactly one error_type='' sample"
+    )
+    assert after_error == before_error + 1, (
+        "errored request should add exactly one error_type='internal_error' sample"
+    )
 
 
 @pytest.fixture(scope="module", params=list(MODELS.keys()))
@@ -99,9 +196,11 @@ def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: i
             ("_count", num_requests * (max_tokens - 1))
         ],
         "vllm:e2e_request_latency_seconds": [("_count", num_requests)],
-        "gen_ai_server_request_duration_seconds": [("_count", num_requests)],
-        "gen_ai_server_time_to_first_token_seconds": [("_count", num_requests)],
-        "gen_ai_server_time_per_output_token_seconds": [("_count", num_requests)],
+        # gen_ai_server_* metrics are exercised separately in
+        # test_gen_ai_metrics_labels with exact-label-combination deltas,
+        # since every gen_ai_operation_name/error_type combination is
+        # pre-created as a zero-valued series and this loop only checks the
+        # first matching sample name, not its specific labels.
         "vllm:request_queue_time_seconds": [("_count", num_requests)],
         "vllm:request_inference_time_seconds": [("_count", num_requests)],
         "vllm:request_prefill_time_seconds": [("_count", num_requests)],
@@ -331,54 +430,73 @@ async def test_metrics_exist(
         assert sample.labels.get("kv_cache_max_concurrency") not in (None, "None", "")
 
 
-def _gen_ai_duration_samples(response_text: str) -> list:
-    for family in text_string_to_metric_families(response_text):
-        if family.name == "gen_ai_server_request_duration_seconds":
-            return [s for s in family.samples if s.name.endswith("_count")]
-    return []
-
-
 @pytest.mark.asyncio
 async def test_gen_ai_metrics_labels(
     server: RemoteOpenAIServer,
     client: openai.AsyncClient,
     model_key: str,
 ):
-    """chat and text_completion requests against the same model/engine must
-    produce distinct gen_ai_* series (gen_ai_operation_name differs), each
-    carrying gen_ai_request_model and a constant gen_ai_provider_name."""
+    """A chat or text_completion request must increment exactly its own
+    (gen_ai_operation_name, gen_ai_request_model, engine[, error_type])
+    series by one on the duration, TTFT, and TPOT gen_ai_server_* histograms
+    -- not merely produce *some* sample with matching labels somewhere in
+    the metric family. Every label combination (chat/text_completion/
+    embeddings/unknown, both error_type values) is pre-created as a
+    zero-valued series at startup, so an existence check alone would still
+    pass if the real request were misrouted to the wrong operation name."""
     if model_key == "multimodal":
         pytest.skip("Unnecessary test")
 
     model_name = MODELS[model_key]
 
-    await client.completions.create(
-        model=model_name,
-        prompt="Hello, my name is",
-        max_tokens=5,
-        temperature=0.0,
-    )
-    await client.chat.completions.create(
-        model=model_name,
-        messages=[{"role": "user", "content": "Hello, my name is"}],
-        max_tokens=5,
-        temperature=0.0,
-    )
+    requests_by_operation = {
+        "text_completion": lambda: client.completions.create(
+            model=model_name,
+            prompt="Hello, my name is",
+            max_tokens=5,
+            temperature=0.0,
+        ),
+        "chat": lambda: client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": "Hello, my name is"}],
+            max_tokens=5,
+            temperature=0.0,
+        ),
+    }
 
-    response = requests.get(server.url_for("metrics"))
-    assert response.status_code == HTTPStatus.OK
+    for operation_name, send_request in requests_by_operation.items():
+        base_labels = {
+            "gen_ai_operation_name": operation_name,
+            "gen_ai_request_model": model_name,
+            "gen_ai_provider_name": GEN_AI_PROVIDER_NAME,
+            "engine": "0",
+        }
+        duration_labels = {**base_labels, "error_type": GEN_AI_ERROR_TYPE_NONE}
 
-    samples = _gen_ai_duration_samples(response.text)
-    op_names_seen = {s.labels.get("gen_ai_operation_name") for s in samples}
-    assert "chat" in op_names_seen
-    assert "text_completion" in op_names_seen
+        metrics_before = _scrape_metrics(server)
+        before = {
+            metric: _get_sample_value(metrics_before, f"{metric}_count", labels)
+            for metric, labels in (
+                ("gen_ai_server_request_duration_seconds", duration_labels),
+                ("gen_ai_server_time_to_first_token_seconds", base_labels),
+                ("gen_ai_server_time_per_output_token_seconds", base_labels),
+            )
+        }
 
-    for sample in samples:
-        assert sample.labels.get("gen_ai_request_model") == model_name
-        assert sample.labels.get("gen_ai_provider_name") == GEN_AI_PROVIDER_NAME
-        if sample.value > 0:
-            # Successful requests carry the empty error_type.
-            assert sample.labels.get("error_type") == GEN_AI_ERROR_TYPE_NONE
+        await send_request()
+
+        metrics_after = _scrape_metrics(server)
+        for metric, labels in (
+            ("gen_ai_server_request_duration_seconds", duration_labels),
+            ("gen_ai_server_time_to_first_token_seconds", base_labels),
+            ("gen_ai_server_time_per_output_token_seconds", base_labels),
+        ):
+            after = _get_sample_value(metrics_after, f"{metric}_count", labels)
+            assert after == before[metric] + 1, (
+                f"expected exactly one new {metric}_count sample for "
+                f"labels {labels} after a {operation_name} request "
+                f"(before={before[metric]}, after={after})"
+            )
 
 
 @pytest.mark.asyncio
@@ -511,6 +629,61 @@ def _get_running_metrics_from_api(server: RemoteOpenAIServer):
     assert kv_cache_usage is not None
 
     return running_requests, waiting_requests, kv_cache_usage
+
+
+@pytest.fixture(scope="module")
+def embed_server():
+    args = [
+        "--runner",
+        "pooling",
+        "--dtype",
+        "bfloat16",
+        "--enforce-eager",
+        "--max-model-len",
+        "512",
+    ]
+    with RemoteOpenAIServer(EMBED_MODEL, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def embed_client(embed_server):
+    async with embed_server.get_async_client() as cl:
+        yield cl
+
+
+@pytest.mark.asyncio
+async def test_gen_ai_metrics_embeddings_operation_name(
+    embed_server: RemoteOpenAIServer,
+    embed_client: openai.AsyncClient,
+):
+    """Embedding requests must be labeled gen_ai_operation_name='embeddings'
+    per the OTel GenAI semantic conventions (a well-known operation name
+    value), not left on the generic 'unknown' bucket that other pooling
+    endpoints (classify/score/pooling) intentionally fall back to."""
+    labels = {
+        "gen_ai_operation_name": "embeddings",
+        "gen_ai_request_model": EMBED_MODEL,
+        "gen_ai_provider_name": GEN_AI_PROVIDER_NAME,
+        "engine": "0",
+        "error_type": GEN_AI_ERROR_TYPE_NONE,
+    }
+    metric = "gen_ai_server_request_duration_seconds_count"
+
+    before = _get_sample_value(_scrape_metrics(embed_server), metric, labels)
+
+    await embed_client.embeddings.create(
+        model=EMBED_MODEL,
+        input="Hello, my name is Robert and I love magic",
+    )
+
+    after = _get_sample_value(_scrape_metrics(embed_server), metric, labels)
+
+    assert after == before + 1, (
+        f"expected exactly one new gen_ai_operation_name='embeddings' "
+        f"duration sample after the embeddings request "
+        f"(before={before}, after={after})"
+    )
 
 
 def test_metrics_exist_run_batch():
