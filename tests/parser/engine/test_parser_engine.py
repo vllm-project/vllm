@@ -814,6 +814,32 @@ class TestEngineBasedPath:
         assert result is not None
         assert len(result.tool_calls) > 0
 
+    def test_parse_delta_skips_reasoning_only_and_records_content(
+        self, mock_request, monkeypatch
+    ):
+        recorder = MagicMock()
+        monkeypatch.setattr(
+            parser_engine_module,
+            "record_tool_parser_invocation",
+            recorder,
+            raising=False,
+        )
+        engine = _make_engine(_combined_config())
+        engine.initialize_streaming()
+
+        engine.parse_delta("thinking", [], mock_request, finished=False)
+        recorder.assert_not_called()
+
+        engine.parse_delta("</think>", [], mock_request, finished=False)
+        recorder.assert_called_once_with(
+            is_tool_called=False,
+            is_streaming=True,
+            request=mock_request,
+        )
+
+        engine.parse_delta("Hello", [], mock_request, finished=False)
+        assert recorder.call_count == 2
+
     @pytest.mark.parametrize(
         ("text", "expected_tool_call"),
         [
@@ -834,7 +860,7 @@ class TestEngineBasedPath:
         )
         engine = _make_engine(_hermes_config())
 
-        _, _, tool_calls = engine.parse(text, mock_request)
+        _, _, tool_calls = engine.parse(text, mock_request, enable_auto_tools=True)
 
         assert bool(tool_calls) is expected_tool_call
         recorder.assert_called_once_with(
@@ -842,6 +868,21 @@ class TestEngineBasedPath:
             is_streaming=False,
             request=mock_request,
         )
+
+    def test_parse_skips_metrics_without_auto_tools(self, monkeypatch):
+        recorder = MagicMock()
+        monkeypatch.setattr(
+            parser_engine_module,
+            "record_tool_parser_invocation",
+            recorder,
+            raising=False,
+        )
+        request = ChatCompletionRequest(messages=[], model="test")
+        engine = _make_engine(_hermes_config())
+
+        engine.parse("Hello", request)
+
+        recorder.assert_not_called()
 
     @pytest.mark.parametrize(
         ("text", "expected_tool_call"),
@@ -890,7 +931,7 @@ class TestEngineBasedPath:
         monkeypatch.setattr(engine, "_single_pass_parse", fail)
 
         with pytest.raises(RuntimeError, match="parser failure"):
-            engine.parse("Hello", mock_request)
+            engine.parse("Hello", mock_request, enable_auto_tools=True)
 
         recorder.assert_called_once_with(
             is_tool_called=error,
@@ -939,7 +980,9 @@ class TestEngineBasedPath:
         try:
             parser_metrics.init_parser_metrics(model_name=model_name)
             test_counter = parser_metrics._tool_call_parser_invocations
-            request = ChatCompletionRequest(messages=[], model="test")
+            request = ChatCompletionRequest(
+                messages=[], model="test", tool_choice="auto"
+            )
 
             non_streaming_labels = {**labels, "mode": "non_streaming"}
             assert (
@@ -950,7 +993,7 @@ class TestEngineBasedPath:
                 == 0
             )
             engine = _make_engine(_hermes_config())
-            engine.parse("Hello", request)
+            engine.parse("Hello", request, enable_auto_tools=True)
             assert (
                 REGISTRY.get_sample_value(
                     "vllm:tool_call_parser_invocations_total",

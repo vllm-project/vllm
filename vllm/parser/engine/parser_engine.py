@@ -45,6 +45,16 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_TOOL_CALL_STATES = frozenset(
+    {
+        ParserState.TOOL_PREAMBLE,
+        ParserState.TOOL_NAME,
+        ParserState.TOOL_ARGS,
+        ParserState.TOOL_BETWEEN,
+    }
+)
+_TOOL_PARSER_PHASE_STATES = frozenset({ParserState.CONTENT, *_TOOL_CALL_STATES})
+
 
 class ToolCallSlot:
     __slots__ = (
@@ -107,6 +117,10 @@ class ParserEngine(Parser):
         self.parser_engine_config = parser_engine_config
         self._engine = StreamingParserEngine(
             parser_engine_config, tokenizer, vocab=self.vocab
+        )
+        self._has_tool_parser = any(
+            state in _TOOL_CALL_STATES or transition.next_state in _TOOL_CALL_STATES
+            for (state, _), transition in parser_engine_config.transitions.items()
         )
 
         self._has_reasoning = (
@@ -419,6 +433,9 @@ class ParserEngine(Parser):
             if tool_choice == "none" and tools:
                 self._suppress_tool_calls = True
 
+    def _in_tool_parser_phase(self) -> bool:
+        return self._has_tool_parser and self._engine.state in _TOOL_PARSER_PHASE_STATES
+
     def _strip_content_whitespace(
         self,
         content: str,
@@ -444,6 +461,7 @@ class ParserEngine(Parser):
     ) -> DeltaMessage | None:
         self._initialize_history_tool_call_cnt(request)
         is_tool_called: bool | Exception = False
+        record_invocation = self._in_tool_parser_phase()
         try:
             if not self._prompt_streaming_prepared and prompt_token_ids is not None:
                 # NOTE: call the hook BEFORE setting the flag, because the hook
@@ -451,6 +469,7 @@ class ParserEngine(Parser):
                 # clears ``_prompt_streaming_prepared``.
                 self.adjust_initial_state_from_prompt(prompt_token_ids)
                 self._prompt_streaming_prepared = True
+            record_invocation |= self._in_tool_parser_phase()
             self._check_skip_tool_parsing(request)
             events = self._feed(delta_text, delta_token_ids)
             if finished:
@@ -470,11 +489,12 @@ class ParserEngine(Parser):
             is_tool_called = e
             raise
         finally:
-            record_tool_parser_invocation(
-                is_tool_called=is_tool_called,
-                is_streaming=True,
-                request=request,
-            )
+            if record_invocation or self._in_tool_parser_phase():
+                record_tool_parser_invocation(
+                    is_tool_called=is_tool_called,
+                    is_streaming=True,
+                    request=request,
+                )
 
     def _strip_trailing_reasoning(
         self,
@@ -719,11 +739,12 @@ class ParserEngine(Parser):
             is_tool_called = e
             raise
         finally:
-            record_tool_parser_invocation(
-                is_tool_called=is_tool_called,
-                is_streaming=False,
-                request=request,
-            )
+            if enable_auto_tools and self._has_tool_parser:
+                record_tool_parser_invocation(
+                    is_tool_called=is_tool_called,
+                    is_streaming=False,
+                    request=request,
+                )
 
     # ── Event-to-delta conversion ─────────────────────────────────────
 
