@@ -388,6 +388,53 @@ def test_shell_wrapper_preserves_failure_status(tmp_path):
     assert result.returncode == 1
 
 
+def test_ci_otel_run_records_command_and_preserves_status(tmp_path):
+    shell = (
+        f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; '
+        f"ci_otel_run 1 {_encoded('true')} true; "
+        f"ci_otel_run 2 {_encoded('false')} false; "
+        'echo "status=$?"'
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_SPOOL_DIR": str(tmp_path),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "status=1" in result.stdout
+    records = "".join(path.read_text() for path in tmp_path.glob("spans-*.jsonl"))
+    assert '"ci.command.index":1' in records
+    assert '"ci.command.index":2' in records
+    assert '"process.exit.code":0' in records
+    assert '"process.exit.code":1' in records
+
+
+def test_ci_otel_run_fail_open_when_tracing_unavailable(tmp_path):
+    shell = (
+        f'CI_INFRA_OTEL_DIR="{tmp_path / "missing"}"; export CI_INFRA_OTEL_DIR; '
+        f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; '
+        f"ci_otel_run 1 {_encoded('echo ran')} echo ran"
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ran"
+
+
 def test_missing_helpers_do_not_block_the_test_command(tmp_path):
     output = tmp_path / "ran"
     shell = (
