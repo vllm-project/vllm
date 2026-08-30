@@ -5,6 +5,7 @@
 import contextlib
 import os
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -484,6 +485,114 @@ def test_replaced_embedding_exposes_one_vpe(vpe):
 
     lm_head = ParallelLMHead(VOCAB_SIZE, HIDDEN_SIZE)
     assert lm_head.tie_weights(composed.embed).weight is composed.embed.weight
+
+
+class FakeVocabModel(nn.Module):
+    """An HF model's embedding accessors, incl. a Gemma-style PLE table.
+
+    Mirrors `Gemma4PreTrainedModel.get_per_layer_input_embeddings`, whose raw
+    accessor returns `self.base_model.embed_tokens_per_layer` and so raises
+    `AttributeError` when per-layer embeddings are disabled.
+    """
+
+    def __init__(self, per_layer: bool):
+        super().__init__()
+        self.embed_tokens = ScaledWordEmbedding(
+            VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE
+        )
+        if per_layer:
+            self.embed_tokens_per_layer = ScaledWordEmbedding(
+                VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE
+            )
+
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.embed_tokens = value
+
+    def get_per_layer_input_embeddings(self):
+        return self.embed_tokens_per_layer
+
+    def set_per_layer_input_embeddings(self, value):
+        self.embed_tokens_per_layer = value
+
+
+class FakeUnifiedVocabModel(nn.Module):
+    """An HF model whose class defines no per-layer accessors at all.
+
+    Mirrors `Gemma4UnifiedModel`, which has neither
+    `get_per_layer_input_embeddings` nor its setter.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.embed_tokens = ScaledWordEmbedding(
+            VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE
+        )
+
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.embed_tokens = value
+
+
+class EmbeddingReplacementStub(nn.Module):
+    """Just enough of the backend to exercise `_replace_input_embeddings`."""
+
+    _replace_input_embeddings = Base._replace_input_embeddings
+
+
+def run_replace_input_embeddings(model, hidden_size_per_layer_input):
+    stub = EmbeddingReplacementStub()
+    stub.model = model
+    stub.quant_config = None
+    stub.text_config = SimpleNamespace(
+        hidden_size_per_layer_input=hidden_size_per_layer_input
+    )
+    stub._replace_input_embeddings()
+    return stub.model
+
+
+def test_replace_input_embeddings_with_ple(vpe):
+    """PLE on: both the input table and the per-layer table become `vpe`."""
+    model = run_replace_input_embeddings(
+        FakeVocabModel(per_layer=True), hidden_size_per_layer_input=HIDDEN_SIZE
+    )
+
+    assert isinstance(model.get_input_embeddings(), vpe)
+    assert isinstance(model.embed_tokens_per_layer, vpe)
+
+
+def test_replace_input_embeddings_without_ple(vpe):
+    """PLE off: the per-layer accessor is never called, input table still replaced.
+
+    The config gate must skip the accessor, which would otherwise raise
+    `AttributeError` exactly as Gemma4's does for a non-PLE checkpoint.
+    """
+    model = run_replace_input_embeddings(
+        FakeVocabModel(per_layer=False), hidden_size_per_layer_input=0
+    )
+
+    assert isinstance(model.get_input_embeddings(), vpe)
+    with pytest.raises(AttributeError):
+        model.get_per_layer_input_embeddings()
+
+
+def test_replace_input_embeddings_without_ple_accessors(vpe):
+    """No per-layer accessors: left alone even when the config gate is set.
+
+    `Gemma4UnifiedModel` defines neither accessor, yet its checkpoints still
+    carry a `hidden_size_per_layer_input` entry on the text config, so the
+    config gate on its own would not keep the per-layer branch away from it.
+    """
+    model = run_replace_input_embeddings(
+        FakeUnifiedVocabModel(), hidden_size_per_layer_input=HIDDEN_SIZE
+    )
+
+    assert isinstance(model.get_input_embeddings(), vpe)
+    assert not hasattr(model, "embed_tokens_per_layer")
 
 
 MULTIMODAL_MODEL = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
