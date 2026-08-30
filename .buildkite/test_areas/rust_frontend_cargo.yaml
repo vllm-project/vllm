@@ -14,6 +14,15 @@ steps:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
   commands:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
+  mirror:
+    amd:
+      label: ":amd: (MI250) Rust Frontend Cargo Style + Clippy"
+      device: mi250_1
+      no_gpu: true
+      working_dir: "/vllm-workspace"
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
 
 - label: ":computer: (CPU) Rust Frontend Cargo"
   key: rust-frontend-cargo-tests
@@ -28,3 +37,12 @@ steps:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
   commands:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
+  mirror:
+    amd:
+      label: ":amd: (MI250) Rust Frontend Cargo"
+      device: mi250_1
+      no_gpu: true
+      working_dir: "/vllm-workspace"
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
