@@ -58,7 +58,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "Static configuration of this engine's CPU KV offload tier: "
                     "its size in slots and in bytes, and the KV tokens it holds "
                     "when full, or 'None' when a slot count does not convert to "
-                    "a token count. Sum across engines for the whole instance."
+                    "a token count. Emitted from the first scheduler step, so "
+                    "absent on an idle engine. Sum across engines for the "
+                    "whole instance."
                 ),
                 labelnames=CPU_TIER_INFO_LABELS,
             ),
