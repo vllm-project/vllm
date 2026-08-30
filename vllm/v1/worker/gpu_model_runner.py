@@ -2243,10 +2243,16 @@ class GPUModelRunner(
                     non_blocking=True,
                 )
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
+            # Fancy-indexing the pinned tensor with a numpy array allocates a
+            # fresh unpinned CPU tensor, so the subsequent .to(non_blocking=True)
+            # silently stages through pageable memory (#53491). Route through
+            # async_tensor_h2d so the intermediate is pinned first.
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
-            ) - self.input_batch.num_computed_tokens_cpu_tensor[req_indices].to(
-                device=self.device, dtype=torch.int64, non_blocking=True
+            ) - async_tensor_h2d(
+                self.input_batch.num_computed_tokens_cpu_tensor[req_indices],
+                device=self.device,
+                dtype=torch.int64,
             )
             target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
             target.gpu[:, :total_num_scheduled_tokens] += drift
