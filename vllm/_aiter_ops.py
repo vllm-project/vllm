@@ -1766,6 +1766,12 @@ class rocm_aiter_ops:
         after monkeypatching an env var in a test to pick up the new value.
         ``init_from_config`` is the equivalent entry point when the values
         come from an ``AITERConfig`` instead.
+
+        Teardown / test only. This ignores any ``AITERConfig`` and reverts to
+        the raw env vars, so never call it on a live engine that was
+        configured via ``--aiter-config`` -- it would silently drop the
+        config's values. The one in-tree caller is ``cleanup_dist_env_and_memory``
+        at engine shutdown, where nothing reads the class vars afterwards.
         """
         cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
         cls._CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
