@@ -345,3 +345,67 @@ def test_sparse_not_supported(mock_vllm_config):
         RocmPlatform.get_attn_backend_cls(
             selected_backend=None, attn_selector_config=attn_selector_config
         )
+
+
+@pytest.mark.parametrize(
+    "is_gfx1x, head_size, expected_backend",
+    [
+        # On RDNA the custom paged-attention HIP kernel is only instantiated at
+        # head_size 128 (see `use_rocm_custom_paged_attention`), so anywhere else
+        # ROCM_ATTN runs the same kind of Triton kernel TRITON_ATTN does and
+        # should not keep the higher rank.
+        (True, 128, AttentionBackendEnum.ROCM_ATTN),
+        (True, 256, AttentionBackendEnum.TRITON_ATTN),
+        (True, 64, AttentionBackendEnum.TRITON_ATTN),
+        # CDNA has the kernel at 64 and 128 and its own ordering; untouched.
+        (False, 128, AttentionBackendEnum.ROCM_ATTN),
+        (False, 256, AttentionBackendEnum.ROCM_ATTN),
+    ],
+)
+def test_gfx1x_ranks_rocm_attn_by_whether_its_kernel_applies(
+    is_gfx1x,
+    head_size,
+    expected_backend,
+    mock_vllm_config,
+    mock_get_cdna_version,
+):
+    """The RDNA ordering follows the custom kernel it is justified by."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=head_size,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+    )
+    with patch("vllm.platforms.rocm.on_gfx1x", return_value=is_gfx1x):
+        backend_path = RocmPlatform.get_attn_backend_cls(
+            selected_backend=None, attn_selector_config=attn_selector_config
+        )
+    assert backend_path == expected_backend.get_path()
+
+
+def test_gfx1x_demotion_keeps_rocm_attn_available(
+    mock_vllm_config, mock_get_cdna_version
+):
+    """Demoted, not excluded: forcing ROCM_ATTN at head_size 256 still works."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=256,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+    )
+    with patch("vllm.platforms.rocm.on_gfx1x", return_value=True):
+        backend_path = RocmPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.ROCM_ATTN,
+            attn_selector_config=attn_selector_config,
+        )
+    assert backend_path == AttentionBackendEnum.ROCM_ATTN.get_path()
