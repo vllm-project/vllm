@@ -2746,7 +2746,8 @@ class VllmConfig:
     def adjust_dcp_kv_cache_interleave_size(
         self, kv_cache_config: "KVCacheConfig"
     ) -> None:
-        """Normalize DCP interleave size against block_size for NIXL P/D.
+        """Normalize DCP interleave size against block_size for connectors
+        that require block-level alignment.
 
         Called by each worker (via ensure_kv_transfer_initialized), once it knows its
         own final block_size via kv_cache_config.
@@ -2767,9 +2768,7 @@ class VllmConfig:
                 "deprecated when PCP is fully supported."
             )
 
-        if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
-            "NixlConnector"
-        ):
+        if self.kv_transfer_config is None:
             return
 
         # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
@@ -2777,7 +2776,15 @@ class VllmConfig:
         local_block_size = min(
             g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
         )
-        if self.parallel_config.cp_kv_cache_interleave_size != local_block_size:
+        if self.parallel_config.cp_kv_cache_interleave_size == local_block_size:
+            return
+
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
+        )
+
+        connector_cls = KVConnectorFactory.get_connector_class(self.kv_transfer_config)
+        if connector_cls.requires_dcp_block_aligned_interleave:
             interleave = self.parallel_config.cp_kv_cache_interleave_size
             self.parallel_config.cp_kv_cache_interleave_size = local_block_size
             logger.info_once(

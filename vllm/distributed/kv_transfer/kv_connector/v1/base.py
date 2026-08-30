@@ -173,6 +173,14 @@ class KVConnectorBase_V1(ABC):
     Base class for KV connectors.
     """
 
+    requires_dcp_block_aligned_interleave: bool = True
+    """Whether this connector needs cp_kv_cache_interleave_size pinned to block_size
+    when decode_context_parallel_size > 1.
+
+    Connectors that only move KV within the same DCP rank (e.g. CPU offloading) should
+    set this to False.
+    """
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         """Whether external hits can complete divergent local hybrid hits.
