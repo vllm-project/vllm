@@ -855,6 +855,7 @@ class Platform:
             model_config.architecture,
             model_config=model_config,
         )
+        # Qwen4Exp has multiple Mamba state layouts with different sizes.
         if hasattr(model_cls, "get_mamba_specs_from_config"):
             mamba_page_size = max(
                 spec.page_size_bytes
