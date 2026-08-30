@@ -46,7 +46,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -62,6 +61,7 @@ from vllm.multimodal.processing import (
     PromptInsertion,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -76,7 +76,6 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -672,6 +671,14 @@ class MolmoDecoderNormAfterLayer(MolmoDecoderLayer):
 class MolmoVisionBackbone(nn.Module, SupportsQuant):
     packed_modules_mapping = {"merged_linear": ["gate_proj", "up_proj"]}
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # image_projector gate_up merge
+            "gate_proj": ("merged_linear", 0),
+            "up_proj": ("merged_linear", 1),
+        }
+    )
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -800,38 +807,8 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         return image_features
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("merged_linear", "gate_proj", 0),
-            ("merged_linear", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @support_torch_compile
@@ -910,20 +887,7 @@ class MolmoModel(nn.Module, SupportsQuant):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        return AutoWeightsLoader(self).load_weights(weights)
 
 
 def _lowest_multiple(x: int, k: int) -> int:
@@ -1160,18 +1124,44 @@ class MolmoDummyInputsBuilder(BaseDummyInputsBuilder[MolmoProcessingInfo]):
 
 
 class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
-    def _call_hf_processor(
+    def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
+        processor = self.info.get_hf_processor()
+
+        # The chat template is already applied to the prompt tokens
+        # Use message_format="none" to avoid applying it again
+        # Prepend an empty space if `always_start_with_space` is True
+        tokens = processor.get_tokens_input(
+            self.info.get_tokenizer().decode(prompt),
+            message_format="none",
+            always_start_with_space=True,
+        )
+
+        # Prepend a BOS token id to the tokens
+        return self.info.ctx.call_hf_processor(
+            processor.process,
+            dict(tokens=tokens),
+        )["input_ids"].tolist()
+
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        processed_outputs = self.info.ctx.call_hf_processor(
+        mm_counts = mm_items.get_all_counts()
+
+        valid_mm_items = mm_items.select({k for k, c in mm_counts.items() if c > 0})
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not processor_data:
+            return BatchFeature(dict(passthrough_data))
+
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_counts)
+
+        processed_data = self.info.ctx.call_hf_processor(
             hf_processor.process,
-            dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+            dict(text=prompt_text, **processor_data),
+            hf_processor_mm_kwargs,
         )
 
         tokenizer = hf_processor.tokenizer
@@ -1179,17 +1169,16 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 
         image_processor = hf_processor.image_processor
 
-        input_ids: torch.Tensor = processed_outputs.pop("input_ids")
-        processed_outputs["input_ids"] = input_ids.unsqueeze(0)
+        processed_data.pop("input_ids")
 
-        if (images := mm_data.get("images")) is not None:
+        if (images := processor_data.get("images")) is not None:
             mm_items = self.info.parse_mm_data({"image": images}, validate=False)
             parsed_images = mm_items.get_items("image", ImageProcessorItems)
             image_sizes = [
                 parsed_images.get_image_size(i) for i in range(len(parsed_images))
             ]
 
-            feat_is_patch = processed_outputs["image_input_idx"] >= 0
+            feat_is_patch = processed_data["image_input_idx"] >= 0
 
             tilings = [
                 self.info.select_tiling(
@@ -1203,35 +1192,12 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             num_crops = torch.tensor(tilings).prod(-1) + 1
             assert num_crops.sum() == len(feat_is_patch)
 
-            processed_outputs["num_crops"] = num_crops
-            processed_outputs["img_patch_id"] = image_patch_id
+            processed_data["num_crops"] = num_crops
+            processed_data["img_patch_id"] = image_patch_id
 
-        return processed_outputs
+        processed_data.update(passthrough_data)
 
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
-        processor = self.info.get_hf_processor()
-
-        # The chat template is already applied to the prompt tokens
-        # Use message_format="none" to avoid applying it again
-        # Prepend an empty space if `always_start_with_space` is True
-        tokens = processor.get_tokens_input(
-            self.info.get_tokenizer().decode(prompt_tokens),
-            message_format="none",
-            always_start_with_space=True,
-        )
-
-        # Prepend a BOS token id to the tokens
-        processed_data = self.info.ctx.call_hf_processor(
-            processor.process,
-            dict(tokens=tokens),
-        )
-        prompt_ids = processed_data.pop("input_ids").tolist()
-        print(prompt_ids, len(prompt_ids))
-
-        return prompt_ids
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -1245,8 +1211,10 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             images=MultiModalFieldConfig.flat_from_sizes("image", num_crops),
             image_masks=MultiModalFieldConfig.flat_from_sizes("image", num_crops),
             image_input_idx=MultiModalFieldConfig.flat_from_sizes("image", num_crops),
-            num_crops=MultiModalFieldConfig.batched("image"),
-            img_patch_id=MultiModalFieldConfig.shared("image", num_images),
+            num_crops=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            img_patch_id=MultiModalFieldConfig.shared(
+                "image", num_images, keep_on_cpu=True
+            ),
         )
 
     def _get_prompt_updates(
@@ -1296,7 +1264,9 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
         return [
             PromptInsertion(
                 modality="image",
-                target=PromptIndexTargets.prefix("<|endoftext|>"),
+                target=PromptIndexTargets.prefix(
+                    cached_encode(tokenizer, "<|endoftext|>", add_special_tokens=False),
+                ),
                 insertion=get_insertion_molmo,
             )
         ]
@@ -1377,15 +1347,14 @@ class MolmoForCausalLM(
 
         self.img_patch_id = None
 
+        self.lm_head = ParallelLMHead(
+            config.embedding_size or config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if self.config.weight_tying:
-            self.lm_head = self.model.transformer.wte
-        else:
-            self.lm_head = ParallelLMHead(
-                config.embedding_size or config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+            self.lm_head = self.lm_head.tie_weights(self.model.transformer.wte)
 
         self.logits_processor = LogitsProcessor(
             config.embedding_size or config.vocab_size

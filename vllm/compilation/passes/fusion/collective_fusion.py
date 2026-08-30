@@ -956,6 +956,15 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
                                 a_scale_view=a_scale_view,
                             )
                         )
+                self.register(
+                    FlashInferAllGatherFP4Pattern(
+                        self.model_dtype,
+                        self.device,
+                        "cute-dsl",
+                        use_8x4_sf_layout=False,
+                        a_scale_view="float8",
+                    )
+                )
                 # NVFP4 reduce-scatter does not need scale communication: FP4
                 # scales are consumed by the local GEMM and only BF16 partial
                 # outputs are reduced. Keep this PR scoped to the all-gather

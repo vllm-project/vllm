@@ -3,7 +3,9 @@
 import torch
 import torch.nn as nn
 
-from vllm.models.deepseek_v4.common.ops import fused_inv_rope_fp8_quant
+from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
+    fused_inv_rope_fp8_quant,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum
 
@@ -58,10 +60,13 @@ def deep_gemm_fp8_o_proj(
         device=o.device,
         dtype=torch.bfloat16,
     )
+    weight_scale = (
+        wo_a.weight_scale if hasattr(wo_a, "weight_scale") else wo_a.weight_scale_inv
+    )
     fp8_einsum(
         "bhr,hdr->bhd",
         (o_fp8, o_scale),
-        (wo_a.weight, wo_a.weight_scale_inv),
+        (wo_a.weight, weight_scale),
         z,
         recipe=einsum_recipe,
     )

@@ -9,6 +9,7 @@ from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
+from ..base.io_processor import PoolingIOProcessor
 from ..base.serving import PoolingServing
 from ..typing import PoolingServeContext
 from ..utils import (
@@ -52,6 +53,12 @@ class ServingEmbedding(PoolingServing):
 
     def init_io_processor(self, *args, **kwargs) -> EmbedIOProcessor:
         return EmbedIOProcessor(*args, **kwargs)
+
+    async def _preprocessing(
+        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
+    ):
+        await super()._preprocessing(io_processor, ctx)
+        self.io_processor.maybe_pre_process_chunked(ctx)
 
     def _build_response(
         self,
@@ -188,7 +195,12 @@ class ServingEmbedding(PoolingServing):
         ]
         total_tokens = get_pooling_usage(ctx.final_res_batch).prompt_tokens
 
-        image_tokens = total_tokens if request.images is not None else 0
+        has_image_input = request.images is not None or any(
+            content.type == "image_url"
+            for input_item in request.inputs or []
+            for content in input_item.content
+        )
+        image_tokens = total_tokens if has_image_input else 0
         texts_echo = request.texts
 
         embedding_types = request.embedding_types or ["float"]

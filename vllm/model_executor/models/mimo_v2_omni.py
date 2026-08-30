@@ -29,7 +29,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
@@ -194,7 +193,7 @@ class MiMoVisionAttention(nn.Module):
         # Rotary embeddings applied separately to Q and K
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
-        # Sink attention weights (loaded but not used in vLLM flash_attn)
+        # Per-head sink logits, applied in the window attention path.
         # The checkpoint stores these only for non-full-attention blocks
         self.use_sink = use_sink
         if use_sink:
@@ -215,21 +214,38 @@ class MiMoVisionAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
     ) -> torch.Tensor:
-        """Window attention via flash_attn_varlen_func with window_size."""
-        from vllm.vllm_flash_attn import flash_attn_varlen_func
+        """Window attention with the per-head sink applied to key 0.
+
+        The reference adds ``sinks[h]`` to the logit of each sequence's first
+        key, which the Triton prefill kernel supports directly, so the softmax
+        normalizes over the biased scores in one pass.
+        """
+        from vllm.v1.attention.ops.triton_prefill_attention import (
+            context_attention_fwd,
+        )
 
         w = self.visual_token_window_size
-        output = flash_attn_varlen_func(
+        output = torch.empty_like(q)
+        head_start = self.tp_rank * self.num_heads_per_partition
+        sinks = (
+            self.sinks[head_start : head_start + self.num_heads_per_partition]
+            if self.sinks is not None
+            else None
+        )
+        context_attention_fwd(
             q,
             k,
             v,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=max_seqlen,
-            max_seqlen_k=max_seqlen,
+            output,
+            b_start_loc=cu_seqlens[:-1],
+            b_seq_len=cu_seqlens[1:] - cu_seqlens[:-1],
+            max_input_len=max_seqlen,
+            is_causal=False,
             softmax_scale=self.scale,
-            causal=False,
-            window_size=[w, w],
+            sliding_window_q=w,
+            sliding_window_k=w,
+            sinks=sinks,
+            sinks_bias_key0=True,
         )
         return output
 
@@ -378,6 +394,13 @@ class MiMoVisionBlock(nn.Module):
 
 
 class MiMoVisionTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            "mlp.gate_proj": ("mlp.gate_up_proj", 0),
+            "mlp.up_proj": ("mlp.gate_up_proj", 1),
+        }
+    )
+
     def __init__(
         self,
         vision_cfg: PretrainedConfig,
@@ -627,28 +650,8 @@ class MiMoVisionTransformer(nn.Module):
         return x
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("mlp.gate_up_proj", "mlp.gate_proj", 0),
-            ("mlp.gate_up_proj", "mlp.up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
@@ -729,7 +732,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
             effective_frames = num_frames * tokens_per_second
         else:
             effective_frames = num_frames
-        padded_num_frames = effective_frames + effective_frames % temporal_patch_size
+        padded_num_frames = effective_frames + (-effective_frames % temporal_patch_size)
         grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size
         grid_w = preprocessed_size.width // patch_size
@@ -890,32 +893,42 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
         merge_size = self.info.get_hf_config().vision_config.spatial_merge_size
         fields: dict[str, MultiModalFieldConfig] = dict(
             **_create_qwen2vl_field_factory(merge_size)(hf_inputs),
-            second_per_grid_ts=MultiModalFieldConfig.batched("video"),
-            video_start_times=MultiModalFieldConfig.batched("video"),
+            second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            video_start_times=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             audio_features=MultiModalFieldConfig.batched("audio"),
-            audio_token_lens=MultiModalFieldConfig.batched("audio"),
+            audio_token_lens=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
         # video_audio fields: only present when video_audio content was processed
         if "video_audio_n_segs" in hf_inputs:
-            fields["video_audio_n_segs"] = MultiModalFieldConfig.batched("video")
+            fields["video_audio_n_segs"] = MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
+            )
         # video_audio_seg_lens: list of per-video 1D tensors, batched("video")
         if "video_audio_seg_lens" in hf_inputs:
-            fields["video_audio_seg_lens"] = MultiModalFieldConfig.batched("video")
+            fields["video_audio_seg_lens"] = MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
+            )
         if "va_audio_features" in hf_inputs:
             fields["va_audio_features"] = MultiModalFieldConfig.batched("va_audio")
         return fields
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo.
         Also remap 'audios' → 'audio' since MiMoOmniProcessor.__call__ uses
         the singular form.
         """
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
         # Remap audios → audio (MiMoOmniProcessor uses singular param name)
         if "audios" in mm_data:
             mm_data = {**mm_data, "audio": mm_data["audios"]}
@@ -993,7 +1006,13 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
 
             mm_data = {**mm_data, "videos": converted}
 
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            mm_data,
+            hf_processor_mm_kwargs,
+        )
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_prompt_updates(
         self,
@@ -1093,7 +1112,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             embed_t = torch.tensor(is_embed_mask)
             return PromptUpdateDetails(
                 full=full,
-                is_embed=lambda _tok, _seq: embed_t,
+                is_embed=lambda _seq: embed_t,
             )
 
         def get_audio_replacement(item_idx: int) -> PromptUpdateDetails:
@@ -1182,6 +1201,7 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
             # mapping for original checkpoint
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
+            "audio_tokenizer.": None,
         }
     )
 
@@ -1483,6 +1503,6 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         audio_loaded: set[str] = set()
 
-        loader = AutoWeightsLoader(self, skip_prefixes=["audio_tokenizer."])
+        loader = AutoWeightsLoader(self)
         auto_loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         return audio_loaded | auto_loaded

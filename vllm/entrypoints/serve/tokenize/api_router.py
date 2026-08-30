@@ -4,21 +4,18 @@
 
 from http import HTTPStatus
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from typing_extensions import assert_never
 
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
     TokenizeRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
+from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
@@ -28,8 +25,8 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def tokenization(request: Request) -> OpenAIServingTokenization:
-    return request.app.state.openai_serving_tokenization
+def tokenization(request: Request) -> ServingTokenization:
+    return request.app.state.serving_tokenization
 
 
 router = APIRouter()
@@ -74,14 +71,7 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    try:
-        generator = await handler.create_detokenize(request, raw_request)
-    except OverflowError as e:
-        raise RequestValidationError(errors=[str(e)]) from e
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+    generator = await handler.create_detokenize(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

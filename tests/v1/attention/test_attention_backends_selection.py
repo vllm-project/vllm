@@ -6,10 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
+    MiniMaxText01LinearAttention,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.short_conv import ShortConv
-from vllm.model_executor.models.minimax_text_01 import MiniMaxText01LinearAttention
 from vllm.v1.attention.backends.linear_attn import LinearAttentionBackend
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionBackend
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend

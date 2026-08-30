@@ -3,7 +3,7 @@
 
 # Adapted from
 # https://github.com/zai-org/CogAgent
-from transformers import PreTrainedTokenizer
+from transformers import PythonBackend
 from transformers.image_processing_utils_fast import BaseImageProcessorFast
 from transformers.image_utils import PILImageResampling
 from transformers.processing_utils import ProcessorMixin
@@ -30,7 +30,7 @@ class GLM4VProcessor(ProcessorMixin):
     def __init__(
         self,
         image_processor: GLM4VImageProcessorFast,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: PythonBackend,
     ) -> None:
         self.image_processor = image_processor
         self.tokenizer = tokenizer

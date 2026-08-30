@@ -242,10 +242,6 @@ class GlmOcrVisionBlock(Glm4vVisionBlock):
         )
 
 
-class GlmOcrVisionPatchEmbed(Glm4vVisionPatchEmbed):
-    pass
-
-
 class GlmOcrPatchMerger(Glm4vPatchMerger):
     pass
 
@@ -330,7 +326,9 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
         self,
         x: torch.Tensor,
         grid_thw: torch.Tensor | list[list[int]],
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
+        del encoder_metadata
         if isinstance(grid_thw, list):
             grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
 
