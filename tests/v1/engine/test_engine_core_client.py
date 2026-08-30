@@ -460,7 +460,7 @@ def test_apply_ready_response_syncs_engine_metadata(effective_size, other_size):
         cache_config=SimpleNamespace(
             block_size=16,
             num_gpu_blocks=0,
-            kv_cache_capacity_bytes=None,
+            kv_cache_capacity_bytes={},
         ),
         model_config=SimpleNamespace(max_model_len=8192),
         parallel_config=SimpleNamespace(_coord_store_port=0),
@@ -503,7 +503,7 @@ def test_apply_ready_response_syncs_engine_metadata(effective_size, other_size):
     assert client.vllm_config.cache_config.block_size == 1056
     cache_config = client.vllm_config.cache_config
     assert cache_config.effective_attention_block_size == effective_size
-    assert cache_config.kv_cache_capacity_bytes == 123456
+    assert cache_config.kv_cache_capacity_bytes == {0: 123456}
 
     fields["effective_attention_block_size"] = other_size
     client._apply_ready_response(msgspec.msgpack.encode(fields))
