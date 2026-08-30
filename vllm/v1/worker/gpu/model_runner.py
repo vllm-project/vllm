@@ -1296,10 +1296,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
 
+        # `compute_need_sampled_mask` no longer predicts which requests are
+        # about to finish, so nothing consumes max_seq_len under PP.
         max_seq_len_np = None
-        if self.use_pp:
-            # max_seq_len is only consumed by the PP `compute_need_sampled_mask`
-            max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
 
         prompt_lens = None
         if self.model_config.rswa_window is not None:

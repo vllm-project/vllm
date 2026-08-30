@@ -34,19 +34,35 @@ class PendingRecv:
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
     """Return a bool array of shape `[input_batch.num_reqs]` marking requests
-    with outputs that might be needed in a subsequent (decode) step.
-    Returns None if no sampled outputs are needed in the requests' next step."""
+    that produce a sampled token this step, and therefore must have that token
+    (and the draft block proposed from it) propagated to the earlier PP stages.
+    Returns None if no request in the batch produces a sample.
+
+    The only sound exclusion is a non-final prefill chunk: it provably produces
+    no sample, and both the last rank (`get_num_sampled_and_rejected` zeroes
+    `num_sampled`/`num_rejected`) and the earlier ranks
+    (`post_update_num_computed_tokens`) then advance `num_computed_tokens` by the
+    full query length, so the two stages stay in step without a broadcast.
+
+    Do NOT additionally exclude requests that look like they are about to
+    finish. Whether a request stops is only known after sampling, and under
+    speculative decoding `num_computed_tokens` advances several tokens per step
+    and can overrun `prompt_len + max_tokens` while the scheduler keeps running
+    the request. Skipping the broadcast for such a row freezes the earlier
+    stages' `last_sampled_tokens`/`draft_tokens` while the last rank keeps
+    advancing its own, so the stages diverge permanently: the earlier stage
+    re-embeds the same token block at ever-advancing positions (degenerate
+    repeated output) and writes KV at positions the last stage never used.
+    Requests that really do finish are already handled by the `req_idx_gen`
+    check in `get_prev_sampled_outputs`, which drops the update once the slot is
+    freed.
+    """  # PR_A_PP_BROADCAST
 
     old_computed = input_batch.num_computed_tokens_np
     prefill_len = input_batch.prefill_len_np
-    max_seq_len = input_batch.max_seq_len_np
-    assert max_seq_len is not None  # always populated under PP
     # Exclude non-final prefill chunks (they don't produce a sample).
     produces_sample = old_computed + input_batch.num_scheduled_tokens >= prefill_len
-    # Exclude requests that we know are finished.
-    not_finishing = np.maximum(old_computed, prefill_len) + 1 < max_seq_len
-    need_sampled_mask = produces_sample & not_finishing
-    return need_sampled_mask if need_sampled_mask.any() else None
+    return produces_sample if produces_sample.any() else None
 
 
 class PPHandler:
