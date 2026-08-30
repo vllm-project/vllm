@@ -410,11 +410,27 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     f"Unsupported compress_ratio={self.compress_ratio}; "
                     "expected 1, 4, or 128."
                 )
-            max_compressed = int(
-                (seq_lens_cpu.numpy() // self.compress_ratio).max()
-            )
+            if envs.VLLM_BATCH_INVARIANT:
+                # A batch-local maximum makes the flattened KV stride and all
+                # request base indices depend on neighboring sequence lengths.
+                # Use the model capacity so a request keeps the same address
+                # mapping in singleton and packed decode.
+                max_compressed = (
+                    self.max_model_len + self.compress_ratio - 1
+                ) // self.compress_ratio
+            else:
+                max_compressed = int(
+                    (seq_lens_cpu.numpy() // self.compress_ratio).max()
+                )
 
-        max_gather = int(gather_lens_cpu.numpy().max())
+        if envs.VLLM_BATCH_INVARIANT:
+            if int(query_lens_values.max()) != 1:
+                raise RuntimeError(
+                    "batched BI sparse decode requires one token per request"
+                )
+            max_gather = self.window_size
+        else:
+            max_gather = int(gather_lens_cpu.numpy().max())
         workspace_width = max_compressed + max_gather
         combined_topk = round_up(top_k + self.window_size, 128)
         specs: list[tuple[tuple[int, ...], torch.dtype]] = [
