@@ -676,13 +676,19 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # of wrapping the generic Attention module. Keep the same runtime scale
         # attributes so FP8 KV reads can honor vLLM's per-layer descale contract.
         set_default_quant_scales(self, register_buffer=True)
+        # Indexer side-cache dtype, mirroring --kv-cache-dtype for the main
+        # cache (--attention-config '{"indexer_kv_dtype": ...}').
+        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+            "bf16"
+        )
 
         # Shared top-k buffer: the indexer writes the selected blocks into it and
         # the attend impl reads them back (no Python value crosses the break).
         self.topk_indices_buffer = topk_indices_buffer
         self.attn_backend = MiniMaxM3SparseBackend
-        # Indexer and main attention are separate impls. On ROCm the SM100 gate
-        # is always False, so both pick Triton and the index cache stays bf16.
+        # Indexer and main attention are separate impls, each picking Triton vs
+        # MSA off its cache dtype (the SM100 gate is always False on ROCm, so
+        # the indexer stays on the Triton impl regardless of indexer_kv_dtype).
         # impl is AttentionImplBase (broader than AttentionLayerBase's annotation).
         self.impl: MiniMaxM3SparseImpl = select_main_impl_cls(  # type: ignore[assignment]
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
@@ -715,6 +721,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             local_blocks=sparse_cfg.get("sparse_local_block", 0),
             score_type=sparse_cfg.get("sparse_score_type", "max"),
             cache_config=cache_config,
+            indexer_kv_dtype=self.indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
         )
 
