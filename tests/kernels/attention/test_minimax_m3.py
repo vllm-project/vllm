@@ -639,6 +639,227 @@ def test_decode_index_topk_correctness(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 fused decode top-k is ROCm-only",
+)
+@pytest.mark.parametrize("num_topk_chunks", [2, 4, 16])
+def test_amd_decode_fused_topk_total_order_and_replay(num_topk_chunks: int):
+    """Atomic multi-chunk selection is ordered and resets graph state."""
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        SPARSE_BLOCK_SIZE,
+        _decode_topk_fused_kernel,
+    )
+
+    torch.manual_seed(0)
+    topk = 16
+    max_blocks = 8192
+    long_seq_lens_list = [
+        0,
+        1,
+        15 * SPARSE_BLOCK_SIZE,
+        16 * SPARSE_BLOCK_SIZE,
+        17 * SPARSE_BLOCK_SIZE,
+        255 * SPARSE_BLOCK_SIZE,
+        256 * SPARSE_BLOCK_SIZE,
+        257 * SPARSE_BLOCK_SIZE,
+        511 * SPARSE_BLOCK_SIZE,
+        512 * SPARSE_BLOCK_SIZE,
+        513 * SPARSE_BLOCK_SIZE,
+        max_blocks * SPARSE_BLOCK_SIZE,
+    ]
+    short_seq_lens_list = [0, 1, 127, 128, 129, 0, 1, 128, 129, 0, 1, 129]
+    batch = len(long_seq_lens_list)
+    score = torch.randn((1, batch, max_blocks), device="cuda")
+    score[:, :, 0] = float("nan")
+    score[:, :, 1] = float("inf")
+    score[:, :, 2] = float("-inf")
+    score[:, :, 3] = 0.0
+    score[:, :, 4] = -0.0
+    score[:, :, 5] = 7.0
+    score[:, :, 256] = 7.0
+    score[:, :, 512] = 7.0
+
+    seq_lens = torch.empty(batch, device="cuda", dtype=torch.int32)
+    partial = torch.full(
+        (num_topk_chunks, 1, batch, topk),
+        -1,
+        device="cuda",
+        dtype=torch.int64,
+    )
+    counter = torch.zeros((1, batch), device="cuda", dtype=torch.int32)
+    actual = torch.full((1, batch, topk), -2, device="cuda", dtype=torch.int32)
+    dummy_block_table = torch.zeros(
+        (batch, max_blocks), device="cuda", dtype=torch.int32
+    )
+    addresses = (partial.data_ptr(), counter.data_ptr(), actual.data_ptr())
+    long_seq_lens = torch.tensor(long_seq_lens_list, device="cuda", dtype=torch.int32)
+    short_seq_lens = torch.tensor(short_seq_lens_list, device="cuda", dtype=torch.int32)
+
+    def launch() -> None:
+        _decode_topk_fused_kernel[(batch, 1, num_topk_chunks)](
+            score,
+            partial,
+            counter,
+            actual,
+            seq_lens,
+            dummy_block_table,
+            actual,
+            seq_lens,
+            1,
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            partial.stride(0),
+            partial.stride(1),
+            partial.stride(2),
+            partial.stride(3),
+            counter.stride(0),
+            counter.stride(1),
+            actual.stride(0),
+            actual.stride(1),
+            actual.stride(2),
+            dummy_block_table.stride(0),
+            actual.stride(1),
+            topk=topk,
+            block_size=SPARSE_BLOCK_SIZE,
+            pages_per_sparse_block=8,
+            block_page_stride=8,
+            NUM_TOPK_CHUNKS=num_topk_chunks,
+            BLOCK_SIZE_K=512,
+            BLOCK_SIZE_T=topk,
+            EMIT_SPARSE_TABLE=False,
+            num_warps=8,
+            num_stages=2,
+        )
+
+    score_cpu = score.cpu()
+
+    def reference(seq_lens_list: list[int]) -> torch.Tensor:
+        expected = torch.full((1, batch, topk), -1, dtype=torch.int32)
+        for row, seq_len in enumerate(seq_lens_list):
+            num_blocks = (seq_len + SPARSE_BLOCK_SIZE - 1) // SPARSE_BLOCK_SIZE
+            values = score_cpu[0, row, :num_blocks].tolist()
+            values = [-1e30 if value != value else value for value in values]
+            selected = sorted(
+                range(num_blocks),
+                key=lambda index: (-values[index], index),
+            )[:topk]
+            expected[0, row, : len(selected)] = torch.tensor(selected)
+        return expected
+
+    seq_lens.copy_(long_seq_lens)
+    launch()
+    torch.accelerator.synchronize()
+    assert torch.equal(actual.cpu(), reference(long_seq_lens_list))
+    assert torch.count_nonzero(counter).item() == 0
+
+    seq_lens.copy_(short_seq_lens)
+    launch()
+    torch.accelerator.synchronize()
+    assert torch.equal(actual.cpu(), reference(short_seq_lens_list))
+    assert torch.count_nonzero(counter).item() == 0
+
+    for replay in range(128):
+        seq_lens.copy_(long_seq_lens if replay % 2 == 0 else short_seq_lens)
+        launch()
+    seq_lens.copy_(long_seq_lens)
+    launch()
+    torch.accelerator.synchronize()
+    assert torch.equal(actual.cpu(), reference(long_seq_lens_list))
+    assert torch.count_nonzero(counter).item() == 0
+    assert addresses == (partial.data_ptr(), counter.data_ptr(), actual.data_ptr())
+
+    if num_topk_chunks == 4:
+        graph = torch.cuda.CUDAGraph()
+        torch.accelerator.synchronize()
+        with torch.cuda.graph(graph):
+            launch()
+        seq_lens.copy_(short_seq_lens)
+        graph.replay()
+        torch.accelerator.synchronize()
+        assert torch.equal(actual.cpu(), reference(short_seq_lens_list))
+        assert torch.count_nonzero(counter).item() == 0
+        seq_lens.copy_(long_seq_lens)
+        graph.replay()
+        torch.accelerator.synchronize()
+        assert torch.equal(actual.cpu(), reference(long_seq_lens_list))
+        assert torch.count_nonzero(counter).item() == 0
+        assert addresses == (partial.data_ptr(), counter.data_ptr(), actual.data_ptr())
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 fused decode top-k is ROCm-only",
+)
+@pytest.mark.parametrize(
+    ("decode_query_len", "max_decode_query_len"),
+    [(1, 1), (1, 4), (4, 4)],
+)
+def test_amd_decode_index_topk_end_to_end(
+    decode_query_len: int, max_decode_query_len: int
+):
+    """ROCm BF16 score-to-selector parity crosses the atomic boundary."""
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        minimax_m3_index_decode as amd_minimax_m3_index_decode,
+    )
+
+    torch.manual_seed(0)
+    topk = 16
+    head_dim = 16
+    seq_lens = torch.tensor([65537], device="cuda", dtype=torch.int32)
+    q_lens = torch.tensor([decode_query_len], device="cuda", dtype=torch.int32)
+    prefix_lens = seq_lens - q_lens
+    max_seq_len = int(seq_lens.max())
+    max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    block_table = torch.randperm(
+        max_blocks, device="cuda", dtype=torch.int32
+    ).unsqueeze(0)
+    idx_q = torch.randn(
+        decode_query_len, 1, head_dim, device="cuda", dtype=torch.bfloat16
+    )
+    index_kv_cache = torch.randn(
+        max_blocks,
+        BLOCK_SIZE,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    completion_counter = torch.zeros(
+        (1, decode_query_len), device="cuda", dtype=torch.int32
+    )
+
+    actual = amd_minimax_m3_index_decode(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        seq_lens,
+        max_seq_len=max_seq_len,
+        topk=topk,
+        init_blocks=0,
+        local_blocks=1,
+        num_kv_heads=1,
+        decode_query_len=decode_query_len,
+        max_decode_query_len=max_decode_query_len,
+        completion_counter=completion_counter,
+    )
+    expected = _reference_index_topk(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        q_lens,
+        seq_lens,
+        prefix_lens,
+        topk,
+        0,
+        1,
+    )
+    torch.accelerator.synchronize()
+
+    _assert_topk_indices_equal_unordered(actual, expected)
+    assert torch.count_nonzero(completion_counter).item() == 0
+
+
+@pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="fp8 e4m3 indexer cache is the SM100 (MSA) path.",
 )
@@ -1248,6 +1469,137 @@ def test_aiter_decode_sparse_block_table_supports_spec_decode():
 
     assert torch.equal(sparse_ctx, expected_ctx)
     assert torch.equal(sparse_bt, expected_bt)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 fused decode top-k is ROCm-only",
+)
+@pytest.mark.parametrize("block_page_stride", [8, 16])
+@pytest.mark.parametrize(
+    "seq_lens_list",
+    [
+        [4097],
+        [65537],
+        [1, 129, 4097, 0],
+        [127, 128, 129, 256, 4097, 0],
+        [1, 127, 128, 129, 255, 256, 257, 4097, 0],
+    ],
+)
+def test_amd_decode_fused_topk_emits_sparse_table(
+    block_page_stride: int, seq_lens_list: list[int]
+):
+    """The fused selector must match top-k followed by table construction."""
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        minimax_m3_index_decode as amd_minimax_m3_index_decode,
+    )
+    from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+        PAGES_PER_SPARSE_BLOCK,
+        minimax_m3_build_sparse_block_table_decode,
+    )
+
+    torch.manual_seed(0)
+    decode_query_len = 4
+    seq_lens = torch.tensor(seq_lens_list, device="cuda", dtype=torch.int32)
+    batch = seq_lens.numel()
+    total_q = batch * decode_query_len
+    max_seq_len = int(seq_lens.max())
+    max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+    index_block_table = torch.zeros(
+        (batch, max_blocks), device="cuda", dtype=torch.int32
+    )
+    for req_id, seq_len in enumerate(seq_lens.tolist()):
+        num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        pages = torch.arange(max_blocks, device="cuda", dtype=torch.int32)
+        index_block_table[req_id, :num_blocks] = torch.roll(pages, req_id)[:num_blocks]
+
+    # The index cache and main-attention cache have independent physical page
+    # mappings in production. Disjoint values make using the wrong table fail.
+    attention_block_table = torch.full_like(index_block_table, -31337)
+    for req_id, seq_len in enumerate(seq_lens.tolist()):
+        num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        first_page = 10_000 + req_id * max_blocks
+        attention_block_table[req_id, :num_blocks] = torch.arange(
+            first_page + num_blocks - 1,
+            first_page - 1,
+            -1,
+            device="cuda",
+            dtype=torch.int32,
+        )
+    assert not torch.equal(index_block_table, attention_block_table)
+
+    idx_q = torch.randn(total_q, 1, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+    index_kv_cache = torch.randn(
+        max_blocks,
+        BLOCK_SIZE,
+        HEAD_DIM,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    decode_kwargs = {
+        "max_seq_len": max_seq_len,
+        "topk": TOPK,
+        "init_blocks": 0,
+        "local_blocks": 1,
+        "num_kv_heads": 1,
+        "decode_query_len": decode_query_len,
+        "max_decode_query_len": decode_query_len,
+    }
+    completion_counter = torch.zeros((1, total_q), device="cuda", dtype=torch.int32)
+
+    expected_topk = amd_minimax_m3_index_decode(
+        idx_q,
+        index_kv_cache,
+        index_block_table,
+        seq_lens,
+        completion_counter=completion_counter,
+        **decode_kwargs,
+    )
+    expected_sparse_bt, expected_sparse_ctx = (
+        minimax_m3_build_sparse_block_table_decode(
+            expected_topk,
+            attention_block_table,
+            seq_lens,
+            decode_query_len,
+            block_page_stride,
+        )
+    )
+
+    topk_out = torch.full_like(expected_topk, -27182)
+    sparse_bt_out = torch.full(
+        (total_q, TOPK * PAGES_PER_SPARSE_BLOCK),
+        -27182,
+        device="cuda",
+        dtype=torch.int32,
+    )
+    sparse_ctx_out = torch.full((total_q,), -27182, device="cuda", dtype=torch.int32)
+    actual_topk = amd_minimax_m3_index_decode(
+        idx_q,
+        index_kv_cache,
+        index_block_table,
+        seq_lens,
+        out=topk_out,
+        attention_block_table=attention_block_table,
+        sparse_block_table_out=sparse_bt_out,
+        sparse_context_lens_out=sparse_ctx_out,
+        block_page_stride=block_page_stride,
+        completion_counter=completion_counter,
+        **decode_kwargs,
+    )
+    torch.accelerator.synchronize()
+
+    assert actual_topk.data_ptr() == topk_out.data_ptr()
+    assert torch.equal(actual_topk, expected_topk)
+    assert torch.equal(sparse_bt_out, expected_sparse_bt)
+    assert torch.equal(sparse_ctx_out, expected_sparse_ctx)
+    assert torch.count_nonzero(completion_counter).item() == 0
+
+    if seq_lens_list[-1] == 0:
+        padded_rows = slice(total_q - decode_query_len, total_q)
+        assert torch.all(actual_topk[:, padded_rows] == -1)
+        assert torch.count_nonzero(sparse_bt_out[padded_rows]) == 0
+        assert torch.count_nonzero(sparse_ctx_out[padded_rows]) == 0
 
 
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
