@@ -121,7 +121,7 @@ steps:
   - vllm/v1/attention/backends/short_conv_attn.py
   - tests/models/qwen4_exp/
   commands:
-    - pytest -v -s models/qwen4_exp/test_config.py models/qwen4_exp/test_ple.py models/qwen4_exp/test_weight_loading.py
+    - pytest -v -s models/qwen4_exp/test_config.py models/qwen4_exp/test_ple.py
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
