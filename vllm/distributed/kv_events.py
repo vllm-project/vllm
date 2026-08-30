@@ -53,24 +53,25 @@ class BlockStored(KVCacheEvent):
     token_ids: list[int]
     block_size: int
 
-    lora_id: int | None
     """Deprecated: use `lora_name` for KV block key hash.
     Retained for backward compatibility.
     """
+    lora_id: int | None
 
     medium: str | None
     lora_name: str | None
 
-    extra_keys: list[tuple[Any, ...] | None] | None = None
     """Extra keys used in block hash computation, one entry per block in
     block_hashes. Each entry contains MM identifiers, LoRA name, cache_salt,
     prompt embedding hashes, etc. for that specific block. Exposed for external
     KV cache consumers to reconstruct block hashes.
     """
+    extra_keys: list[tuple[Any, ...] | None] | None = None
 
+    """Store events carry cache-spec metadata so consumers can classify and
+    filter groups as they are learned. Remove events only need group_idx+hash.
+    """
     group_idx: int | None = None
-    # Store events carry cache-spec metadata so consumers can classify and
-    # filter groups as they are learned. Remove events only need group_idx+hash.
     kv_cache_spec_kind: str | None = None
     kv_cache_spec_sliding_window: int | None = None
     """LOCAL or REMOTE relative to the publisher; None means unspecified."""
