@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import ast
 import json
-from typing import Any, TypedDict
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import regex as re
 
@@ -25,6 +26,9 @@ from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.utils import partial_tag_overlap
+
+if TYPE_CHECKING:
+    from xgrammar import StructuralTag
 
 logger = init_logger(__name__)
 
@@ -576,9 +580,9 @@ class HYV4ToolExtractor:
         previous_text: str,
         current_text: str,
         delta_text: str,
-        previous_token_ids,
-        current_token_ids,
-        delta_token_ids,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
         tools: list[ToolSchema] | None,
         *,
         guided: bool = False,
@@ -989,7 +993,7 @@ class HYV4ToolParser(ToolParser):
         request: ChatCompletionRequest | ResponsesRequest,
         *,
         reasoning: bool = False,
-    ):
+    ) -> StructuralTag | None:
         """Build a structural tag matching HYV4's tool tokens.
 
         Overridden only to pass the per-checkpoint ``token_suffix`` through to
@@ -1106,9 +1110,9 @@ class HYV4ToolParser(ToolParser):
         previous_text: str,
         current_text: str,
         delta_text: str,
-        previous_token_ids,
-        current_token_ids,
-        delta_token_ids,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
         delta = self._extractor.extract_tool_calls_streaming(
