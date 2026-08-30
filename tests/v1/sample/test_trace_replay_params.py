@@ -35,7 +35,7 @@ def test_sampling_params_trace_field_preserved_by_clone():
 
 def test_sampling_params_trace_field_rejects_empty_list():
     params = SamplingParams(trace_decode_token_ids=[])
-    with pytest.raises(ValueError, match="non-empty"):
+    with pytest.raises(VLLMValidationError, match="non-empty"):
         params._validate_trace_replay(
             _make_model_config(vocab_size=100), speculative_config=None
         )
@@ -43,7 +43,7 @@ def test_sampling_params_trace_field_rejects_empty_list():
 
 def test_sampling_params_trace_field_requires_single_output():
     params = SamplingParams(n=2, trace_decode_token_ids=[1])
-    with pytest.raises(ValueError, match="requires n=1"):
+    with pytest.raises(VLLMValidationError, match="requires n=1"):
         params._validate_trace_replay(
             _make_model_config(vocab_size=100), speculative_config=None
         )
@@ -52,7 +52,7 @@ def test_sampling_params_trace_field_requires_single_output():
 @pytest.mark.parametrize("invalid_ids", [[-1, 5], [1, "2"]])
 def test_sampling_params_trace_field_rejects_invalid_token_ids(invalid_ids):
     params = SamplingParams(trace_decode_token_ids=invalid_ids)
-    with pytest.raises(ValueError, match="non-negative integers"):
+    with pytest.raises(VLLMValidationError, match="non-negative integers"):
         params._validate_trace_replay(
             _make_model_config(vocab_size=100), speculative_config=None
         )
@@ -94,7 +94,9 @@ def test_validate_trace_replay_noop_when_unset():
 
 def test_trace_decode_token_ids_rejects_speculative_decoding():
     params = SamplingParams(trace_decode_token_ids=[1])
-    with pytest.raises(ValueError, match="not supported with speculative decoding"):
+    with pytest.raises(
+        VLLMValidationError, match="not supported with speculative decoding"
+    ):
         params._validate_trace_replay(
             _make_model_config(vocab_size=100), speculative_config=object()
         )
@@ -105,7 +107,9 @@ def test_trace_decode_token_ids_rejects_structured_outputs():
         trace_decode_token_ids=[1],
         structured_outputs=StructuredOutputsParams(json_object=True),
     )
-    with pytest.raises(ValueError, match="not supported with structured outputs"):
+    with pytest.raises(
+        VLLMValidationError, match="not supported with structured outputs"
+    ):
         params._validate_trace_replay(
             _make_model_config(vocab_size=100), speculative_config=None
         )

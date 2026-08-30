@@ -112,6 +112,28 @@ async def test_generate_endpoint(client):
 
 
 @pytest.mark.asyncio
+async def test_generate_rejects_empty_trace_decode_token_ids(client):
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "token_ids": [0],
+            "sampling_params": {"trace_decode_token_ids": []},
+        },
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["type"] == "BadRequestError"
+    assert "must be a non-empty list" in error["message"]
+
+    healthy_response = await client.post(
+        GEN_ENDPOINT,
+        json={"token_ids": [0], "sampling_params": {"max_tokens": 1}},
+    )
+    healthy_response.raise_for_status()
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
     reason="sampling mask output is not supported by the Rust frontend",

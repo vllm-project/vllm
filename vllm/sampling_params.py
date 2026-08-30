@@ -915,36 +915,40 @@ class SamplingParams(
             return
 
         if len(self.trace_decode_token_ids) == 0:
-            raise ValueError("trace_decode_token_ids must be a non-empty list.")
+            raise VLLMValidationError(
+                "trace_decode_token_ids must be a non-empty list."
+            )
         if self.n != 1:
-            raise ValueError("trace_decode_token_ids requires n=1.")
+            raise VLLMValidationError("trace_decode_token_ids requires n=1.")
         if not all(isinstance(t, int) and t >= 0 for t in self.trace_decode_token_ids):
-            raise ValueError(
+            raise VLLMValidationError(
                 "trace_decode_token_ids must contain non-negative integers."
             )
 
         if self.prompt_logprobs is not None:
-            raise ValueError(
+            raise VLLMValidationError(
                 "trace_decode_token_ids is not supported with prompt_logprobs."
             )
         if speculative_config is not None:
-            raise ValueError(
+            raise VLLMValidationError(
                 "trace_decode_token_ids is not supported with speculative decoding."
             )
         if self.structured_outputs is not None:
-            raise ValueError(
+            raise VLLMValidationError(
                 "trace_decode_token_ids is not supported with structured outputs."
             )
         if self.repetition_detection is not None:
-            raise ValueError(
+            raise VLLMValidationError(
                 "trace_decode_token_ids is not supported with repetition_detection."
             )
         if self.thinking_token_budget is not None:
-            raise ValueError(
+            raise VLLMValidationError(
                 "trace_decode_token_ids is not supported with thinking_token_budget."
             )
         if self.bad_words:
-            raise ValueError("trace_decode_token_ids is not supported with bad_words.")
+            raise VLLMValidationError(
+                "trace_decode_token_ids is not supported with bad_words."
+            )
 
         vocab_size = model_config.get_vocab_size()
         invalid_token_ids = [
