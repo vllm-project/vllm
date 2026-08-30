@@ -69,6 +69,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
@@ -407,7 +408,7 @@ class MuseGlimmerMultiModalProcessor(
         video_end_id = vocab["<|vid_end|>"]
         video_separator_id = vocab["<|vid_frame_separator|>"]
 
-        def image_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+        def image_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["image"][item_idx]
             num_tokens = int(out_item["image_feature_sizes"].data)
             replacement = (
@@ -417,7 +418,7 @@ class MuseGlimmerMultiModalProcessor(
                 replacement, config.image_token_id
             )
 
-        def video_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+        def video_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["video"][item_idx]
             pixel_values = out_item["video_pixel_values"].data
             num_groups = len(pixel_values)
@@ -1646,3 +1647,13 @@ class MuseGlimmerForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="model",
+            connector=["vision_adapter.", "vision_projection."],
+            tower_model="vision_encoder.",
+        )
