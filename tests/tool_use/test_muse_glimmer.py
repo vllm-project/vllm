@@ -8,7 +8,7 @@ than JSON, so the two parsers are tested together: the reasoning parser strips
 the reasoning span and forwards the remaining channels as content, and the tool
 parser reads ATEM markup out of those channels.
 
-Four areas, in order:
+Five areas, in order:
 
   1. non-streaming tool-call extraction, including channel scoping (an
      ``<atem:invoke>`` echoed inside reasoning must never become a call);
@@ -16,7 +16,10 @@ Four areas, in order:
      ``content=None`` and starving the tool parser;
   3. streaming, where markers routinely straddle chunk boundaries, plus
      truncation isolation for an unterminated ``to=self`` block;
-  4. tool-name normalization against the tools registered on the request.
+  4. tool-name normalization against the tools registered on the request;
+  5. the grammar-gate prefilter, which must answer `is_reasoning_end` per
+     decode step without re-decoding the sequence, and must never skip a
+     False->True transition of the full check.
 
 These drive the parsers directly and need no checkpoint. The tests that require
 a real tokenizer live in ``test_muse_glimmer_parse_delta.py``.
@@ -303,3 +306,219 @@ def test_exact_match_kept():
         T, _call("get_weather"), _req("get_weather")
     )
     assert out.tool_calls[0].function.name == "get_weather"
+
+
+# ---------------------------------------------------------- grammar-gate prefilter
+#
+# `is_reasoning_end_streaming` runs once per decode step per running request
+# while a structured-output request is still reasoning. Answering it with a
+# full-sequence decode makes decoding quadratic in sequence length, so the
+# parser prefilters on the delta's token ids and only decodes on steps that
+# could have completed a channel header. These tests pin the two properties
+# that make the prefilter sound: no False->True transition of the full check
+# is ever skipped, and ordinary steps decode nothing.
+
+
+class _FakeTokenizer:
+    """Concatenative tokenizer offering several spellings per marker.
+
+    Byte-level BPE lets one marker be spelled by many token-id sequences, so
+    `<|message|>` is available here as one piece, as two, and as four. Tokens
+    decode by concatenation, which is what the parser relies on.
+    """
+
+    _PIECES = (
+        "<|message|>",
+        "<|mes",
+        "sage|>",
+        "<|",
+        "mess",
+        "age",
+        "|>",
+        "<|eom|>",
+        "<|eot|>",
+        "<|start|>",
+        "assistant",
+        " to=self",
+        " to=user",
+        " to=weather.get",
+        "<atem:function_calls>",
+        '<atem:invoke name="weather.get">',
+    )
+
+    def __init__(self):
+        pieces = list(self._PIECES)
+        pieces += [chr(c) for c in range(32, 127)]
+        self._id_to_text = pieces
+        self._text_to_id = {text: i for i, text in enumerate(pieces)}
+        self.decode_calls = 0
+
+    def get_vocab(self):
+        return dict(self._text_to_id)
+
+    def decode(self, token_ids, **kwargs):
+        self.decode_calls += 1
+        return "".join(self._id_to_text[i] for i in token_ids)
+
+    def ids(self, *pieces):
+        """Token ids for an explicit spelling; unknown pieces go char by char."""
+        out = []
+        for piece in pieces:
+            if piece in self._text_to_id:
+                out.append(self._text_to_id[piece])
+            else:
+                out.extend(self._text_to_id[ch] for ch in piece)
+        return out
+
+
+@pytest.fixture
+def tok():
+    return _FakeTokenizer()
+
+
+def _first_fire(parser, ids):
+    """Index of the step where the gate first opens, walking one token at a time.
+
+    Mirrors `StructuredOutputManager._find_reasoning_end_index`, which is how
+    the engine locates the boundary token.
+    """
+    for i in range(len(ids)):
+        if parser.is_reasoning_end_streaming(ids[: i + 1], ids[i : i + 1]):
+            return i
+    return None
+
+
+# `<|message|>` spellings, from one token to four.
+_MARKER_SPELLINGS = [
+    ("<|message|>",),
+    ("<|mes", "sage|>"),
+    ("<|", "mess", "age", "|>"),
+]
+
+
+@pytest.mark.parametrize("marker", _MARKER_SPELLINGS, ids=lambda m: str(len(m)))
+def test_gate_opens_when_the_answer_header_completes(tok, marker):
+    """The gate must open at `to=user`, exactly when its header completes."""
+    parser = MuseGlimmerReasoningParser(tok)
+    prefix = (" to=self", "<|message|>", "h", "m", "<|eom|>", "<|start|>", "assistant")
+    ids = tok.ids(*prefix, " to=user", *marker, "4", "2", "<|eot|>")
+    assert _first_fire(parser, ids) == len(tok.ids(*prefix, " to=user", *marker)) - 1
+
+
+@pytest.mark.parametrize("marker", _MARKER_SPELLINGS, ids=lambda m: str(len(m)))
+def test_prefilter_never_misses_a_transition(tok, marker):
+    """Every False->True step of the full check must survive the prefilter.
+
+    The caller latches the first True (`StructuredOutputManager.should_advance`
+    sets `reasoning_ended`), so the prefilter may answer False on later steps
+    but must never skip a transition. The reasoning body quotes a channel
+    header character by character so the confirm-tail path runs too.
+    """
+    parser = MuseGlimmerReasoningParser(tok)
+    ids = tok.ids(
+        " to=self",
+        *marker,
+        "quoting a header: to=user<|message|> ...but only quoting",
+        "<|eom|>",
+        "<|start|>",
+        "assistant",
+        " to=user",
+        *marker,
+        "short answer",
+        "<|eot|>",
+        "<|start|>",
+        "assistant",
+        " to=self",
+        *marker,
+        "more thought",
+        "<|eom|>",
+        "<|start|>",
+        "assistant",
+        " to=user",
+        *marker,
+        "done",
+        "<|eot|>",
+    )
+    previous = False
+    transitions = 0
+    for i in range(len(ids)):
+        prefix = ids[: i + 1]
+        reference = parser.is_reasoning_end(prefix)
+        got = parser.is_reasoning_end_streaming(prefix, ids[i : i + 1])
+        if reference and not previous:
+            transitions += 1
+            assert got, f"missed transition at step {i}: {tok.decode(prefix)!r}"
+        assert not got or reference, f"false positive at step {i}"
+        previous = reference
+    assert transitions >= 2, "test lost its multi-transition coverage"
+
+
+def test_prefilter_skips_decoding_on_ordinary_steps(tok):
+    """The regression guard: no full-sequence decode per generated token."""
+    parser = MuseGlimmerReasoningParser(tok)
+    ids = tok.ids(" to=self", "<|message|>", "a long chain of thought " * 20)
+    tok.decode_calls = 0
+    for i in range(len(ids)):
+        parser.is_reasoning_end_streaming(ids[: i + 1], ids[i : i + 1])
+    # Only the step completing `<|message|>` may decode; the body must not.
+    assert tok.decode_calls == 1, tok.decode_calls
+
+
+def test_gate_opens_at_a_tool_header_too(tok):
+    """A tool channel ends reasoning for the grammar, same as an answer."""
+    parser = MuseGlimmerReasoningParser(tok)
+    prefix = (
+        " to=self",
+        "<|message|>",
+        "call it",
+        "<|eom|>",
+        "<|start|>",
+        "assistant",
+        " to=weather.get",
+        "<|message|>",
+    )
+    ids = tok.ids(
+        *prefix,
+        "<atem:function_calls>",
+        '<atem:invoke name="weather.get">',
+    )
+    assert _first_fire(parser, ids) == len(tok.ids(*prefix)) - 1
+
+
+def test_prefilter_disables_itself_without_a_vocabulary():
+    """A tokenizer with no vocabulary falls back to the full check unchanged."""
+    parser = MuseGlimmerReasoningParser(object())
+    assert parser._channel_marker_completers == frozenset()
+
+
+@pytest.mark.skipif(
+    "MUSE_GLIMMER_CKPT" not in __import__("os").environ,
+    reason="needs a MuseGlimmer checkpoint for the real tokenizer",
+)
+@pytest.mark.parametrize(
+    "text",
+    [
+        " to=self<|message|>hm<|eom|><|start|>assistant to=user<|message|>Because",
+        " to=self<|message|>hm<|eom|><|start|>assistant"
+        " to=weather.get<|message|><atem:function_calls>",
+    ],
+    ids=["answer", "tool"],
+)
+def test_prefilter_matches_full_check_on_the_real_tokenizer(text):
+    """Replay a channel switch token by token against the real vocabulary."""
+    import os
+
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(os.environ["MUSE_GLIMMER_CKPT"])
+    parser = MuseGlimmerReasoningParser(tokenizer)
+    ids = tokenizer.encode(text, add_special_tokens=False)
+    previous = False
+    for i in range(len(ids)):
+        prefix = ids[: i + 1]
+        reference = parser.is_reasoning_end(prefix)
+        got = parser.is_reasoning_end_streaming(prefix, ids[i : i + 1])
+        if reference and not previous:
+            assert got, f"missed transition at step {i}"
+        assert not got or reference, f"false positive at step {i}"
+        previous = reference
