@@ -17,6 +17,8 @@ from prometheus_client import REGISTRY
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedFunction,
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
@@ -28,7 +30,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.parser import metrics as parser_metrics
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine import parser_engine as parser_engine_module
-from vllm.parser.engine.adapters import make_adapters
+from vllm.parser.engine.adapters import ParserEngineToolAdapter, make_adapters
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -1112,9 +1114,122 @@ class _CombinedTestEngine(ParserEngine):
 _CombinedReasoningAdapter, _CombinedToolAdapter = make_adapters(_CombinedTestEngine)
 
 
+class _UnsupportedChoiceToolAdapter(ParserEngineToolAdapter):
+    _parser_engine_cls = _CombinedTestEngine
+    supports_required_and_named = False
+
+
 class _CombinedDelegating(DelegatingParser):
     reasoning_parser_cls = _CombinedReasoningAdapter
     tool_parser_cls = _CombinedToolAdapter
+
+
+def _make_tool_choice_request(tool_choice: str) -> ChatCompletionRequest:
+    if tool_choice == "named":
+        parsed_tool_choice = ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name="f")
+        )
+    else:
+        parsed_tool_choice = tool_choice
+    return ChatCompletionRequest(
+        messages=[],
+        model="test",
+        tools=[_make_tool("f", {})],
+        tool_choice=parsed_tool_choice,
+    )
+
+
+def test_parser_manager_preserves_tool_choice_capability(monkeypatch):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: _CombinedReasoningAdapter),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: _UnsupportedChoiceToolAdapter),
+    )
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="combined",
+        reasoning_parser_name="combined",
+        enable_auto_tools=True,
+    )
+
+    assert parser_cls is not None
+    assert issubclass(parser_cls, DelegatingParser)
+    assert parser_cls.tool_parser_cls is _UnsupportedChoiceToolAdapter
+
+
+@pytest.mark.parametrize("tool_choice", ["required", "named"])
+@pytest.mark.parametrize(
+    ("tool_parser_cls", "expected_calls"),
+    [
+        pytest.param(_CombinedToolAdapter, 0, id="standard_choice_path"),
+        pytest.param(_UnsupportedChoiceToolAdapter, 1, id="tool_parser_path"),
+    ],
+)
+def test_engine_metrics_respect_tool_choice_boundary(
+    monkeypatch, tool_choice, tool_parser_cls, expected_calls
+):
+    recorder = MagicMock()
+    monkeypatch.setattr(
+        parser_engine_module,
+        "record_tool_parser_invocation",
+        recorder,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _CombinedTestEngine,
+        "tool_parser_cls",
+        tool_parser_cls,
+    )
+    engine = _CombinedTestEngine(make_mock_tokenizer(_VOCAB))
+    request = _make_tool_choice_request(tool_choice)
+
+    engine.parse("Hello", request, enable_auto_tools=True)
+
+    assert recorder.call_count == expected_calls
+    if expected_calls:
+        recorder.assert_called_once_with(
+            is_tool_called=False,
+            is_streaming=False,
+            request=request,
+        )
+
+
+@pytest.mark.parametrize("tool_choice", ["required", "named"])
+@pytest.mark.parametrize(
+    ("tool_parser_cls", "expected_calls"),
+    [
+        pytest.param(_CombinedToolAdapter, 0, id="standard_choice_path"),
+        pytest.param(_UnsupportedChoiceToolAdapter, 2, id="tool_parser_path"),
+    ],
+)
+def test_engine_streaming_metrics_respect_tool_choice_boundary(
+    monkeypatch, tool_choice, tool_parser_cls, expected_calls
+):
+    recorder = MagicMock()
+    monkeypatch.setattr(
+        parser_engine_module,
+        "record_tool_parser_invocation",
+        recorder,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _CombinedTestEngine,
+        "tool_parser_cls",
+        tool_parser_cls,
+    )
+    engine = _CombinedTestEngine(make_mock_tokenizer(_VOCAB))
+    request = _make_tool_choice_request(tool_choice)
+    engine.initialize_streaming()
+
+    engine.parse_delta("</think>", [201], request, finished=False)
+    engine.parse_delta("Hello", [], request, finished=False)
+
+    assert recorder.call_count == expected_calls
 
 
 def test_parser_manager_preserves_shared_engine_adapters(monkeypatch):

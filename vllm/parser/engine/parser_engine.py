@@ -122,6 +122,11 @@ class ParserEngine(Parser):
             state in _TOOL_CALL_STATES or transition.next_state in _TOOL_CALL_STATES
             for (state, _), transition in parser_engine_config.transitions.items()
         )
+        self._supports_required_and_named = getattr(
+            self.__class__.tool_parser_cls,
+            "supports_required_and_named",
+            True,
+        )
 
         self._has_reasoning = (
             "THINK_END" in parser_engine_config.token_id_terminals
@@ -436,6 +441,22 @@ class ParserEngine(Parser):
     def _in_tool_parser_phase(self) -> bool:
         return self._has_tool_parser and self._engine.state in _TOOL_PARSER_PHASE_STATES
 
+    def _should_record_tool_parser_invocation(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> bool:
+        """Return whether this request uses the ToolParser boundary."""
+        if not self._has_tool_parser:
+            return False
+        if not self._supports_required_and_named:
+            return True
+
+        tool_choice = getattr(request, "tool_choice", None)
+        return not (
+            tool_choice == "required"
+            or (tool_choice is not None and not isinstance(tool_choice, str))
+        )
+
     def _strip_content_whitespace(
         self,
         content: str,
@@ -461,7 +482,8 @@ class ParserEngine(Parser):
     ) -> DeltaMessage | None:
         self._initialize_history_tool_call_cnt(request)
         is_tool_called: bool | Exception = False
-        record_invocation = self._in_tool_parser_phase()
+        should_record_invocation = self._should_record_tool_parser_invocation(request)
+        record_invocation = should_record_invocation and self._in_tool_parser_phase()
         try:
             if not self._prompt_streaming_prepared and prompt_token_ids is not None:
                 # NOTE: call the hook BEFORE setting the flag, because the hook
@@ -469,10 +491,14 @@ class ParserEngine(Parser):
                 # clears ``_prompt_streaming_prepared``.
                 self.adjust_initial_state_from_prompt(prompt_token_ids)
                 self._prompt_streaming_prepared = True
-            record_invocation |= self._in_tool_parser_phase()
+            record_invocation |= (
+                should_record_invocation and self._in_tool_parser_phase()
+            )
             self._check_skip_tool_parsing(request)
             events = self._feed(delta_text, delta_token_ids)
-            record_invocation |= self._in_tool_parser_phase()
+            record_invocation |= (
+                should_record_invocation and self._in_tool_parser_phase()
+            )
             if finished:
                 events.extend(self._engine.finish())
             result = self._events_to_delta(events, finished=finished)
@@ -740,7 +766,9 @@ class ParserEngine(Parser):
             is_tool_called = e
             raise
         finally:
-            if enable_auto_tools and self._has_tool_parser:
+            if enable_auto_tools and self._should_record_tool_parser_invocation(
+                request
+            ):
                 record_tool_parser_invocation(
                     is_tool_called=is_tool_called,
                     is_streaming=False,
