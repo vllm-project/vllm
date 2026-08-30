@@ -575,6 +575,37 @@ class OrthrusModel(Qwen2Model):
             prefix=prefix,
             decoder_layer_type=OrthrusDecoderLayer,
         )
+        # Read inside building_diffusion_draft()'s context span, same as
+        # OrthrusForCausalLM.is_orthrus_diffusion_draft -- see forward's
+        # docstring for why the dispatch needs to live here rather than in
+        # the outer LM's forward.
+        self.is_orthrus_diffusion_draft = _BUILDING_DIFFUSION_DRAFT.get()
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        """Dispatch to the diffusion path from *inside* the compiled entry
+        point, not from the caller.
+
+        ``@support_torch_compile`` instruments this class's ``__call__``,
+        not any other method -- calling ``forward_diffusion_paged``
+        directly (as this used to, from ``OrthrusForCausalLM.forward``)
+        bypasses torch.compile and CUDA graph capture for the whole
+        diffusion path entirely, which is why
+        ``OrthrusProposer.initialize_cudagraph_keys`` has to force
+        ``cudagraph_mode=NONE`` for the draft. Branching here instead
+        means both paths go through the same ``__call__``-wrapped entry
+        point that compilation/capture actually instruments.
+        """
+        if self.is_orthrus_diffusion_draft:
+            return self.forward_diffusion_paged(input_ids, positions, inputs_embeds)
+        return super().forward(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
 
     def forward_diffusion(
         self,
@@ -767,15 +798,6 @@ class OrthrusForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        # EXPERIMENTAL (milestone 3, unvalidated): true when this instance
-        # is being constructed as a speculative-decode *draft* model, i.e.
-        # inside OrthrusProposer._get_model's building_diffusion_draft()
-        # context. In that case forward() routes through the diffusion path
-        # instead of the normal AR path. See building_diffusion_draft's
-        # docstring for why a context flag is used instead of inspecting
-        # vllm_config.
-        self.is_orthrus_diffusion_draft = _BUILDING_DIFFUSION_DRAFT.get()
-
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
@@ -803,10 +825,10 @@ class OrthrusForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        if self.is_orthrus_diffusion_draft:
-            return self.model.forward_diffusion_paged(
-                input_ids, positions, inputs_embeds
-            )
+        # Always go through self.model's __call__ (not a direct method call)
+        # so torch.compile/CUDA-graph capture sees this invocation -- see
+        # OrthrusModel.forward's docstring for why the diffusion branch used
+        # to bypass compilation entirely by being dispatched from here.
         return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     def compute_logits(
