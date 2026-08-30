@@ -163,7 +163,7 @@ def test_ngram_embedding_rejects_mismatched_checkpoint_shard() -> None:
         module.load_weights([("ngram_embedding.shard_0.weight", torch.zeros(3, 2))])
 
 
-def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
+def test_ngram_embedding_loads_fp8_scale_after_shard_group() -> None:
     module = _make_fp8_ngram_embedding_for_load_test()
     shard_0 = torch.arange(8, dtype=torch.float32).reshape(4, 2).to(torch.float8_e4m3fn)
     shard_1 = (
@@ -171,15 +171,16 @@ def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
     )
     weight_scale = torch.tensor([0.25], dtype=torch.bfloat16)
 
-    loaded = module.load_weights(
+    loaded_shards = module.load_weights(
         [
             ("ngram_embedding.shard_0.weight", shard_0),
             ("ngram_embedding.shard_1.weight", shard_1),
-            ("ngram_embedding.weight_scale", weight_scale),
         ]
     )
+    loaded_scale = module.load_weights([("ngram_embedding.weight_scale", weight_scale)])
 
-    assert loaded == {"ngram_embedding.weight", "ngram_embedding.weight_scale"}
+    assert loaded_shards == {"ngram_embedding.weight"}
+    assert loaded_scale == {"ngram_embedding.weight_scale"}
     assert module.ngram_embedding.weight.dtype == torch.float8_e4m3fn
     assert torch.equal(
         module.ngram_embedding.weight.float(),
@@ -189,7 +190,7 @@ def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
     assert module.get_offload_output_dtype(torch.bfloat16) == torch.float8_e4m3fn
 
 
-def test_ngram_gpu_offload_retains_only_fp8_global_scale(monkeypatch) -> None:
+def test_ngram_gpu_offload_loads_fp8_scale_after_shard_group(monkeypatch) -> None:
     module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
     nn.Module.__init__(module)
     module._offload_quant_method = Qwen4ExpPLEFp8EmbeddingMethod()
@@ -202,21 +203,24 @@ def test_ngram_gpu_offload_retains_only_fp8_global_scale(monkeypatch) -> None:
         lambda: torch.device("cpu"),
     )
 
-    loaded = module.load_weights(
-        [
-            ("ngram_embedding.shard_0.weight", torch.empty(4, 2)),
-            ("ngram_embedding.weight_scale", weight_scale),
-        ]
+    loaded_shards = module.load_weights(
+        [("ngram_embedding.shard_0.weight", torch.empty(4, 2))]
     )
-
-    assert loaded == {"ngram_embedding.weight_scale"}
-    assert torch.equal(module._offload_weight_scale, weight_scale)
-    assert module.get_offload_output_dtype(torch.bfloat16) == torch.float8_e4m3fn
 
     ple_layer = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
     nn.Module.__init__(ple_layer)
     ple_layer.ple_embedding = module
     embeddings = torch.tensor([[4.0, 8.0]]).to(torch.float8_e4m3fn)
+
+    assert not loaded_shards
+    with pytest.raises(RuntimeError, match="missing its global scale"):
+        ple_layer._dequantize_embeddings(embeddings, torch.bfloat16)
+
+    loaded_scale = module.load_weights([("ngram_embedding.weight_scale", weight_scale)])
+
+    assert loaded_scale == {"ngram_embedding.weight_scale"}
+    assert torch.equal(module._offload_weight_scale, weight_scale)
+    assert module.get_offload_output_dtype(torch.bfloat16) == torch.float8_e4m3fn
     output = ple_layer._dequantize_embeddings(embeddings, torch.bfloat16)
     torch.testing.assert_close(
         output,

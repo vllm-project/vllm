@@ -661,6 +661,8 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
 
+        # Prefix grouping may invoke this method repeatedly for one module.
+        # Treat the global FP8 scale as incrementally loaded state.
         # GPU workers retain only dequantization metadata. The CPU process owns
         # the embedding table and transfers quantized lookup rows unchanged.
         if envs.VLLM_PLE_CPU_OFFLOAD and not is_offload_process():
@@ -678,8 +680,6 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
                         persistent=False,
                     )
                     retained.add(name)
-                if not retained:
-                    raise ValueError("FP8 PLE offload checkpoint is missing its scale")
             elif isinstance(quant_method, Qwen4ExpPLENVFp4EmbeddingMethod):
                 outer_scales: dict[int, torch.Tensor] = {}
                 for name, loaded_weight in weights:
@@ -725,7 +725,6 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
         shard_prefix = "ngram_embedding.shard_"
         quant_method = getattr(self.ngram_embedding, "quant_method", None)
         nvfp4_runtime = isinstance(quant_method, Qwen4ExpPLENVFp4EmbeddingMethod)
-        fp8_runtime = isinstance(quant_method, Qwen4ExpPLEFp8EmbeddingMethod)
         packed_codes: dict[int, torch.Tensor] = {}
         packed_scales: dict[int, torch.Tensor] = {}
         packed_outer_scales: dict[int, torch.Tensor] = {}
@@ -872,8 +871,6 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
 
         if regular_weights:
             loaded.update(AutoWeightsLoader(self).load_weights(regular_weights))
-        if fp8_runtime and "ngram_embedding.weight_scale" not in loaded:
-            raise ValueError("FP8 PLE checkpoint is missing its global scale")
         return loaded
 
 
