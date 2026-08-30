@@ -42,43 +42,6 @@ from vllm.v1.sample.thinking_budget_state import (
     maybe_create_thinking_budget_state_holder,
 )
 
-
-def _canary(tag: str) -> None:
-    """Report CUDA state at both torch and driver level.
-
-    ``torch.cuda.is_initialized()`` only tracks torch's own lazy init, so it
-    misses a driver context created by any other library. Open ``/dev/nvidia*``
-    descriptors detect such a context without needing NVML permissions.
-    """
-    import os
-
-    nvidia_fds = set()
-    try:
-        for fd in os.listdir("/proc/self/fd"):
-            try:
-                target = os.readlink(f"/proc/self/fd/{fd}")
-            except OSError:
-                continue
-            if "nvidia" in target:
-                nvidia_fds.add(target)
-    except OSError:
-        nvidia_fds.add("unreadable")
-
-    try:
-        num_threads = len(os.listdir("/proc/self/task"))
-    except OSError:
-        num_threads = -1
-
-    print(
-        f"[canary] {tag}: torch={torch.cuda.is_initialized()} "
-        f"nvidia_fds={sorted(nvidia_fds)} threads={num_threads} "
-        f"pid={os.getpid()}",
-        flush=True,
-    )
-
-
-_canary("after imports")
-
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
 VOCAB_SIZE = 1024
@@ -88,9 +51,6 @@ DEVICES = [
     f"{DEVICE_TYPE}:{i}"
     for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
-
-_canary("after module consts")
-
 MAX_NUM_PROMPT_TOKENS = 64
 MIN_TOKENS_LEN_THRESHOLD = 5
 REQS_PER_LOGITPROC = 50
@@ -493,14 +453,13 @@ def _min_tokens_validate(
 
 
 def _make_min_tokens_processor() -> MinTokensLogitsProcessor:
-    _canary("  before VllmConfig")
-    cfg = VllmConfig()
-    _canary("  after VllmConfig")
-    proc = MinTokensLogitsProcessor(cfg, torch.device("cpu"), False)
-    _canary("  after ctor")
-    return proc
+    return MinTokensLogitsProcessor(VllmConfig(), torch.device("cpu"), False)
 
 
+# Constructing the processor allocates pinned host memory, which creates a
+# CUDA driver context even though the tensors stay on CPU. Run these in their
+# own process so the pytest process can still fork for `test_logitsprocs`.
+@create_new_process_for_each_test()
 def test_min_tokens_keeps_all_masked_behavior_without_structured_output():
     processor = _make_min_tokens_processor()
     processor.update_state(
@@ -518,18 +477,16 @@ def test_min_tokens_keeps_all_masked_behavior_without_structured_output():
             moved=(),
         )
     )
-    _canary("  after update_state")
 
     logits = torch.full((1, 3), -float("inf"))
     logits[0, 0] = 1.0
-    _canary("  after logits alloc")
 
     processor.apply(logits)
 
     assert torch.isneginf(logits).all()
-    _canary("after test1")
 
 
+@create_new_process_for_each_test()
 def test_min_tokens_restores_all_masked_structured_output_stop_token():
     processor = _make_min_tokens_processor()
     processor.update_state(
@@ -561,9 +518,9 @@ def test_min_tokens_restores_all_masked_structured_output_stop_token():
 
     assert logits[0, 0] == 1.0
     assert torch.isneginf(logits[0, 1:]).all()
-    _canary("after test2")
 
 
+@create_new_process_for_each_test()
 def test_min_tokens_restores_all_masked_structured_output_stop_token_spec_decode():
     processor = _make_min_tokens_processor()
     processor.update_state(
@@ -600,7 +557,6 @@ def test_min_tokens_restores_all_masked_structured_output_stop_token_spec_decode
     assert logits[1, 0] == 3.0
     assert torch.isneginf(logits[1, 1:]).all()
     assert torch.isneginf(logits[:, 2:]).all()
-    _canary("after test3")
 
 
 def _thinking_budget_params(kwargs: dict) -> None:
