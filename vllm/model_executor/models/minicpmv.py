@@ -1279,6 +1279,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     def _parse_and_validate_multimodal_inputs(
         self, **kwargs: object
     ) -> MiniCPMVMultiModalInputs:
+        kwargs.pop("modality", None)
         modalities: MiniCPMVMultiModalInputs = {}
 
         # Preserve the order of modalities if there are multiple of them
