@@ -87,9 +87,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 
         self.pynccl_comm: PyNcclCommunicator | None = None
-        disable_pynccl = (
-            envs.VLLM_DISABLE_PYNCCL or current_platform.dist_backend == "gloo"
-        )
+        disable_pynccl = envs.VLLM_DISABLE_PYNCCL or self._is_gloo()
         if self.world_size > 1 and not disable_pynccl:
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group if tcp_store_group is None else tcp_store_group,

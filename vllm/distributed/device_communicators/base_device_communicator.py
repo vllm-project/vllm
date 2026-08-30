@@ -230,7 +230,7 @@ class DeviceCommunicatorBase:
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if self._is_gloo():
-            cpu_input = input_.cpu()
+            cpu_input = input_.contiguous().cpu()
             dist.all_reduce(cpu_input, group=self.device_group)
             input_.copy_(cpu_input)
             return input_
@@ -475,7 +475,7 @@ class DeviceCommunicatorBase:
             dim += input_.dim()
 
         if self._is_gloo():
-            cpu_input = input_.cpu()
+            cpu_input = input_.contiguous().cpu()
             if self.rank_in_group == dst:
                 cpu_gather_list = [
                     torch.empty_like(cpu_input) for _ in range(world_size)
@@ -516,7 +516,7 @@ class DeviceCommunicatorBase:
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
         if self._is_gloo():
-            cpu_tensor = tensor.cpu()
+            cpu_tensor = tensor.contiguous().cpu()
             torch.distributed.send(cpu_tensor, self.ranks[dst], self.device_group)
         else:
             torch.distributed.send(tensor, self.ranks[dst], self.device_group)
@@ -543,7 +543,7 @@ class DeviceCommunicatorBase:
         if self.world_size == 1:
             return tensor
         if self._is_gloo():
-            cpu_tensor = tensor.cpu()
+            cpu_tensor = tensor.contiguous().cpu()
             torch.distributed.broadcast(cpu_tensor, self.ranks[src], self.device_group)
             tensor.copy_(cpu_tensor)
         else:
