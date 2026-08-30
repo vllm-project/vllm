@@ -620,6 +620,7 @@ def test_ple_nvfp4_embedding_uses_qwen4_exp_runtime_method() -> None:
     method = _get_ple_embedding_quant_method(
         quant_config,
         "model.layers.1.ple.ple_embedding.ngram_embedding",
+        "float8_e4m3fn",
     )
 
     assert isinstance(method, Qwen4ExpPLENVFp4EmbeddingMethod)
@@ -633,6 +634,28 @@ def test_ple_nvfp4_embedding_respects_modelopt_exclusions() -> None:
     )
 
     assert _get_ple_embedding_quant_method(quant_config, prefix) is None
+
+
+@pytest.mark.parametrize(
+    "ple_embedding_dtype",
+    ["float8_e4m3fn", "torch.float8_e4m3fn", torch.float8_e4m3fn],
+)
+def test_ple_mixed_checkpoint_uses_declared_fp8_embedding_dtype(
+    ple_embedding_dtype: object,
+) -> None:
+    prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        exclude_modules=["*.ple.*"],
+    )
+
+    method = _get_ple_embedding_quant_method(
+        quant_config,
+        prefix,
+        ple_embedding_dtype,
+    )
+
+    assert isinstance(method, Qwen4ExpPLEFp8EmbeddingMethod)
 
 
 def test_ngram_cpu_offload_padding_does_not_overwrite_real_tokens(

@@ -285,9 +285,20 @@ class Qwen4ExpPLENVFp4EmbeddingMethod(QuantizeMethodBase):
         )
 
 
+def _ple_dtype_is_fp8(ple_embedding_dtype: object) -> bool:
+    """Return whether the model config declares FP8 PLE checkpoint weights."""
+
+    if ple_embedding_dtype is None:
+        return False
+    if isinstance(ple_embedding_dtype, torch.dtype):
+        return ple_embedding_dtype == torch.float8_e4m3fn
+    return str(ple_embedding_dtype).rsplit(".", 1)[-1] == "float8_e4m3fn"
+
+
 def _get_ple_embedding_quant_method(
     quant_config: QuantizationConfig | None,
     prefix: str,
+    ple_embedding_dtype: object = None,
 ) -> QuantizeMethodBase | None:
     """Select a packed PLE embedding method for quantized checkpoint shards."""
 
@@ -309,13 +320,17 @@ def _get_ple_embedding_quant_method(
         return Qwen4ExpPLEFp8EmbeddingMethod()
 
     if isinstance(quant_config, ModelOptNvFp4Config):
-        if (
-            not quant_config.is_checkpoint_nvfp4_serialized
-            or quant_config.is_layer_excluded(prefix)
-        ):
+        if not quant_config.is_checkpoint_nvfp4_serialized:
             return None
-        logger.info_once("PLE embedding %s uses the runtime NVFP4 method", prefix)
-        return Qwen4ExpPLENVFp4EmbeddingMethod()
+        if not quant_config.is_layer_excluded(prefix):
+            logger.info_once("PLE embedding %s uses the runtime NVFP4 method", prefix)
+            return Qwen4ExpPLENVFp4EmbeddingMethod()
+        if _ple_dtype_is_fp8(ple_embedding_dtype):
+            logger.info_once(
+                "Excluded ModelOpt PLE embedding %s uses the runtime FP8 method",
+                prefix,
+            )
+            return Qwen4ExpPLEFp8EmbeddingMethod()
 
     return None
 
@@ -452,7 +467,9 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
             padding_size=divisor,
             prefix=f"{prefix}.ngram_embedding",
             quant_method=_get_ple_embedding_quant_method(
-                quant_config, f"{prefix}.ngram_embedding"
+                quant_config,
+                f"{prefix}.ngram_embedding",
+                getattr(config, "ple_embedding_dtype", None),
             ),
         )
         self.register_buffer(
@@ -927,6 +944,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             ple_embedding._offload_quant_method = _get_ple_embedding_quant_method(
                 quant_config,
                 f"{prefix}.ple_embedding.ngram_embedding",
+                getattr(config, "ple_embedding_dtype", None),
             )
         self.ple_embedding: nn.Module = ple_embedding
         self.key_proj = ReplicatedLinear(
