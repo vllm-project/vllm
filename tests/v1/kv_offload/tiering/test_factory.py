@@ -45,6 +45,7 @@ def _make_mock_args():
 def test_pre_registered_tiers_can_be_imported():
     """CI sentinel: registered tiers import and yield SecondaryTierManager."""
     for tier_type in SecondaryTierFactory._registry:
+        # KVCR is an optional external dependency and may not be installed.
         if tier_type == "kvcr" and find_spec("kvcr") is None:
             continue
         cls = SecondaryTierFactory._registry[tier_type]()
