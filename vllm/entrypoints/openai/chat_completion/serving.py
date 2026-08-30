@@ -376,6 +376,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    operation_name="chat",
                     reasoning_ended=reasoning_ended,
                     reasoning_parser_kwargs={
                         "chat_template_kwargs": self._engine_chat_template_kwargs(

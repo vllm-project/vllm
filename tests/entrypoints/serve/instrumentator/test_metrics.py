@@ -18,12 +18,30 @@ from tests.conftest import LocalAssetServer
 from tests.utils import RemoteOpenAIServer
 from vllm import version
 from vllm.utils.network_utils import get_open_port
+from vllm.v1.engine import FinishReason
+from vllm.v1.metrics.loggers import (
+    GEN_AI_ERROR_TYPE_INTERNAL,
+    GEN_AI_ERROR_TYPE_NONE,
+    GEN_AI_PROVIDER_NAME,
+    gen_ai_error_type,
+)
 
 MODELS = {
     "text": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     "multimodal": "HuggingFaceTB/SmolVLM-256M-Instruct",
 }
 PREV_MINOR_VERSION = version._prev_minor_version()
+
+
+@pytest.mark.cpu_test
+def test_gen_ai_error_type():
+    """FinishReason.ERROR maps to the OTel `internal_error` error.type value;
+    every other finish reason maps to the empty string."""
+    assert gen_ai_error_type(FinishReason.ERROR) == GEN_AI_ERROR_TYPE_INTERNAL
+    for finish_reason in FinishReason:
+        if finish_reason == FinishReason.ERROR:
+            continue
+        assert gen_ai_error_type(finish_reason) == GEN_AI_ERROR_TYPE_NONE
 
 
 @pytest.fixture(scope="module", params=list(MODELS.keys()))
@@ -311,6 +329,56 @@ async def test_metrics_exist(
     for sample in cache_config_samples:
         assert sample.labels.get("kv_cache_size_tokens") not in (None, "None", "")
         assert sample.labels.get("kv_cache_max_concurrency") not in (None, "None", "")
+
+
+def _gen_ai_duration_samples(response_text: str) -> list:
+    for family in text_string_to_metric_families(response_text):
+        if family.name == "gen_ai_server_request_duration_seconds":
+            return [s for s in family.samples if s.name.endswith("_count")]
+    return []
+
+
+@pytest.mark.asyncio
+async def test_gen_ai_metrics_labels(
+    server: RemoteOpenAIServer,
+    client: openai.AsyncClient,
+    model_key: str,
+):
+    """chat and text_completion requests against the same model/engine must
+    produce distinct gen_ai_* series (gen_ai_operation_name differs), each
+    carrying gen_ai_request_model and a constant gen_ai_provider_name."""
+    if model_key == "multimodal":
+        pytest.skip("Unnecessary test")
+
+    model_name = MODELS[model_key]
+
+    await client.completions.create(
+        model=model_name,
+        prompt="Hello, my name is",
+        max_tokens=5,
+        temperature=0.0,
+    )
+    await client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": "Hello, my name is"}],
+        max_tokens=5,
+        temperature=0.0,
+    )
+
+    response = requests.get(server.url_for("metrics"))
+    assert response.status_code == HTTPStatus.OK
+
+    samples = _gen_ai_duration_samples(response.text)
+    op_names_seen = {s.labels.get("gen_ai_operation_name") for s in samples}
+    assert "chat" in op_names_seen
+    assert "text_completion" in op_names_seen
+
+    for sample in samples:
+        assert sample.labels.get("gen_ai_request_model") == model_name
+        assert sample.labels.get("gen_ai_provider_name") == GEN_AI_PROVIDER_NAME
+        if sample.value > 0:
+            # Successful requests carry the empty error_type.
+            assert sample.labels.get("error_type") == GEN_AI_ERROR_TYPE_NONE
 
 
 @pytest.mark.asyncio

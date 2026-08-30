@@ -36,6 +36,22 @@ logger = init_logger(__name__)
 WAITING_REASON_CAPACITY = "capacity"
 WAITING_REASON_DEFERRED = "deferred"
 
+# OTel GenAI semantic convention labels for the gen_ai_server_* histograms.
+GEN_AI_PROVIDER_NAME = "vllm"
+GEN_AI_OPERATION_NAMES = ("chat", "text_completion", "unknown")
+GEN_AI_ERROR_TYPE_NONE = ""
+GEN_AI_ERROR_TYPE_INTERNAL = "internal_error"
+
+
+def gen_ai_error_type(finish_reason: FinishReason) -> str:
+    """Map a finish reason to the OTel GenAI `error.type` label value."""
+    return (
+        GEN_AI_ERROR_TYPE_INTERNAL
+        if finish_reason == FinishReason.ERROR
+        else GEN_AI_ERROR_TYPE_NONE
+    )
+
+
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
 StatLoggerFactory = AggregateStatLoggerFactory | PerEngineStatLoggerFactory
@@ -828,6 +844,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         # OTel GenAI semantic convention mirror of
         # vllm:time_to_first_token_seconds.
+        gen_ai_labelnames = [
+            "gen_ai_request_model",
+            "engine",
+            "gen_ai_operation_name",
+            "gen_ai_provider_name",
+        ]
         histogram_gen_ai_time_to_first_token = self._histogram_cls(
             name="gen_ai_server_time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
@@ -855,11 +877,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 640.0,
                 2560.0,
             ],
-            labelnames=labelnames,
+            labelnames=gen_ai_labelnames,
         )
-        self.histogram_gen_ai_time_to_first_token = create_metric_per_engine(
-            histogram_gen_ai_time_to_first_token, per_engine_labelvalues
-        )
+        self.histogram_gen_ai_time_to_first_token: dict[str, dict[int, Histogram]] = {}
+        for op_name in GEN_AI_OPERATION_NAMES:
+            self.histogram_gen_ai_time_to_first_token[op_name] = {
+                idx: histogram_gen_ai_time_to_first_token.labels(
+                    gen_ai_request_model=model_name,
+                    engine=str(idx),
+                    gen_ai_operation_name=op_name,
+                    gen_ai_provider_name=GEN_AI_PROVIDER_NAME,
+                )
+                for idx in engine_indexes
+            }
 
         histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
@@ -947,11 +977,21 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 40.0,
                 80.0,
             ],
-            labelnames=labelnames,
+            labelnames=gen_ai_labelnames,
         )
-        self.histogram_gen_ai_time_per_output_token = create_metric_per_engine(
-            histogram_gen_ai_time_per_output_token, per_engine_labelvalues
-        )
+        self.histogram_gen_ai_time_per_output_token: dict[
+            str, dict[int, Histogram]
+        ] = {}
+        for op_name in GEN_AI_OPERATION_NAMES:
+            self.histogram_gen_ai_time_per_output_token[op_name] = {
+                idx: histogram_gen_ai_time_per_output_token.labels(
+                    gen_ai_request_model=model_name,
+                    engine=str(idx),
+                    gen_ai_operation_name=op_name,
+                    gen_ai_provider_name=GEN_AI_PROVIDER_NAME,
+                )
+                for idx in engine_indexes
+            }
 
         request_latency_buckets = [
             0.3,
@@ -992,11 +1032,24 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             name="gen_ai_server_request_duration_seconds",
             documentation="Histogram of e2e request latency in seconds.",
             buckets=request_latency_buckets,
-            labelnames=labelnames,
+            labelnames=gen_ai_labelnames + ["error_type"],
         )
-        self.histogram_gen_ai_request_duration = create_metric_per_engine(
-            histogram_gen_ai_request_duration, per_engine_labelvalues
-        )
+        self.histogram_gen_ai_request_duration: dict[
+            str, dict[str, dict[int, Histogram]]
+        ] = {}
+        for op_name in GEN_AI_OPERATION_NAMES:
+            self.histogram_gen_ai_request_duration[op_name] = {}
+            for error_type in (GEN_AI_ERROR_TYPE_NONE, GEN_AI_ERROR_TYPE_INTERNAL):
+                self.histogram_gen_ai_request_duration[op_name][error_type] = {
+                    idx: histogram_gen_ai_request_duration.labels(
+                        gen_ai_request_model=model_name,
+                        engine=str(idx),
+                        gen_ai_operation_name=op_name,
+                        gen_ai_provider_name=GEN_AI_PROVIDER_NAME,
+                        error_type=error_type,
+                    )
+                    for idx in engine_indexes
+                }
 
         histogram_queue_time_request = self._histogram_cls(
             name="vllm:request_queue_time_seconds",
@@ -1292,9 +1345,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
         for n_param in iteration_stats.n_params_iter:
             self.histogram_n_request[engine_idx].observe(n_param)
-        for ttft in iteration_stats.time_to_first_tokens_iter:
+        for ttft, op_name in iteration_stats.time_to_first_tokens_iter:
             self.histogram_time_to_first_token[engine_idx].observe(ttft)
-            self.histogram_gen_ai_time_to_first_token[engine_idx].observe(ttft)
+            self.histogram_gen_ai_time_to_first_token[op_name][engine_idx].observe(ttft)
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)
 
@@ -1305,9 +1358,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_e2e_time_request[engine_idx].observe(
                 finished_request.e2e_latency
             )
-            self.histogram_gen_ai_request_duration[engine_idx].observe(
-                finished_request.e2e_latency
-            )
+            error_type = gen_ai_error_type(finished_request.finish_reason)
+            self.histogram_gen_ai_request_duration[finished_request.operation_name][
+                error_type
+            ][engine_idx].observe(finished_request.e2e_latency)
             self.histogram_queue_time_request[engine_idx].observe(
                 finished_request.queued_time
             )
@@ -1336,9 +1390,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_request_time_per_output_token[engine_idx].observe(
                 finished_request.mean_time_per_output_token
             )
-            self.histogram_gen_ai_time_per_output_token[engine_idx].observe(
-                finished_request.mean_time_per_output_token
-            )
+            self.histogram_gen_ai_time_per_output_token[
+                finished_request.operation_name
+            ][engine_idx].observe(finished_request.mean_time_per_output_token)
             if finished_request.max_tokens_param:
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param

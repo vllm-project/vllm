@@ -157,6 +157,12 @@ class EngineCoreRequest(
 
     session_id: str | None = None
 
+    # OTel GenAI semantic convention operation name (e.g. "chat",
+    # "text_completion"). None when the caller doesn't set it; consumers
+    # should fall back to a sensible default derived from sampling_params
+    # vs pooling_params.
+    operation_name: str | None = None
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""

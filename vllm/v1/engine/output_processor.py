@@ -152,6 +152,7 @@ class RequestState:
         n: int | None = None,
         temperature: float | None = None,
         stream_input: bool = False,
+        operation_name: str = "unknown",
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -160,6 +161,7 @@ class RequestState:
         self.lora_request = lora_request
         self.lora_name = lora_request.lora_name if lora_request is not None else None
         self.output_kind = output_kind
+        self.operation_name = operation_name
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
@@ -180,7 +182,11 @@ class RequestState:
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
-        self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+        self.stats = (
+            RequestStateStats(arrival_time=arrival_time, operation_name=operation_name)
+            if log_stats
+            else None
+        )
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
@@ -256,6 +262,12 @@ class RequestState:
             assert request.pooling_params is not None
             output_kind = request.pooling_params.output_kind
 
+        # Endpoints that don't set operation_name explicitly (e.g. the
+        # pooling/embeddings API, which covers embed/classify/score/rerank)
+        # intentionally fall back to "unknown" rather than guessing a
+        # specific GenAI operation name.
+        operation_name = request.operation_name or "unknown"
+
         assert request.external_req_id is not None
         return cls(
             request_id=request.request_id,
@@ -278,6 +290,7 @@ class RequestState:
             log_stats=log_stats,
             stream_interval=stream_interval,
             stream_input=request.resumable,
+            operation_name=operation_name,
         )
 
     def make_request_output(
@@ -849,6 +862,7 @@ class OutputProcessor:
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,
             num_cached_tokens=req_state.num_cached_tokens,
+            operation_name=req_state.operation_name,
         )
         self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
 
