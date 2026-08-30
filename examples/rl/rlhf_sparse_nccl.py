@@ -66,7 +66,7 @@ class TrainModel:
     def __init__(self, model_name: str):
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
         ).to("cuda:0")
         self.model.eval()
 

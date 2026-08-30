@@ -104,7 +104,7 @@ class FSDPTrainWorker:
         torch.accelerator.set_device_index(0)
 
         model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.bfloat16
+            model_name, dtype=torch.bfloat16
         )
 
         for layer in model.model.layers:
