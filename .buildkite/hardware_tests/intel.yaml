@@ -2,7 +2,6 @@ group: Hardware
 depends_on: ~
 steps:
   - label: "Intel HPU Test"
-    key: intel-hpu-test
     soft_fail: true
     device: intel_hpu
     no_plugin: true
