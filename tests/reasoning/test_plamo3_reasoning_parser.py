@@ -371,9 +371,19 @@ def test_is_reasoning_end_streaming(
     assert parser.is_reasoning_end_streaming(input_ids, delta_ids) is expected
 
 
-def test_is_reasoning_end_after_streaming_started(tokenizer):
+def test_is_reasoning_end_does_not_depend_on_streaming_state(tokenizer):
     parser = Plamo3ReasoningParser(tokenizer)
-    _call_reasoning_streaming(parser, "", BEGIN_THINK_TAG, BEGIN_THINK_TAG)
+    streamed_ids = _BEGIN_IDS + [42] + _END_IDS + [99]
+    parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text=BEGIN_THINK_TAG + "reasoning" + END_THINK_TAG + "answer",
+        delta_text=BEGIN_THINK_TAG + "reasoning" + END_THINK_TAG + "answer",
+        previous_token_ids=[],
+        current_token_ids=streamed_ids,
+        delta_token_ids=streamed_ids,
+    )
+
+    assert parser.is_reasoning_end([100]) is False
     assert parser.is_reasoning_end([100] + _END_IDS + [42]) is True
 
 

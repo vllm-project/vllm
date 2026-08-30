@@ -168,10 +168,8 @@ class Plamo3ReasoningParser(ReasoningParser):
         )
         self._stream_emit_pos: int = 0
         self._identity_stream_terminated: bool = False
-        # Some vLLM call paths pass only delta token IDs, which is too short to
-        # detect the multi-token END_THINK sequence. Keep the full stream token
-        # IDs updated in extract_reasoning_streaming and fall back to them
-        # inside is_reasoning_end / extract_content_ids.
+        # Some vLLM call paths pass only delta token IDs to extract_content_ids.
+        # Retain the complete stream only for that extraction.
         self._stream_token_ids: list[int] = []
 
     @staticmethod
@@ -209,14 +207,18 @@ class Plamo3ReasoningParser(ReasoningParser):
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         if self._identity_parser is not None:
             return self._identity_parser.is_reasoning_end(input_ids)
-        if not (ids := self._effective_input_ids(input_ids)):
+        if not input_ids:
             return False
         if (
-            last_end := self._find_seq(ids, self._end_think_token_ids, reverse=True)
+            last_end := self._find_seq(
+                input_ids, self._end_think_token_ids, reverse=True
+            )
         ) == -1:
             return False
         if (
-            last_begin := self._find_seq(ids, self._begin_think_token_ids, reverse=True)
+            last_begin := self._find_seq(
+                input_ids, self._begin_think_token_ids, reverse=True
+            )
         ) == -1:
             return True
         return last_end > last_begin
@@ -277,7 +279,7 @@ class Plamo3ReasoningParser(ReasoningParser):
             )
 
         # Keep accumulated token IDs available because some vLLM call paths
-        # pass only delta token IDs to is_reasoning_end / extract_content_ids.
+        # pass only delta token IDs to extract_content_ids.
         self._stream_token_ids = list(current_token_ids)
 
         while True:
