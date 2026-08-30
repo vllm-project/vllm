@@ -2,7 +2,7 @@ group: PyTorch
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) PyTorch Compilation"
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Compilation"
   device: h200_35gb
   key: pytorch-compilation-unit-tests
   timeout_in_minutes: 60
@@ -54,7 +54,7 @@ steps:
       - csrc/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200) PyTorch Compilation H100 Cases"
+- label: ":nvidia: (H200 MIG 18GB) PyTorch Compilation H100 Cases"
   key: pytorch-compilation-unit-tests-h100
   timeout_in_minutes: 30
   device: h200_18gb
@@ -121,7 +121,7 @@ steps:
   commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
 
-- label: ":nvidia: (H200) PyTorch Fullgraph"
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph"
   device: h200_35gb
   key: pytorch-fullgraph-test
   timeout_in_minutes: 90
@@ -195,7 +195,7 @@ steps:
   commands:
   - pytest -s -v compile/fullgraph/test_full_cudagraph.py
 
-- label: ":nvidia: (H200) PyTorch Nightly Dependency Override Check"
+- label: ":nvidia: (H200 MIG 18GB) PyTorch Nightly Dependency Override Check"
   key: pytorch-nightly-dependency-override-check
   # if this test fails, it means the nightly torch version is not compatible with some
   # of the dependencies. Please check the error message and add the package to whitelist

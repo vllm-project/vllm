@@ -2,7 +2,7 @@ group: JIT Monitor
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200) No Runtime JITs E2E"
+- label: ":nvidia: (H200 MIG 35GB) No Runtime JITs E2E"
   key: jit-monitor-no-runtime-jit
   device: h200_35gb
   timeout_in_minutes: 45
