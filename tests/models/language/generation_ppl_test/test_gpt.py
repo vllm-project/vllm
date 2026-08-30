@@ -11,4 +11,14 @@ MODELS = [GenerateModelInfo("openai-community/gpt2-large", hf_ppl=19.45705604553
 
 @pytest.mark.parametrize("model_info", MODELS)
 def test_ppl(hf_runner, vllm_runner, model_info: GenerateModelInfo):
-    wikitext_ppl_test(hf_runner, vllm_runner, model_info)
+    bf16_ppl = wikitext_ppl_test(hf_runner, vllm_runner, model_info)
+    fp32_ppl = wikitext_ppl_test(
+        hf_runner,
+        vllm_runner,
+        model_info,
+        vllm_extra_kwargs={"hf_overrides": {"head_dtype": "float32"}},
+    )
+
+    differ = ((fp32_ppl - bf16_ppl) / bf16_ppl) * 100
+    print("fp32 head difference (%):", differ)
+    assert differ < 0

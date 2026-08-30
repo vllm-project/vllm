@@ -1,5 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 pub mod reasoning;
 pub mod tool;
+pub mod unified;
 
 use std::collections::HashMap;
 use std::convert::Infallible;

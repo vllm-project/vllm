@@ -7,32 +7,20 @@ Ported from SGLang's MiMoV2OmniProcessor / MiMoVLProcessor implementations.
 """
 
 import contextlib
-import copy
-import io
 import logging
 import math
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from io import BytesIO
 from typing import Any, Literal
 
 import numpy as np
 import regex as re
-import requests
 import torch
 import torch.nn.functional as F
 from PIL import Image
 from transformers import BatchFeature, TensorType
 from transformers.processing_utils import ProcessorMixin
-
-try:
-    from torchcodec.decoders import AudioDecoder
-
-    _HAS_TORCHCODEC = True
-except ImportError:
-    AudioDecoder = None
-    _HAS_TORCHCODEC = False
 
 try:
     import torchaudio
@@ -62,7 +50,7 @@ _mean_std_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
 @dataclass
 class ImageInput:
-    # PIL.Image | str (path/url/base64) | bytes | torch.Tensor (C,H,W)
+    # PIL.Image | torch.Tensor (C,H,W)
     image: Any
     max_pixels: int | None = None
     min_pixels: int | None = None
@@ -87,7 +75,7 @@ class VideoInput:
 
 @dataclass
 class AudioInput:
-    # str (path/url/base64) | bytes | tuple[waveform_1D, sr]
+    # tuple[waveform_1D, sr]
     # | np.ndarray | torch.Tensor (T,n_vq)
     audio: Any
 
@@ -168,14 +156,6 @@ def _smart_resize(
     return int(h_bar), int(w_bar)
 
 
-def _to_rgb(img: Image.Image) -> Image.Image:
-    if img.mode == "RGBA":
-        bg = Image.new("RGB", img.size, (255, 255, 255))
-        bg.paste(img, mask=img.split()[3])
-        return bg
-    return img.convert("RGB")
-
-
 def _standardize(images: torch.Tensor) -> torch.Tensor:
     key = str(images.device)
     if key not in _mean_std_cache:
@@ -228,27 +208,6 @@ def _transform_single(
     return _standardize(out).squeeze(0), w_bar, h_bar
 
 
-def _fetch_image(src: Any) -> Image.Image:
-    if isinstance(src, Image.Image):
-        return _to_rgb(src)
-    if isinstance(src, bytes):
-        return _to_rgb(copy.deepcopy(Image.open(BytesIO(src))))
-    if isinstance(src, str):
-        if src.startswith(("http://", "https://")):
-            r = requests.get(src, timeout=30)
-            r.raise_for_status()
-            return _to_rgb(copy.deepcopy(Image.open(BytesIO(r.content))))
-        if src.startswith("file://"):
-            return _to_rgb(Image.open(src[7:]))
-        if src.startswith("data:image"):
-            import pybase64 as _b64
-
-            _, b64 = src.split("base64,", 1)
-            return _to_rgb(copy.deepcopy(Image.open(BytesIO(_b64.b64decode(b64)))))
-        return _to_rgb(Image.open(src))
-    raise ValueError(f"Unrecognized image source: {type(src)}")
-
-
 # ---------------------------------------------------------------------------
 # Core processor
 # ---------------------------------------------------------------------------
@@ -259,6 +218,10 @@ class MiMoVLProcessor:
 
     Handles image/video/audio preprocessing and token sequence construction.
     Ported from SGLang's MiMoVLProcessor.
+
+    Media strings (URL / path / data:) are resolved upstream in vLLM's media
+    pipeline; this processor accepts only already-decoded inputs (``PIL.Image``
+    for images, ``(waveform, sr)`` tuples for audio).
     """
 
     def __init__(
@@ -451,33 +414,14 @@ class MiMoVLProcessor:
         return kw
 
     def preprocess_audio(self, audio: Any) -> tuple[torch.Tensor, int]:
-        """Decode audio bytes/path/tuple → (mel_spec (T, n_mels), token_len)."""
-        if isinstance(audio, tuple):
-            waveform, original_sr = audio
-        else:
-            if AudioDecoder is None:
-                raise RuntimeError(
-                    "torchcodec is required for audio. "
-                    "Install with: pip install torchcodec"
-                )
-            if isinstance(audio, bytes):
-                file_obj: Any = io.BytesIO(audio)
-            elif isinstance(audio, str):
-                if audio.startswith("data:"):
-                    import pybase64 as _b64
-
-                    file_obj = io.BytesIO(_b64.b64decode(audio.split(",")[1]))
-                elif audio.startswith(("http://", "https://")):
-                    r = requests.get(audio, timeout=30)
-                    r.raise_for_status()
-                    file_obj = io.BytesIO(r.content)
-                else:
-                    file_obj = audio
-            else:
-                raise ValueError(f"Unsupported audio source type: {type(audio)}")
-            samples = AudioDecoder(file_obj).get_all_samples()
-            waveform = samples.data
-            original_sr = samples.sample_rate
+        """Convert a pre-loaded ``(waveform, sr)`` tuple into (mel_spec, token_len)."""
+        if not isinstance(audio, tuple):
+            raise ValueError(
+                f"Unsupported audio source type: {type(audio)}. Audio must be a "
+                "pre-decoded (waveform, sample_rate) tuple; URL/path/bytes "
+                "resolution is handled upstream in vLLM's media pipeline."
+            )
+        waveform, original_sr = audio
 
         if original_sr != self.audio_sampling_rate:
             if original_sr not in self._resamplers:
@@ -504,8 +448,6 @@ class MiMoVLProcessor:
     def process_image(self, image: ImageInput) -> torch.Tensor:
         kw = self._resolve_img_kw(image)
         src = image.image
-        if isinstance(src, (str, bytes)):
-            src = _fetch_image(src)
         tensor, _, _ = _transform_single(
             src,
             factor=self.patch_size * self.merge_size,
@@ -584,7 +526,7 @@ class MiMoVLProcessor:
         src = audio.audio
         if isinstance(src, np.ndarray):
             src = (torch.from_numpy(src).float(), self.audio_sampling_rate)
-        if isinstance(src, (str, bytes, tuple)):
+        if isinstance(src, tuple):
             return self.preprocess_audio(src)
         # Pre-tokenized tensor (T, n_vq)
         assert isinstance(src, torch.Tensor) and src.ndim == 2
@@ -899,7 +841,7 @@ class MiMoOmniProcessor(ProcessorMixin):
     """HuggingFace-compatible ProcessorMixin wrapper for MiMo-Omni.
 
     Accepts PIL images, pre-decoded video tuples (frames_TCHW, timestamps_T),
-    and audio (file path / bytes / (waveform, sr) tuple / numpy array).
+    and audio (file path / (waveform, sr) tuple / numpy array).
     """
 
     attributes = ["tokenizer"]
@@ -1011,8 +953,12 @@ class MiMoOmniProcessor(ProcessorMixin):
         )
 
     @classmethod
-    def from_hf_config(cls, tokenizer: Any, hf_config: Any) -> "MiMoOmniProcessor":
-        """Convenience factory: instantiate directly from an HF model config object."""
+    def from_hf_config(
+        cls,
+        tokenizer: Any,
+        hf_config: Any,
+    ) -> "MiMoOmniProcessor":
+        """Instantiate directly from an HF model config object."""
         vc = hf_config.vision_config
         if isinstance(vc, dict):
             patch_size = vc.get("patch_size", 14)

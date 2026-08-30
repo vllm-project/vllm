@@ -38,8 +38,10 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import PIN_MEMORY
 
+from .utils import AutoWeightsLoader, WeightsMapper
 from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
@@ -74,31 +76,29 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.num_positions = self.num_patches
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
 
-    def forward(
+    def get_position_ids(
         self,
-        pixel_values: torch.FloatTensor,
         patch_attention_mask: torch.BoolTensor,
         tgt_sizes: torch.IntTensor | None = None,
     ) -> torch.Tensor:
-        batch_size, _, max_im_h, max_im_w = pixel_values.shape
-        target_dtype = self.patch_embedding.weight.dtype
-        patch_embeds = self.patch_embedding(pixel_values.to(target_dtype))
-        embeddings = patch_embeds.flatten(2).transpose(1, 2)
-        max_nb_patches_h, max_nb_patches_w = (
-            max_im_h // self.patch_size,
-            max_im_w // self.patch_size,
-        )
+        batch_size, max_nb_patches_h, max_nb_patches_w = patch_attention_mask.shape
         boundaries = torch.arange(
             1 / self.num_patches_per_side, 1.0, 1 / self.num_patches_per_side
         )
         position_ids = torch.full(
-            size=(batch_size, max_nb_patches_h * max_nb_patches_w), fill_value=0
+            size=(batch_size, max_nb_patches_h * max_nb_patches_w),
+            fill_value=0,
+            pin_memory=PIN_MEMORY,
         )
 
-        for batch_idx, p_attn_mask in enumerate(patch_attention_mask):
-            if tgt_sizes is not None:
-                nb_patches_h = tgt_sizes[batch_idx][0]
-                nb_patches_w = tgt_sizes[batch_idx][1]
+        with gpu_sync_allowed():
+            patch_attention_mask_cpu = patch_attention_mask.cpu()
+            tgt_sizes_cpu = tgt_sizes.cpu() if tgt_sizes is not None else None
+
+        for batch_idx, p_attn_mask in enumerate(patch_attention_mask_cpu):
+            if tgt_sizes_cpu is not None:
+                nb_patches_h = tgt_sizes_cpu[batch_idx][0]
+                nb_patches_w = tgt_sizes_cpu[batch_idx][1]
             else:
                 nb_patches_h = p_attn_mask[:, 0].sum()
                 nb_patches_w = p_attn_mask[0].sum()
@@ -113,8 +113,22 @@ class Idefics2VisionEmbeddings(nn.Module):
             pos_ids = (
                 bucket_coords_h[:, None] * self.num_patches_per_side + bucket_coords_w
             ).flatten()
-            position_ids[batch_idx][p_attn_mask.view(-1).cpu()] = pos_ids
-        position_ids = position_ids.to(self.position_embedding.weight.device)
+            position_ids[batch_idx][p_attn_mask.view(-1)] = pos_ids
+
+        return position_ids.to(self.position_embedding.weight.device, non_blocking=True)
+
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor,
+        patch_attention_mask: torch.BoolTensor,
+        tgt_sizes: torch.IntTensor | None = None,
+        position_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        target_dtype = self.patch_embedding.weight.dtype
+        patch_embeds = self.patch_embedding(pixel_values.to(target_dtype))
+        embeddings = patch_embeds.flatten(2).transpose(1, 2)
+        if position_ids is None:
+            position_ids = self.get_position_ids(patch_attention_mask, tgt_sizes)
         embeddings += self.position_embedding(position_ids)
         return embeddings
 
@@ -352,6 +366,14 @@ class Idefics2Encoder(nn.Module):
 
 
 class Idefics2VisionTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config: Idefics2VisionConfig,
@@ -392,6 +414,13 @@ class Idefics2VisionTransformer(nn.Module):
             if require_post_norm
             else nn.Identity()
         )
+        # head is a pooling header absent from this model.
+        orig_to_new_prefix: dict[str, str | None] = {"head.": None}
+        if not require_post_norm:
+            orig_to_new_prefix["post_layernorm."] = None
+        self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+            orig_to_new_prefix=orig_to_new_prefix
+        )
 
     def get_input_embeddings(self):
         return self.embeddings
@@ -401,6 +430,7 @@ class Idefics2VisionTransformer(nn.Module):
         pixel_values,
         patch_attention_mask: torch.BoolTensor | None = None,
         tgt_sizes: torch.IntTensor | None = None,
+        position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = pixel_values.size(0)
 
@@ -424,6 +454,7 @@ class Idefics2VisionTransformer(nn.Module):
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
             tgt_sizes=tgt_sizes,
+            position_ids=position_ids,
         )
 
         # Align with HuggingFace NaViT SigLIP in MiniCPMV/O:
@@ -453,42 +484,18 @@ class Idefics2VisionTransformer(nn.Module):
         return last_hidden_state
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        loader = AutoWeightsLoader(self)
+
         layer_count = len(self.encoder.layers)
 
-        for name, loaded_weight in weights:
-            # skip pooling header
-            if name.startswith("head."):
-                continue
-
-            # post_layernorm is optional
-            if name.startswith("post_layernorm.") and not self.require_post_norm:
-                continue
-
-            # omit layers when num_hidden_layers_override is set
-            if name.startswith("encoder.layers."):
-                layer_idx = int(name.split(".")[2])
-                if layer_idx >= layer_count:
+        def _filter(ws: Iterable[tuple[str, torch.Tensor]]):
+            # Drop layers beyond num_hidden_layers_override.
+            for name, w in ws:
+                if (
+                    name.startswith("encoder.layers.")
+                    and int(name.split(".")[2]) >= layer_count
+                ):
                     continue
+                yield name, w
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name or self.use_data_parallel:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)

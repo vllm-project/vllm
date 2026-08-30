@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Main block-sparse GQA attention for MiniMax M3 sparse layers.
 
-The lightning indexer (``indexer.py``) selects the top-k KV blocks; this module
-holds the main attention that attends only to those blocks: the paged K/V cache
-backend, its metadata + builder, and the impl that consumes the indexer's
-``topk_idx``. The Triton attend kernel lives here; the SM100 (MSA)
+The lightning indexer (``indexer.py``) selects the top-k KV blocks (written into
+the shared ``layer.topk_indices_buffer``); this module holds the main attention
+that attends only to those blocks: the paged K/V cache backend, its metadata +
+builder, and the impl that reads the indexer's top-k from that buffer. The Triton
+attend kernel lives here; the SM100 (MSA)
 ``build_k2q_csr`` + ``sparse_atten_func`` attend lives in
 ``nvidia/sparse_attention_msa.py``.
 
@@ -19,16 +20,26 @@ from typing import ClassVar
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.models.minimax_m3.common.ops.sparse_attn import (
-    SPARSE_BLOCK_SIZE,
-    minimax_m3_sparse_attn,
-    minimax_m3_sparse_attn_decode,
-)
+from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 from vllm.platforms import current_platform
+
+# AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops;
+# every other platform uses the generic common.ops implementation.
+if current_platform.is_rocm():
+    from vllm.models.minimax_m3.amd.ops.sparse_attn import (
+        minimax_m3_sparse_attn,
+        minimax_m3_sparse_attn_decode,
+    )
+else:
+    from vllm.models.minimax_m3.common.ops.sparse_attn import (
+        minimax_m3_sparse_attn,
+        minimax_m3_sparse_attn_decode,
+    )
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -40,12 +51,73 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
-    get_kv_cache_layout,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    is_quantized_kv_cache,
+)
 
 logger = init_logger(__name__)
+
+
+def _minimax_m3_aiter_sparse_pa_requested() -> bool:
+    return rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+
+
+def minimax_m3_rebase_slots_to_page16(
+    slot_mapping: torch.Tensor,
+    block_size: int,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Rebase a token slot mapping onto AITER's page-16 page numbering.
+
+    AITER's KV writer derives the destination page from ``slot // 16`` and
+    assumes pages are numbered consecutively. When the resolved layout stores
+    both K/V sides inside a block, a block spans twice as many pages, so only
+    the block component of the slot doubles -- the offset within the page must
+    not move. Clamping before the division leaves padding slots at their
+    negative sentinel, which is what tells the writer to skip them.
+    """
+    if out is None:
+        out = torch.empty_like(slot_mapping)
+    torch.clamp(slot_mapping, min=0, out=out)
+    return (
+        out.div_(block_size, rounding_mode="floor").mul_(block_size).add_(slot_mapping)
+    )
+
+
+def minimax_m3_query_token_positions(
+    cu_seqlens_q: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    total_q: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map each prefill query token to its request id and absolute KV position.
+
+    Both tensors are the same for every sparse layer in a step, so the AITER
+    sparse PA block-table builder reads them from the metadata instead of
+    rebuilding them once per layer.
+    """
+    pos = torch.arange(total_q, dtype=torch.int32, device=cu_seqlens_q.device)
+    query_req_id = torch.searchsorted(
+        cu_seqlens_q[1:].contiguous(), pos, right=True
+    ).to(torch.int32)
+    query_abs_pos = (prefix_lens[query_req_id] + (pos - cu_seqlens_q[query_req_id])).to(
+        torch.int32
+    )
+    return query_req_id, query_abs_pos
+
+
+def minimax_m3_use_aiter_sparse_pa(num_kv_heads: int) -> bool:
+    """Whether to use the ROCm AITER page-16 sparse PA prototype."""
+    requested = _minimax_m3_aiter_sparse_pa_requested()
+    if requested and num_kv_heads != 1:
+        raise ValueError(
+            "MiniMax M3 AITER sparse paged attention requires "
+            f"num_kv_heads == 1 per tensor-parallel rank, got {num_kv_heads}."
+        )
+    return requested
 
 
 class MiniMaxM3SparseBackend(AttentionBackend):
@@ -86,31 +158,17 @@ class MiniMaxM3SparseBackend(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        # Permutation from get_kv_cache_shape to the actual memory layout.
-        if include_num_layers_dimension:
-            raise NotImplementedError  # no cross-layer KV blocks in M3
-        cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD":
-            stride_order = (0, 1, 2, 3, 4)
-        elif cache_layout == "HND":
-            stride_order = (0, 1, 3, 2, 4)
-        else:
-            raise ValueError(f"Unknown cache layout format {cache_layout}.")
-        return stride_order
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
+        # AITER sparse PA reads K and V as separate page-16 tensors. LHBNC
+        # gives each side a dense plane; LBHNC interleaves the sides inside a
+        # block, which the page-id rebasing in ops/sparse_pa.py absorbs. LBHNC
+        # is listed first because these layers publish two head slots while the
+        # indexer publishes one, and mixed HNC shapes need a block-compact
+        # layout to share the block-id pool.
+        if _minimax_m3_aiter_sparse_pa_requested():
+            return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
+        return super().supported_kv_cache_layouts()
 
 
 @dataclass
@@ -125,6 +183,12 @@ class MiniMaxM3SparsePrefillMetadata:
     max_query_len: int
     max_seq_len: int
     total_kv_blocks: int
+
+    # Per-query-token request id and absolute KV position, built once per step
+    # for the AITER sparse PA block-table kernel. See
+    # ``minimax_m3_query_token_positions``.
+    query_req_id: torch.Tensor | None = None
+    query_abs_pos: torch.Tensor | None = None
 
 
 @dataclass
@@ -156,6 +220,11 @@ class MiniMaxM3SparseMetadata(AttentionMetadata):
     prefill: MiniMaxM3SparsePrefillMetadata | None = None
     decode: MiniMaxM3SparseDecodeMetadata | None = None
 
+    # ``slot_mapping`` rebased onto the page-16 numbering AITER's KV writer
+    # uses when both K/V sides share a block. Only set for the AITER sparse PA
+    # path; see ``MiniMaxM3SparseMetadataBuilder.build``.
+    page16_slot_mapping: torch.Tensor | None = None
+
 
 class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMetadata]):
     # Full cudagraphs for uniform decode batches, incl. spec-decode verify
@@ -180,6 +249,19 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
             dtype=torch.int32,
             device=device,
         )
+        # Every sparse layer shares one slot mapping, so the AITER page-16
+        # rebase is done here once per step instead of once per layer. Stable
+        # buffer for the same reason as the context lengths above.
+        self.use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
+            kv_cache_spec.num_kv_heads
+        )
+        self.page16_slot_mapping_buffer: torch.Tensor | None = None
+        if self.use_aiter_sparse_pa:
+            self.page16_slot_mapping_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                dtype=torch.int64,
+                device=device,
+            )
 
     def build(
         self,
@@ -225,17 +307,26 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
             )
             prefill_cu_seqlens_k[0] = 0
             torch.cumsum(prefill_kv_lens, dim=0, out=prefill_cu_seqlens_k[1:])
+            prefill_cu_seqlens_q = (
+                query_start_loc[num_decodes:] - num_decode_tokens
+            ).to(torch.int32)
+            prefill_context_lens = context_lens[num_decodes:]
+            query_req_id = query_abs_pos = None
+            if self.use_aiter_sparse_pa:
+                query_req_id, query_abs_pos = minimax_m3_query_token_positions(
+                    prefill_cu_seqlens_q, prefill_context_lens, num_prefill_tokens
+                )
             prefill_metadata = MiniMaxM3SparsePrefillMetadata(
-                cu_seqlens_q=(query_start_loc[num_decodes:] - num_decode_tokens).to(
-                    torch.int32
-                ),
+                cu_seqlens_q=prefill_cu_seqlens_q,
                 cu_seqlens_k=prefill_cu_seqlens_k,
                 seq_lens=prefill_kv_lens,
-                context_lens=context_lens[num_decodes:],
+                context_lens=prefill_context_lens,
                 block_table=block_table[num_decodes:],
                 max_query_len=common_attn_metadata.max_query_len,
                 max_seq_len=common_attn_metadata.max_seq_len,
                 total_kv_blocks=prefill_total_kv_blocks,
+                query_req_id=query_req_id,
+                query_abs_pos=query_abs_pos,
             )
 
         decode_metadata: MiniMaxM3SparseDecodeMetadata | None = None
@@ -254,10 +345,20 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
                 decode_query_len=decode_query_len,
             )
 
+        page16_slot_mapping = None
+        if self.page16_slot_mapping_buffer is not None:
+            slot_mapping = common_attn_metadata.slot_mapping
+            page16_slot_mapping = minimax_m3_rebase_slots_to_page16(
+                slot_mapping,
+                self.kv_cache_spec.block_size,
+                out=self.page16_slot_mapping_buffer[: slot_mapping.shape[0]],
+            )
+
         return MiniMaxM3SparseMetadata(
             seq_lens=seq_lens,
             max_seq_len=common_attn_metadata.max_seq_len,
             slot_mapping=common_attn_metadata.slot_mapping,
+            page16_slot_mapping=page16_slot_mapping,
             num_actual_tokens=num_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
@@ -272,9 +373,10 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
     """Abstract base for block-sparse GQA over the indexer-selected blocks.
 
     Inherits ``AttentionImplBase`` for a custom forward signature (the layer
-    pre-inserts K/V and runs the indexer, so forward takes the queries +
-    ``topk_idx``). The Triton and MSA subclasses each own a full ``forward`` --
-    no shared forward code.
+    pre-inserts K/V and runs the indexer, which writes the selected blocks into
+    the shared ``layer.topk_indices_buffer``; the attend reads them back from
+    there). The Triton and MSA subclasses each own a full ``forward`` -- no
+    shared forward code.
     """
 
     def __init__(
@@ -287,6 +389,7 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         *,
         topk_blocks: int,
         sparse_block_size: int,
+        msa_decode_backend: str = "triton",
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -311,11 +414,20 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         layer: AttentionLayer,
         query: torch.Tensor,
         kv_cache: torch.Tensor,
-        topk_idx: tuple[torch.Tensor | None, torch.Tensor | None],
         output: torch.Tensor,
+        *,
+        query_fp8: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Attend the queries to the indexer-selected blocks. Per kernel."""
+        """Attend the queries to the indexer-selected blocks. Per kernel.
+
+        The indexer has already written the top-k block ids into
+        ``layer.topk_indices_buffer`` (decode at ``[:, :nd]``, prefill at
+        ``[:, nd:num_tokens]``); the attend reads them from there.
+        """
         raise NotImplementedError
+
+    def should_use_msa_decode(self, layer_name: str) -> bool:
+        return False
 
 
 class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
@@ -326,49 +438,63 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
         layer: AttentionLayer,
         query: torch.Tensor,
         kv_cache: torch.Tensor,
-        topk_idx: tuple[torch.Tensor | None, torch.Tensor | None],
         output: torch.Tensor,
+        *,
+        query_fp8: torch.Tensor | None = None,
     ) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
             return output  # profiling run; caches unbound
         main_md = attn_metadata[layer.layer_name]  # type: ignore[attr-defined]
         assert isinstance(main_md, MiniMaxM3SparseMetadata)
-        decode_topk, prefill_topk = topk_idx
 
         nd = main_md.num_decode_tokens
         num_tokens = main_md.num_actual_tokens
+        # Indexer top-k from the shared buffer: decode [:, :nd], prefill [:, nd:].
+        topk_buffer = layer.topk_indices_buffer  # type: ignore[attr-defined]
+        assert topk_buffer is not None
+
+        topk = (
+            topk_buffer
+            if current_platform.is_rocm()
+            else topk_buffer[:num_tokens].transpose(0, 1)
+        )
+        assert topk is not None
         hd = self.head_size
         q = query[:num_tokens].view(-1, self.num_heads, hd)
         out = output[:num_tokens].view(-1, self.num_heads, hd)
         kv_cache = (
             kv_cache.view(self.kv_cache_fp8_dtype) if self.use_fp8_kv else kv_cache
         )
+        k_scale = getattr(layer, "_k_scale", None) if self.use_fp8_kv else None
+        v_scale = getattr(layer, "_v_scale", None) if self.use_fp8_kv else None
 
         # Decode [:nd]: split-K over the selected blocks (request-major chunks).
         if main_md.num_decodes > 0:
             d = main_md.decode
-            assert d is not None and decode_topk is not None
+            assert d is not None
             minimax_m3_sparse_attn_decode(
                 q[:nd],
                 kv_cache,
-                decode_topk,
+                topk[:, :nd, :],
                 d.block_table,
                 d.seq_lens,
                 self.num_kv_heads,
                 self.scale,
                 out[:nd],
                 d.decode_query_len,
+                k_scale=k_scale,
+                v_scale=v_scale,
             )
 
         # Prefill [nd:]: cu_seqlens_q already rebased to 0.
         if main_md.num_prefills > 0:
             p = main_md.prefill
-            assert p is not None and prefill_topk is not None
+            assert p is not None
             minimax_m3_sparse_attn(
                 q[nd:],
                 kv_cache,
-                prefill_topk,
+                topk[:, nd:num_tokens, :],
                 p.block_table,
                 p.cu_seqlens_q,
                 p.seq_lens,
@@ -377,39 +503,67 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
                 self.num_kv_heads,
                 self.scale,
                 out[nd:],
+                k_scale=k_scale,
+                v_scale=v_scale,
             )
         return output
 
 
-def select_main_impl_cls(
+def select_main_backend_and_impl_cls(
     *,
     topk_blocks: int,
     kv_cache_dtype: str,
-) -> type[MiniMaxM3SparseImpl]:
-    """Pick the main attend impl off the main KV-cache dtype.
+    num_kv_heads: int,
+) -> tuple[type[MiniMaxM3SparseBackend], type[MiniMaxM3SparseImpl]]:
+    """Pick the main attention backend and implementation.
 
     Blackwell (SM100) uses the MSA attend for supported top-k block counts
-    when the KV cache is BF16 or FP8 E4M3; non-Blackwell and FP8 E5M2 fall
-    back to Triton. The MSA module is imported lazily so AMD/non-SM100 never
-    import fmha_sm100.
+    when the KV cache is BF16 or FP8 E4M3; MI355 uses AITER sparse PA
+    with shuffle KV cache layout; Other platforms and FP8 E5M2 fall
+    back to Triton. The MSA modules are imported lazily to avoid import errors
+    on unsupported platforms.
     """
+    use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(num_kv_heads)
     use_msa = (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
         and topk_blocks in (4, 8, 16, 32)
         and kv_cache_dtype != "fp8_e5m2"
     )
-    selected = "MSA" if use_msa else "Triton"
+    selected = (
+        "AITER_SPARSE_PA" if use_aiter_sparse_pa else ("MSA" if use_msa else "Triton")
+    )
     logger.info_once(
         "MiniMax M3 sparse attention selected %s (kv_cache_dtype=%s, topk_blocks=%s)",
         selected,
         kv_cache_dtype,
         topk_blocks,
     )
+    if use_aiter_sparse_pa:
+        from vllm.models.minimax_m3.amd.sparse_attention_msa import (
+            MiniMaxM3SparseAiterPAImpl,
+        )
+
+        return MiniMaxM3SparseBackend, MiniMaxM3SparseAiterPAImpl
     if use_msa:
         from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
+            MiniMaxM3SparseMSABackend,
             MiniMaxM3SparseMSAImpl,
         )
 
-        return MiniMaxM3SparseMSAImpl
-    return MiniMaxM3SparseTritonImpl
+        return MiniMaxM3SparseMSABackend, MiniMaxM3SparseMSAImpl
+    return MiniMaxM3SparseBackend, MiniMaxM3SparseTritonImpl
+
+
+def select_main_impl_cls(
+    *,
+    topk_blocks: int,
+    kv_cache_dtype: str,
+    num_kv_heads: int,
+) -> type[MiniMaxM3SparseImpl]:
+    """Backward-compatible implementation-only selector."""
+    return select_main_backend_and_impl_cls(
+        topk_blocks=topk_blocks,
+        kv_cache_dtype=kv_cache_dtype,
+        num_kv_heads=num_kv_heads,
+    )[1]

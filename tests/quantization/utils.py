@@ -10,15 +10,15 @@ from vllm.platforms import current_platform
 
 
 def is_quant_method_supported(quant_method: str) -> bool:
-    # Currently, all quantization methods require Nvidia or AMD GPUs
-    if not (current_platform.is_cuda() or current_platform.is_rocm()):
+    # Currently, quantization tests only run GPUs
+    if current_platform.is_cpu():
         return False
-
     try:
         current_platform.verify_quantization(quant_method)
     except ValueError:
         return False
-
+    if current_platform.is_xpu():
+        return True
     capability = current_platform.get_device_capability()
     assert capability is not None
 

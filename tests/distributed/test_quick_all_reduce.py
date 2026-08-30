@@ -38,6 +38,14 @@ def on_gfx942() -> bool:
     return False
 
 
+def _quickreduce_tolerance(quant_level: QuickReduceRegime) -> dict:
+    # With INT3 inputs of absmax 23, per-rank error peaks at 2.75,
+    # doubled by the TP2 sum = 5.5.
+    if quant_level == QuickReduceRegime.INT3:
+        return {"atol": 5.5, "rtol": 0.1}
+    return {"atol": 2.5, "rtol": 0.1}
+
+
 set_random_seed(42)
 _test_size_rng = random.Random(44)
 # Size over 8MB is sufficient for custom quick allreduce.
@@ -280,8 +288,9 @@ def graph_quickreduce(
                             out2 = tensor_model_parallel_all_reduce(inp2)
                             dist.all_reduce(inp2, group=group)
                 graph.replay()
-                torch.testing.assert_close(out1, inp1, atol=2.5, rtol=0.1)
-                torch.testing.assert_close(out2, inp2, atol=2.5, rtol=0.1)
+                tol = _quickreduce_tolerance(fa.qr_quant_level)
+                torch.testing.assert_close(out1, inp1, **tol)
+                torch.testing.assert_close(out2, inp2, **tol)
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -309,14 +318,15 @@ def eager_quickreduce(
         )
         _assert_quickreduce(fa, inp)
         out = fa.quick_all_reduce(inp)
-        torch.testing.assert_close(out, inp * tp_size, atol=2.5, rtol=0.1)
+        tol = _quickreduce_tolerance(fa.qr_quant_level)
+        torch.testing.assert_close(out, inp * tp_size, **tol)
 
         inp = torch.tensor(
             [1.0 * ((i) % 23) for i in range(sz)], dtype=torch.bfloat16, device=device
         )
         _assert_quickreduce(fa, inp)
         out = fa.quick_all_reduce(inp)
-        torch.testing.assert_close(out, inp * tp_size, atol=2.5, rtol=0.1)
+        torch.testing.assert_close(out, inp * tp_size, **tol)
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -350,7 +360,7 @@ def bf16_cast_quickreduce(
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="only test quick allreduce for rocm"
 )
-@pytest.mark.parametrize("quant_mode", ["FP", "INT8", "INT6", "INT4"])
+@pytest.mark.parametrize("quant_mode", ["FP", "INT8", "INT6", "INT4", "INT3"])
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
 @pytest.mark.parametrize("test_target", [graph_quickreduce, eager_quickreduce])
@@ -438,7 +448,7 @@ def qr_variable_input(rank, world_size):
             s2 = 2048
             inp1 = torch.ones((s1, s2), dtype=dtype, device=device_idx)
         result = torch.empty_like(inp1)
-        # FP = 0 INT8 = 1 INT6 = 2 INT4 = 3 NONE = 4
+        # FP = 0 INT8 = 1 INT6 = 2 INT4 = 3 INT3 = 4
         ops.qr_all_reduce(_ptr, inp1, result, 3, cast_bf2half=True)
         try:
             if inp1[0, 0] == 0:

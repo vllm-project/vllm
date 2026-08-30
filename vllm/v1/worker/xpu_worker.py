@@ -82,7 +82,7 @@ class XPUWorker(Worker):
                 self.local_rank
             ).total_memory
         else:
-            raise RuntimeError(f"Not support device type: {self.device_config.device}")
+            raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
         ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
         ENV_LOCAL_WORLD_SIZE = os.getenv(
@@ -100,8 +100,13 @@ class XPUWorker(Worker):
             current_platform.dist_backend,
         )
 
-        # global all_reduce needed for overall oneccl warm up
-        if torch.distributed.is_xccl_available():
+        # oneCCL warm-up; only meaningful for multi-device runs. Requiring it
+        # with a single worker breaks platforms where oneCCL cannot enumerate
+        # device topology (e.g. paravirtualized GPUs).
+        if (
+            self.parallel_config.world_size > 1
+            and torch.distributed.is_xccl_available()
+        ):
             torch.distributed.all_reduce(torch.zeros(1).xpu())
 
         if self.use_v2_model_runner:
@@ -162,3 +167,20 @@ class XPUWorker(Worker):
             logger.debug("Starting torch profiler with trace name: %s", trace_name)
 
         super().profile(is_start=is_start, profile_prefix=profile_prefix)
+
+    def shutdown(self) -> None:
+        logger.info(
+            "XPUWorker shutdown: cleaning up (rank=%d, local_rank=%d)",
+            self.rank,
+            self.local_rank,
+        )
+        super().shutdown()
+        from vllm.device_allocator.xpumem import XpuMemAllocator
+
+        if XpuMemAllocator.instance is not None:
+            XpuMemAllocator.instance.release_pools()
+        logger.info(
+            "XPUWorker shutdown: done (rank=%d, local_rank=%d)",
+            self.rank,
+            self.local_rank,
+        )

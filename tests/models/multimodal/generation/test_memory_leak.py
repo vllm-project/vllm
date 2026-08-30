@@ -83,7 +83,7 @@ def _ru_maxrss_bytes() -> int | None:
 
 def _gpu_used_bytes() -> int:
     torch.accelerator.synchronize()
-    free_bytes, total_bytes = current_platform.mem_get_info()
+    free_bytes, total_bytes = torch.accelerator.get_memory_info()
     return int(total_bytes - free_bytes)
 
 
