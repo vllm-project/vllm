@@ -769,6 +769,8 @@ class CompilationConfig:
         "vllm::mamba_mixer",
         "vllm::short_conv",
         "vllm::qwen4_exp_compute_ple_ngram_ids",
+        "vllm::qwen4_exp_ple_start_prefetch",
+        "vllm::qwen4_exp_ple_wait_prefetch",
         "vllm::qwen4_exp_ple_short_conv",
         "vllm::qwen4_exp_qsa_with_output",
         "vllm::linear_attention",

@@ -12,6 +12,7 @@ from torch.nn import functional as F
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
     compute_ple_shard_overlap,
@@ -20,9 +21,12 @@ from vllm.models.qwen4_exp.common.ple import (
 from vllm.models.qwen4_exp.nvidia import ple_layer as ple_layer_module
 from vllm.models.qwen4_exp.nvidia.ple_layer import (
     Qwen4ExpNGramEmbedding,
+    Qwen4ExpPinnedHostEmbedding,
+    Qwen4ExpPLEDeviceEmbedding,
+    Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLELayer,
-    _get_ple_embedding_quant_method,
+    Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 
 
@@ -161,7 +165,7 @@ def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
 
 def _make_fp8_embedding_layer(
     monkeypatch: pytest.MonkeyPatch,
-) -> embedding_module.VocabParallelEmbedding:
+) -> Qwen4ExpPLEDeviceEmbedding:
     monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
@@ -171,12 +175,13 @@ def _make_fp8_embedding_layer(
         parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
     )
     method = Qwen4ExpPLEFp8EmbeddingMethod()
-    layer = embedding_module.VocabParallelEmbedding(
+    layer = Qwen4ExpPLEDeviceEmbedding(
         3,
         2,
         params_dtype=torch.bfloat16,
         padding_size=1,
-        quant_method=method,
+        prefix="test.ple_embedding",
+        embedding_method=method,
     )
     weight = torch.tensor([[1.0, 2.0], [4.0, 8.0], [16.0, 32.0]])
     layer.weight.data.copy_(weight.to(torch.float8_e4m3fn))
@@ -233,12 +238,13 @@ def test_ple_fp8_embedding_uses_int8_for_tp_reduce(monkeypatch) -> None:
         "tensor_model_parallel_all_reduce",
         all_reduce,
     )
-    layer = embedding_module.VocabParallelEmbedding(
+    layer = Qwen4ExpPLEDeviceEmbedding(
         4,
         2,
         params_dtype=torch.bfloat16,
         padding_size=1,
-        quant_method=Qwen4ExpPLEFp8EmbeddingMethod(),
+        prefix="test.ple_embedding",
+        embedding_method=Qwen4ExpPLEFp8EmbeddingMethod(),
     )
     layer.weight.data.copy_(
         torch.tensor([[1.0, 2.0], [4.0, 8.0]]).to(torch.float8_e4m3fn)
@@ -260,17 +266,167 @@ def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
         weight_block_size=[128, 128],
     )
     assert isinstance(
-        _get_ple_embedding_quant_method(quant_config, prefix),
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
         Qwen4ExpPLEFp8EmbeddingMethod,
     )
 
     quant_config.ignored_layers = [f"{prefix}.shard_0"]
-    assert _get_ple_embedding_quant_method(quant_config, prefix) is None
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(None, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+
+def test_ple_embedding_rejects_unsupported_quantization_configs() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    with pytest.raises(NotImplementedError, match="SimpleNamespace"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(SimpleNamespace(), prefix)
+
+    nvfp4_config = ModelOptNvFp4Config(exclude_modules=[])
+    with pytest.raises(NotImplementedError, match="ModelOptNvFp4Config"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(nvfp4_config, prefix)
+
+    dynamic_fp8_config = Fp8Config(
+        is_checkpoint_fp8_serialized=False,
+        ignored_layers=[],
+    )
+    with pytest.raises(NotImplementedError, match="serialized FP8"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(dynamic_fp8_config, prefix)
+
+
+def test_ple_embedding_respects_modelopt_exclusion() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = ModelOptNvFp4Config(exclude_modules=[prefix])
+
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+
+def test_ple_prefetch_streams_are_scoped_by_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    streams = Qwen4ExpNGramEmbedding._PREFETCH_STREAMS
+    streams.clear()
+    monkeypatch.setattr(torch.cuda, "Stream", object)
+
+    try:
+        with pytest.raises(RuntimeError, match="is not initialized"):
+            Qwen4ExpNGramEmbedding._get_prefetch_stream("layers.1.ple")
+
+        Qwen4ExpNGramEmbedding._setup_prefetch_stream("layers.1.ple")
+        Qwen4ExpNGramEmbedding._setup_prefetch_stream("layers.1.ple")
+        Qwen4ExpNGramEmbedding._setup_prefetch_stream("layers.2.ple")
+        first = Qwen4ExpNGramEmbedding._get_prefetch_stream("layers.1.ple")
+        first_again = Qwen4ExpNGramEmbedding._get_prefetch_stream("layers.1.ple")
+        second = Qwen4ExpNGramEmbedding._get_prefetch_stream("layers.2.ple")
+
+        assert first is first_again
+        assert first is not second
+    finally:
+        streams.clear()
+
+
+def test_ple_device_embedding_allocates_on_active_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    embedding_method = Qwen4ExpPLEUnquantizedEmbeddingMethod()
+
+    with torch.device("cuda:0"):
+        embedding = Qwen4ExpPLEDeviceEmbedding(
+            4,
+            3,
+            params_dtype=torch.bfloat16,
+            padding_size=1,
+            prefix="test.ple_embedding",
+            embedding_method=embedding_method,
+        )
+
+    assert embedding.weight.device == torch.device("cuda:0")
+    assert embedding.embedding_method is embedding_method
+    assert embedding.quant_method is embedding_method
+
+
+@pytest.mark.parametrize("fp8_checkpoint", [False, True])
+def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
+    monkeypatch: pytest.MonkeyPatch,
+    fp8_checkpoint: bool,
+) -> None:
+    monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    with torch.device("cuda:0"):
+        embedding_method = (
+            Qwen4ExpPLEFp8EmbeddingMethod()
+            if fp8_checkpoint
+            else Qwen4ExpPLEUnquantizedEmbeddingMethod()
+        )
+        embedding = Qwen4ExpPinnedHostEmbedding(
+            4,
+            3,
+            params_dtype=torch.bfloat16,
+            padding_size=1,
+            prefix="test.ple_embedding",
+            embedding_method=embedding_method,
+        )
+
+    storage_dtype = torch.float8_e4m3fn if fp8_checkpoint else torch.bfloat16
+    loaded_weight = (
+        torch.arange(12, dtype=torch.float32).reshape(4, 3).to(storage_dtype)
+    )
+    copied = copy_ple_embedding_shard_(
+        embedding.weight,
+        loaded_weight,
+        checkpoint_start=0,
+        tp_start=0,
+        tp_end=4,
+    )
+    input_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
+    output = embedding.lookup(input_ids)
+    if fp8_checkpoint:
+        embedding.weight_scale.data.fill_(0.25)
+    dequantized = embedding.dequantize(output, torch.bfloat16)
+
+    assert copied == 4
+    assert embedding.weight.device.type == "cpu"
+    assert embedding.weight.is_pinned()
+    assert embedding.embedding_method is embedding_method
+    assert not hasattr(embedding, "quant_method")
+    assert embedding._uva_weight.device.type == "cuda"
+    assert output.dtype == torch.bfloat16
+    expected = loaded_weight[input_ids.cpu()].to(device="cuda:0", dtype=torch.bfloat16)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    expected_scale = 0.25 if fp8_checkpoint else 1.0
+    torch.testing.assert_close(
+        dequantized,
+        expected * expected_scale,
+        rtol=0,
+        atol=0,
+    )
 
 
 def test_ple_ngram_ids_custom_op_uses_current_request_layout(monkeypatch) -> None:
     class RuntimeNGramEmbedding(nn.Module):
-        def compute_ngram_ids(
+        def _compute_ngram_ids_impl(
             self,
             input_ids: torch.Tensor,
             query_start_loc: torch.Tensor,
