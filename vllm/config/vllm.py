@@ -2773,17 +2773,25 @@ class VllmConfig:
             and self.kv_transfer_config.kv_connector is not None
             and self.parallel_config.cp_kv_cache_interleave_size != local_block_size
         ):
-            interleave = self.parallel_config.cp_kv_cache_interleave_size
-            self.parallel_config.cp_kv_cache_interleave_size = local_block_size
-            logger.info_once(
-                "When using PD disaggregation with DCP "
-                "(decode_context_parallel_size=%d), "
-                "cp_kv_cache_interleave_size is automatically adjusted "
-                "from %d to block_size %d for block-level alignment.",
-                dcp_size,
-                interleave,
-                local_block_size,
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
             )
+
+            connector_cls = KVConnectorFactory.get_connector_class(
+                self.kv_transfer_config
+            )
+            if connector_cls.requires_dcp_block_aligned_interleave:
+                interleave = self.parallel_config.cp_kv_cache_interleave_size
+                self.parallel_config.cp_kv_cache_interleave_size = local_block_size
+                logger.info_once(
+                    "When using PD disaggregation with DCP "
+                    "(decode_context_parallel_size=%d), "
+                    "cp_kv_cache_interleave_size is automatically adjusted "
+                    "from %d to block_size %d for block-level alignment.",
+                    dcp_size,
+                    interleave,
+                    local_block_size,
+                )
 
     def validate_block_size(self) -> None:
         """Validate block_size against DCP and mamba constraints.
