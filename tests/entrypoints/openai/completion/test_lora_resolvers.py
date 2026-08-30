@@ -87,6 +87,8 @@ class MockLoRAResolver(LoRAResolver):
                 lora_int_id=2,
                 lora_path="/fake/path/invalid-lora",
             )
+        elif lora_name == "raising-lora":
+            raise KeyError("peft_type")
         return None
 
 
@@ -237,6 +239,29 @@ async def test_serving_completion_resolver_add_lora_fails(
     assert isinstance(response, ErrorResponse)
     assert response.error.code == HTTPStatus.BAD_REQUEST.value
     assert invalid_model in response.error.message
+
+
+@pytest.mark.asyncio
+async def test_serving_completion_resolver_raises(mock_serving_setup, monkeypatch):
+    """A resolver that raises must not fail the request or stop the loop."""
+    monkeypatch.setenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "true")
+
+    mock_engine, serving_completion = mock_serving_setup
+
+    raising_model = "raising-lora"
+    req = CompletionRequest(
+        model=raising_model,
+        prompt="what is 1+1?",
+    )
+
+    response = await serving_completion.create_completion(req)
+
+    mock_engine.add_lora.assert_not_awaited()
+    mock_engine.generate.assert_not_called()
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == HTTPStatus.BAD_REQUEST.value
+    assert raising_model in response.error.message
 
 
 @pytest.mark.asyncio
