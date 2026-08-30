@@ -212,6 +212,7 @@ class HiSparsePrefillStagingPlan:
     # Host rows with a GPU-resident copy (adopted shadow pages): the flat
     # resident-cache row to read instead of DMAing from host, -1 for misses.
     gpu_row_ids: torch.Tensor | None = None
+    gpu_source_key: tuple[int, int] | None = None
 
     def ensure_gpu_sources(
         self,
@@ -224,7 +225,8 @@ class HiSparsePrefillStagingPlan:
         layer in the group); non-null resident pages become miss_mask=0 rows
         gathered device-to-device by ``gather_prefill_cache``.
         """
-        if self.gpu_row_ids is not None:
+        source_key = (resident_block_table.data_ptr(), resident_block_size)
+        if self.gpu_source_key == source_key:
             return
         block_size = self.block_size
         if resident_block_size <= 0 or block_size % resident_block_size != 0:
@@ -271,6 +273,7 @@ class HiSparsePrefillStagingPlan:
         hit = (per_off_block > 0) & (host_ids[:, None] > 0)
         self.gpu_row_ids = torch.where(hit, gpu_rows, -1).reshape(1, -1).to(torch.int32)
         self.miss_mask = (self.gpu_row_ids < 0).int()
+        self.gpu_source_key = source_key
 
 
 def build_hisparse_prefill_staging_plan(
@@ -526,16 +529,12 @@ class HiSparseRuntime:
         )
         if plan.gpu_row_ids is not None and resident_cache is not None:
             gpu_rows = plan.gpu_row_ids[0].to(torch.long)
-            hit_rows = (gpu_rows >= 0).nonzero(as_tuple=False).squeeze(1)
-            if hit_rows.numel():
-                src = gpu_rows[hit_rows]
-                resident_block_size = resident_cache.shape[1]
-                rows = resident_cache[
-                    src // resident_block_size, src % resident_block_size
-                ]
-                if rows.dtype != staged.dtype:
-                    rows = rows.contiguous().view(staged.dtype)
-                staged.view(-1, row_width)[hit_rows] = rows
+            src = gpu_rows.clamp_min(0)
+            resident_block_size = resident_cache.shape[1]
+            rows = resident_cache[src // resident_block_size, src % resident_block_size]
+            if rows.dtype != staged.dtype:
+                rows = rows.contiguous().view(staged.dtype)
+            staged.view(-1, row_width).copy_(rows)
         torch.ops._C_cache_ops.hisparse_gather_plan(
             kv_cache.view(-1, row_width),
             staged,
@@ -750,6 +749,8 @@ class HiSparseCacheHandle:
         self.req_id_per_token: torch.Tensor | None = None
         self.defer_host_mirror = False
         self.mirror_slot_mapping: torch.Tensor | None = None
+        self.mirror_staging_cache: torch.Tensor | None = None
+        self.mirror_staging_slots: torch.Tensor | None = None
 
     def bind_cache(
         self,
@@ -786,7 +787,7 @@ class HiSparseCacheHandle:
     ) -> None:
         assert self.view is not None and self.slot_mapping is not None
         host_slots = slot_mapping.flatten()
-        num_rows = min(kv_c_normed.shape[0], host_slots.numel())
+        num_rows = min(kv_c_normed.shape[0], host_slots.numel(), self.num_actual_tokens)
         if not mirror_to_host:
             num_rows = min(num_rows, self.runtime.max_num_reqs)
         if num_rows == 0:
@@ -804,14 +805,36 @@ class HiSparseCacheHandle:
             mirrored_slots = host_slots[:num_rows].to(
                 device=self.runtime.device, dtype=torch.int64
             )
-            if self.defer_host_mirror:
+            if self.defer_host_mirror and not mirror_to_host:
                 if self.mirror_slot_mapping is None:
                     self.mirror_slot_mapping = mirrored_slots
                 return
             mirrored_slots = mirrored_slots.contiguous()
+            mirror_src_cache = self.view.cache
+            mirror_src_slots = resident_slots
+            if mirror_to_host:
+                staging_cache = self.mirror_staging_cache
+                staging_slots = self.mirror_staging_slots
+                if staging_cache is None or staging_slots is None:
+                    raise RuntimeError("HiSparse prefill mirror staging is not bound.")
+                if num_rows > staging_slots.numel():
+                    raise RuntimeError(
+                        "HiSparse prefill mirror exceeds staging capacity: "
+                        f"{num_rows} > {staging_slots.numel()}."
+                    )
+                mirror_src_slots = staging_slots[:num_rows]
+                ops.concat_and_cache_mla(
+                    kv_c_normed[:num_rows],
+                    k_pe[:num_rows].squeeze(1),
+                    staging_cache,
+                    mirror_src_slots,
+                    kv_cache_dtype=kv_cache_dtype,
+                    scale=k_scale,
+                )
+                mirror_src_cache = staging_cache
             self.runtime.backup_rows(
-                self.view.cache,
-                resident_slots,
+                mirror_src_cache,
+                mirror_src_slots,
                 mirrored_slots,
             )
             if self.runtime.is_group_leader and self.num_decode_tokens:
@@ -906,14 +929,9 @@ def create_hisparse_cache_handle(
     if is_index_group_leader and index_group_builder is not None:
         index_group_builder.current_group = runtime.index_group
     kv_transfer_config = vllm_config.kv_transfer_config
-    if kv_transfer_config is not None:
-        from vllm.distributed.kv_transfer.kv_connector.factory import (
-            KVConnectorFactory,
-        )
-
-        runtime.eager_host_mirror = KVConnectorFactory.requires_hisparse_host_mirroring(
-            kv_transfer_config
-        )
+    runtime.eager_host_mirror = bool(
+        kv_transfer_config is not None and kv_transfer_config.is_kv_producer
+    )
     logger.info_once(
         "Enabled experimental HiSparse HMA hot cache: top_k=%d, "
         "device_buffer_size=%d (%d LRU rows), host_pool_gib=%s, "

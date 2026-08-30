@@ -27,7 +27,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
-    SupportsHiSparseHostExport,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -75,7 +74,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA, SupportsHiSparseHostExport):
+class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
 
     @property

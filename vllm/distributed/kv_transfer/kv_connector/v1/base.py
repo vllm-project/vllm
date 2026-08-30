@@ -128,21 +128,11 @@ class SupportsHMA(ABC):
         raise NotImplementedError
 
 
-class SupportsHiSparseHostExport:
-    """Marks connectors that export HiSparse's host-resident KV contents."""
-
-
 def supports_hma(connector: Any) -> bool:
     if isinstance(connector, type):
         return issubclass(connector, SupportsHMA)
     else:
         return isinstance(connector, SupportsHMA)
-
-
-def supports_hisparse_host_export(connector: Any) -> bool:
-    if isinstance(connector, type):
-        return issubclass(connector, SupportsHiSparseHostExport)
-    return isinstance(connector, SupportsHiSparseHostExport)
 
 
 class KVConnectorRole(enum.Enum):

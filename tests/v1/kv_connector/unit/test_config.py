@@ -181,18 +181,3 @@ def test_kv_offloading_size_only_uses_native_default():
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
     assert kv_transfer_config.kv_role == "kv_both"
     assert kv_connector_extra_config["cpu_bytes_to_use"] == 4.0 * (1 << 30)
-
-
-def test_hisparse_host_mirroring_requires_export_capability():
-    """Producer role alone must not force unrelated HiSparse host writes."""
-    offloading = KVTransferConfig(kv_connector="OffloadingConnector", kv_role="kv_both")
-    nixl_producer = KVTransferConfig(
-        kv_connector="NixlConnector", kv_role="kv_producer"
-    )
-    nixl_consumer = KVTransferConfig(
-        kv_connector="NixlConnector", kv_role="kv_consumer"
-    )
-
-    assert not KVConnectorFactory.requires_hisparse_host_mirroring(offloading)
-    assert KVConnectorFactory.requires_hisparse_host_mirroring(nixl_producer)
-    assert not KVConnectorFactory.requires_hisparse_host_mirroring(nixl_consumer)

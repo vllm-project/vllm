@@ -83,23 +83,32 @@ class HiSparseConnectorWorker:
         assert source_block_size % resident.block_size == 0
         host_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
         assert host_num_blocks is not None
-        self.initialize(
-            cache_handles,
-            hot_backing,
-            self.vllm_config.scheduler_config.max_num_seqs,
-            self.vllm_config.model_config.max_model_len,
-            self.vllm_config.max_concurrent_batches,
-            source_block_size // resident.block_size,
-            host_num_blocks,
-            hot_backing.device,
-            pinned_host_pools,
-        )
+        try:
+            self.initialize(
+                cache_handles,
+                hot_backing,
+                self.vllm_config.scheduler_config.max_num_seqs,
+                self.vllm_config.scheduler_config.max_num_batched_tokens,
+                self.vllm_config.model_config.max_model_len,
+                self.vllm_config.max_concurrent_batches,
+                source_block_size // resident.block_size,
+                host_num_blocks,
+                hot_backing.device,
+                pinned_host_pools,
+            )
+        except Exception:
+            release_pinned_state(
+                [cache.runtime for cache in cache_handles],
+                pinned_host_pools,
+            )
+            raise
 
     def initialize(
         self,
         cache_handles: list[HiSparseCacheHandle],
         hot_backing: torch.Tensor,
         max_num_reqs: int,
+        max_num_batched_tokens: int,
         max_model_len: int,
         max_concurrent_batches: int,
         pages_per_host_block: int,
@@ -125,6 +134,22 @@ class HiSparseConnectorWorker:
         self.cache_handles = cache_handles
         for cache in cache_handles:
             cache.defer_host_mirror = True
+        resident = cache_handles[0].view
+        assert resident is not None
+        staging_blocks = (
+            max_num_batched_tokens + resident.block_size - 1
+        ) // resident.block_size
+        mirror_staging_cache = torch.empty(
+            (staging_blocks, resident.block_size, resident.cache.shape[-1]),
+            dtype=resident.cache.dtype,
+            device=device,
+        )
+        mirror_staging_slots = torch.arange(
+            max_num_batched_tokens, dtype=torch.int64, device=device
+        )
+        for cache in cache_handles:
+            cache.mirror_staging_cache = mirror_staging_cache
+            cache.mirror_staging_slots = mirror_staging_slots
         self.leader_runtimes = [
             cache.runtime for cache in cache_handles if cache.runtime.is_group_leader
         ]
@@ -295,6 +320,11 @@ class HiSparseConnectorWorker:
         metadata: HiSparseConnectorMetadata,
         request_state_indices: torch.Tensor | None,
     ) -> None:
+        for handle in self.cache_handles:
+            handle.decode_batch = False
+            handle.num_actual_tokens = 0
+            handle.num_decode_tokens = 0
+            handle.req_id_per_token = None
         if not self.is_host_writer:
             torch.accelerator.current_stream(self.hot_backing.device).wait_event(
                 self.host_write_event
@@ -417,19 +447,62 @@ class HiSparseConnectorWorker:
 
     def _enqueue_host_mirror(self) -> None:
         cache = self.cache_handles[0]
+        if cache.num_actual_tokens == 0:
+            return
         dst_slots = cache.mirror_slot_mapping
-        if any(
-            handle.num_actual_tokens != cache.num_actual_tokens
-            or handle.num_decode_tokens != cache.num_decode_tokens
-            or handle.decode_batch != cache.decode_batch
-            or handle.runtime.eager_host_mirror != cache.runtime.eager_host_mirror
-            or handle.mirror_slot_mapping is None
-            or dst_slots is None
-            or handle.mirror_slot_mapping.data_ptr() != dst_slots.data_ptr()
-            for handle in self.cache_handles[1:]
-        ):
-            raise RuntimeError("HiSparse cache layers disagree on mirror metadata.")
-        if cache.decode_batch and not cache.runtime.eager_host_mirror:
+        num_active_layers = next(
+            (
+                index
+                for index, handle in enumerate(self.cache_handles)
+                if handle.num_actual_tokens == 0
+            ),
+            len(self.cache_handles),
+        )
+        active_handles = self.cache_handles[:num_active_layers]
+        inactive_handles = self.cache_handles[num_active_layers:]
+        for handle in inactive_handles:
+            # Draft-model forwards run after the connector's finish_forward hook,
+            # so their rows cannot participate in the deferred all-layer mirror.
+            handle.defer_host_mirror = False
+        if any(handle.num_actual_tokens != 0 for handle in inactive_handles):
+            raise RuntimeError("HiSparse active cache layers must form a prefix.")
+        mismatch = next(
+            (
+                (index, handle)
+                for index, handle in enumerate(active_handles[1:], start=1)
+                if handle.num_actual_tokens != cache.num_actual_tokens
+                or handle.num_decode_tokens != cache.num_decode_tokens
+                or handle.decode_batch != cache.decode_batch
+                or handle.runtime.eager_host_mirror != cache.runtime.eager_host_mirror
+                or handle.mirror_slot_mapping is None
+                or dst_slots is None
+                or handle.mirror_slot_mapping.data_ptr() != dst_slots.data_ptr()
+            ),
+            None,
+        )
+        if mismatch is not None:
+            index, handle = mismatch
+            expected = (
+                cache.num_actual_tokens,
+                cache.num_decode_tokens,
+                cache.decode_batch,
+                cache.runtime.eager_host_mirror,
+                None if dst_slots is None else dst_slots.data_ptr(),
+            )
+            actual = (
+                handle.num_actual_tokens,
+                handle.num_decode_tokens,
+                handle.decode_batch,
+                handle.runtime.eager_host_mirror,
+                None
+                if handle.mirror_slot_mapping is None
+                else handle.mirror_slot_mapping.data_ptr(),
+            )
+            raise RuntimeError(
+                "HiSparse cache layers disagree on mirror metadata: "
+                f"cache 0={expected}, cache {index}={actual}."
+            )
+        if not cache.decode_batch or not cache.runtime.eager_host_mirror:
             return
         if dst_slots is None:
             raise RuntimeError("HiSparse host mirror has no source slot mapping.")
@@ -443,10 +516,10 @@ class HiSparseConnectorWorker:
         if self.is_host_writer:
             torch.ops._C_cache_ops.hisparse_backup_layers(
                 self.hot_backing,
-                self.mirror_layer_offsets,
-                self.mirror_src_indices_ptrs,
+                self.mirror_layer_offsets[:num_active_layers],
+                self.mirror_src_indices_ptrs[:num_active_layers],
                 self.backup_host_anchor,
-                self.backup_host_cache_ptrs,
+                self.backup_host_cache_ptrs[:num_active_layers],
                 dst_slots,
                 num_rows,
                 self.mirror_src_block_stride,
@@ -456,7 +529,7 @@ class HiSparseConnectorWorker:
         num_decode_tokens = min(cache.num_decode_tokens, num_rows)
         if num_decode_tokens:
             assert cache.req_id_per_token is not None
-            for handle in self.cache_handles:
+            for handle in active_handles:
                 if handle.runtime.is_group_leader:
                     handle.runtime.invalidate_written_slots(
                         dst_slots[:num_decode_tokens],

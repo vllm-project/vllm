@@ -4,6 +4,7 @@
 
 import math
 from types import MethodType, SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -1850,6 +1851,13 @@ def test_hisparse_prefill_writes_resident_and_host_rows():
     kv_c = torch.randn(8, row_width - 2, device=device)
     k_pe = torch.randn(8, 1, 2, device=device)
     cache_handle.runtime.bind_source_cache(kv_pool)
+    cache_handle.num_actual_tokens = slots.numel()
+    cache_handle.mirror_staging_cache = torch.zeros(
+        1, block_size, row_width, dtype=torch.float32, device=device
+    )
+    cache_handle.mirror_staging_slots = torch.arange(
+        slots.numel(), dtype=torch.int64, device=device
+    )
 
     cache_handle.write_rows(
         kv_c,
@@ -2086,6 +2094,7 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     kv_c = torch.randn(3, row_width - 2, device=device)
     k_pe = torch.randn(3, 1, 2, device=device)
     cache_handle.runtime.bind_source_cache(kv_pool)
+    cache_handle.num_actual_tokens = slot_mapping.numel()
     cache_handle.write_rows(
         kv_c,
         k_pe,
@@ -2250,7 +2259,6 @@ def test_hisparse_mixed_batch_bf16_row_split(
     metadata = builder.build(
         common_prefix_len=0, common_attn_metadata=common_attn_metadata
     )
-    num_decodes = metadata.num_decodes
     assert isinstance(metadata.prefill, SparseMLAPrefillMetadata)
 
     # Per-token sparse indices bounded by each token's position, with unique
@@ -2340,34 +2348,31 @@ def test_hisparse_mixed_batch_bf16_row_split(
     reference, _ = impl._bf16_flash_mla_kernel(q, kv_cache, ref_topk, ref_topk_length)
 
     # Host-resident pool with identical contents.
-    kv_pool = kv_cache.cpu().pin_memory()
+    kv_pool = kv_cache.squeeze(1).cpu().pin_memory()
     cache_handle.runtime.bind_source_cache(kv_pool)
 
     staging_calls = []
-    original_stage = cache_handle.runtime.stage_prefill_cache
+    original_gather = cache_handle.runtime.gather_prefill_cache
 
-    def spy_stage(self, kv, block_table, seq_lens):
-        staged, staged_bt = original_stage(kv, block_table, seq_lens)
-        staging_calls.append((block_table.clone(), seq_lens.clone(), staged.shape))
-        return staged, staged_bt
+    def spy_gather(self, kv, plan, resident_cache=None):
+        staged = original_gather(kv, plan, resident_cache)
+        staging_calls.append((plan, staged.shape))
+        return staged
 
-    cache_handle.runtime.stage_prefill_cache = MethodType(
-        spy_stage, cache_handle.runtime
+    cache_handle.runtime.gather_prefill_cache = MethodType(
+        spy_gather, cache_handle.runtime
     )
 
-    backend_output, _ = impl._forward_bf16_kv(q, kv_pool, sparse_indices, metadata)
+    backend_output, _ = impl._forward_bf16_kv(
+        q, kv_pool, sparse_indices, metadata, q.shape[1]
+    )
     torch.accelerator.synchronize()
 
     # Only the prefill rows' blocks were staged: the decode rows' 2048-token
     # contexts (32 blocks each) must stay off the staging gather.
     assert len(staging_calls) == 1
-    staged_bt, staged_seq_lens, staged_shape = staging_calls[0]
-    torch.testing.assert_close(
-        staged_bt, metadata.block_table[num_decodes:], rtol=0, atol=0
-    )
-    torch.testing.assert_close(
-        staged_seq_lens, metadata.seq_lens[num_decodes:], rtol=0, atol=0
-    )
+    plan, staged_shape = staging_calls[0]
+    assert plan is metadata.prefill.hisparse_staging_plan
     prefill_blocks = cdiv(batch_spec.seq_lens[-1], block_size)
     assert staged_shape[0] <= prefill_blocks + 1  # +1: block-0 tail padding
 
@@ -2448,6 +2453,11 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
         plan.miss_mask, (plan.gpu_row_ids < 0).int(), check_dtype=False
     )
 
+    plan.ensure_gpu_sources(torch.zeros_like(resident_table), resident_block_size)
+
+    assert plan.gpu_row_ids is not None
+    assert (plan.gpu_row_ids == -1).all()
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_hisparse_gather_prefill_cache_prefers_resident_rows():
@@ -2514,8 +2524,9 @@ def test_hisparse_mixed_mha_returns_decode_only_mqa_slice():
     def swap_in(self, indices, metadata, **kwargs):
         return torch.empty(1), indices, torch.full((2,), 4, dtype=torch.int32)
 
-    def run_kernel(self, query, cache, indices, lengths):
+    def run_kernel(self, query, cache, indices, lengths, actual_num_heads):
         assert query.shape == q.shape
+        assert actual_num_heads == q.shape[1]
         return expected, None
 
     def unexpected_stage(*args, **kwargs):
@@ -2532,7 +2543,7 @@ def test_hisparse_mixed_mha_returns_decode_only_mqa_slice():
         block_table=torch.zeros(2, 1, dtype=torch.int32),
         req_id_per_token=torch.arange(5, dtype=torch.int32),
     )
-    output, _ = impl._forward_bf16_kv(q, source_cache, topk, metadata)
+    output, _ = impl._forward_bf16_kv(q, source_cache, topk, metadata, q.shape[1])
     torch.testing.assert_close(output, expected)
 
 
@@ -2975,3 +2986,46 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
     assert out.is_contiguous()
     assert not out.isnan().any()
     assert not lse.isnan().any()
+
+
+def test_hisparse_prefill_reuses_builder_staging_plan():
+    """Every layer must reuse the batch plan instead of synchronizing to dedupe."""
+    plan = SimpleNamespace(
+        block_table=torch.tensor([[0]], dtype=torch.int32),
+        ensure_gpu_sources=MagicMock(),
+    )
+    staged = torch.empty((1, 1, 8))
+    calls = []
+
+    def gather(kv_cache, staging_plan, resident_cache=None):
+        calls.append((kv_cache, staging_plan, resident_cache))
+        return staged
+
+    def unexpected_stage(*args):
+        raise AssertionError("per-layer staging-plan construction is not allowed")
+
+    impl = object.__new__(FlashMLASparseImpl)
+    impl.hisparse_cache = SimpleNamespace(
+        runtime=SimpleNamespace(
+            gather_prefill_cache=gather,
+            stage_prefill_cache=unexpected_stage,
+        ),
+    )
+    source = torch.empty((1, 1, 8))
+    metadata = SimpleNamespace(
+        num_decodes=0,
+        num_decode_tokens=0,
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        prefill=SimpleNamespace(hisparse_staging_plan=plan),
+        req_id_per_token=torch.tensor([0], dtype=torch.int32),
+    )
+
+    result, block_table, request_ids = impl._hisparse_stage_prefill_rows(
+        source, metadata
+    )
+
+    assert result is staged
+    assert block_table is plan.block_table
+    torch.testing.assert_close(request_ids, metadata.req_id_per_token)
+    plan.ensure_gpu_sources.assert_not_called()
+    assert calls == [(source, plan, None)]

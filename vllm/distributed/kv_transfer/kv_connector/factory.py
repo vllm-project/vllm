@@ -12,7 +12,6 @@ from vllm.distributed.kv_transfer.kv_connector.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
-    supports_hisparse_host_export,
     supports_hma,
 )
 from vllm.logger import init_logger
@@ -144,28 +143,6 @@ class KVConnectorFactory:
         )
 
         return MultiConnector.all_children_support_hma(kv_transfer_config)
-
-    @classmethod
-    def requires_hisparse_host_mirroring(
-        cls, kv_transfer_config: "KVTransferConfig"
-    ) -> bool:
-        """Whether a producer exports HiSparse host-resident KV contents."""
-        if not kv_transfer_config.is_kv_producer:
-            return False
-        if kv_transfer_config.kv_connector == "MultiConnector":
-            connectors = kv_transfer_config.kv_connector_extra_config.get(
-                "connectors", []
-            )
-            return any(
-                cls.requires_hisparse_host_mirroring(
-                    KVTransferConfig(
-                        **{"engine_id": kv_transfer_config.engine_id, **config}
-                    )
-                )
-                for config in connectors
-            )
-        connector_cls = cls.get_connector_class(kv_transfer_config)
-        return supports_hisparse_host_export(connector_cls)
 
 
 # Register various connectors here.

@@ -136,6 +136,7 @@ def test_hisparse_cache_defers_required_host_mirror(monkeypatch):
     cache = hisparse_runtime_module.HiSparseCacheHandle(runtime)
     cache.view = SimpleNamespace(cache=torch.empty((2, 2, 4)))
     cache.slot_mapping = torch.tensor([0, 1], dtype=torch.int64)
+    cache.num_actual_tokens = 2
     cache.defer_host_mirror = True
     host_slots = torch.tensor([4, 5], dtype=torch.int64)
     monkeypatch.setattr(
@@ -153,6 +154,42 @@ def test_hisparse_cache_defers_required_host_mirror(monkeypatch):
 
     runtime.backup_rows.assert_not_called()
     assert cache.mirror_slot_mapping.data_ptr() == host_slots.data_ptr()
+
+
+def test_hisparse_cache_mirrors_prefill_before_attention(monkeypatch):
+    runtime = SimpleNamespace(
+        device=torch.device("cpu"),
+        eager_host_mirror=True,
+        max_num_reqs=4,
+        backup_rows=MagicMock(),
+        is_group_leader=False,
+    )
+    cache = hisparse_runtime_module.HiSparseCacheHandle(runtime)
+    cache.view = SimpleNamespace(cache=torch.empty((2, 2, 4)), block_size=2)
+    cache.slot_mapping = torch.tensor([0, 1], dtype=torch.int64)
+    cache.num_actual_tokens = 2
+    cache.defer_host_mirror = True
+    cache.mirror_staging_cache = torch.empty((2, 2, 4))
+    cache.mirror_staging_slots = torch.tensor([0, 1], dtype=torch.int64)
+    host_slots = torch.tensor([4, 5], dtype=torch.int64)
+    monkeypatch.setattr(
+        hisparse_runtime_module.ops, "concat_and_cache_mla", MagicMock()
+    )
+
+    cache.write_rows(
+        torch.empty((2, 2)),
+        torch.empty((2, 1, 2)),
+        host_slots,
+        "auto",
+        torch.tensor(1.0),
+        mirror_to_host=True,
+    )
+
+    runtime.backup_rows.assert_called_once()
+    mirror_cache, mirror_src, mirror_dst = runtime.backup_rows.call_args.args
+    assert mirror_cache is cache.mirror_staging_cache
+    torch.testing.assert_close(mirror_src, cache.mirror_staging_slots)
+    torch.testing.assert_close(mirror_dst, host_slots)
 
 
 def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
@@ -216,6 +253,59 @@ def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
     )
     follower.invalidate_written_slots.assert_not_called()
     worker.host_write_event.record.assert_called_once_with(current_stream)
+
+
+def test_hisparse_finish_forward_excludes_trailing_mtp_cache(monkeypatch):
+    dst_slots = torch.tensor([7, 8], dtype=torch.int64)
+    runtime = SimpleNamespace(
+        eager_host_mirror=True,
+        is_group_leader=False,
+        invalidate_written_slots=MagicMock(),
+    )
+    active = SimpleNamespace(
+        runtime=runtime,
+        decode_batch=True,
+        num_actual_tokens=2,
+        num_decode_tokens=2,
+        req_id_per_token=torch.tensor([0, 1], dtype=torch.int32),
+        mirror_slot_mapping=dst_slots,
+    )
+    mtp = SimpleNamespace(
+        runtime=runtime,
+        decode_batch=False,
+        defer_host_mirror=True,
+        num_actual_tokens=0,
+        num_decode_tokens=0,
+        req_id_per_token=None,
+        mirror_slot_mapping=dst_slots,
+    )
+    worker = object.__new__(HiSparseConnectorWorker)
+    worker.is_host_writer = True
+    worker.cache_handles = [active, mtp]
+    worker.mirror_src_slot_mappings = [torch.empty(2), torch.empty(2)]
+    worker.hot_backing = torch.empty(1)
+    worker.mirror_layer_offsets = torch.arange(2)
+    worker.mirror_src_indices_ptrs = torch.arange(2)
+    worker.backup_host_anchor = torch.empty(1)
+    worker.backup_host_cache_ptrs = torch.arange(2)
+    worker.mirror_src_block_stride = 1
+    worker.mirror_src_block_size = 1
+    worker.mirror_src_rows = 2
+    backup_layers = MagicMock()
+    monkeypatch.setattr(
+        torch.ops._C_cache_ops,
+        "hisparse_backup_layers",
+        backup_layers,
+        raising=False,
+    )
+
+    worker._enqueue_host_mirror()
+
+    backup_layers.assert_called_once()
+    assert backup_layers.call_args.args[1].numel() == 1
+    assert backup_layers.call_args.args[2].numel() == 1
+    assert backup_layers.call_args.args[4].numel() == 1
+    assert not mtp.defer_host_mirror
 
 
 def test_hisparse_shared_host_reader_skips_mirror(monkeypatch):
@@ -284,6 +374,7 @@ def test_hisparse_shared_host_reader_waits_for_writer(monkeypatch):
     worker.host_num_blocks = 1
     worker._post_forward_transfers = []
     worker._pending_invalid_block_ids = []
+    worker.cache_handles = []
     stream = MagicMock()
     monkeypatch.setattr(torch.accelerator, "current_stream", lambda device: stream)
 
@@ -293,6 +384,40 @@ def test_hisparse_shared_host_reader_waits_for_writer(monkeypatch):
     )
 
     stream.wait_event.assert_called_once_with(worker.host_write_event)
+
+
+def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
+    handle = SimpleNamespace(
+        decode_batch=True,
+        num_actual_tokens=2,
+        num_decode_tokens=2,
+        req_id_per_token=torch.tensor([0, 1]),
+        mirror_slot_mapping=torch.tensor([4, 5]),
+    )
+    worker = object.__new__(HiSparseConnectorWorker)
+    worker.is_host_writer = True
+    worker.hot_backing = SimpleNamespace(device=torch.device("cpu"))
+    worker.host_write_event = MagicMock()
+    worker.host_caches = ()
+    worker.host_num_blocks = 1
+    worker.cache_handles = [handle]
+    worker._post_forward_transfers = []
+    worker._pending_invalid_block_ids = []
+    worker._enqueue_host_mirror = MagicMock(wraps=worker._enqueue_host_mirror)
+    worker._enqueue_transfers = MagicMock()
+    stream = MagicMock()
+    monkeypatch.setattr(torch.accelerator, "current_stream", lambda device: stream)
+
+    worker.start_step(
+        SimpleNamespace(host_block_copies=[], command=None, source_block_ids=[]),
+        None,
+    )
+    worker.finish_forward()
+
+    worker._enqueue_host_mirror.assert_called_once_with()
+    assert handle.num_actual_tokens == 0
+    torch.testing.assert_close(handle.mirror_slot_mapping, torch.tensor([4, 5]))
+    worker._enqueue_transfers.assert_called_once_with([])
 
 
 def test_hisparse_runtime_invalidates_only_scheduled_request_states():
@@ -372,8 +497,8 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     assert len(plans) == len(streams) == 2
 
 
-def test_hisparse_cache_does_not_mirror_for_local_kv_offload(monkeypatch):
-    """Local indexer offload must not add sparse-KV host writes to decode."""
+def test_hisparse_cache_mirrors_for_local_kv_offload(monkeypatch):
+    """Decode rows must remain durable when local offload is configured."""
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
             max_num_seqs=2,
@@ -409,7 +534,7 @@ def test_hisparse_cache_does_not_mirror_for_local_kv_offload(monkeypatch):
     )
 
     assert cache_handle is not None
-    assert not cache_handle.runtime.eager_host_mirror
+    assert cache_handle.runtime.eager_host_mirror
 
 
 class _TestReplaySSMMixer(MambaMixer2):

@@ -373,16 +373,14 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 prefill_query_lens_cpu,
             )
             staging_plan = None
-            if (
-                self.vllm_config.attention_config.hisparse_config is not None
-                and chunked_context is not None
-            ):
+            if self.vllm_config.attention_config.hisparse_config is not None:
                 staging_plan = build_hisparse_prefill_staging_plan(
                     block_table,
                     common_attn_metadata.seq_lens[num_decodes:],
                     self.kv_cache_spec.block_size,
                 )
-                block_table = staging_plan.block_table
+                if chunked_context is not None:
+                    block_table = staging_plan.block_table
             prefill = SparseMLAPrefillMetadata(
                 block_table=block_table,
                 query_start_loc=prefill_query_start_loc,
@@ -936,11 +934,19 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         num_decodes = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
         assert attn_metadata.seq_lens is not None
-        staged_cache, staged_bt = self.hisparse_cache.runtime.stage_prefill_cache(
-            kv_cache,
-            attn_metadata.block_table[num_decodes:],
-            attn_metadata.seq_lens[num_decodes:],
-        )
+        prefill = attn_metadata.prefill
+        staging_plan = prefill.hisparse_staging_plan if prefill is not None else None
+        if staging_plan is None:
+            staged_cache, staged_bt = self.hisparse_cache.runtime.stage_prefill_cache(
+                kv_cache,
+                attn_metadata.block_table[num_decodes:],
+                attn_metadata.seq_lens[num_decodes:],
+            )
+        else:
+            staged_cache = self.hisparse_cache.runtime.gather_prefill_cache(
+                kv_cache, staging_plan
+            )
+            staged_bt = staging_plan.block_table
         prefill_req_ids = attn_metadata.req_id_per_token[num_decode_tokens:]
         if num_decodes > 0:
             prefill_req_ids = prefill_req_ids - num_decodes
@@ -1239,7 +1245,11 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None
         staging_plan = prefill_metadata.hisparse_staging_plan
-        if staging_plan is not None and kv_c_and_k_pe_cache.device.type == "cpu":
+        if (
+            staging_plan is not None
+            and prefill_metadata.chunked_context is not None
+            and kv_c_and_k_pe_cache.device.type == "cpu"
+        ):
             assert self.hisparse_cache is not None
             handle = self.hisparse_cache
             resident_cache = None
