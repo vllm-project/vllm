@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: ":nvidia: (H200) Rust Frontend OpenAI Coverage"
+  key: rust-frontend-openai-coverage
   timeout_in_minutes: 30
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -61,6 +62,7 @@ steps:
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200) Rust Frontend Serve/Admin Coverage"
+  key: rust-frontend-serve-admin-coverage
   timeout_in_minutes: 25
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -110,6 +112,7 @@ steps:
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200) Rust Frontend Core Correctness"
+  key: rust-frontend-core-correctness
   timeout_in_minutes: 20
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -124,6 +127,7 @@ steps:
   - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: ":nvidia: (H200) Rust Frontend Tool Use"
+  key: rust-frontend-tool-use
   device: h200_35gb
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
@@ -139,6 +143,7 @@ steps:
   - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
 
 - label: ":nvidia: (L4) Rust Frontend Distributed"
+  key: rust-frontend-distributed
   timeout_in_minutes: 25
   num_devices: 4
   working_dir: "/vllm-workspace/tests"
