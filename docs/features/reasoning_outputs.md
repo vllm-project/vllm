@@ -255,8 +255,9 @@ To use this feature:
 - `--reasoning-parser` enables reasoning extraction.
 - `--reasoning-config` defines the reasoning boundary tokens (e.g., `reasoning_start_str`, `reasoning_end_str`). If not set, vLLM will attempt to automatically initialize these tokens from the reasoning parser.
 - `thinking_token_budget` (a sampling parameter) sets the per-request reasoning token limit.
+- `--override-generation-config '{"thinking_token_budget": N}'` sets a server-side default applied to requests that do not specify one. An explicit per-request value always takes precedence.
 
-If `thinking_token_budget` is not specified, no explicit reasoning limit is applied beyond normal generation constraints such as `max_tokens`.
+If `thinking_token_budget` is not specified on the request and no server-side default is configured, no explicit reasoning limit is applied beyond normal generation constraints such as `max_tokens`.
 
 `--reasoning-config` accepts a JSON object corresponding to  
 [ReasoningConfig][vllm.config.ReasoningConfig] with the following fields:
