@@ -174,4 +174,10 @@ def test_llm_delete_inprocess_direct(
         wait_for_gpu_memory_to_clear(
             devices=[0],
             threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
+            threshold_ratio=0.01 if current_platform.is_rocm() else None,
+            timeout_s=(
+                SHUTDOWN_TEST_TIMEOUT_SEC // 2
+                if current_platform.is_rocm()
+                else SHUTDOWN_TEST_TIMEOUT_SEC
+            ),
         )
