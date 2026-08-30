@@ -29,9 +29,7 @@ def _get_counter(metrics, name: str) -> float:
 
 @pytest.mark.slow_test
 @large_gpu_mark(min_gb=80)
-# The refiner only biases the same block-diffusion draft, so acceptance at or below the
-# bare drafter's (~6.3 on this pair) means it is not in the loop at all: weights not
-# loaded, K read as 0, or the mixer left unfolded.
+# Acceptance length test
 def test_xpress_accepts_more_than_the_bare_drafter(monkeypatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
@@ -65,10 +63,7 @@ def test_xpress_accepts_more_than_the_bare_drafter(monkeypatch):
         cleanup_dist_env_and_memory()
 
 
-# Speculative decoding is meant to be lossless: every drafted token is verified against
-# the target, so at temperature 0 the text should be what plain autoregressive decoding
-# would have produced. A mismatch means the verify/accept path is wrong, which acceptance
-# length alone would not reveal -- a broken sampler can still accept plenty of tokens.
+# lossless test
 @pytest.mark.slow_test
 @large_gpu_mark(min_gb=80)
 def test_xpress_output_matches_non_speculative(monkeypatch):
@@ -98,9 +93,6 @@ def test_xpress_output_matches_non_speculative(monkeypatch):
     ref_texts = _run(spec=False)
 
     matches = sum(a == b for a, b in zip(spec_texts, ref_texts))
-    # bf16 verification is not bit-reproducible across the two engine configurations, so
-    # follow the threshold the existing spec-decode e2e tests use rather than demanding
-    # every prompt match.
     assert matches >= int(0.66 * len(PROMPTS)), (
         f"only {matches}/{len(PROMPTS)} outputs matched non-speculative decoding"
     )
