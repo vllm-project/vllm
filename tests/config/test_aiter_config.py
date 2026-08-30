@@ -7,11 +7,12 @@ import multiprocessing
 
 import pytest
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import AITERConfig, VllmConfig
 from vllm.platforms import current_platform
 
-# Class vars init_from_config writes; snapshot/restore so a test that mutates the
-# process-global rocm_aiter_ops class vars do not leak into the next one.
+# Class vars init_from_config writes; snapshot/restore so mutations from one test
+# don't leak into the next (they are process-global and pytest shares a process).
 _AITER_CLASS_VARS = (
     "_AITER_ENABLED",
     "_CUSTOM_ALL_REDUCE_ENABLED",
@@ -32,13 +33,14 @@ _AITER_CLASS_VARS = (
 )
 
 
-@pytest.fixture
-def restore_aiter_class_vars():
-    from vllm._aiter_ops import rocm_aiter_ops
-
+@pytest.fixture(autouse=True)
+def _restore_aiter_class_vars():
+    """Restore the process-global rocm_aiter_ops class vars after every test.
+    autouse: ``init_from_config`` / ``VllmConfig`` construction /
+    ``refresh_env_variables`` all mutate them in place."""
     saved = {v: getattr(rocm_aiter_ops, v) for v in _AITER_CLASS_VARS}
     try:
-        yield rocm_aiter_ops
+        yield
     finally:
         for v, val in saved.items():
             setattr(rocm_aiter_ops, v, val)
@@ -87,10 +89,8 @@ def test_compute_hash_reflects_fields():
     assert base.compute_hash() != flipped.compute_hash()
 
 
-def test_init_from_config_syncs_class_vars(restore_aiter_class_vars):
+def test_init_from_config_syncs_class_vars():
     """rocm_aiter_ops holds the config values in class vars for the hot path."""
-    rocm_aiter_ops = restore_aiter_class_vars
-
     rocm_aiter_ops.init_from_config(
         AITERConfig(enabled=True, moe=False, mla=True, moe_dispatch_policy=3)
     )
@@ -101,14 +101,12 @@ def test_init_from_config_syncs_class_vars(restore_aiter_class_vars):
 
 
 def test_refresh_env_variables_restores_every_synced_field(
-    restore_aiter_class_vars, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """refresh_env_variables() must reset every class var init_from_config()
     writes, so a test that monkeypatches an env var and then calls it does not
     leak state. Regression guard for _MOE_DISPATCH_POLICY, which init_from_config
     writes but refresh_env_variables historically skipped."""
-    rocm_aiter_ops = restore_aiter_class_vars
-
     rocm_aiter_ops.init_from_config(
         AITERConfig(enabled=True, moe=False, moe_dispatch_policy=7)
     )
@@ -143,11 +141,9 @@ def _class_var_tuple(ops) -> tuple:
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific")
-def test_vllm_config_post_init_syncs_class_vars(restore_aiter_class_vars):
+def test_vllm_config_post_init_syncs_class_vars():
     """VllmConfig.__post_init__ sets the AITER class vars from aiter_config for the
     front-end / single-GPU path."""
-    rocm_aiter_ops = restore_aiter_class_vars
-
     VllmConfig(aiter_config=_override_config())
 
     assert _class_var_tuple(rocm_aiter_ops) == _EXPECTED
@@ -172,7 +168,7 @@ def _worker_class_var_probe(vllm_config, q):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific")
-def test_worker_process_resyncs_class_vars(restore_aiter_class_vars):
+def test_worker_process_resyncs_class_vars():
     """A worker gets VllmConfig by value but __post_init__ is not re-run there,
     so WorkerBase.__init__ must call init_from_config to pick up overrides."""
     vllm_config = VllmConfig(aiter_config=_override_config())
