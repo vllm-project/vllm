@@ -1919,11 +1919,8 @@ def get_kv_cache_groups(
         # full attention, or all layers are sliding window attention with the
         # same window size). Put all layers into one group.
         return _get_kv_cache_groups_uniform_type(uniform_spec)
-    elif kv_cache_groups := _get_packed_kv_cache_groups(vllm_config, kv_cache_spec):
-        return kv_cache_groups
-
-    # Pull HiddenStateCacheSpec layers out before the general multi-group
-    # path so they don't affect page-size unification or grouping.
+    # Hidden-state layers use their own block table and must not be absorbed
+    # into a compatible attention bucket.
     hidden_specs = {
         k: v for k, v in kv_cache_spec.items() if isinstance(v, HiddenStateCacheSpec)
     }
@@ -1932,6 +1929,14 @@ def get_kv_cache_groups(
         for k, v in kv_cache_spec.items()
         if not isinstance(v, HiddenStateCacheSpec)
     }
+
+    if packed_groups := _get_packed_kv_cache_groups(vllm_config, filtered_spec):
+        # Block-outermost blocks are strided by the widest group, so hidden
+        # groups need no page alignment.
+        packed_groups += [
+            KVCacheGroupSpec([name], spec) for name, spec in hidden_specs.items()
+        ]
+        return packed_groups
 
     # Prefer preserving each layer's cache semantics. If physical pages cannot
     # be unified, try a supported allocation-only fallback before failing.
