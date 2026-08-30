@@ -6,7 +6,7 @@ import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pydantic
 import pytest
@@ -2129,12 +2129,50 @@ def test_draft_sample_method_gumbel_is_rejected():
 
 
 @patch("vllm.config.speculative.ModelConfig")
+def test_deepseek_dspark_accepts_draft_topk(mock_model_config_cls):
+    draft_hf_config = SimpleNamespace(
+        architectures=["DeepseekV4ForCausalLM"],
+        model_type="deepseek_v4",
+        n_predict=7,
+        vocab_size=129280,
+    )
+    draft_config = MagicMock(
+        architectures=["DeepseekV4ForCausalLM"],
+        hf_config=draft_hf_config,
+        max_model_len=32768,
+        model="/model",
+    )
+    mock_model_config_cls.return_value = draft_config
+    target_config = MagicMock(
+        max_model_len=32768,
+        model="/model",
+        model_weights=None,
+        quantization=None,
+    )
+
+    def update_arch(config):
+        config.draft_model_config.architectures = (
+            config.draft_model_config.hf_config.architectures
+        )
+
+    with patch.object(SpeculativeConfig, "update_arch_", update_arch):
+        speculative_config = SpeculativeConfig(
+            method="dspark",
+            num_speculative_tokens=7,
+            dspark_draft_topk=512,
+            target_model_config=target_config,
+            target_parallel_config=ParallelConfig(tensor_parallel_size=8),
+        )
+
+    assert speculative_config.draft_model_config.architectures == ["DSparkDraftModel"]
+    assert draft_hf_config.dspark_draft_topk == 512
+
+
+@patch("vllm.config.speculative.ModelConfig")
 def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     """Regression test: MTP + runai_streamer should use model_weights (original
     S3 URL) for the draft model, not model (local cache dir set by
     pull_runai_model_from_obj_storage)."""
-    from unittest.mock import MagicMock
-
     s3_url = "s3://my-bucket/Qwen3-35B-A3B-FP8"
     local_cache = "/root/.cache/vllm/assets/model_streamer/abcd1234"
 

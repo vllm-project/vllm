@@ -203,6 +203,10 @@ class DSparkSpeculator(DFlashSpeculator):
         paths then consume that truncated distribution unchanged.
         """
         assert self._draft_topk is not None
+        if self.draft_logits is None and hasattr(self.model, "compute_draft_topk"):
+            self._sample_sequential_topk_greedy(num_reqs, head_hidden)
+            return
+
         n_spec = self.num_speculative_steps
         num_sample = num_reqs * n_spec
         sample_hidden = head_hidden[self.sample_indices[:num_sample]]
@@ -231,6 +235,43 @@ class DSparkSpeculator(DFlashSpeculator):
             draft_sampled_i = self._sample_logits(
                 logits_i, idx_map[:, i], sample_pos[:, i], i
             )
+            self.draft_tokens[:num_reqs, i] = draft_sampled_i
+            prev = draft_sampled_i
+
+        if self.enable_adaptive_verification:
+            confidence = self.model.compute_confidence(
+                sample_hidden,
+                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+            )
+            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
+                num_reqs, n_spec
+            )
+
+    def _sample_sequential_topk_greedy(
+        self, num_reqs: int, head_hidden: torch.Tensor
+    ) -> None:
+        assert self._draft_topk is not None
+        n_spec = self.num_speculative_steps
+        num_sample = num_reqs * n_spec
+        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+        draft_indices, base_values = self.model.compute_draft_topk(
+            sample_hidden, self._draft_topk
+        )
+        draft_indices = draft_indices.view(num_reqs, n_spec, self._draft_topk)
+        base_values = base_values.view(num_reqs, n_spec, self._draft_topk)
+        confidence_markov_embeds = []
+        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+
+        for i in range(n_spec):
+            markov_embed = self.model.markov_embed(prev)
+            if self.enable_adaptive_verification:
+                confidence_markov_embeds.append(markov_embed)
+            scores = self.model.score_draft_candidates(
+                markov_embed, base_values[:, i], draft_indices[:, i]
+            )
+            selected = scores.argmax(dim=-1, keepdim=True)
+            draft_ids = draft_indices[:, i].gather(1, selected).squeeze(1)
+            draft_sampled_i = self.model.map_draft_to_target(draft_ids)
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 

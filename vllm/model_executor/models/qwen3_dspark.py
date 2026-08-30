@@ -108,6 +108,23 @@ class DSparkMarkovHead(nn.Module):
         )
         return logits.scatter_(1, index, corrected.squeeze(-1))
 
+    def score_gathered(
+        self,
+        markov_embed: torch.Tensor,
+        values: torch.Tensor,
+        index: torch.Tensor,
+        scale: float = 1.0,
+    ) -> torch.Tensor:
+        """Apply the Markov projection only to selected vocabulary rows."""
+        weight = self.markov_w2.weight[index]
+        return torch.baddbmm(
+            values.unsqueeze(-1),
+            weight,
+            markov_embed.unsqueeze(-1),
+            beta=1.0,
+            alpha=scale,
+        ).squeeze(-1)
+
 
 class DSparkConfidenceHead(nn.Module):
     """DSpark acceptance-confidence head."""

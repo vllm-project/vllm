@@ -274,7 +274,8 @@ class LogitsProcessor(PluggableLayer):
         if num_pad > 0:
             logits[..., -num_pad:] = -float("inf")
 
-        values, ids = _topk(logits, k)
+        local_k = min(k, logits.shape[-1])
+        values, ids = _topk(logits, local_k)
         # Convert shard-local indices to global vocab indices.
         ids = ids.to(torch.int64) + lm_head.shard_indices.org_vocab_start_index
 

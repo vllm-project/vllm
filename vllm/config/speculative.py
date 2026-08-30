@@ -583,8 +583,9 @@ class SpeculativeConfig:
     usage."""
 
     dspark_draft_topk: int | None = Field(default=None, ge=1)
-    """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
-    top-k base-logit candidates. Requires draft tensor parallel size 1."""
+    """Evaluate the DSpark Markov projection only for the top-k base-logit
+    candidates. Supported by Qwen3 and DeepSeek-V4 DSpark models. Qwen3
+    requires draft tensor parallel size 1."""
 
     def compute_hash(self) -> str:
         """
@@ -1418,10 +1419,13 @@ class SpeculativeConfig:
                             not in self.draft_model_config.architectures
                             and _QWEN3_OMNI_DSPARK_ARCHITECTURE
                             not in self.draft_model_config.architectures
+                            and "DSparkDraftModel"
+                            not in self.draft_model_config.architectures
                         ):
                             raise ValueError(
                                 "dspark_draft_topk is only supported by "
-                                "Qwen3DSparkModel and Qwen3OmniDSparkModel"
+                                "Qwen3DSparkModel, Qwen3OmniDSparkModel, and "
+                                "DeepSeek-V4 DSpark"
                             )
                         hf_config.dspark_draft_topk = dspark_draft_topk
 
