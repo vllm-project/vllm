@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
@@ -315,6 +316,42 @@ class TestCSALinearGrouping:
         # The hash granularity is the GCD over prefix-cacheable groups only;
         # the 4-token scratch ring is excluded (it would drag it to 4).
         assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (16, 16)
+
+    def test_compressed_attention_hashes_can_be_finer_than_cache_hits(self):
+        config = _shared_layout_config()
+        config.cache_config.enable_prefix_caching = True
+        specs = {
+            "compressed.4": MLAAttentionSpec(
+                block_size=256,
+                num_kv_heads=1,
+                head_size=16,
+                dtype=torch.bfloat16,
+                tokens_per_state=4,
+            ),
+            "compressed.128": MLAAttentionSpec(
+                block_size=256,
+                num_kv_heads=1,
+                head_size=16,
+                dtype=torch.bfloat16,
+                tokens_per_state=128,
+            ),
+            "compressor_state.4": SlidingWindowMLASpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=8,
+                head_size_v=0,
+                dtype=torch.bfloat16,
+                sliding_window=8,
+            ),
+        }
+        groups = get_kv_cache_groups(config, specs)
+        kv_cache_config = get_kv_cache_config_from_groups(
+            config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
+        )
+
+        # Hashes are computed every 4 tokens, but without an align-mode Mamba
+        # group cache hits remain on the 256-token scheduler boundary.
+        assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (256, 4)
 
     @pytest.mark.parametrize("wide", ["unbalanced_attention", "unsplittable_state"])
     def test_mamba_split_measures_the_block_the_other_groups_already_force(self, wide):
