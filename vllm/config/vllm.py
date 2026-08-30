@@ -2797,12 +2797,12 @@ class VllmConfig:
             )
 
     def _maybe_sync_aiter_ops(self) -> None:
-        """Push ``aiter_config`` into the ``rocm_aiter_ops`` toggle cache.
+        """Set the ``rocm_aiter_ops`` AITER enablement class vars from ``aiter_config``.
 
-        ``rocm_aiter_ops`` mirrors its toggles into class variables at import
-        time (from env vars) so the hot path is a plain attribute read. This
-        re-points that cache at ``aiter_config``, which is the typed,
-        cache-hashed, worker-serialized source of truth.
+        ``rocm_aiter_ops`` reads these into class variables at import (from
+        env vars) so the hot path is a plain attribute read. When an
+        ``AITERConfig`` is present it is the source of truth instead: typed,
+        part of the compilation hash, and serialized to workers.
         """
         from vllm.platforms import current_platform
 

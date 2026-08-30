@@ -101,7 +101,7 @@ class WorkerBase:
         )
 
         # pickle does not re-run VllmConfig.__post_init__ in worker
-        # subprocesses, so re-sync the ROCm AITER toggle cache here.
+        # subprocesses, so set the ROCm AITER class vars from the config here.
         if current_platform.is_rocm():
             from vllm._aiter_ops import rocm_aiter_ops
 

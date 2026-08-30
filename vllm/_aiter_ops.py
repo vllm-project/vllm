@@ -1759,17 +1759,13 @@ class rocm_aiter_ops:
 
     @classmethod
     def refresh_env_variables(cls):
-        """
-        Since the environment variables are assigned when the module is imported,
-        This is a helper function to reload all the env variables from
-        the environment variables.
-        for example, after monkey patching the env variables in the unit test,
-        you can call this function to reload the env variables.
+        """Re-read the AITER enablement class vars from their ``VLLM_ROCM_USE_AITER*``
+        env vars.
 
-        This is the env-var path; ``init_from_config`` is the config-driven
-        equivalent that syncs the same class vars from ``VllmConfig.aiter_config``.
-        Tests that monkeypatch ``VLLM_ROCM_USE_AITER*`` directly use this;
-        the engine syncs via ``init_from_config``.
+        They are read once at import (see the class ``Note``), so call this
+        after monkeypatching an env var in a test to pick up the new value.
+        ``init_from_config`` is the equivalent entry point when the values
+        come from an ``AITERConfig`` instead.
         """
         cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
         cls._CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
@@ -1790,16 +1786,13 @@ class rocm_aiter_ops:
 
     @classmethod
     def init_from_config(cls, aiter_config: "AITERConfig") -> None:
-        """Point the toggle cache at ``VllmConfig.aiter_config``.
+        """Set the AITER enablement class vars from ``aiter_config``.
 
-        Called once per process (front-end in ``VllmConfig.__post_init__``,
-        workers in ``WorkerBase.__init__``). ``aiter_config`` defaults every
-        field from the matching ``VLLM_ROCM_USE_AITER*`` env var, so this
-        preserves prior behaviour when the config is left unset.
-
-        This is the config-driven path; ``refresh_env_variables`` syncs the
-        same class vars straight from the env vars for tests that monkeypatch
-        them without going through ``VllmConfig``.
+        Called once per process -- ``VllmConfig.__post_init__`` for the
+        front-end / single-GPU path, ``WorkerBase.__init__`` for worker
+        subprocesses (pickle does not re-run ``__post_init__`` there). Each
+        ``AITERConfig`` field defaults from the matching ``VLLM_ROCM_USE_AITER*``
+        env var, so an unset config reproduces the import-time values.
 
         Args:
             aiter_config: The ``AITERConfig`` from ``VllmConfig``.
