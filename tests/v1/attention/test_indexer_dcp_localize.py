@@ -270,6 +270,10 @@ def _merge_local_topks_global_with_fake_dcp(
         (True, 32, True, 4, "explicit"),
     ],
 )
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_cutedsl(),
+    reason="DCP Top-K symmetric-memory dispatch requires CUDA and CuTeDSL.",
+)
 def test_dcp_topk_symm_serving_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     workspace_available: bool,
