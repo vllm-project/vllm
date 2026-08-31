@@ -3,6 +3,7 @@
 
 import json
 from collections.abc import Sequence
+from typing import Any, Literal
 
 import pytest
 from openai_harmony import (
@@ -11,15 +12,20 @@ from openai_harmony import (
     RenderConversationConfig,
     Role,
 )
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, GenerationConfig
 
+from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.harmony import HarmonyParser
 from vllm.parser.parser_manager import ParserManager
+from vllm.sampling_params import StructuredOutputsParams
+from vllm.v1.structured_output.backend_types import StructuredOutputOptions
+from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
 REASONING_MODEL_NAME = "openai/gpt-oss-20b"
 
@@ -27,6 +33,26 @@ REASONING_MODEL_NAME = "openai/gpt-oss-20b"
 @pytest.fixture(scope="module")
 def gpt_oss_tokenizer():
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
+
+
+@pytest.fixture(scope="module")
+def gpt_oss_stop_token_ids() -> set[int]:
+    eos_token_id = GenerationConfig.from_pretrained(REASONING_MODEL_NAME).eos_token_id
+    if isinstance(eos_token_id, int):
+        return {eos_token_id}
+    return set(eos_token_id)
+
+
+@pytest.fixture(scope="module")
+def xgrammar_backend(gpt_oss_tokenizer) -> XgrammarBackend:
+    vllm_config = VllmConfig(
+        structured_outputs_config=StructuredOutputsConfig(backend="xgrammar")
+    )
+    return XgrammarBackend(
+        vllm_config,
+        tokenizer=gpt_oss_tokenizer,
+        vocab_size=len(gpt_oss_tokenizer),
+    )
 
 
 @pytest.fixture
@@ -63,8 +89,11 @@ def encode_output(harmony_str: str) -> list[int]:
     return get_encoding().encode(harmony_str, allowed_special="all")
 
 
-def assistant(content: str, channel: str) -> Message:
-    return Message.from_role_and_content(Role.ASSISTANT, content).with_channel(channel)
+def assistant(content: str, channel: str, content_type: str | None = None) -> Message:
+    message = Message.from_role_and_content(Role.ASSISTANT, content).with_channel(
+        channel
+    )
+    return message if content_type is None else message.with_content_type(content_type)
 
 
 def tool_call(
@@ -77,16 +106,14 @@ def tool_call(
     return message if content_type is None else message.with_content_type(content_type)
 
 
-def get_model_output_tokens(
-    prompt_messages: Sequence[Message],
-    response_messages: Sequence[Message],
-) -> list[int]:
+def get_model_output_tokens(response_messages: Sequence[Message]) -> list[int]:
     enc = get_encoding()
+    prompt_messages = [Message.from_role_and_content(Role.USER, "x")]
     # Keep analysis messages when synthesizing model-output-only token sequences
     # for parser tests; the default render path drops them after a later final turn.
     config = RenderConversationConfig(auto_drop_analysis=False)
     prompt_ids = enc.render_conversation_for_completion(
-        Conversation.from_messages(list(prompt_messages)),
+        Conversation.from_messages(prompt_messages),
         Role.ASSISTANT,
         config=config,
     )
@@ -96,6 +123,10 @@ def get_model_output_tokens(
     )
     assert full_ids[: len(prompt_ids)] == prompt_ids
     return full_ids[len(prompt_ids) :]
+
+
+def get_model_output_str(response_messages: Sequence[Message]) -> str:
+    return get_encoding().decode_utf8(get_model_output_tokens(response_messages))
 
 
 def get_text(msg: Message) -> str:
@@ -189,13 +220,12 @@ class TestParse:
     # Rendered conversation outputs.
 
     def test_reasoning_only(self, harmony_parser, chat_request):
-        prompt = [Message.from_role_and_content(Role.USER, "Why?")]
         response = [assistant("This is reasoning", "analysis")]
 
         reasoning, content, tool_calls = harmony_parser.parse(
             "",
             chat_request,
-            model_output_token_ids=get_model_output_tokens(prompt, response),
+            model_output_token_ids=get_model_output_tokens(response),
         )
 
         assert reasoning == "This is reasoning"
@@ -203,13 +233,12 @@ class TestParse:
         assert tool_calls is None
 
     def test_content_only(self, harmony_parser, chat_request):
-        prompt = [Message.from_role_and_content(Role.USER, "Hello")]
         response = [assistant("This is a test", "final")]
 
         reasoning, content, tool_calls = harmony_parser.parse(
             "",
             chat_request,
-            model_output_token_ids=get_model_output_tokens(prompt, response),
+            model_output_token_ids=get_model_output_tokens(response),
         )
 
         assert reasoning is None
@@ -217,7 +246,6 @@ class TestParse:
         assert tool_calls is None
 
     def test_reasoning_and_content(self, harmony_parser, chat_request):
-        prompt = [Message.from_role_and_content(Role.USER, "What is 2+2?")]
         response = [
             assistant("I should think first.", "analysis"),
             assistant("The answer is 4.", "final"),
@@ -226,7 +254,7 @@ class TestParse:
         reasoning, content, tool_calls = harmony_parser.parse(
             "",
             chat_request,
-            model_output_token_ids=get_model_output_tokens(prompt, response),
+            model_output_token_ids=get_model_output_tokens(response),
         )
 
         assert reasoning == "I should think first."
@@ -244,15 +272,12 @@ class TestParse:
     def test_single_tool_call(
         self, harmony_parser, chat_request, tool_args, tool_channel
     ):
-        prompt = [
-            Message.from_role_and_content(Role.USER, "What is the weather in Tokyo?")
-        ]
         response = [tool_call("functions.get_current_weather", tool_args, tool_channel)]
 
         reasoning, content, tool_calls = harmony_parser.parse(
             "",
             chat_request,
-            model_output_token_ids=get_model_output_tokens(prompt, response),
+            model_output_token_ids=get_model_output_tokens(response),
         )
 
         assert reasoning is None
@@ -262,11 +287,6 @@ class TestParse:
         ]
 
     def test_multiple_tool_calls_varied_formats(self, harmony_parser, chat_request):
-        prompt = [
-            Message.from_role_and_content(
-                Role.USER, "What is the weather in Tokyo based on where I'm at?"
-            )
-        ]
         response = [
             tool_call("functions.get_current_weather", '{"location": "Tokyo"}'),
             tool_call("functions.get_user_location", '{"location": "Tokyo"}'),
@@ -283,7 +303,7 @@ class TestParse:
         _, content, tool_calls = harmony_parser.parse(
             "",
             chat_request,
-            model_output_token_ids=get_model_output_tokens(prompt, response),
+            model_output_token_ids=get_model_output_tokens(response),
         )
 
         assert content is None
@@ -297,13 +317,12 @@ class TestParse:
         ]
 
     def test_tool_call_bare_recipient(self, harmony_parser, chat_request):
-        prompt = [Message.from_role_and_content(Role.USER, "Weather?")]
         response = [tool_call("get_current_weather", '{"location": "Tokyo"}')]
 
         _, _, tool_calls = harmony_parser.parse(
             "",
             chat_request,
-            model_output_token_ids=get_model_output_tokens(prompt, response),
+            model_output_token_ids=get_model_output_tokens(response),
         )
 
         assert tool_call_tuples(tool_calls) == [
@@ -311,7 +330,6 @@ class TestParse:
         ]
 
     def test_multiple_tool_calls_bare_recipients(self, harmony_parser, chat_request):
-        prompt = [Message.from_role_and_content(Role.USER, "Use both tools.")]
         response = [
             tool_call("get_current_weather", '{"location": "Tokyo"}'),
             tool_call("get_user_location", "{}"),
@@ -320,7 +338,7 @@ class TestParse:
         _, _, tool_calls = harmony_parser.parse(
             "",
             chat_request,
-            model_output_token_ids=get_model_output_tokens(prompt, response),
+            model_output_token_ids=get_model_output_tokens(response),
         )
 
         assert tool_call_tuples(tool_calls) == [
@@ -329,7 +347,6 @@ class TestParse:
         ]
 
     def test_assistant_recipient_not_tool(self, harmony_parser, chat_request):
-        prompt = [Message.from_role_and_content(Role.USER, "Hello")]
         response = [
             tool_call("assistant", "Some tool response", content_type=None),
             assistant("Here is the answer", "final"),
@@ -338,7 +355,7 @@ class TestParse:
         reasoning, content, tool_calls = harmony_parser.parse(
             "",
             chat_request,
-            model_output_token_ids=get_model_output_tokens(prompt, response),
+            model_output_token_ids=get_model_output_tokens(response),
         )
 
         assert reasoning is None
@@ -346,13 +363,12 @@ class TestParse:
         assert tool_calls is None
 
     def test_tool_call_dotted_name(self, harmony_parser, chat_request):
-        prompt = [Message.from_role_and_content(Role.USER, "Compute 2+3")]
         response = [tool_call("math.sum", '{"a": 2, "b": 3}')]
 
         _, _, tool_calls = harmony_parser.parse(
             "",
             chat_request,
-            model_output_token_ids=get_model_output_tokens(prompt, response),
+            model_output_token_ids=get_model_output_tokens(response),
         )
 
         assert tool_call_tuples(tool_calls) == [
@@ -360,7 +376,6 @@ class TestParse:
         ]
 
     def test_tool_calls_with_final_content(self, harmony_parser, chat_request):
-        prompt = [Message.from_role_and_content(Role.USER, "What is the weather?")]
         response = [
             assistant("User asked about the weather.", "analysis"),
             tool_call("functions.get_current_weather", '{"location": "Tokyo"}'),
@@ -370,7 +385,7 @@ class TestParse:
         reasoning, content, tool_calls = harmony_parser.parse(
             "",
             chat_request,
-            model_output_token_ids=get_model_output_tokens(prompt, response),
+            model_output_token_ids=get_model_output_tokens(response),
         )
 
         assert reasoning == "User asked about the weather."
@@ -674,12 +689,11 @@ class TestParseDelta:
         recipient,
     ):
         parser = HarmonyParser(gpt_oss_tokenizer)
-        prompt = [Message.from_role_and_content(Role.USER, "Hello")]
         response = [tool_call(recipient, "Ignore this", content_type=None)]
 
         delta = parser.parse_delta(
             delta_text="",
-            delta_token_ids=get_model_output_tokens(prompt, response),
+            delta_token_ids=get_model_output_tokens(response),
             request=chat_request,
             finished=False,
         )
@@ -857,3 +871,381 @@ class TestProcessChunk:
             ("analysis", "One"),
             ("final", "Two"),
         ]
+
+
+class TestAdjustRequest:
+    REQUEST_TEXT = "Hello"
+    TOOL_TYPE = "function"
+    TOOL_1_NAME = "get_user_location"
+    TOOL_2_NAME = "get_weather"
+    TOOLS = [
+        {
+            "name": TOOL_1_NAME,
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+        {
+            "name": TOOL_2_NAME,
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    ]
+    OUTPUT_SCHEMA = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+
+    ANALYSIS = get_model_output_str([assistant("reasoning", "analysis")])
+    COMMENTARY = get_model_output_str([assistant("commentary", "commentary")])
+    TOOL_CALL_1_CHANNEL_FIRST = (
+        ANALYSIS + f"<|start|>assistant<|channel|>commentary to=functions.{TOOL_1_NAME}"
+        " <|constrain|>json<|message|>{}<|call|>"
+    )
+    TOOL_CALL_1_FUNCTION_FIRST = get_model_output_str(
+        [
+            assistant("reasoning", "analysis"),
+            tool_call(f"functions.{TOOL_1_NAME}", "{}"),
+        ]
+    )
+    TOOL_CALL_2_CHANNEL_FIRST = (
+        ANALYSIS + f"<|start|>assistant<|channel|>commentary to=functions.{TOOL_2_NAME}"
+        ' <|constrain|>json<|message|>{"city": "Tokyo"}<|call|>'
+    )
+    TOOL_CALL_2_FUNCTION_FIRST = get_model_output_str(
+        [
+            assistant("reasoning", "analysis"),
+            tool_call(f"functions.{TOOL_2_NAME}", '{"city": "Tokyo"}'),
+        ]
+    )
+    FINAL_JSON_SCHEMA = get_model_output_str(
+        [
+            assistant("reasoning", "analysis"),
+            assistant('{"answer": "Tokyo"}', "final", "json"),
+        ]
+    )
+    FINAL_JSON_OBJECT = get_model_output_str(
+        [
+            assistant("reasoning", "analysis"),
+            assistant('{"city": "Tokyo"}', "final", "<|constrain|>json"),
+        ]
+    )
+    FINAL_TEXT_ONLY = get_model_output_str(
+        [assistant("reasoning", "analysis"), assistant("any", "final")]
+    )
+    FINAL_REGEX = get_model_output_str(
+        [assistant("reasoning", "analysis"), assistant("regex", "final")]
+    )
+    FINAL_CHOICE = get_model_output_str(
+        [assistant("reasoning", "analysis"), assistant("choice1", "final")]
+    )
+    FINAL_GRAMMAR = get_model_output_str(
+        [assistant("reasoning", "analysis"), assistant("grammar", "final")]
+    )
+    FINAL_STRUCTURAL_TAG = get_model_output_str(
+        [assistant("reasoning", "analysis"), assistant("tag content", "final")]
+    )
+    ADMISSION_SAMPLES = (
+        "COMMENTARY",
+        "TOOL_CALL_1_CHANNEL_FIRST",
+        "TOOL_CALL_1_FUNCTION_FIRST",
+        "TOOL_CALL_2_CHANNEL_FIRST",
+        "TOOL_CALL_2_FUNCTION_FIRST",
+        "FINAL_JSON_SCHEMA",
+        "FINAL_JSON_OBJECT",
+        "FINAL_TEXT_ONLY",
+        "FINAL_REGEX",
+        "FINAL_CHOICE",
+        "FINAL_GRAMMAR",
+        "FINAL_STRUCTURAL_TAG",
+    )
+
+    @staticmethod
+    def _build_request(
+        request_kind: Literal["chat", "responses"],
+        tool_choice: str = "none",
+        strict_tools: bool = False,
+        response_format_type: str | None = None,
+        structured_outputs: StructuredOutputsParams | None = None,
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        data: dict[str, Any] = {
+            "model": REASONING_MODEL_NAME,
+        }
+        if request_kind == "chat":
+            data["messages"] = [
+                {
+                    "role": "user",
+                    "content": TestAdjustRequest.REQUEST_TEXT,
+                }
+            ]
+        else:
+            data["input"] = TestAdjustRequest.REQUEST_TEXT
+
+        if request_kind == "chat":
+            data["tools"] = [
+                {
+                    "type": TestAdjustRequest.TOOL_TYPE,
+                    "function": {"strict": strict_tools, **tool_def},
+                }
+                for tool_def in TestAdjustRequest.TOOLS
+            ]
+            data["tool_choice"] = (
+                {
+                    "type": TestAdjustRequest.TOOL_TYPE,
+                    "function": {"name": TestAdjustRequest.TOOL_2_NAME},
+                }
+                if tool_choice == "named"
+                else tool_choice
+            )
+        else:
+            data["tools"] = [
+                {
+                    "type": TestAdjustRequest.TOOL_TYPE,
+                    "strict": strict_tools,
+                    **tool_def,
+                }
+                for tool_def in TestAdjustRequest.TOOLS
+            ]
+            data["tool_choice"] = (
+                {
+                    "type": TestAdjustRequest.TOOL_TYPE,
+                    "name": TestAdjustRequest.TOOL_2_NAME,
+                }
+                if tool_choice == "named"
+                else tool_choice
+            )
+
+        if response_format_type == "json_schema":
+            schema_format = {
+                "name": "answer_format",
+                "schema": TestAdjustRequest.OUTPUT_SCHEMA,
+                "strict": True,
+            }
+            if request_kind == "chat":
+                data["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": schema_format,
+                }
+            else:
+                data["text"] = {
+                    "format": {
+                        "type": "json_schema",
+                        **schema_format,
+                    }
+                }
+        elif response_format_type == "json_object":
+            if request_kind == "chat":
+                data["response_format"] = {"type": "json_object"}
+            else:
+                data["text"] = {"format": {"type": "json_object"}}
+
+        if structured_outputs is not None:
+            data["structured_outputs"] = structured_outputs
+
+        if request_kind == "chat":
+            return ChatCompletionRequest.model_validate(data)
+        return ResponsesRequest.model_validate(data)
+
+    @staticmethod
+    def _assert_format_cleared(
+        adjusted_request: ChatCompletionRequest | ResponsesRequest,
+    ) -> None:
+        if isinstance(adjusted_request, ResponsesRequest):
+            assert adjusted_request.text is None or adjusted_request.text.format is None
+        else:
+            assert adjusted_request.response_format is None
+
+        structured_outputs = adjusted_request.structured_outputs
+        assert structured_outputs is not None
+        assert structured_outputs.structural_tag is not None
+        assert structured_outputs.all_non_structural_tag_constraints_none()
+
+    @classmethod
+    def _assert_structured_outputs_admission(
+        cls,
+        adjusted_request: ChatCompletionRequest | ResponsesRequest,
+        expected_admission: Sequence[str],
+        xgrammar_backend: XgrammarBackend,
+        stop_token_ids: set[int],
+    ) -> None:
+        structured_outputs = adjusted_request.structured_outputs
+        assert structured_outputs is not None
+        assert structured_outputs.structural_tag is not None
+        assert structured_outputs.all_non_structural_tag_constraints_none()
+
+        grammar = xgrammar_backend.compile_grammar(
+            StructuredOutputOptions.STRUCTURAL_TAG,
+            structured_outputs.structural_tag,
+            stop_token_ids=stop_token_ids,
+        )
+        expected_admission_set = set(expected_admission)
+
+        for sample_name in cls.ADMISSION_SAMPLES:
+            tokens = encode_output(getattr(cls, sample_name))
+            accepted = grammar.validate_tokens(tokens)
+            admitted = accepted == tokens
+            should_admit = sample_name in expected_admission_set
+            assert admitted is should_admit, (
+                f"Expected structured_outputs admission for {sample_name} "
+                f"to be {should_admit}, got {admitted}."
+            )
+
+    @pytest.mark.parametrize("request_kind", ["chat", "responses"])
+    @pytest.mark.parametrize(
+        ("request_kwargs", "expected_admission"),
+        [
+            (
+                {"tool_choice": "auto", "strict_tools": True},
+                [
+                    "COMMENTARY",
+                    "TOOL_CALL_1_CHANNEL_FIRST",
+                    "TOOL_CALL_1_FUNCTION_FIRST",
+                    "TOOL_CALL_2_CHANNEL_FIRST",
+                    "TOOL_CALL_2_FUNCTION_FIRST",
+                    "FINAL_JSON_SCHEMA",
+                    "FINAL_JSON_OBJECT",
+                    "FINAL_TEXT_ONLY",
+                    "FINAL_REGEX",
+                    "FINAL_CHOICE",
+                    "FINAL_GRAMMAR",
+                    "FINAL_STRUCTURAL_TAG",
+                ],
+            ),
+            (
+                {"tool_choice": "required"},
+                [
+                    "COMMENTARY",
+                    "TOOL_CALL_1_CHANNEL_FIRST",
+                    "TOOL_CALL_1_FUNCTION_FIRST",
+                    "TOOL_CALL_2_CHANNEL_FIRST",
+                    "TOOL_CALL_2_FUNCTION_FIRST",
+                ],
+            ),
+            (
+                {"tool_choice": "named"},
+                [
+                    "COMMENTARY",
+                    "TOOL_CALL_2_CHANNEL_FIRST",
+                    "TOOL_CALL_2_FUNCTION_FIRST",
+                ],
+            ),
+            (
+                {"response_format_type": "json_schema"},
+                ["FINAL_JSON_SCHEMA"],
+            ),
+            (
+                {"response_format_type": "json_object"},
+                ["FINAL_JSON_SCHEMA", "FINAL_JSON_OBJECT"],
+            ),
+            (
+                {"structured_outputs": StructuredOutputsParams(json=OUTPUT_SCHEMA)},
+                ["FINAL_JSON_SCHEMA"],
+            ),
+            (
+                {"structured_outputs": StructuredOutputsParams(json_object=True)},
+                ["FINAL_JSON_SCHEMA", "FINAL_JSON_OBJECT"],
+            ),
+            (
+                {"structured_outputs": StructuredOutputsParams(regex=r"regex")},
+                ["FINAL_REGEX"],
+            ),
+            (
+                {
+                    "structured_outputs": StructuredOutputsParams(
+                        choice=["choice1", "choice2"]
+                    )
+                },
+                ["FINAL_CHOICE"],
+            ),
+            (
+                {
+                    "structured_outputs": StructuredOutputsParams(
+                        grammar='root ::= "grammar"'
+                    )
+                },
+                ["FINAL_GRAMMAR"],
+            ),
+            (
+                {
+                    "structured_outputs": StructuredOutputsParams(
+                        structural_tag=json.dumps(
+                            {
+                                "type": "structural_tag",
+                                "format": {
+                                    "type": "json_schema",
+                                    "json_schema": OUTPUT_SCHEMA,
+                                },
+                            }
+                        )
+                    )
+                },
+                ["FINAL_JSON_SCHEMA"],
+            ),
+            (
+                {
+                    "structured_outputs": StructuredOutputsParams(
+                        structural_tag=json.dumps(
+                            {
+                                "type": "structural_tag",
+                                "structures": [
+                                    {
+                                        "begin": "<tag>",
+                                        "schema": {"type": "object"},
+                                        "end": "</tag>",
+                                    }
+                                ],
+                                "triggers": ["<tag>"],
+                            }
+                        )
+                    )
+                },
+                [
+                    # Legacy triggered tags allow free text until a trigger, so
+                    # unconstrained final-channel payloads are also admitted.
+                    "FINAL_TEXT_ONLY",
+                    "FINAL_REGEX",
+                    "FINAL_CHOICE",
+                    "FINAL_GRAMMAR",
+                    "FINAL_STRUCTURAL_TAG",
+                ],
+            ),
+        ],
+        ids=[
+            "tool_auto_strict",
+            "tool_required",
+            "tool_named",
+            "response_format_json_schema",
+            "response_format_json_object",
+            "structured_outputs_json",
+            "structured_outputs_json_object",
+            "structured_outputs_regex",
+            "structured_outputs_choice",
+            "structured_outputs_grammar",
+            "structured_outputs_structural_tag_modern",
+            "structured_outputs_structural_tag_legacy",
+        ],
+    )
+    def test_adjust_request(
+        self,
+        harmony_parser,
+        xgrammar_backend,
+        gpt_oss_stop_token_ids,
+        request_kind,
+        request_kwargs,
+        expected_admission,
+    ):
+        request = self._build_request(request_kind, **request_kwargs)
+        adjusted_request = harmony_parser.adjust_request(request)
+        self._assert_format_cleared(adjusted_request)
+        self._assert_structured_outputs_admission(
+            adjusted_request,
+            expected_admission,
+            xgrammar_backend,
+            gpt_oss_stop_token_ids,
+        )

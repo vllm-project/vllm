@@ -13,6 +13,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+    convert_flashinfer_moe_output,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -22,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
+    has_flashinfer_situ_activation,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -66,16 +71,9 @@ class TrtLlmNvFp4ExpertsBase:
         )
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+        self.is_situ = moe_config.activation == MoEActivation.SITU
 
-        assert self.quant_config.g1_alphas is not None
-        assert self.quant_config.a2_gscale is not None
-        if moe_config.is_act_and_mul:
-            # g1_alpha_s = a13_scale * w13_scale_2
-            # a2_gscale = (1 / a2_scale)
-            # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
-            self.g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
-        else:
-            self.g1_scale_c = self.quant_config.a2_gscale.clone()
+        self.g1_scale_c = self._compute_g1_scale_c()
 
         # Fall back to moe_config.swiglu_* when quant_config doesn't carry them
         # (ModelOpt NVFP4 checkpoints store these on moe_config, not quant_config).
@@ -116,7 +114,6 @@ class TrtLlmNvFp4ExpertsBase:
         # (gemm1_alpha) and situ linear_beta -> gatedActBeta (gemm1_beta).
         # These operate on the dequantized gate/up, so they are NOT folded by
         # g1_alphas in process_weights_after_loading.
-        self.is_situ = moe_config.activation == MoEActivation.SITU
         if self.is_situ:
             situ_beta = moe_config.activation_situ_beta
             situ_linear_beta = moe_config.activation_situ_linear_beta
@@ -139,18 +136,28 @@ class TrtLlmNvFp4ExpertsBase:
             clamp,
         )
 
+    def _compute_g1_scale_c(self) -> torch.Tensor:
+        assert self.quant_config.g1_alphas is not None
+        assert self.quant_config.a2_gscale is not None
+        if not self.moe_config.is_act_and_mul:
+            return self.quant_config.a2_gscale.clone()
+        if self.is_situ:
+            # SITU applies its nonlinear activation after g1_alphas, so only
+            # the output quantization factor belongs in g1_scale_c.
+            return self.quant_config.a2_gscale.clone()
+
+        # g1_alphas = a13_scale * w13_scale_2
+        # a2_gscale = 1 / a2_scale
+        # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
+        return self.quant_config.g1_alphas * self.quant_config.a2_gscale
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
         # Recompute g1_scale_c since g1_alphas was just fused in-place.
         # Register as a layer parameter so EPLB rearranges it alongside
         # other expert weights.
-        assert self.quant_config.g1_alphas is not None
-        assert self.quant_config.a2_gscale is not None
-        if self.moe_config.is_act_and_mul:
-            g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
-        else:
-            g1_scale_c = self.quant_config.a2_gscale.clone()
+        g1_scale_c = self._compute_g1_scale_c()
         layer.register_parameter(
             "g1_scale_c",
             torch.nn.Parameter(g1_scale_c, requires_grad=False),
@@ -225,15 +232,15 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports SiLU, RELU^2 non-gated, GELU, clamped SwiGLU-OAI, and the
-        private SituGLU (SITU) cubin."""
+        """Supports SITU only when the installed FlashInfer exposes it."""
+        if activation == MoEActivation.SITU:
+            return has_flashinfer_situ_activation()
         return activation in [
             MoEActivation.SILU,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-            MoEActivation.SITU,
         ]
 
     @staticmethod
@@ -517,7 +524,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 
         assert self._supports_activation(activation)
@@ -542,14 +549,19 @@ class TrtLlmNvFp4ExpertsMonolithic(
 
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
+        num_tokens = hidden_states.shape[0]
+        # The runner divides by the token count on the host, so an idle rank's
+        # dummy 0-token forward has to keep the finalized (empty) form.
+        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+
         routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=hidden_states.shape[0],
+            num_tokens=num_tokens,
             device=hidden_states.device,
         )
         # Invoke kernel.
         # NOTE: Activation padding and output
         # truncation are handled by the MoE runner's
-        result = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
+        flashinfer_output = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
@@ -577,13 +589,17 @@ class TrtLlmNvFp4ExpertsMonolithic(
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
-            do_finalize=True,
+            do_finalize=not defer,
             activation_type=activation_to_flashinfer_int(activation),
             per_token_scale=per_token_scale,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
-        )[0]
-        self._maybe_dispatch_routing_replay(
-            routing_replay_out, num_tokens=hidden_states.shape[0]
         )
-        return result
+        routed_output = convert_flashinfer_moe_output(
+            flashinfer_output,
+            do_finalize=not defer,
+            num_tokens=num_tokens,
+            top_k=self.topk,
+        )
+        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
+        return routed_output

@@ -3,10 +3,6 @@
 
 from transformers.configuration_utils import PretrainedConfig
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
 
 class KimiLinearConfig(PretrainedConfig):
     model_type = "kimi_linear"
@@ -49,8 +45,16 @@ class KimiLinearConfig(PretrainedConfig):
         qk_rope_head_dim: int | None = None,
         v_head_dim: int | None = None,
         mla_use_nope: bool | None = False,
+        mla_use_output_gate: bool | None = False,
         num_nextn_predict_layers: int = 0,
         linear_attn_config: dict | None = None,
+        attn_res_block_size: int | None = None,
+        latent_moe_use_norm: bool = False,
+        activation_situ_beta: float | None = None,
+        activation_situ_linear_beta: float | None = None,
+        max_position_embeddings: int = 4096,
+        routed_expert_hidden_size: int | None = None,
+        topk_method: str = "noaux_tc",
         **kwargs,
     ):
         self.model_type = model_type
@@ -86,6 +90,7 @@ class KimiLinearConfig(PretrainedConfig):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.v_head_dim = v_head_dim
         self.mla_use_nope = mla_use_nope
+        self.mla_use_output_gate = mla_use_output_gate
         # moe config
         self.num_experts = num_experts
         self.num_experts_per_token = num_experts_per_token
@@ -101,6 +106,14 @@ class KimiLinearConfig(PretrainedConfig):
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group
         self.num_nextn_predict_layers = num_nextn_predict_layers
+
+        self.attn_res_block_size = attn_res_block_size
+        self.latent_moe_use_norm = latent_moe_use_norm
+        self.activation_situ_beta = activation_situ_beta
+        self.activation_situ_linear_beta = activation_situ_linear_beta
+        self.max_position_embeddings = max_position_embeddings
+        self.routed_expert_hidden_size = routed_expert_hidden_size
+        self.topk_method = topk_method
 
         if linear_attn_config is not None:
             assert linear_attn_config["kda_layers"] is not None

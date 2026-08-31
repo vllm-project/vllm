@@ -421,6 +421,7 @@ full_transcription = " ".join(transcriptions)
 
 The `split_audio` function:
 
+- Expects 1D mono audio (`load_audio` downmixes by default)
 - Splits audio at quiet points to avoid cutting through speech
 - Uses RMS energy to find low-amplitude regions within the overlap window
 - Preserves all audio samples (no data loss)
@@ -843,20 +844,19 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
 
 #### Video Decoding Backend
 
-vLLM decodes video bytes into frames using a selectable decoding backend. Five
+vLLM decodes video bytes into frames using a selectable decoding backend. Four
 backends are supported:
 
 | Backend | Device | Description |
 | --- | --- | --- |
 | `opencv` (default) | CPU | OpenCV-based decoder |
-| `pyav` | CPU | PyAV decoder |
 | `torchcodec` | CPU | TorchCodec (PyTorch-native) decoder |
 | `pynvvideocodec` | GPU | NVIDIA PyNvVideoCodec decoder |
 | `deepstream` | GPU | NVIDIA DeepStream decoder |
 
-The three CPU backends are ultimately backed by FFmpeg. `torchcodec` lets you
-choose which FFmpeg version is used while `opencv` and `pyav` rely on whichever
-FFmpeg build they were linked against.
+The two CPU backends are ultimately backed by FFmpeg. `torchcodec` lets you
+choose which FFmpeg version is used while `opencv` relies on whichever
+FFmpeg build it was linked against.
 
 Select the backend by passing the `backend` parameter via `--media-io-kwargs`:
 

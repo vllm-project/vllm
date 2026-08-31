@@ -114,9 +114,19 @@ class GateLinear(ReplicatedLinear):
         if self.allow_bf16x3_router_gemm:
             logger.info_once("Enabled experimental SM100 BF16x3 router GEMM.")
 
-        # cuBLAS bf16→fp32 eligibility
+        # Fused bf16 x bf16 -> fp32 GEMM eligibility. torch.mm's out_dtype
+        # epilogue folds the fp32 cast into the GEMM, removing the standalone
+        # bf16->fp32 copy kernel that otherwise runs before grouped_topk. This is
+        # the plain cuBLAS (CUDA) / hipBLASLt (ROCm) out_dtype epilogue, so it
+        # applies on any CUDA-alike device (no bias, since torch.mm has no bias
+        # term). The specialized-kernel gate above excludes family-120 Blackwell
+        # (GB10 / DGX Spark), which this tier still covers. See #49921.
+        self._router_gemm_no_bias = not bias
+        self._router_gemm_cublas_capable = (
+            current_platform.is_cuda() or current_platform.is_rocm()
+        ) and self._router_gemm_no_bias
         self.allow_cublas_router_gemm = (
-            self.allow_specialized_router_gemm
+            self._router_gemm_cublas_capable
             and self.weight.dtype == torch.bfloat16
             and self.out_dtype == torch.float32
         )
@@ -148,7 +158,7 @@ class GateLinear(ReplicatedLinear):
 
         if (
             not self.allow_cublas_router_gemm
-            and self.allow_specialized_router_gemm
+            and self._router_gemm_cublas_capable
             and out_dtype == torch.float32
         ):
             self.allow_cublas_router_gemm = self.weight.dtype == torch.bfloat16
