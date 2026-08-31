@@ -153,7 +153,7 @@ def build_offloading_config(
         def spec_certifiable(spec: KVCacheSpec) -> bool:
             """Conservative static mirror of _layer_mapping's per-layer checks."""
             if isinstance(spec, UniformTypeKVCacheSpecs):
-                # Same-type layers with differing page sizes (MLA + DSA indexer)
+                # Same-type layers whose specs differ (e.g. MLA + DSA indexer)
                 return len(spec.kv_cache_specs) > 0 and all(
                     spec_certifiable(inner) for inner in spec.kv_cache_specs.values()
                 )
