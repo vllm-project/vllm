@@ -176,3 +176,53 @@ def test_pad_unpad_round_trip_preserves_head_order(num_heads):
 
     assert unpadded.shape == q.shape
     torch.testing.assert_close(unpadded, q)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)
+@pytest.mark.parametrize("num_heads", [1, 2, 4, 8])
+@pytest.mark.parametrize("dcp_world_size", [2, 4, 8])
+def test_dcp_decode_leaves_gluon(
+    gluon_available, kv_cache_dtype, num_heads, dcp_world_size
+):
+    """DCP decode must not take Gluon, which returns no LSE.
+
+    These are exactly the shapes that keep Gluon without DCP, so the head count
+    is not what excludes them. The cross-shard combine needs an LSE per partial
+    output, and the Gluon single-token branch has none to give -- without this
+    the layer hits a bare assertion at the first decoded token.
+    """
+    assert AiterMLAHelper.use_gluon_decode(num_heads, 1, kv_cache_dtype)
+    assert not AiterMLAHelper.use_gluon_decode(
+        num_heads, 1, kv_cache_dtype, dcp_world_size
+    )
+
+
+@pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)
+@pytest.mark.parametrize("num_heads", [1, 2, 4, 8])
+def test_dcp_world_size_one_is_the_non_dcp_answer(
+    gluon_available, kv_cache_dtype, num_heads
+):
+    """A world size of 1 is not DCP and must not change routing."""
+    assert AiterMLAHelper.use_gluon_decode(
+        num_heads, 1, kv_cache_dtype, 1
+    ) == AiterMLAHelper.use_gluon_decode(num_heads, 1, kv_cache_dtype)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)
+@pytest.mark.parametrize("num_heads", [1, 2, 4, 5, 8, 12])
+@pytest.mark.parametrize("dcp_world_size", [2, 8])
+def test_neither_gluon_entry_point_serves_dcp(
+    gluon_available, kv_cache_dtype, num_heads, dcp_world_size
+):
+    """Both Gluon entry points are closed to DCP, at every query length.
+
+    Verify already excluded it; decode now matches. DCP is served by the asm
+    persistent decode and, for multi-token verification, by segmented MLA.
+    """
+    for max_qo_len in (1, 2, 8):
+        assert not AiterMLAHelper.use_gluon_decode(
+            num_heads, max_qo_len, kv_cache_dtype, dcp_world_size
+        )
+        assert not AiterMLAHelper.use_gluon_verify(
+            num_heads, max_qo_len, kv_cache_dtype, dcp_world_size
+        )

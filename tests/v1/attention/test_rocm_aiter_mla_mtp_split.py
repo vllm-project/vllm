@@ -949,3 +949,66 @@ def test_persistent_metadata_gate_without_gluon_build(
 
     assert metadata.has_persistent_metadata is expect_persistent
     assert get_mla_metadata_v1.called is expect_persistent
+
+
+def _decode_lse_probe(monkeypatch, fn):
+    """Point the LSE capability probe at ``fn`` and clear its cache."""
+    monkeypatch.setattr(rocm_aiter_mla, "_get_aiter_mla_decode", lambda: fn)
+    rocm_aiter_mla._decode_lse_supported.cache_clear()
+    return rocm_aiter_mla._decode_lse_supported
+
+
+def test_decode_lse_probe_reads_the_aiter_signature(monkeypatch):
+    """The probe answers from the installed aiter's signature, not a version."""
+
+    def with_lse(q, kv, out, *args, return_lse=False, **kwargs):
+        return None, None
+
+    def without_lse(q, kv, out, *args, **kwargs):
+        return None
+
+    try:
+        assert _decode_lse_probe(monkeypatch, with_lse)()
+        assert not _decode_lse_probe(monkeypatch, without_lse)()
+    finally:
+        rocm_aiter_mla._decode_lse_supported.cache_clear()
+
+
+def test_decode_lse_probe_survives_a_broken_aiter(monkeypatch):
+    """An aiter that cannot even be imported reads as unsupported, not a crash.
+
+    The probe runs at configuration time on hosts where the import may fail for
+    reasons unrelated to DCP, so it must degrade rather than propagate.
+    """
+
+    def explode():
+        raise ImportError("no aiter here")
+
+    monkeypatch.setattr(rocm_aiter_mla, "_get_aiter_mla_decode", explode)
+    rocm_aiter_mla._decode_lse_supported.cache_clear()
+    try:
+        assert not rocm_aiter_mla._decode_lse_supported()
+    finally:
+        rocm_aiter_mla._decode_lse_supported.cache_clear()
+
+
+@pytest.mark.parametrize("dcp_world_size", [2, 8])
+def test_dcp_without_decode_lse_fails_at_startup(monkeypatch, dcp_world_size):
+    """An aiter build with no decode LSE must be rejected while it is cheap.
+
+    Reaching the first decoded token instead costs a whole model load and
+    surfaces as a bare assertion inside the attention layer, which says nothing
+    about the aiter build being the cause.
+    """
+
+    def without_lse(q, kv, out, *args, **kwargs):
+        return None
+
+    _decode_lse_probe(monkeypatch, without_lse)
+    try:
+        with pytest.raises(ValueError, match="return_lse"):
+            AiterMLAImpl._check_dcp_decode_lse(dcp_world_size)
+        # Not DCP: the probe is irrelevant and must not block startup.
+        AiterMLAImpl._check_dcp_decode_lse(1)
+    finally:
+        rocm_aiter_mla._decode_lse_supported.cache_clear()

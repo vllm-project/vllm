@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Final
@@ -183,6 +184,22 @@ def _segmented_mla_decode_supported() -> bool:
     except Exception:  # noqa: BLE001
         return False
     return True
+
+
+@functools.lru_cache(maxsize=1)
+def _decode_lse_supported() -> bool:
+    """Whether AITER's MLA decode can return the LSE the DCP merge needs.
+
+    ``mla_decode_fwd(..., return_lse=True)`` is what lets a DCP rank hand its
+    partial output to the cross-shard combine. Older AITER builds have no such
+    keyword, and the resulting failure is a bare assertion at the first decode
+    step rather than at startup, so probe the signature once at configuration
+    time instead.
+    """
+    try:
+        return "return_lse" in inspect.signature(_get_aiter_mla_decode()).parameters
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _segmented_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> bool:
@@ -958,6 +975,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._decode_num_heads,
             int(max_qo_len),
             self._kv_cache_dtype_str,
+            self.dcp_world_size,
         )
         use_gluon_verify = AiterMLAHelper.use_gluon_verify(
             self._decode_num_heads,
@@ -1331,12 +1349,25 @@ class AiterMLAHelper:
         return AiterMLAHelper._get_mla_unpadded_heads(num_heads, lse)
 
     @staticmethod
-    def use_gluon_decode(num_heads: int, max_qo_len: int, kv_cache_dtype: str) -> bool:
+    def use_gluon_decode(
+        num_heads: int,
+        max_qo_len: int,
+        kv_cache_dtype: str,
+        dcp_world_size: int = 1,
+    ) -> bool:
         # Small-head (<16) single-token decode takes either the Gluon kernel or
         # the padded asm persistent decode, selected by
         # VLLM_ROCM_AITER_MLA_ASM_PADDING and the arch (Gluon is gfx950 only).
+        #
+        # DCP decode is excluded: the Gluon branch in forward_mqa returns no
+        # LSE, and the cross-rank combine needs one. Today this is also true
+        # arithmetically -- the caller passes the gathered head count, which is
+        # >= 16 for every realistic DCP layout -- but that is a coincidence of
+        # head counts, not a guarantee, and the failure mode without this guard
+        # is a bare `assert lse is not None` in the MLA layer. Mirrors the same
+        # exclusion in use_gluon_verify.
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
-        if num_heads >= m or max_qo_len != 1:
+        if num_heads >= m or max_qo_len != 1 or dcp_world_size > 1:
             return False
         # Gluon's only fp8-KV regime, bh16bn128, is a bf16-query kernel with a
         # hardcoded scale that asserts batch_size == 1, so it cannot serve a
@@ -1428,6 +1459,23 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         """Return the query-head count after DCP gathering."""
         return self.num_heads * self.dcp_world_size
 
+    @staticmethod
+    def _check_dcp_decode_lse(dcp_world_size: int) -> None:
+        """Reject a DCP config whose AITER build cannot return a decode LSE.
+
+        Every DCP decode step merges partial attention across shards, which
+        needs the LSE. Raising here costs a config check; discovering it at the
+        first decoded token costs a model load and surfaces as an assertion
+        inside the attention layer that names nothing useful.
+        """
+        if dcp_world_size > 1 and not _decode_lse_supported():
+            raise ValueError(
+                "Decode context parallelism on the AITER MLA backend requires "
+                "an AITER build whose mla_decode_fwd accepts return_lse=True; "
+                "the installed build does not. Upgrade AITER, or select a "
+                "different MLA attention backend."
+            )
+
     def __init__(
         self,
         num_heads: int,
@@ -1458,6 +1506,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         )
         AiterMLAHelper.check_num_heads_validity(num_heads)
         AiterMLAHelper.check_num_heads_validity(self._decode_num_heads)
+
+        AiterMLAImpl._check_dcp_decode_lse(self.dcp_world_size)
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
