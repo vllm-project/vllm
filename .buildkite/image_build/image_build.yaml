@@ -96,6 +96,31 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
 
+  - label: ":docker: Build Rust mock engine image"
+    key: image-build-rust-mock-engine
+    depends_on: []
+    timeout_in_minutes: 20
+    source_file_dependencies:
+      - ".buildkite/image_build/image_build.yaml"
+      - ".dockerignore"
+      - "rust/Cargo.lock"
+      - "rust/Cargo.toml"
+      - "rust/src/engine-core-client/"
+      - "rust/src/metrics/"
+      - "rust/src/mock-engine/"
+      - "rust-toolchain.toml"
+    commands:
+      - docker build --file rust/src/mock-engine/Dockerfile --tag vllm-mock-engine:ci .
+      - docker run --rm vllm-mock-engine:ci --help
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+
   - label: ":docker: Build CPU arm64 image"
     key: cpu-arm64-image-build
     depends_on: []

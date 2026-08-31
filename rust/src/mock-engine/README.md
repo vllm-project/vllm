@@ -32,6 +32,26 @@ Useful knobs:
 
 Stop it with Ctrl-C.
 
+## Docker
+
+Build the image from the repository root:
+
+```bash
+docker build \
+  --file rust/src/mock-engine/Dockerfile \
+  --tag vllm-mock-engine .
+```
+
+On Linux, use host networking to connect to a frontend running on the host:
+
+```bash
+docker run --rm --network host vllm-mock-engine \
+  --handshake-address tcp://127.0.0.1:29550
+```
+
+For other network layouts, use an address reachable from the container, such
+as the frontend container's name on a shared Docker network.
+
 ## Rust Frontend
 
 Terminal 1:
