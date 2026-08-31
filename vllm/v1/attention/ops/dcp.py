@@ -28,7 +28,38 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
+    from vllm.config.parallel import ParallelConfig
     from vllm.distributed.parallel_state import GroupCoordinator
+
+
+def resolve_dcp_q_replicate(parallel_config: ParallelConfig) -> bool:
+    """Whether MLA decode should replicate the Q projection within a DCP group.
+
+    Replicating lets every rank materialize the group's full head set, so decode
+    can skip the per-layer query all-gather at the cost of computing the (small)
+    projection redundantly. ``VLLM_DCP_Q_REPLICATE`` overrides the model default
+    in ``ParallelConfig.dcp_q_replicate`` when it is set explicitly.
+
+    DCP must be active, and PCP must be disabled. The PCP condition is
+    load-bearing rather than conservative: ``DCPGroupColumnParallelLinear``
+    identifies a rank's slot in its DCP group as ``tp_rank % dcp_size``, which
+    only agrees with the real group layout while DCP groups are contiguous runs
+    of TP ranks. With PCP > 1 ``initialize_model_parallel`` builds them across
+    the PCP axis first (``all_ranks.transpose(-1, -2)``), so the groups become
+    strided and the replicated head order stops lining up with ``_local_view``
+    and the gathered ``W_UK_T``.
+    """
+    # The env var predates the config field and still wins if set explicitly.
+    requested = (
+        envs.VLLM_DCP_Q_REPLICATE
+        if envs.is_set("VLLM_DCP_Q_REPLICATE")
+        else bool(parallel_config.dcp_q_replicate)
+    )
+    return (
+        requested
+        and parallel_config.decode_context_parallel_size > 1
+        and parallel_config.prefill_context_parallel_size <= 1
+    )
 
 
 # LSE/output combine
