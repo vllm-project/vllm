@@ -11,7 +11,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
@@ -524,9 +524,195 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
 
+        if self.indexer is None:
+            # Only CSA layers (compress_ratio=4, indexer present) use the
+            # multi-stream overlap on ROCm; HCA (compress_ratio=128) and
+            # SWA-only layers stay on the serial base path.
+            self.aux_stream_list = None
+        else:
+            # The ROCm CSA path never uses the indexer-inner overlap: the
+            # fork runs forward_compressor on the side stream and the serial
+            # fallback must stay fully sequential (eager multi-stream hangs
+            # on HIP).
+            self.indexer.aux_stream = None
+
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
+
+    def _attn_pipeline(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        capturing = torch.cuda.is_current_stream_capturing()
+        profile_run = not isinstance(get_forward_context().attn_metadata, dict)
+        if self.aux_stream_list is None or (not capturing and not profile_run):
+            # Serial fallback: clear the streams so the base path (input-GEMM
+            # fan-out + overlap) runs fully sequentially — eager multi-stream
+            # hangs on HIP. Restored afterwards for the capture-time fork.
+            saved_streams = self.aux_stream_list
+            self.aux_stream_list = None
+            try:
+                return super()._attn_pipeline(hidden_states, positions, o_padded)
+            finally:
+                self.aux_stream_list = saved_streams
+        # CSA multi-stream fires only while capturing, plus once during the
+        # profile run: serving-time eager multi-stream accumulates launches
+        # across layers and is racy on HIP, and the profile-run fork warms
+        # the aux stream's hipBLAS handles (their lazy workspace allocation
+        # during capture would fail with hipErrorStreamCaptureUnsupported).
+        # Skip the base input-GEMM/rmsnorm prologue — the fork in
+        # _prepare_and_attn covers the input GEMMs and the compressor chain.
+        # Dispatching through _prepare_and_attn_fn keeps the whole overlap
+        # inside the eager-break region (required by MRV1 piecewise graphs);
+        # the skipped projection outputs are None sentinels.
+        self._prepare_and_attn_fn(
+            hidden_states,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            positions,
+            o_padded,
+        )
+
+    def _prepare_and_attn(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor | None,
+        kv: torch.Tensor | None,
+        qr_scale: torch.Tensor | None,
+        kv_score: torch.Tensor | None,
+        indexer_kv_score: torch.Tensor | None,
+        indexer_weights: torch.Tensor | None,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        if self.aux_stream_list is None or qr is not None:
+            return super()._prepare_and_attn(
+                hidden_states,
+                qr,
+                kv,
+                qr_scale,
+                kv_score,
+                indexer_kv_score,
+                indexer_weights,
+                positions,
+                o_padded,
+            )
+        if not torch.cuda.is_current_stream_capturing() and isinstance(
+            get_forward_context().attn_metadata, dict
+        ):
+            # Sentinel dispatch reached outside capture (MRV1 eager
+            # sub-segment at capture time, or its piecewise replay): the
+            # prologue was skipped, so re-run the full serial base pipeline
+            # with the streams cleared (eager multi-stream hangs on HIP).
+            # The breakable wrapper runs the nested dispatch directly once
+            # capturing is cleared — no recursion. The profile run is
+            # excluded: it must fork to warm the aux stream's hipBLAS
+            # handles.
+            saved_streams = self.aux_stream_list
+            self.aux_stream_list = None
+            try:
+                return super()._attn_pipeline(hidden_states, positions, o_padded)
+            finally:
+                self.aux_stream_list = saved_streams
+
+        # CSA multi-stream: fork before the input GEMMs and join after the
+        # compressor chain. Each stream runs a self-contained chain straight
+        # from hidden_states, and stream-level waits express the fork/join
+        # (HIP events are unreliable under multi-stream overlap).
+        # Default: fused_wqa_wkv GEMM → fused norm+quant → wq_b →
+        # qnorm/rope/SWA insert.
+        # aux0: fused compressor GEMM → compress kernels (compressed KV
+        # cache) → indexer-internal compressor (indexer K cache).
+        assert self.indexer is not None
+        assert self.compressor is not None
+        aux_streams = self.aux_stream_list
+        assert aux_streams is not None
+
+        compressor = self.compressor
+        indexer = self.indexer
+        fused_weight = self._fused_compressor_weight
+        split_sizes = self._fused_compressor_split_sizes
+
+        def compressor_chain() -> None:
+            if fused_weight is not None and split_sizes is not None:
+                fused_scores = torch.mm(
+                    hidden_states, fused_weight.T, out_dtype=torch.float32
+                )
+                kv_score, indexer_kv_score = fused_scores.split(split_sizes, dim=-1)
+            else:
+                kv_score = torch.mm(
+                    hidden_states,
+                    compressor.fused_wkv_wgate.weight.T,
+                    out_dtype=torch.float32,
+                )
+                indexer_kv_score = torch.mm(
+                    hidden_states,
+                    indexer.compressor.fused_wkv_wgate.weight.T,
+                    out_dtype=torch.float32,
+                )
+            compressor(kv_score, positions, self.rotary_emb)
+            indexer.forward_compressor(
+                indexer_kv_score, positions, self.indexer_rotary_emb
+            )
+
+        def default_chain() -> tuple[
+            torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor
+        ]:
+            qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+            qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
+            q = self._wq_b_proj(qr, qr_scale).view(
+                -1, self.n_local_heads, self.head_dim
+            )
+            q = self._fused_qnorm_rope_kv_insert(
+                q, kv, positions, get_forward_context().attn_metadata
+            )
+            return q, qr, qr_scale, kv
+
+        aux_stream = aux_streams[0]
+        main_stream = None
+        if is_forward_context_available():
+            main_stream = get_forward_context().additional_kwargs.get("main_stream")
+        if main_stream is None:
+            main_stream = torch.cuda.current_stream()
+        aux_stream.wait_stream(main_stream)
+        with torch.cuda.stream(aux_stream):
+            compressor_chain()
+        q, qr, qr_scale, kv = default_chain()
+        main_stream.wait_stream(aux_stream)
+
+        # After the join, weights_proj runs serially; then the indexer q-side
+        # and the sparse attention finish the tail.
+        indexer_weights, _ = indexer.weights_proj(hidden_states)
+        index_q: torch.Tensor | None = None
+        index_q_scale: torch.Tensor | None = None
+        index_weights_out: torch.Tensor | None = None
+        q_quant, weights = indexer.forward_q(
+            qr, qr_scale, positions, self.indexer_rotary_emb, indexer_weights
+        )
+        if q_quant is not None:
+            if isinstance(q_quant, tuple):
+                index_q, index_q_scale = q_quant
+            else:
+                index_q, index_q_scale = q_quant, None
+            index_weights_out = weights
+
+        self._sparse_indexer_and_attn(
+            hidden_states,
+            index_q,
+            index_q_scale,
+            index_weights_out,
+            q,
+            kv,
+            positions,
+            o_padded,
+        )
 
     def prepare_attn_preshuffle(self) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
