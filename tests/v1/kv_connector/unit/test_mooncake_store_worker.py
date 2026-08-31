@@ -31,8 +31,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
+    MooncakeLookupResult,
     PoolKey,
     ReqMeta,
+    TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
@@ -150,6 +152,7 @@ def _make_load_req(
     *,
     token_len: int,
     vllm_cached_tokens: int = 0,
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = (),
 ) -> ReqMeta:
     return ReqMeta(
         req_id=req_id,
@@ -161,6 +164,7 @@ def _make_load_req(
             kvpool_cached_tokens=token_len,
             can_load=True,
             token_len=token_len,
+            tail_key_boundaries=tail_key_boundaries,
         ),
     )
 
@@ -177,6 +181,7 @@ def _run_store_req(thread, req_meta: ReqMeta) -> None:
 
 
 def _make_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMeta:
+    # 1-based: block 0 is the reserved null block and the save skips it.
     return ReqMeta(
         req_id=req_id,
         token_len_chunk=32,
@@ -305,15 +310,16 @@ def _patch_worker_runtime(
     local_ip: str = "10.0.0.7",
     tp_rank: int = 0,
     tp_size: int = 1,
+    pcp_size: int = 1,
     dcp_size: int = 1,
 ) -> None:
-    single_rank_group = SimpleNamespace(world_size=1, rank_in_group=0)
+    pcp_group = SimpleNamespace(world_size=pcp_size, rank_in_group=0)
     # DCP groups are contiguous splits of the TP group (see
     # parallel_state.py), so dcp_rank == tp_rank % dcp_size.
     dcp_group = SimpleNamespace(world_size=dcp_size, rank_in_group=tp_rank % dcp_size)
     monkeypatch.setattr(worker, "get_tensor_model_parallel_rank", lambda: tp_rank)
     monkeypatch.setattr(worker, "get_tensor_model_parallel_world_size", lambda: tp_size)
-    monkeypatch.setattr(worker, "get_pcp_group", lambda: single_rank_group)
+    monkeypatch.setattr(worker, "get_pcp_group", lambda: pcp_group)
     monkeypatch.setattr(worker, "get_dcp_group", lambda: dcp_group)
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
     monkeypatch.setattr(worker, "LookupKeyServer", MagicMock())
@@ -646,6 +652,7 @@ def _make_partial_tail_send_thread(
         enable_partial_hash_hits=True,
         hash_block_size=4,
         lcm_block_size=16,
+        mamba_group_ids={1},
     )
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0),
@@ -654,10 +661,18 @@ def _make_partial_tail_send_thread(
     )
     db.set_kv_caches_base_addr([0x1000])
     db.set_block_len([256])
+    # Group 1 models the mamba "align" group the hand-offs reference.
+    db_mamba = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=16,
+        hash_block_size=4,
+    )
+    db_mamba.set_kv_caches_base_addr([0x2000])
+    db_mamba.set_block_len([256])
     return _make_store_sending_thread(
         store,
         coord=coord,
-        token_databases=[db],
+        token_databases=[db, db_mamba],
         replicate_config=replicate_config,
         enable_group_semantics=enable_group_semantics,
         supports_group_ids=supports_group_ids,
@@ -668,20 +683,20 @@ def _make_partial_tail_req(block_ids: list[int]) -> ReqMeta:
     return ReqMeta(
         req_id="req-a",
         token_len_chunk=0,
-        block_ids=(block_ids,),
+        block_ids=(block_ids, [1]),
         block_hashes=[b"a0", b"a1", b"a2"],
         can_save=True,
-        partial_tail_offloads=[(1, 7, 12)],
+        boundary_state_offloads=[(1, 7, 12)],
     )
 
 
 def test_partial_tail_offload_skips_null_source_blocks():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
     thread = _make_partial_tail_send_thread(store)
 
-    assert thread._maybe_offload_partial_tail(_make_partial_tail_req([0, 2, 3]))
+    assert thread._maybe_offload_boundary_states(_make_partial_tail_req([0, 2, 3]))
 
     keys, addrs, _sizes, _replicate_config = (
         store.batch_put_from_multi_buffers.call_args.args
@@ -689,15 +704,21 @@ def test_partial_tail_offload_skips_null_source_blocks():
     assert keys == [
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6132",
     ]
-    assert addrs == [[0x1000 + 2 * 256], [0x1000 + 3 * 256]]
+    # FA reads blocks 2 and 3 (block 0 is null and skipped); the mamba
+    # boundary block reads the core-provided CoW block 7, not block_ids.
+    assert addrs == [
+        [0x1000 + 2 * 256],
+        [0x1000 + 3 * 256],
+        [0x2000 + 7 * 256],
+    ]
 
 
 def test_store_sending_thread_skips_null_sparse_group_blocks():
     from vllm.v1.kv_cache_interface import (
         FullAttentionSpec,
         KVCacheGroupSpec,
-        MambaSpec,
     )
 
     store = MagicMock()
@@ -706,16 +727,11 @@ def test_store_sending_thread_skips_null_sparse_group_blocks():
         lambda keys, addrs, sizes, replicate_config: [256] * len(keys)
     )
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
-    mamba = MambaSpec(
-        block_size=16,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
-        mamba_cache_mode="align",
-    )
+    sparse = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
         [
             KVCacheGroupSpec(["full"], full),
-            KVCacheGroupSpec(["mamba"], mamba),
+            KVCacheGroupSpec(["sparse"], sparse),
         ],
         scheduler_block_size=16,
         hash_block_size=16,
@@ -727,17 +743,17 @@ def test_store_sending_thread_skips_null_sparse_group_blocks():
     )
     db_full.set_kv_caches_base_addr([0x1000])
     db_full.set_block_len([256])
-    db_mamba = ChunkedTokenDatabase(
+    db_sparse = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
         block_size=16,
     )
-    db_mamba.set_kv_caches_base_addr([0x2000])
-    db_mamba.set_block_len([512])
+    db_sparse.set_kv_caches_base_addr([0x2000])
+    db_sparse.set_block_len([512])
 
     thread = _make_store_sending_thread(
         store,
         coord=coord,
-        token_databases=[db_full, db_mamba],
+        token_databases=[db_full, db_sparse],
     )
     _run_store_req(
         thread,
@@ -751,15 +767,86 @@ def test_store_sending_thread_skips_null_sparse_group_blocks():
     )
 
     keys, addrs, _, _ = store.batch_put_from_multi_buffers.call_args.args
-    mamba_keys = [key for key in keys if "@group:1" in key]
-    assert [key.rsplit("@", 1)[-1] for key in mamba_keys] == [b"a1".hex()]
+    sparse_keys = [key for key in keys if "@group:1" in key]
+    assert [key.rsplit("@", 1)[-1] for key in sparse_keys] == [b"a1".hex()]
     assert all(addr[0] >= 0x2000 for key, addr in zip(keys, addrs) if "@group:1" in key)
+
+
+def test_partial_tail_offload_skips_cap_omitted_mamba_group():
+    """A Mamba group omitted by the handoff cap must not fall back to the
+    connector's positional block table."""
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+
+    full_spec = FullAttentionSpec(
+        block_size=4, num_kv_heads=8, head_size=64, dtype=torch.float32
+    )
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [
+            KVCacheGroupSpec(["full"], full_spec),
+            KVCacheGroupSpec(["mamba-1"], mamba_spec),
+            KVCacheGroupSpec(["mamba-2"], mamba_spec),
+        ],
+        scheduler_block_size=16,
+        hash_block_size=4,
+    )
+
+    def make_db(group_id: int, block_size: int, base_addr: int):
+        db = ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=block_size,
+            hash_block_size=4,
+        )
+        db.set_kv_caches_base_addr([base_addr])
+        db.set_block_len([256])
+        return db
+
+    db_full = make_db(0, 4, 0x1000)
+    db_mamba_1 = make_db(1, 16, 0x2000)
+    db_mamba_2 = make_db(2, 16, 0x3000)
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db_full, db_mamba_1, db_mamba_2],
+    )
+
+    req = ReqMeta(
+        req_id="req-a",
+        token_len_chunk=0,
+        block_ids=([1, 2, 3], [5], [9]),
+        block_hashes=[b"a0", b"a1", b"a2"],
+        can_save=True,
+        # The scheduler accepted group 1 and omitted group 2 at boundary 12.
+        boundary_state_offloads=[(1, 7, 12)],
+    )
+    assert thread._maybe_offload_boundary_states(req)
+
+    keys, addrs, _sizes, _replicate_config = (
+        store.batch_put_from_multi_buffers.call_args.args
+    )
+    puts = list(zip(keys, addrs, strict=True))
+    boundary_hash = BlockHash(b"a2")
+    assert (db_mamba_1.key_for(boundary_hash), [0x2000 + 7 * 256]) in puts
+    assert (db_mamba_2.key_for(boundary_hash), [0x3000 + 9 * 256]) not in puts
 
 
 def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
     store = MagicMock()
-    store.batch_is_exist.return_value = [1, 0, 0]
-    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    store.batch_is_exist.return_value = [1, 0, 0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, 256, 256]
     replicate_config = SimpleNamespace(group_ids=["stale"])
     thread = _make_partial_tail_send_thread(
         store,
@@ -768,16 +855,18 @@ def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
         supports_group_ids=True,
     )
 
-    assert thread._maybe_offload_partial_tail(_make_partial_tail_req([1, 2, 3]))
+    assert thread._maybe_offload_boundary_states(_make_partial_tail_req([1, 2, 3]))
 
     keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
     assert keys == [
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6132",
     ]
     assert config is replicate_config
     assert config.group_ids == [
         "vllm-mooncake-store:test-model@6131",
+        "vllm-mooncake-store:test-model@6132",
         "vllm-mooncake-store:test-model@6132",
     ]
 
@@ -808,6 +897,165 @@ def test_partial_tail_put_failure_activates_pressure_gate():
 
     _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
     assert store.batch_put_from_multi_buffers.call_count == 1
+
+
+def test_normal_save_excludes_mamba_group_and_null_blocks():
+    """The positional normal save must never cover mamba chunks (align-mode
+    block tables are not append-only) and must skip chunks whose block is the
+    reserved null block, for any group."""
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+
+    full_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=8, head_size=64, dtype=None
+    )
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [KVCacheGroupSpec(["L0"], full_spec), KVCacheGroupSpec(["L1"], mamba_spec)],
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), block_size=16
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([256])
+    db_mamba = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1), block_size=16
+    )
+    db_mamba.set_kv_caches_base_addr([0x2000])
+    db_mamba.set_block_len([256])
+    thread = _make_store_sending_thread(
+        store, coord=coord, token_databases=[db_full, db_mamba]
+    )
+
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="r0",
+            token_len_chunk=64,
+            # FA has a null at chunk 1; the mamba table is align-mode shaped
+            # (interior nulls + one state block) and must not be read at all.
+            block_ids=([1, 0, 3, 4], [0, 0, 0, 9]),
+            block_hashes=[b"a0", b"a1", b"a2", b"a3"],
+            can_save=True,
+        ),
+    )
+
+    keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
+    assert all("@group:0@" in k for k in keys)
+    assert [k.rsplit("@", 1)[-1] for k in keys] == ["6130", "6132", "6133"]
+    assert addrs == [[0x1000 + 256], [0x1000 + 3 * 256], [0x1000 + 4 * 256]]
+
+
+def test_block_aligned_snapshot_offload_uses_provided_block():
+    """A block-aligned hand-off (sparse-retention mamba checkpoint) uploads
+    exactly the core-pinned block under the boundary-end hash key; the
+    positional block table entry for that chunk must be ignored."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    thread = _make_partial_tail_send_thread(store)
+
+    hs = [bytes([i + 1]) * 4 for i in range(8)]  # 8 hash units = 32 tokens
+    req = ReqMeta(
+        req_id="req-a",
+        token_len_chunk=0,
+        block_ids=([1, 2, 3], [5]),
+        block_hashes=hs,
+        can_save=True,
+        boundary_state_offloads=[(1, 7, 32)],
+    )
+    assert thread._maybe_offload_boundary_states(req)
+
+    keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
+    # boundary 32 is block-aligned for the mamba group (block 16): one key,
+    # keyed by hs[32 // 4 - 1], read from the handed-off block 7 — not from
+    # block_ids[1] and with no FA gap coverage.
+    assert keys == [thread.token_databases[1].key_for(BlockHash(hs[7]))]
+    assert addrs == [[0x2000 + 7 * 256]]
+
+
+def test_mixed_snapshot_and_sub_block_offloads():
+    """A retention snapshot and the prompt-end sub-block CoW tail can arrive
+    in one hand-off; the sub-block path covers FA gap blocks but reads the
+    mamba boundary only from the CoW block, never positionally."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    thread = _make_partial_tail_send_thread(store)
+
+    hs = [bytes([i + 1]) * 4 for i in range(11)]  # 11 hash units = 44 tokens
+    req = ReqMeta(
+        req_id="req-a",
+        token_len_chunk=0,
+        block_ids=([1, 2, 3], [0, 0, 0]),
+        block_hashes=hs,
+        can_save=True,
+        boundary_state_offloads=[(1, 9, 32), (1, 7, 44)],
+    )
+    assert thread._maybe_offload_boundary_states(req)
+
+    keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
+    db_full, db_mamba = thread.token_databases
+    assert keys == [
+        # Aligned snapshot: boundary 32 from the handed-off block 9.
+        db_mamba.key_for(BlockHash(hs[7])),
+        # Sub-block boundary 44: FA gap blocks ending at 4, 8, 12.
+        db_full.key_for(BlockHash(hs[0])),
+        db_full.key_for(BlockHash(hs[1])),
+        db_full.key_for(BlockHash(hs[2])),
+        # Mamba boundary block from the CoW hand-off (block 7).
+        db_mamba.key_for(BlockHash(hs[10])),
+    ]
+    assert addrs == [
+        [0x2000 + 9 * 256],
+        [0x1000 + 1 * 256],
+        [0x1000 + 2 * 256],
+        [0x1000 + 3 * 256],
+        [0x2000 + 7 * 256],
+    ]
+
+
+def test_snapshot_offload_skips_null_handoff_block():
+    """A hand-off the core could not materialize (null block) carries no
+    committed state; persisting it would poison the boundary key."""
+    store = MagicMock()
+    thread = _make_partial_tail_send_thread(store)
+
+    hs = [bytes([i + 1]) * 4 for i in range(8)]
+    assert thread._maybe_offload_boundary_states(
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=0,
+            block_ids=([1, 2, 3], [5]),
+            block_hashes=hs,
+            can_save=True,
+            boundary_state_offloads=[(1, NULL_BLOCK_ID, 32)],
+        )
+    )
+    store.batch_is_exist.assert_not_called()
+    store.batch_put_from_multi_buffers.assert_not_called()
+
+
+def test_worker_meta_is_absent_before_any_completed_job():
+    send_thread = _make_partial_tail_send_thread(MagicMock())
+    store_worker = object.__new__(mooncake_store_worker.MooncakeStoreWorker)
+    store_worker.kv_send_thread = send_thread
+
+    assert store_worker.build_connector_worker_meta() is None
 
 
 def test_store_sending_thread_delta_start_rank_saves_second_local_chunk():
@@ -1433,6 +1681,29 @@ def test_recv_thread_uses_single_batch_when_no_disk_offload_budget(monkeypatch):
     store.batch_get_replica_desc.assert_not_called()
 
 
+def test_recv_thread_keys_chunk_by_lookup_selected_boundary():
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256, 256]
+    thread = _make_store_recving_thread(store)
+
+    # 32-token hit over 16-token chunks: chunk 1 would default to the hash at
+    # the 32-token boundary (a1); the lookup matched the 48-token one (a2).
+    req = _make_load_req(
+        "req-a",
+        [b"a0", b"a1", b"a2"],
+        token_len=32,
+        tail_key_boundaries=(TailKeyBoundary(group_id=0, num_tokens=48),),
+    )
+
+    thread._handle_request(req)
+
+    keys = store.batch_get_into_multi_buffers.call_args.args[0]
+    assert keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
+    ]
+
+
 def test_recv_thread_logs_tier_summary_when_enabled(monkeypatch, caplog_vllm):
     monkeypatch.setenv("VLLM_MOONCAKE_STORE_TIER_LOG", "1")
     caplog_vllm.set_level(logging.INFO, logger=worker.logger.name)
@@ -1797,6 +2068,59 @@ def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
 
     assert isinstance(w.store_replicate_config, fake_replicate_config_cls)
     assert w.store_replicate_config.preferred_segment == "10.0.0.7:50053"
+
+
+def test_worker_scales_uniform_attention_group_under_dcp(tmp_path, monkeypatch):
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        UniformTypeKVCacheSpecs,
+    )
+
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch, tp_size=4, dcp_size=4)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+    inner_specs = {
+        "layer0": FullAttentionSpec(
+            block_size=16, num_kv_heads=8, head_size=64, dtype=None
+        ),
+        "layer1": FullAttentionSpec(
+            block_size=16, num_kv_heads=4, head_size=64, dtype=None
+        ),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs=inner_specs,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(list(inner_specs), uniform_spec)],
+    )
+
+    w = worker.MooncakeStoreWorker(
+        _make_vllm_config(decode_context_parallel_size=4),
+        kv_cache_config,
+    )
+
+    scaled_spec = w._kv_cache_groups[0].kv_cache_spec
+    assert isinstance(scaled_spec, UniformTypeKVCacheSpecs)
+    assert scaled_spec.block_size == 64
+    assert all(spec.block_size == 64 for spec in scaled_spec.kv_cache_specs.values())
+    assert w.coord.attention_groups[0].spec.block_size == 64
+    assert w.token_dbs[0].block_size == 64
 
 
 @pytest.mark.parametrize("dcp_size", [1, 4])
@@ -2668,12 +2992,12 @@ def test_lookup_rejects_boundary_missing_one_mamba_shard():
     # 33 tokens for two 16-token blocks: the hit stops below the request end,
     # so the full-hit re-derivation stays out of the shard accounting.
     worker.store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
-    assert worker.lookup(33, [b"h0", b"h1"]) == 32
+    assert worker.lookup(33, [b"h0", b"h1"]).hit_length == 32
 
     worker.store.batch_is_exist.side_effect = lambda keys: [
         0 if "tp_rank:1" in k and "group:1" in k else 1 for k in keys
     ]
-    assert worker.lookup(33, [b"h0", b"h1"]) == 0
+    assert worker.lookup(33, [b"h0", b"h1"]).hit_length == 0
 
 
 def test_lookup_requires_all_dcp_rank_namespaces():
@@ -2684,7 +3008,7 @@ def test_lookup_requires_all_dcp_rank_namespaces():
     _refresh_group_tp_replication_factors(worker)
     worker.store.batch_is_exist.return_value = [1, 1, 0, 1]
 
-    assert worker.lookup(16, [b"a0"]) == 0
+    assert worker.lookup(16, [b"a0"]).hit_length == 0
     assert worker.store.batch_is_exist.call_args.args[0] == [
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
         "test-model@tp_rank:1@pcp0@dcp1@pp_rank:0@group:0@6130",
@@ -2696,7 +3020,7 @@ def test_lookup_requires_all_dcp_rank_namespaces():
 def test_lookup_partial_prefix_returns_first_hit_length():
     worker = _make_bare_worker()
     worker.store.batch_is_exist.return_value = [1, 1, 0]
-    assert worker.lookup(48, [b"a0", b"a1", b"a2"]) == 32
+    assert worker.lookup(48, [b"a0", b"a1", b"a2"]).hit_length == 32
 
 
 def test_lookup_partial_tail_uses_hash_alignment():
@@ -2736,7 +3060,7 @@ def test_lookup_partial_tail_uses_hash_alignment():
     _refresh_group_tp_replication_factors(worker)
     worker.store.batch_is_exist.return_value = [0, 0, 1, 0, 0, 1]
 
-    assert worker.lookup(13, [b"h0", b"h1", b"h2"]) == 12
+    assert worker.lookup(13, [b"h0", b"h1", b"h2"]).hit_length == 12
 
 
 def test_lookup_full_hit_reuses_existing_boundary():
@@ -2744,7 +3068,10 @@ def test_lookup_full_hit_reuses_existing_boundary():
     worker = _make_bare_worker(block_size=16)
     worker.store.batch_is_exist.return_value = [1, 1]
 
-    assert worker.lookup(32, [b"h0", b"h1"]) == 16
+    assert worker.lookup(32, [b"h0", b"h1"]) == MooncakeLookupResult(
+        hit_length=16,
+        tail_key_boundaries=(TailKeyBoundary(group_id=0, num_tokens=16),),
+    )
     assert worker.store.batch_is_exist.call_count == 1
 
 
@@ -2765,8 +3092,142 @@ def test_lookup_full_hit_with_eagle_pops_once_not_twice():
     # 64-token exact-multiple prompt, all 4 blocks stored: one eagle pop
     # gives 48; a spurious re-derivation (anchored at 48) would pop again
     # and return 32.
-    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 48
+    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]).hit_length == 48
     assert worker.store.batch_is_exist.call_count == 1
+
+
+def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["full"], full),
+        KVCacheGroupSpec(["mamba"], mamba),
+    ]
+    worker.hash_block_size = 4
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=16,
+            hash_block_size=4,
+        )
+        for group_id in range(2)
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+        use_eagle=True,
+    )
+    _refresh_group_tp_replication_factors(worker)
+    hashes = [BlockHash(f"h{i}".encode()) for i in range(6)]
+    present = {
+        (0, bytes(hashes[3])),
+        (0, bytes(hashes[5])),
+        (1, bytes(hashes[4])),
+        # A later Mamba state also exists, but its exact hit-boundary hash
+        # must win and therefore needs no override.
+        (1, bytes(hashes[5])),
+    }
+
+    def exists(keys):
+        return [
+            int(
+                any(
+                    f"@group:{group_id}@{block_hash.hex()}" in key
+                    for group_id, block_hash in present
+                )
+            )
+            for key in keys
+        ]
+
+    worker.store.batch_is_exist.side_effect = exists
+
+    result = worker.lookup(25, hashes)
+
+    # The eagle drop trims the hit to 20 tokens, but the block that survives
+    # truncation is the one keyed at the 24-token boundary (hashes[5]), which
+    # the load path cannot derive from hit_length.
+    assert result.hit_length == 20
+    assert result.tail_key_boundaries == (
+        TailKeyBoundary(group_id=0, num_tokens=24),
+        TailKeyBoundary(group_id=1, num_tokens=20),
+    )
+
+
+def test_lookup_plan_recovers_tail_key_after_multi_chunk_convergence():
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["full"], full),
+        KVCacheGroupSpec(["mamba"], mamba),
+    ]
+    worker.hash_block_size = 4
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=16,
+            hash_block_size=4,
+        )
+        for group_id in range(2)
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=4,
+    )
+    _refresh_group_tp_replication_factors(worker)
+    hashes = [BlockHash(f"h{i}".encode()) for i in range(12)]
+    present = {
+        (0, bytes(hashes[3])),
+        (0, bytes(hashes[7])),
+        (0, bytes(hashes[11])),
+        (1, bytes(hashes[4])),
+    }
+
+    def exists(keys):
+        return [
+            int(
+                any(
+                    f"@group:{group_id}@{block_hash.hex()}" in key
+                    for group_id, block_hash in present
+                )
+            )
+            for key in keys
+        ]
+
+    worker.store.batch_is_exist.side_effect = exists
+
+    result = worker.lookup(49, hashes)
+
+    assert result.hit_length == 20
+    assert result.tail_key_boundaries == (
+        TailKeyBoundary(group_id=0, num_tokens=32),
+        TailKeyBoundary(group_id=1, num_tokens=20),
+    )
 
 
 def test_lookup_full_hit_swa_degrades_when_no_stored_boundary_is_usable():
@@ -2790,7 +3251,7 @@ def test_lookup_full_hit_swa_degrades_when_no_stored_boundary_is_usable():
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
 
-    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 0
+    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]).hit_length == 0
     assert worker.store.batch_is_exist.call_count == 1
 
 
@@ -2811,7 +3272,7 @@ def test_lookup_swa_single_group_returns_full_when_tail_window_present():
         hash_block_size=worker.hash_block_size,
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
-    assert worker.lookup(65, [b"h0", b"h1", b"h2", b"h3"]) == 64
+    assert worker.lookup(65, [b"h0", b"h1", b"h2", b"h3"]).hit_length == 64
 
 
 def test_lookup_checks_all_potential_swa_hit_boundaries():
@@ -2865,7 +3326,7 @@ def test_lookup_checks_all_potential_swa_hit_boundaries():
         [f"h{i}".encode() for i in range(12)],
     )
 
-    assert result == 32
+    assert result.hit_length == 32
     keys = worker.store.batch_is_exist.call_args.args[0]
     assert len(keys) == 6
     swa_keys = [key for key in keys if "@group:1@" in key]
@@ -2949,6 +3410,24 @@ def test_consumer_starts_send_thread_only_when_put_is_enabled(save_decode_cache)
     assert (worker.kv_send_thread is not None) == save_decode_cache
 
 
+def test_start_load_kv_queues_async_load():
+    w = _make_bare_worker()
+    req = _make_load_req(
+        "load-req",
+        [b"h0", b"h1"],
+        token_len=32,
+    )
+    assert req.load_spec is not None
+    req.load_spec.token_len = 0
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
+    meta.add_request(req)
+
+    w.start_load_kv(meta)
+
+    assert req.load_spec.token_len == 32
+    assert w.recv_request_queue.get_nowait() is req
+
+
 def test_putting_consumer_queues_decode_save():
     w = _make_bare_worker(kv_role="kv_consumer", save_decode_cache=True)
     send_thread = MagicMock()
@@ -2960,7 +3439,7 @@ def test_putting_consumer_queues_decode_save():
 
     with patch.object(torch.cuda, "Event") as event_cls:
         event = event_cls.return_value
-        w.get_finished(set(), meta)
+        w.wait_for_save(meta)
 
     event.record.assert_called_once_with()
     send_thread.add_request.assert_called_once_with(req)
@@ -3385,7 +3864,7 @@ def test_lookup_records_mooncake_metrics():
     result = worker.lookup(33, [b"a0", b"a1"])
     stats = worker.get_kv_connector_stats()
 
-    assert result == 32
+    assert result.hit_length == 32
     assert isinstance(stats, MooncakeStoreConnectorStats)
     assert len(stats.data["lookup_exists"]) == 1
     assert stats.data["lookup_exists"][0]["num_keys"] == 2
