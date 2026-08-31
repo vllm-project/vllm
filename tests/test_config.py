@@ -775,8 +775,20 @@ def test_data_parallel_rpc_port_has_fixed_default():
     assert ParallelConfig().data_parallel_rpc_port == 29550
 
 
-def test_all2all_backend_has_portable_default():
-    assert ParallelConfig().all2all_backend == "allgather_reducescatter"
+@pytest.mark.parametrize(
+    ("is_cuda", "expected_backend"),
+    [
+        (True, "flashinfer_nvlink_one_sided"),
+        (False, "allgather_reducescatter"),
+    ],
+)
+def test_all2all_backend_default_is_platform_dependent(
+    monkeypatch, is_cuda, expected_backend
+):
+    """Non-CUDA platforms must keep the portable default (#53952); CUDA opts
+    into the faster one-sided backend."""
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: is_cuda)
+    assert ParallelConfig().all2all_backend == expected_backend
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])

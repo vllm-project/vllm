@@ -78,11 +78,18 @@ def test_default_ep_communicator_uses_platform_all2all_backend(
         self.all2all_backend = get_current_vllm_config().parallel_config.all2all_backend
         self.all2all_manager = None
 
+    def init_all2all_manager(self, cpu_group, tcp_store_group=None):
+        # The real base __init__ needs DP/TP groups, which aren't initialized
+        # here. Set only what the manager subclasses read on construction.
+        self.cpu_group = cpu_group
+        self.rank = 0
+        self.world_size = 1
+
     monkeypatch.setattr(
         "vllm.platforms.current_platform.is_cuda", lambda: platform == "cuda"
     )
     monkeypatch.setattr(DeviceCommunicatorBase, "__init__", init_device_communicator)
-    monkeypatch.setattr(All2AllManagerBase, "__init__", lambda self, *args: None)
+    monkeypatch.setattr(All2AllManagerBase, "__init__", init_all2all_manager)
 
     vllm_config = VllmConfig(parallel_config=ParallelConfig())
     with set_current_vllm_config(vllm_config):
