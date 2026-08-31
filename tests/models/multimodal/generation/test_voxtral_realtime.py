@@ -15,6 +15,7 @@ from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeGeneration
 from vllm.utils.math_utils import cdiv
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
@@ -128,6 +129,60 @@ async def async_engine():
         from tests.utils import wait_for_memory_to_settle
 
         wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+
+
+def test_offline_transcription_reaches_audio_embedding_boundary(
+    audio_assets, tokenizer, vllm_runner, monkeypatch
+):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    audio = Audio.from_file(audio_assets[0].get_local_path(), strict=False)
+    request = TranscriptionRequest(
+        audio=audio.to_base64(audio.format),
+        streaming=StreamingMode.OFFLINE,
+        language=None,
+    )
+    tokenized = tokenizer.instruct_tokenizer.encode_transcription(request)
+
+    prompt = {
+        "multi_modal_data": {"audio": [(tokenized.audios[0].audio_array, None)]},
+        "prompt_token_ids": tokenized.tokens,
+    }
+
+    vllm_kwargs = {**ENGINE_CONFIG}
+    vllm_kwargs["model_name"] = vllm_kwargs.pop("model")
+
+    with vllm_runner(**vllm_kwargs) as vllm_model:
+        renderer = vllm_model.llm.llm_engine.input_processor.renderer
+        (engine_input,) = renderer.render_cmpl([prompt])
+
+        audio_placeholder = engine_input["mm_placeholders"]["audio"][0]
+        audio_end = audio_placeholder.offset + audio_placeholder.length
+        prompt_len = len(engine_input["prompt_token_ids"])
+        expected_last_position = audio_end - 1
+
+        max_tokens = VoxtralRealtimeGeneration.get_speech_to_text_max_tokens(
+            engine_input
+        )
+
+        (output,) = vllm_model.llm.generate(
+            [prompt],
+            sampling_params=[
+                SamplingParams(
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                    ignore_eos=True,
+                )
+            ],
+        )
+
+        completion = output.outputs[0]
+        actual_last_position = prompt_len + len(completion.token_ids) - 1
+
+        # Forced-length decoding stop at the final audio-aligned position.
+        assert completion.finish_reason == "length"
+        assert len(completion.token_ids) == max_tokens
+        assert actual_last_position == expected_last_position
 
 
 def test_voxtral_realtime_forward(audio_assets, tokenizer, vllm_runner, monkeypatch):
