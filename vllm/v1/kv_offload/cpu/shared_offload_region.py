@@ -14,29 +14,18 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.v1.kv_offload.cpu.memory import (
+    CPUOffloadMemoryConfig,
+    create_shared_memory_allocation,
+)
 
 logger = init_logger(__name__)
 
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
 
-
-def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
-    """Spin-wait until the file reaches expected_size (creator truncated it)."""
-    deadline = time.monotonic() + timeout
-    while True:
-        if os.fstat(fd).st_size >= expected_size:
-            return
-        if time.monotonic() > deadline:
-            raise TimeoutError(
-                f"Timed out waiting for mmap file to reach {expected_size} bytes"
-            )
-        time.sleep(0.005)
-
-
 def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
     mmap_obj.madvise(_MADV_POPULATE_WRITE, offset, length)
-
 
 def _fallback_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
     # Touch one byte per page via a read-modify-write so existing bytes are
@@ -44,7 +33,6 @@ def _fallback_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> N
     # shared mmap by the time we run on a kernel without MADV_POPULATE_WRITE.
     arr = np.frombuffer(mmap_obj, dtype=np.uint8)
     arr[offset : offset + length : mmap.PAGESIZE] |= 0
-
 
 def _get_populate_write_fn(
     mmap_obj: mmap.mmap,
@@ -62,7 +50,6 @@ def _get_populate_write_fn(
         return _fallback_populate_write
     return _madvise_populate_write
 
-
 class SharedOffloadRegion:
     """
     Single mmap-backed memory region shared across all workers for a
@@ -71,7 +58,7 @@ class SharedOffloadRegion:
     the rest open the existing file and wait until it reaches the expected
     size.  Each worker then mmap()s the full file.
 
-    File path: /dev/shm/vllm_offload_{engine_id}.mmap
+    Default file path: /dev/shm/vllm_offload_{engine_id}.mmap
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -83,64 +70,51 @@ class SharedOffloadRegion:
         rank: int | None,
         kv_bytes_per_block: int,
         cpu_page_size: int,
+        memory_config: CPUOffloadMemoryConfig | None = None,
     ) -> None:
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_block % self.page_size == 0
 
+        self.memory_config = memory_config or CPUOffloadMemoryConfig()
         self.num_blocks = num_blocks
         self._row_stride = kv_bytes_per_block
         self.total_size_bytes = self.num_blocks * self._row_stride
+        self.mapped_size_bytes = self.memory_config.mapped_size(self.total_size_bytes)
 
-        self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+        self.mmap_path = self.memory_config.mmap_path(engine_id)
         self._creator = False  # set True only if this worker creates the file
         self.rank = rank
+        self.fd: int | None = None
+        self.mmap_obj: mmap.mmap | None = None
+        self._base: torch.Tensor | None = None
+        self._views: list[torch.Tensor] = []
+        self.is_pinned: bool = False
         if rank is not None:
             # byte offset to this worker's first slot within each block row
             self._worker_offset = rank * cpu_page_size
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
         try:
-            self.fd: int | None = os.open(
-                self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
+            allocation = create_shared_memory_allocation(
+                instance_id=engine_id,
+                logical_size_bytes=self.total_size_bytes,
+                memory_config=self.memory_config,
             )
-        except FileExistsError:
-            # Joiner path — another worker won O_EXCL. Reopen and wait
-            # for the file to reach expected size.
-            self.fd = os.open(self.mmap_path, os.O_RDWR)
-            try:
-                _wait_for_file_size(self.fd, self.total_size_bytes)
-            except (TimeoutError, OSError):
-                os.close(self.fd)
-                raise
-            logger.info("Opened existing mmap file %s", self.mmap_path)
-        else:
-            # Creator path. We won O_EXCL, so we own the file: any
-            # failure here must clean up so concurrent joiners don't
-            # land on a 0-byte stub and spin in _wait_for_file_size
-            # for the full 30 s timeout.
-            try:
-                check_shm_free_space(self.total_size_bytes)
-                os.ftruncate(self.fd, self.total_size_bytes)
-            except (RuntimeError, OSError):
-                os.unlink(self.mmap_path)
-                os.close(self.fd)
-                raise
-            self._creator = True
-            logger.info(
-                "Created mmap file %s (%.2f GB)",
-                self.mmap_path,
-                self.total_size_bytes / 1e9,
-            )
+            self.mmap_path = allocation.path
+            self.fd = allocation.fd
+            self._creator = allocation.creator
 
-        self.mmap_obj: mmap.mmap | None = mmap.mmap(
-            self.fd,
-            self.total_size_bytes,
-            flags=mmap.MAP_SHARED,
-            prot=mmap.PROT_READ | mmap.PROT_WRITE,
-        )
+            self.mmap_obj = mmap.mmap(
+                self.fd,
+                self.mapped_size_bytes,
+                flags=mmap.MAP_SHARED,
+                prot=mmap.PROT_READ | mmap.PROT_WRITE,
+            )
+        except Exception:
+            self.cleanup()
+            raise
 
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
-
         if rank is not None:
             # Populate only this worker's pages (one slot per block row).
             worker_offset = rank * cpu_page_size
@@ -165,10 +139,11 @@ class SharedOffloadRegion:
                 "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
             )
 
-        self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
+        self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8, count=self.total_size_bytes)
         self._views: list[torch.Tensor] = []
         self._canonical_offset = 0
         self.is_pinned: bool = False
+
 
     def create_next_worker_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
@@ -193,6 +168,7 @@ class SharedOffloadRegion:
             tensor_page_size: Bytes per block for this  tensor.
         """
         assert self.rank is not None
+        assert self._base is not None
         new_offset = self._worker_offset + tensor_page_size
         assert new_offset <= self._worker_area_end, (
             f"Worker offset {new_offset} exceeds worker area end "
@@ -259,6 +235,7 @@ class SharedOffloadRegion:
         Shape: (num_blocks, row_stride_bytes). Secondary tiers address
         block *b* as ``view[b]``.
         """
+        assert self._base is not None
         kv_tensor = self._base.view(self.num_blocks, self._row_stride)
         np_arr = kv_tensor.numpy()
         assert np_arr.ctypes.data == self._base.data_ptr(), (
