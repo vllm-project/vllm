@@ -16,7 +16,7 @@ INIT_PATH: Final = Path("vllm/__init__.py")
 # If you need to add items to whitelist, do it here.
 ALLOWED_IMPORTS: Final[frozenset[str]] = frozenset(
     {
-        "vllm.env_override",
+        "vllm.foundation.system.env_override",
     }
 )
 ALLOWED_FROM_MODULES: Final[frozenset[str]] = frozenset(

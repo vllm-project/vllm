@@ -76,6 +76,13 @@ Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
 - [Installation](https://docs.vllm.ai/en/latest/getting_started/installation.html)
 - [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
 - [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
+- [Source Code Guide](docs/design/source_code_guide.md)
+
+To make the vLLM source easier to navigate, the Python package is organized
+around four conceptual domains: frontend, runtime, backends, and foundation.
+Existing public APIs and legacy import paths remain available through
+compatibility shims. See the Source Code Guide for the package map, request
+flow, and compatibility details.
 
 ## Contributing
 

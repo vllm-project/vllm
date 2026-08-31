@@ -1,0 +1,106 @@
+[
+  {"old": "usage", "new": "foundation/observability/usage"},
+  {"old": "tracing", "new": "foundation/observability/tracing"},
+  {"old": "logging_utils", "new": "foundation/observability/logging_utils"},
+  {
+    "old": "connections.py",
+    "new": "foundation/system/connections.py",
+    "file": true
+  },
+  {
+    "old": "exceptions.py",
+    "new": "foundation/system/exceptions.py",
+    "file": true
+  },
+  {
+    "old": "env_override.py",
+    "new": "foundation/system/env_override.py",
+    "file": true
+  },
+  {"old": "profiler", "new": "foundation/devtools/profiler"},
+  {
+    "old": "envs.py",
+    "new": "foundation/system/envs.py",
+    "file": true
+  },
+  {
+    "old": "logger.py",
+    "new": "foundation/observability/logger.py",
+    "file": true
+  },
+  {"old": "utils", "new": "foundation/utilities"},
+  {
+    "old": "transformers_utils",
+    "new": "foundation/integrations/transformers_utils"
+  },
+  {"old": "plugins", "new": "foundation/extensibility/plugins"},
+  {"old": "config", "new": "foundation/config"},
+  {"old": "engine", "new": "frontend/compat/engine"},
+  {
+    "old": "outputs.py",
+    "new": "frontend/processing/outputs.py",
+    "file": true
+  },
+  {
+    "old": "sampling_params.py",
+    "new": "frontend/processing/sampling_params.py",
+    "file": true
+  },
+  {
+    "old": "pooling_params.py",
+    "new": "frontend/processing/pooling_params.py",
+    "file": true
+  },
+  {
+    "old": "tasks.py",
+    "new": "frontend/processing/tasks.py",
+    "file": true
+  },
+  {"old": "tokenizers", "new": "frontend/processing/tokenizers"},
+  {"old": "renderers", "new": "frontend/processing/renderers"},
+  {"old": "reasoning", "new": "frontend/processing/reasoning"},
+  {"old": "tool_parsers", "new": "frontend/processing/tool_parsers"},
+  {"old": "parser", "new": "frontend/processing/parser"},
+  {"old": "inputs", "new": "frontend/processing/inputs"},
+  {"old": "multimodal", "new": "frontend/processing/multimodal"},
+  {"old": "entrypoints", "new": "frontend/entrypoints"},
+  {"old": "platforms", "new": "backends/platform"},
+  {
+    "old": "device_allocator",
+    "new": "backends/platform/device_allocator"
+  },
+  {"old": "compilation", "new": "backends/compiler"},
+  {"old": "ir", "new": "backends/compute/ir"},
+  {"old": "distributed", "new": "backends/distributed"},
+  {"old": "ray", "new": "backends/distributed/ray"},
+  {
+    "old": "sequence.py",
+    "new": "runtime/modeling/sequence.py",
+    "file": true
+  },
+  {
+    "old": "logits_process.py",
+    "new": "runtime/generation/logits_process.py",
+    "file": true
+  },
+  {
+    "old": "logprobs.py",
+    "new": "runtime/generation/logprobs.py",
+    "file": true
+  },
+  {"old": "lora", "new": "runtime/modeling/lora"},
+  {
+    "old": "forward_context.py",
+    "new": "runtime/execution/forward_context.py",
+    "file": true
+  },
+  {"old": "triton_utils", "new": "backends/compute/dsl/triton_utils"},
+  {"old": "cute_utils", "new": "backends/compute/dsl/cute_utils"},
+  {"old": "tilelang_utils", "new": "backends/compute/dsl/tilelang_utils"},
+  {
+    "old": "scalar_type.py",
+    "new": "backends/compute/scalar_type.py",
+    "file": true
+  },
+  {"old": "kernels", "new": "backends/compute/kernels"}
+]
