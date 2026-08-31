@@ -79,7 +79,7 @@ def get_offloading_event_group_spec(
 class _OffloadEventMetadata:
     """BlockStored payload snapshot for one OffloadKey, captured while the
     Request is available and kept until the matching eviction event. ``medium``
-    is forwarded from the OffloadingEvent."""
+    and ``ownership`` are forwarded from the OffloadingEvent."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
     block_hashes: tuple[BlockHash, ...]
@@ -319,6 +319,7 @@ class OffloadingEventsTracker:
         key: OffloadKey,
         medium: Medium,
         locality: str | None,
+        ownership: str | None,
     ) -> BlockStored:
         return BlockStored(
             block_hashes=[
@@ -332,6 +333,7 @@ class OffloadingEventsTracker:
             lora_name=None,
             group_idx=get_offload_group_idx(key),
             locality=locality,
+            ownership=ownership,
         )
 
     def _take_stored_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
@@ -351,7 +353,9 @@ class OffloadingEventsTracker:
                         "groups and promotions not observed as a primary-tier "
                         "hit before translation."
                     )
-                yield self._placeholder_stored(key, event.medium, locality)
+                yield self._placeholder_stored(
+                    key, event.medium, locality, event.ownership
+                )
                 continue
 
             yield BlockStored(
@@ -377,6 +381,7 @@ class OffloadingEventsTracker:
                     meta.kv_cache_spec.kv_cache_spec_sliding_window
                 ),
                 locality=locality,
+                ownership=event.ownership,
             )
 
     def _take_removed_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
@@ -410,4 +415,5 @@ class OffloadingEventsTracker:
                 medium=_MEDIUM_TO_EVENT_STR[event.medium],
                 group_idx=group_idx,
                 locality=locality,
+                ownership=event.ownership,
             )
