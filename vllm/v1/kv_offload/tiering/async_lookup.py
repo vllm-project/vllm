@@ -45,8 +45,9 @@ logger = init_logger(__name__)
 
 @dataclass(slots=True)
 class LookupState:
+    generation: int
     result: bool | None = None  # True (found), False (not found), None
-    request_ids: set[str] = field(default_factory=set)  # requests asking for the lookup
+    request_context_ids: set[int] = field(default_factory=set)
 
 
 class AsyncLookupManager(ABC):
@@ -76,23 +77,25 @@ class AsyncLookupManager(ABC):
 
         # key → LookupState; scheduler-owned, no lock needed.
         self._lookup_state: dict[OffloadKey, LookupState] = {}
-        # req_id → keys looked up by that request (reverse index for cleanup).
-        self._req_keys: dict[str, set[OffloadKey]] = {}
+        # ReqContext identity → keys looked up by that request incarnation.
+        self._req_keys: dict[int, set[OffloadKey]] = {}
 
-        # Accumulates (key, req_context) pairs during lookup() calls.
+        self._next_generation = 0
+
+        # Accumulates (key, req_context, generation) tuples during lookup().
         # Flushed as one queue item per step by flush().
-        self._lookup_batch: list[tuple[OffloadKey, ReqContext]] = []
+        self._lookup_batch: list[tuple[OffloadKey, ReqContext, int]] = []
 
         # Scheduler → worker: one full step's batch per item.
         # None is used as a shutdown sentinel.
         self._lookup_queue: queue.SimpleQueue[
-            list[tuple[OffloadKey, ReqContext]] | None
+            list[tuple[OffloadKey, ReqContext, int]] | None
         ] = queue.SimpleQueue()
 
         # Worker → scheduler: completed result batches.
         # Each item is a list of (key, found) pairs.
         # SimpleQueue is explicitly thread-safe for one writer / one reader.
-        self._pending_results: queue.SimpleQueue[list[tuple[OffloadKey, bool]]] = (
+        self._pending_results: queue.SimpleQueue[list[tuple[OffloadKey, int, bool]]] = (
             queue.SimpleQueue()
         )
         self._need_to_drain: bool = False
@@ -134,14 +137,16 @@ class AsyncLookupManager(ABC):
         if self._need_to_drain:
             self.drain_results()
             self._need_to_drain = False
-        req_id = req_context.req_id
+        context_id = id(req_context)
         state = self._lookup_state.get(key)
         if state is None:
-            state = LookupState()
+            generation = self._next_generation
+            self._next_generation += 1
+            state = LookupState(generation=generation)
             self._lookup_state[key] = state
-            self._lookup_batch.append((key, req_context))
-        state.request_ids.add(req_id)
-        self._req_keys.setdefault(req_id, set()).add(key)
+            self._lookup_batch.append((key, req_context, generation))
+        state.request_context_ids.add(context_id)
+        self._req_keys.setdefault(context_id, set()).add(key)
         return state.result
 
     def flush(self) -> None:
@@ -167,9 +172,9 @@ class AsyncLookupManager(ABC):
                 batch = self._pending_results.get_nowait()
             except queue.Empty:
                 break
-            for key, result in batch:
+            for key, generation, result in batch:
                 state = self._lookup_state.get(key)
-                if state is not None:
+                if state is not None and state.generation == generation:
                     # A key is enqueued for probing exactly once, so a decided
                     # verdict must never receive a second result. Enforcing it
                     # keeps a late/duplicate result from resurrecting a stale
@@ -190,16 +195,17 @@ class AsyncLookupManager(ABC):
             if state is not None:
                 state.result = False
 
-    def cleanup(self, req_id: str) -> None:
+    def cleanup(self, req_context: ReqContext) -> None:
         """Remove entries no longer needed by any active request.
 
         Called from the tier's on_request_finished(). Uses the reverse
         index to visit only keys associated with this request.
         """
-        for key in self._req_keys.pop(req_id, ()):
+        context_id = id(req_context)
+        for key in self._req_keys.pop(context_id, ()):
             state = self._lookup_state[key]
-            state.request_ids.discard(req_id)
-            if not state.request_ids:
+            state.request_context_ids.discard(context_id)
+            if not state.request_context_ids:
                 del self._lookup_state[key]
 
     def shutdown(self) -> None:
@@ -217,19 +223,20 @@ class AsyncLookupManager(ABC):
             if pending is None:
                 break
 
-            # Group by req_id.
-            batches: dict[str, tuple[ReqContext, list[OffloadKey]]] = {}
-            for key, req_context in pending:
-                req_id = req_context.req_id
-                if req_id not in batches:
-                    batches[req_id] = (req_context, [])
-                batches[req_id][1].append(key)
+            # Group by request incarnation, not the reusable request ID.
+            batches: dict[int, tuple[ReqContext, list[OffloadKey], list[int]]] = {}
+            for key, req_context, generation in pending:
+                context_id = id(req_context)
+                if context_id not in batches:
+                    batches[context_id] = (req_context, [], [])
+                batches[context_id][1].append(key)
+                batches[context_id][2].append(generation)
 
             if not batches:
                 continue
 
-            results: list[tuple[OffloadKey, bool]] = []
-            for req_context, keys in batches.values():
+            results: list[tuple[OffloadKey, int, bool]] = []
+            for req_context, keys, generations in batches.values():
                 try:
                     hits = self.batch_lookup(keys, req_context)
                 except Exception as exc:
@@ -241,8 +248,8 @@ class AsyncLookupManager(ABC):
                     )
                     hits = (False for _ in keys)
 
-                for key, hit in zip(keys, hits):
-                    results.append((key, hit))
+                for key, generation, hit in zip(keys, generations, hits):
+                    results.append((key, generation, hit))
 
             # Post the entire batch as one item — no lock needed.
             if results:
