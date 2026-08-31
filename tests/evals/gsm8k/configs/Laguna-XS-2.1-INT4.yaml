@@ -1,4 +1,4 @@
-model_name: "poolside/Laguna-XS.2-NVFP4"
+model_name: "poolside/Laguna-XS-2.1-INT4"
 accuracy_threshold: 0.90
 num_questions: 1319
 num_fewshot: 5
