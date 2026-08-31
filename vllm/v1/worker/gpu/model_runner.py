@@ -76,6 +76,9 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
     RoutedExpertsTensors,
 )
+from vllm.v1.worker.adaptive_verification_profile_cache import (
+    initialize_adaptive_verification_profile,
+)
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
@@ -945,12 +948,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     with use_workspace_lane(self._draft_workspace_lane):
                         self.speculator.capture()
                 if self.adaptive_verification is not None:
-                    with self.step_timing.collect() as timings:
-                        for batch in self.adaptive_verification.batches_to_profile(
-                            self.cudagraph_manager.captured_token_counts()
-                        ):
-                            self._dummy_run(**batch)
-                    self.adaptive_verification.set_initial_cost_curves(timings)
+                    initialize_adaptive_verification_profile(
+                        self, self.cudagraph_manager.captured_token_counts()
+                    )
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
