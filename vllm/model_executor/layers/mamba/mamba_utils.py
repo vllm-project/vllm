@@ -17,6 +17,7 @@ from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     get_kv_cache_torch_dtype,
 )
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 logger = init_logger(__name__)
 
@@ -352,6 +353,10 @@ Parameters:
   num_accepted_tokens: int - number of accepted tokens used to compute the copy offset.
       Range: 1 .. 1 + num_speculative_tokens (inclusive).
 """
+MambaStateCopyFuncs: TypeAlias = tuple[MambaStateCopyFunc, ...]
+MambaStateCopyFuncsByType: TypeAlias = dict[
+    MambaAttentionBackendEnum, MambaStateCopyFuncs
+]
 
 
 def get_conv_copy_spec(

@@ -16,7 +16,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesResponse,
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
 )
