@@ -69,9 +69,6 @@ RUN python${PYTHON_VERSION} -m venv "${VIRTUAL_ENV}" && \
     "${VIRTUAL_ENV}/bin/python" -m pip install --upgrade pip setuptools PyYAML
 ENV PATH=${VIRTUAL_ENV}/bin:$PATH
 
-# point to amdsmi python module
-ENV PYTHONPATH=${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi
-
 RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
@@ -114,6 +111,7 @@ ENV HIP_DEVICE_LIB_PATH=${SITE_PACKAGES}/_rocm_sdk_core/lib/llvm/amdgcn/bitcode
 ENV PATH=${ROCM_PATH}/bin:${ROCM_PATH}/llvm/bin:$PATH
 ENV LD_LIBRARY_PATH=${ROCM_PATH}/lib:${SITE_PACKAGES}/_rocm_sdk_core/lib
 ENV CMAKE_PREFIX_PATH=${ROCM_PATH}/lib/cmake:${SITE_PACKAGES}/torch/share/cmake
+ENV PYTHONPATH=${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi
 
 # torch/torchvision/torchaudio must be pinned to mutually-consistent builds
 # (same +rocm... suffix) or the C++ ops break at import (ABI skew). The rocm
