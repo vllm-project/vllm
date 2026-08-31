@@ -15,6 +15,7 @@ from vllm.lora.layers import (
     BaseLayerWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
+    LogitsProcessorWithLoRA,
     LoRAMapping,
     LoRAMappingType,
 )
@@ -736,6 +737,21 @@ class LoRAModelManager:
             self.lora_config.target_modules,
             self.packed_modules_mapping,
         )
+
+    def get_lm_punica_wrapper(self) -> PunicaWrapperBase:
+        """Return the Punica wrapper for the language model."""
+        if not self.supports_mm:
+            return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
+        return self.punica_wrapper_mapping[self.mm_mapping.language_model[0]]
+
+    def get_lora_logits_wrapper(self) -> PunicaWrapperBase | None:
+        """Return the LM wrapper only when LoRA targets the logits processor."""
+        if not any(
+            isinstance(module, LogitsProcessorWithLoRA)
+            for module in self.modules.values()
+        ):
+            return None
+        return self.get_lm_punica_wrapper()
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
         """
