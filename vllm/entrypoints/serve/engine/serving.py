@@ -147,7 +147,11 @@ class BaseServing:
             ):
                 for content_dict in message["content"]:
                     if "type" in content_dict:
-                        message_types.add(content_dict["type"].split("_")[0])
+                        content_type = content_dict["type"]
+                        if content_type.startswith("input_"):
+                            message_types.add(content_type.removeprefix("input_"))
+                        else:
+                            message_types.add(content_type.split("_")[0])
         return message_types
 
     def _get_active_default_mm_loras(
