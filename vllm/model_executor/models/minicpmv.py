@@ -611,22 +611,24 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
-    def get_hf_processor(self, **kwargs: object):
+    def _get_checkpoint_image_processor(self, **kwargs: object):
         model_config = self.ctx.model_config
         processor_cls = self._image_processor_cls
         merged_kwargs = _merge_mm_kwargs(model_config, processor_cls, **kwargs)
 
-        # AutoProcessor only for tokenizer; its image_processor is resolved by
-        # class name and can pick the wrong checkpoint across MiniCPM-V versions.
-        hf_processor = self.ctx.get_hf_processor(**kwargs)
-
-        image_processor = cached_get_image_processor(
+        return cached_get_image_processor(
             model_config.model,
             revision=model_config.revision,
             trust_remote_code=model_config.trust_remote_code,
             processor_cls_overrides=processor_cls,
             **merged_kwargs,
         )
+
+    def get_hf_processor(self, **kwargs: object):
+        # AutoProcessor only for tokenizer; its image_processor is resolved by
+        # class name and can pick the wrong MiniCPM checkpoint.
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
+        image_processor = self._get_checkpoint_image_processor(**kwargs)
 
         from vllm.transformers_utils.processors.minicpmv import MiniCPMVProcessor
 
