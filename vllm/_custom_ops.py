@@ -3328,18 +3328,17 @@ def dsv3_fused_a_gemm(
     torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b, enable_pdl)
 
 
-if hasattr(torch.ops._C, "weight_packed_linear"):
-
-    @register_fake("_C::weight_packed_linear")
-    def weight_packed_linear_fake(
-        mat1: torch.Tensor,
-        mat2: torch.Tensor,
-        bias: torch.Tensor | None,
-        is_vnni: bool,
-    ) -> torch.Tensor:
-        return torch.empty(
-            (mat1.size(0), mat2.size(0)), dtype=mat1.dtype, device=mat2.device
-        )
+def weight_packed_linear_cpu(
+    x: torch.Tensor,
+    packed_weight: torch.Tensor,
+    n: int,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    output = torch.empty((*x.shape[0:-1], n), dtype=x.dtype)
+    torch.ops._C.weight_packed_linear(
+        output.reshape(-1, n), x.reshape(-1, x.size(-1)), packed_weight, bias, True
+    )
+    return output
 
 
 class CPUQuantMethod(IntEnum):
