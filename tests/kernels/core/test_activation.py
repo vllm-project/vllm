@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
 )
+from vllm.model_executor.layers.fused_moe.utils import swiglu_limit_func
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -219,6 +220,20 @@ def test_act_and_mul(
 
 
 SWIGLU_LIMITS = [3.0, 7.0, 15.0]
+
+
+@torch.inference_mode()
+def test_swiglu_limit_func_without_routing_uses_output_buffer() -> None:
+    x = torch.randn(7, 1024, dtype=torch.bfloat16, device="cuda")
+    output = torch.empty(7, 512, dtype=x.dtype, device=x.device)
+
+    swiglu_limit_func(output, x, swiglu_limit=7.0)
+    gate, up = x.chunk(2, dim=-1)
+    expected = torch.nn.functional.silu(gate.clamp(max=7.0)) * up.clamp(
+        min=-7.0, max=7.0
+    )
+
+    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.parametrize("swiglu_limit", SWIGLU_LIMITS)
