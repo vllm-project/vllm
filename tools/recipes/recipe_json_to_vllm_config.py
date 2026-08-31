@@ -16,13 +16,24 @@ Examples:
   python3 recipe_json_to_vllm_config.py \
     https://recipes.vllm.ai/meta-llama/Llama-3.1-8B-Instruct/hw/xeon6.json
 
-  # Non-interactive discovery
+  # Non-interactive discovery (recommended strategy)
   python3 recipe_json_to_vllm_config.py \
     --model meta-llama/Llama-3.1-8B-Instruct --hardware xeon6
+
+  # Promoted variant + explicit strategy
+  python3 recipe_json_to_vllm_config.py \
+    --model nvidia/Llama-3.1-8B-Instruct-FP8 \
+    --hardware arc_pro_b70 \
+    --strategy single_node_tp
 
 Then:
   source env.sh
   vllm serve --config config.yml
+
+Variants with a distinct Hugging Face model ID are promoted by the Recipes API
+and selected through --model; this converter does not need a separate --variant
+argument. Strategy selection follows the exact `alternatives` JSON links emitted
+by the Recipes API instead of synthesizing strategy URLs locally.
 
 The converter intentionally targets a single `vllm serve` process. If the
 recipe rendering is multi-node, PD-disaggregated, or another multi-process
@@ -46,13 +57,38 @@ try:
 except ImportError as exc:
     raise SystemExit("PyYAML is required. Install it with: pip install pyyaml") from exc
 
-
 DEFAULT_API_BASE = "https://recipes.vllm.ai"
 
-SHORT_ALIASES = {
-    "-tp": "tensor-parallel-size",
+VALUE_SHORT_ALIASES = {
+    "-q": "quantization",
     "-pp": "pipeline-parallel-size",
+    "-n": "nnodes",
+    "-r": "node-rank",
+    "-tp": "tensor-parallel-size",
+    "-dcp": "decode-context-parallel-size",
+    "-pcp": "prefill-context-parallel-size",
     "-dp": "data-parallel-size",
+    "-dpn": "data-parallel-rank",
+    "-dpr": "data-parallel-start-rank",
+    "-dpl": "data-parallel-size-local",
+    "-dpa": "data-parallel-address",
+    "-dpp": "data-parallel-rpc-port",
+    "-dpb": "data-parallel-backend",
+    "-asc": "api-server-count",
+}
+
+FLAG_SHORT_ALIASES = {
+    "-dph": "data-parallel-hybrid-lb",
+    "-dpe": "data-parallel-external-lb",
+    "-dpm": "data-parallel-multi-port-external-lb",
+    "-ep": "enable-expert-parallel",
+}
+
+DICT_SHORT_ALIASES = {
+    "-sc": "speculative-config",
+    "-dc": "diffusion-config",
+    "-cc": "compilation-config",
+    "-ac": "attention-config",
 }
 
 
@@ -71,13 +107,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--model",
         help=(
-            "Model hf_id or search text for recipe discovery. "
-            "Use with --hardware for non-interactive operation."
+            "Model hf_id or search text for recipe discovery. Promoted recipe "
+            "variants are selected by their own hf_id. Use with --hardware for "
+            "non-interactive operation."
         ),
     )
     p.add_argument(
         "--hardware",
-        help="Hardware ID for recipe discovery, for example xeon6 or h100.",
+        help=(
+            "Hardware ID for recipe discovery, for example xeon6, b200, or arc_pro_b70."
+        ),
+    )
+    p.add_argument(
+        "--strategy",
+        help=(
+            "Serving strategy for recipe discovery, for example single_node_tp. "
+            "When omitted with --model and --hardware, use the Recipes-recommended "
+            "strategy. Interactive discovery offers the recommended strategy and "
+            "all generated alternatives."
+        ),
     )
     p.add_argument(
         "--api-base",
@@ -93,6 +141,71 @@ def parse_args() -> argparse.Namespace:
         "--env-out",
         default="env.sh",
         help="Output shell environment file (default: env.sh)",
+    )
+
+    tuning = p.add_argument_group(
+        "optional runtime tuning",
+        (
+            "Refine the recipe baseline only when additional information is supplied. "
+            "Runtime tuning is enabled only for recipe hardware with a registered "
+            "policy (currently: xeon6)."
+        ),
+    )
+    tuning.add_argument(
+        "--detect-hardware",
+        action="store_true",
+        help=(
+            "Detect effective CPU/NUMA/memory resources and allow the selected "
+            "recipe-hardware policy to override recipe runtime arguments."
+        ),
+    )
+    tuning.add_argument(
+        "--input-tokens",
+        type=int,
+        help="Expected input-token length. Optional workload hint.",
+    )
+    tuning.add_argument(
+        "--output-tokens",
+        type=int,
+        help="Expected output-token length. Optional workload hint.",
+    )
+    tuning.add_argument(
+        "--concurrency",
+        type=int,
+        help="Expected maximum concurrent requests. Optional workload hint.",
+    )
+    tuning.add_argument(
+        "--ttft-sla-ms",
+        type=float,
+        help="Optional time-to-first-token objective in milliseconds.",
+    )
+    tuning.add_argument(
+        "--tpot-sla-ms",
+        type=float,
+        help="Optional time-per-output-token objective in milliseconds.",
+    )
+    tuning.add_argument(
+        "--target-qps",
+        type=float,
+        help="Optional capacity target for future DP/capacity tuning.",
+    )
+
+    sweep = p.add_argument_group(
+        "optional performance sweep",
+        ("Generate benchmark files after creating one initial runtime suggestion."),
+    )
+    sweep.add_argument(
+        "--generate-sweep",
+        action="store_true",
+        help=(
+            "Generate an optional vllm bench sweep package around the single "
+            "initial runtime suggestion."
+        ),
+    )
+    sweep.add_argument(
+        "--sweep-out-dir",
+        default="sweep",
+        help="Output directory for optional sweep files (default: sweep).",
     )
     return p.parse_args()
 
@@ -238,10 +351,74 @@ def select_hardware(
     return selected, by_hardware[selected]
 
 
+def strategy_sources(
+    api_base: str, hardware_json_url: str, recipe: dict[str, Any]
+) -> tuple[str, dict[str, str]]:
+    recommended = recipe.get("strategy")
+    if not isinstance(recommended, str) or not recommended:
+        raise ValueError(
+            "Hardware recipe JSON does not contain a usable `strategy` field."
+        )
+
+    sources = {recommended: hardware_json_url}
+    raw_alternatives = recipe.get("alternatives") or {}
+    if not isinstance(raw_alternatives, dict):
+        raise ValueError(
+            "Hardware recipe JSON `alternatives` must be an object when present."
+        )
+
+    for strategy, path in raw_alternatives.items():
+        if isinstance(strategy, str) and strategy and isinstance(path, str) and path:
+            sources[strategy] = api_url(api_base, path)
+
+    return recommended, sources
+
+
+def select_strategy(
+    api_base: str,
+    hardware_json_url: str,
+    recipe: dict[str, Any],
+    requested: str | None,
+    interactive: bool,
+) -> tuple[str, str]:
+    recommended, sources = strategy_sources(api_base, hardware_json_url, recipe)
+    strategies = [recommended, *sorted(s for s in sources if s != recommended)]
+
+    if requested:
+        selected = next(
+            (
+                strategy
+                for strategy in strategies
+                if strategy.lower() == requested.lower()
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError(
+                f"Strategy {requested!r} is not available for this model/hardware. "
+                f"Available: {', '.join(strategies)}"
+            )
+        return selected, sources[selected]
+
+    if not interactive:
+        return recommended, hardware_json_url
+
+    print("\nAvailable strategies:")
+
+    def strategy_label(strategy: str) -> str:
+        if strategy == recommended:
+            return f"{strategy} (recommended)"
+        return strategy
+
+    selected = choose_from_menu(strategies, strategy_label, "Select strategy: ")
+    return selected, sources[selected]
+
+
 def discover_recipe_source(
     api_base: str,
     requested_model: str | None,
     requested_hardware: str | None,
+    requested_strategy: str | None,
 ) -> str:
     print("No recipe JSON supplied; starting Recipes API discovery.")
 
@@ -287,11 +464,24 @@ def discover_recipe_source(
         )
 
     hardware, path = select_hardware(by_hardware, requested_hardware)
-    resolved = api_url(api_base, path)
+    hardware_json_url = api_url(api_base, path)
+    hardware_data = load_json(hardware_json_url)
+    if not isinstance(hardware_data, dict):
+        raise ValueError(f"{hardware_json_url} did not return a JSON object.")
+
+    interactive = requested_model is None or requested_hardware is None
+    strategy, resolved = select_strategy(
+        api_base,
+        hardware_json_url,
+        hardware_data,
+        requested_strategy,
+        interactive,
+    )
 
     print("\nResolved recipe:")
     print(f"  Model:    {model.get('hf_id')}")
     print(f"  Hardware: {hardware}")
+    print(f"  Strategy: {strategy}")
     print(f"  JSON:     {resolved}")
     print()
 
@@ -300,6 +490,11 @@ def discover_recipe_source(
 
 def coerce(value: str) -> Any:
     """Convert CLI string values to useful YAML scalar/object types."""
+    # Recipes may preserve Python-style booleans in dotted config aliases,
+    # for example: -cc.pass_config.fuse_rope_kvcache=True.
+    if value in ("True", "False"):
+        return value == "True"
+
     try:
         return json.loads(value)
     except (json.JSONDecodeError, TypeError):
@@ -309,8 +504,19 @@ def coerce(value: str) -> Any:
 def is_option_token(token: str) -> bool:
     if token.startswith("--"):
         return True
-    if token in SHORT_ALIASES or token == "-O":
+
+    short_name = token.split("=", 1)[0]
+    if (
+        short_name in VALUE_SHORT_ALIASES
+        or short_name in FLAG_SHORT_ALIASES
+        or short_name in DICT_SHORT_ALIASES
+        or token == "-O"
+    ):
         return True
+
+    if any(token.startswith(f"{alias}.") for alias in DICT_SHORT_ALIASES):
+        return True
+
     return token.startswith("-O") and len(token) > 2
 
 
@@ -390,22 +596,85 @@ def argv_to_config(argv: list[Any]) -> dict[str, Any]:
             i += 2
             continue
 
-        # Selected common short aliases.
-        if token in SHORT_ALIASES:
-            if i + 1 >= len(argv):
-                raise ValueError(f"{token} is missing its value")
+        # Dotted dictionary aliases accepted by FlexibleArgumentParser:
+        #   -cc.mode=3
+        #   -cc.mode 3
+        #   -cc.pass_config.foo=True
+        #   -cc.custom_ops+ -quant_fp8
+        # The same syntax applies to -sc, -dc, and -ac.
+        dotted_alias = next(
+            (alias for alias in DICT_SHORT_ALIASES if token.startswith(f"{alias}.")),
+            None,
+        )
+        if dotted_alias is not None:
+            dotted = token[len(dotted_alias) + 1 :]
+            raw_key, separator, raw_value = dotted.partition("=")
+
+            append = raw_key.endswith("+")
+            if append:
+                raw_key = raw_key[:-1]
+
+            if not raw_key:
+                raise ValueError(f"{token} must contain a key after {dotted_alias}.")
+
+            if not separator:
+                if i + 1 >= len(argv):
+                    raise ValueError(f"{token} is missing its value")
+                # Consume the next token unconditionally. Dotted list values may
+                # themselves begin with "-", for example "-quant_fp8".
+                raw_value = argv[i + 1]
+                i += 2
+            else:
+                i += 1
+
+            value: Any = raw_value.split(",") if append else coerce(raw_value)
+
             merge_value(
                 config,
-                [SHORT_ALIASES[token]],
-                coerce(argv[i + 1]),
+                [DICT_SHORT_ALIASES[dotted_alias], *raw_key.split(".")],
+                value,
             )
+            continue
+
+        # Support -alias=value for value-bearing and whole-dict aliases.
+        if "=" in token:
+            short_name, raw_value = token.split("=", 1)
+            if short_name in VALUE_SHORT_ALIASES:
+                merge_value(
+                    config,
+                    [VALUE_SHORT_ALIASES[short_name]],
+                    coerce(raw_value),
+                )
+                i += 1
+                continue
+            if short_name in DICT_SHORT_ALIASES:
+                merge_value(
+                    config,
+                    [DICT_SHORT_ALIASES[short_name]],
+                    coerce(raw_value),
+                )
+                i += 1
+                continue
+
+        # Boolean short aliases are flags and do not consume a value.
+        if token in FLAG_SHORT_ALIASES:
+            merge_value(config, [FLAG_SHORT_ALIASES[token]], True)
+            i += 1
+            continue
+
+        # Scalar and whole-dictionary short aliases consume one value.
+        if token in VALUE_SHORT_ALIASES or token in DICT_SHORT_ALIASES:
+            if i + 1 >= len(argv):
+                raise ValueError(f"{token} is missing its value")
+            key = VALUE_SHORT_ALIASES.get(token) or DICT_SHORT_ALIASES[token]
+            merge_value(config, [key], coerce(argv[i + 1]))
             i += 2
             continue
 
         if not token.startswith("--"):
             raise ValueError(
                 f"Unexpected positional/short argument {token!r}. "
-                "The converter expects Recipes to emit long-form vLLM serve options."
+                "The converter accepts vLLM serve long options and known short aliases."
             )
 
         # --key=value
@@ -527,11 +796,13 @@ def main() -> int:
     try:
         source = args.source
         if source is None:
-            source = discover_recipe_source(args.api_base, args.model, args.hardware)
-        elif args.model or args.hardware:
+            source = discover_recipe_source(
+                args.api_base, args.model, args.hardware, args.strategy
+            )
+        elif args.model or args.hardware or args.strategy:
             raise ValueError(
                 "Do not combine a positional recipe JSON source with "
-                "--model/--hardware discovery options."
+                "--model/--hardware/--strategy discovery options."
             )
 
         recipe = load_json(source)
@@ -540,18 +811,115 @@ def main() -> int:
 
         argv = recipe_argv(recipe)
         config = argv_to_config(argv)
+
+        tuning_requested = (
+            args.detect_hardware
+            or args.generate_sweep
+            or any(
+                value is not None
+                for value in (
+                    args.input_tokens,
+                    args.output_tokens,
+                    args.concurrency,
+                    args.ttft_sla_ms,
+                    args.tpot_sla_ms,
+                    args.target_qps,
+                )
+            )
+        )
+
+        tuning = None
+        workload = None
+        sweep_writer = None
+        if tuning_requested:
+            # Keep plain Recipes conversion lightweight. vLLM-specific modules
+            # are imported only for optional runtime tuning or sweep generation.
+            from runtime_tuning import (
+                WorkloadHints,
+                finetune_runtime_config,
+                get_runtime_tuning_policies,
+            )
+
+            workload = WorkloadHints(
+                input_tokens=args.input_tokens,
+                output_tokens=args.output_tokens,
+                concurrency=args.concurrency,
+                ttft_sla_ms=args.ttft_sla_ms,
+                tpot_sla_ms=args.tpot_sla_ms,
+                target_qps=args.target_qps,
+            )
+
+            if args.generate_sweep:
+                from sweep_generation import (
+                    validate_sweep_workload,
+                    write_sweep_files,
+                )
+
+                validate_sweep_workload(workload)
+                sweep_writer = write_sweep_files
+
+            recipe_hardware = recipe.get("hardware")
+            policies = get_runtime_tuning_policies(recipe_hardware)
+
+            hardware = None
+            if args.detect_hardware:
+                from hardware_detection import detect_hardware
+
+                hardware = detect_hardware()
+
+            tuning = finetune_runtime_config(
+                config,
+                hardware=hardware,
+                workload=workload,
+                policies=policies,
+            )
+            config.update(tuning.overrides)
+
         write_config(args.config_out, source, recipe, config)
         write_env(args.env_out, source, recipe)
+
+        sweep_files: list[Path] = []
+        if args.generate_sweep:
+            assert workload is not None
+            assert sweep_writer is not None
+            sweep_files = sweep_writer(
+                args.sweep_out_dir,
+                config_path=args.config_out,
+                env_path=args.env_out,
+                config=config,
+                workload=workload,
+            )
+
+        if tuning is not None:
+            if tuning.overrides:
+                print("Initial runtime suggestion:")
+                for key, value in tuning.overrides.items():
+                    print(f"  {key}: {value}")
+            for note in tuning.notes:
+                print(f"  tuning: {note}")
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
     print(f"Wrote {args.config_out}")
     print(f"Wrote {args.env_out}")
+    if sweep_files:
+        print(f"Wrote optional sweep package under {args.sweep_out_dir}/")
     print()
     print("Run:")
     print(f"  source {shlex.quote(args.env_out)}")
     print(f"  vllm serve --config {shlex.quote(args.config_out)}")
+    if sweep_files:
+        sweep_dir = Path(args.sweep_out_dir)
+        run_sweep = sweep_dir / "run_sweep.sh"
+        recommend = sweep_dir / "recommend.py"
+        print()
+        print("Optional performance sweep:")
+        print(f"  {shlex.quote(str(run_sweep))} --dry-run")
+        print(f"  {shlex.quote(str(run_sweep))}")
+        print()
+        print("After the sweep:")
+        print(f"  {shlex.quote(str(recommend))}")
     return 0
 
 

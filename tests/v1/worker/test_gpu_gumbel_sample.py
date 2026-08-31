@@ -54,6 +54,7 @@ def _sample(
     *,
     use_fp64: bool = False,
     temperature: float = 1.0,
+    is_drafting: bool = False,
 ) -> torch.Tensor:
     """Sample `num_samples` tokens from one logit vector.
 
@@ -74,6 +75,7 @@ def _sample(
         seed,
         pos,
         apply_temperature=True,
+        is_drafting=is_drafting,
         use_fp64=use_fp64,
     )
 
@@ -84,7 +86,11 @@ def _z_score(observed: int, expected: float, num_trials: int) -> float:
 
 
 def _sample_histogram(
-    logits_1d: torch.Tensor, num_samples: int, *, chunk: int = 1_000_000
+    logits_1d: torch.Tensor,
+    num_samples: int,
+    *,
+    chunk: int = 1_000_000,
+    is_drafting: bool = False,
 ) -> torch.Tensor:
     """Histogram of `num_samples` draws, accumulated in chunks.
 
@@ -101,7 +107,13 @@ def _sample_histogram(
         seed = torch.tensor([0xABCD], dtype=torch.int64, device=DEVICE)
         pos = torch.arange(start, start + size, dtype=torch.int64, device=DEVICE)
         out = gumbel_sample(
-            logits, idx_mapping, temp, seed, pos, apply_temperature=True
+            logits,
+            idx_mapping,
+            temp,
+            seed,
+            pos,
+            apply_temperature=True,
+            is_drafting=is_drafting,
         )
         hist += torch.bincount(out, minlength=vocab_size).double()
     return hist
@@ -164,6 +176,55 @@ def test_full_vocab_distribution_fidelity():
     assert chi2 < df + 10 * math.sqrt(2 * df), f"chi2={chi2:.0f}, df={df}"
 
 
+# --------------------------- Noise streams ---------------------------------
+
+
+def test_drafting_uses_a_separate_noise_stream():
+    """is_drafting salts the Philox offset: same inputs, different draws.
+
+    The draft proposal and the residual resample after a rejection must be
+    independent. They key noise by the same (seed, pos), so only the salt keeps
+    them apart -- without it the resample inherits the very noise vector that
+    picked the rejected proposal. See test_stochastic_rejection_sample in
+    tests/v1/spec_decode/test_rejection_sampler_utils.py for the distributional
+    consequence.
+
+    Relocating the offset must not distort the draw either, so both streams are
+    checked against the target's far-tail mass, which sits HEAD_LOG_GAP logits
+    below the head -- the regime where fp32 Gumbel precision matters.
+    """
+    counts = _make_heavy_tailed_counts()
+    total = counts.sum().item()
+    logits = _counts_to_logits(counts)
+    tail_prob = (total - counts[0].item()) / total
+
+    target = _sample(logits, NUM_SAMPLES, is_drafting=False)
+    draft = _sample(logits, NUM_SAMPLES, is_drafting=True)
+
+    # The head dominates, so the streams agree on most draws by construction.
+    # Compare instead which draws leave the head: shared noise makes that
+    # identical, independent noise makes them differ on ~2p(1-p) of draws.
+    target_tail = target != 0
+    draft_tail = draft != 0
+    disagree = (target_tail != draft_tail).double().mean().item()
+    assert disagree > tail_prob, (
+        f"streams leave the head on the same draws ({disagree:.3e} disagreement "
+        f"vs tail mass {tail_prob:.3e}); the draft salt is not taking effect"
+    )
+
+    # Both streams must still reproduce the target's tail mass.
+    for name, tail in (("target", target_tail), ("draft", draft_tail)):
+        tail_count = tail.sum().item()
+        z = _z_score(tail_count, NUM_SAMPLES * tail_prob, NUM_SAMPLES)
+        assert abs(z) < Z_TOLERANCE, (
+            f"{name} tail mass {tail_count / NUM_SAMPLES:.3e} != "
+            f"{tail_prob:.3e} (z={z:.2f})"
+        )
+
+    # The draft stream is reproducible.
+    assert torch.equal(draft, _sample(logits, NUM_SAMPLES, is_drafting=True))
+
+
 # ----------------------------- Edge cases ----------------------------------
 
 
@@ -178,7 +239,7 @@ def test_greedy_temperature_zero_returns_argmax():
     pos = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
 
     sampled = gumbel_sample(
-        logits, idx_mapping, temp, seed, pos, apply_temperature=True
+        logits, idx_mapping, temp, seed, pos, apply_temperature=True, is_drafting=False
     )
     assert torch.equal(sampled, logits.argmax(dim=-1))
 
@@ -278,6 +339,7 @@ def test_logits_cache_stores_input_logits_bitwise(
         seed,
         pos,
         apply_temperature=True,
+        is_drafting=True,
         logits_cache=cache,
         logits_cache_col=cols,
     )
@@ -291,3 +353,74 @@ def test_logits_cache_stores_input_logits_bitwise(
     assert torch.equal(_float_bits(stored), _float_bits(logits)), (
         "cached logits differ from the input logits"
     )
+
+
+@pytest.mark.parametrize("extra_cache_cols", [0, 1])
+def test_logits_cache_columns_stay_separate_across_steps(extra_cache_cols: int):
+    """Each drafting step must land in its own cache column.
+
+    `extra_cache_cols=1` is the shape a draft produces when it adds an
+    input-only mask/noise row to its embedding table but keeps a full-width
+    output head: N-wide logits cached into N+1-wide rows. Striding cache
+    columns by the logits width instead of the cache's own row width leaves
+    step 0 correct and silently misaligns every step after it.
+    """
+    torch.manual_seed(0)
+    num_reqs, vocab_size, num_steps = 4, 1031, 3
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+    temp = torch.ones(num_reqs, dtype=torch.float32, device=DEVICE)
+    seed = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+    pos = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+
+    cache = torch.zeros(
+        num_reqs, num_steps, vocab_size + extra_cache_cols, device=DEVICE
+    )
+    cols = torch.arange(num_steps, dtype=torch.int32, device=DEVICE)
+    per_step = [
+        torch.randn(num_reqs, vocab_size, device=DEVICE) for _ in range(num_steps)
+    ]
+
+    for step, logits in enumerate(per_step):
+        gumbel_sample(
+            logits,
+            idx_mapping,
+            temp,
+            seed,
+            pos,
+            apply_temperature=True,
+            is_drafting=True,
+            logits_cache=cache,
+            logits_cache_col=cols[step],
+        )
+
+    for step, logits in enumerate(per_step):
+        stored = cache[:, step, :vocab_size]
+        assert torch.equal(_float_bits(stored), _float_bits(logits)), (
+            f"step {step} was overwritten by a later step"
+        )
+    # Columns past the sampled width belong to no step and stay untouched.
+    assert not cache[:, :, vocab_size:].any()
+
+
+def test_logits_cache_narrower_than_logits_is_rejected():
+    """A cache too narrow to hold a step would silently drop its tail."""
+    num_reqs, vocab_size, num_steps = 2, 64, 3
+    logits = torch.randn(num_reqs, vocab_size, device=DEVICE)
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+    temp = torch.ones(num_reqs, dtype=torch.float32, device=DEVICE)
+    seed = torch.zeros(num_reqs, dtype=torch.int64, device=DEVICE)
+    pos = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+    cache = torch.zeros(num_reqs, num_steps, vocab_size - 1, device=DEVICE)
+
+    with pytest.raises(AssertionError, match="narrower"):
+        gumbel_sample(
+            logits,
+            idx_mapping,
+            temp,
+            seed,
+            pos,
+            apply_temperature=True,
+            is_drafting=True,
+            logits_cache=cache,
+            logits_cache_col=torch.tensor(0, dtype=torch.int32, device=DEVICE),
+        )

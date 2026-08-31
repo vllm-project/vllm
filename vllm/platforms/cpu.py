@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.cpu_resource_utils import (
     DEVICE_CONTROL_ENV_VAR,
@@ -28,6 +29,61 @@ if TYPE_CHECKING:
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
+
+
+def _cpu_mamba_backend(vllm_config: VllmConfig) -> str:
+    """Return the CPU state backend selected by the model configuration."""
+    model_config = vllm_config.model_config
+    if model_config is None:
+        return "none"
+
+    hf_config = getattr(model_config, "hf_text_config", None)
+    model_type = str(getattr(hf_config, "model_type", "")).lower()
+    architecture = str(getattr(model_config, "architecture", "")).lower()
+    layer_types = getattr(hf_config, "layer_types", None)
+    has_linear_attention = isinstance(layer_types, (list, tuple)) and (
+        "linear_attention" in layer_types
+    )
+
+    try:
+        has_inner_state = bool(model_config.has_inner_state)
+    except (AttributeError, RuntimeError):
+        has_inner_state = False
+
+    if not (has_inner_state or has_linear_attention):
+        return "none"
+
+    fallback_backend = model_type or architecture or "unknown"
+    if not has_linear_attention:
+        return fallback_backend
+
+    try:
+        model_cls, _ = model_config.registry.resolve_model_cls(
+            model_config.architecture,
+            model_config=model_config,
+        )
+    except Exception:
+        return fallback_backend
+
+    try:
+        state_dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
+    except Exception:
+        return fallback_backend
+
+    if not isinstance(state_dtypes, tuple) or len(state_dtypes) != 2:
+        return fallback_backend
+
+    if vllm_config.cache_config.mamba_ssm_cache_dtype == "float16":
+        cache_dtype = torch.float16
+    elif vllm_config.cache_config.mamba_ssm_cache_dtype == "bfloat16":
+        cache_dtype = torch.bfloat16
+    else:
+        return fallback_backend
+
+    if state_dtypes[1] == cache_dtype:
+        return "gdn"
+
+    return fallback_backend
 
 
 def get_max_threads(pid=0):
@@ -71,6 +127,10 @@ class CpuPlatform(Platform):
         return [torch.bfloat16, torch.float16, torch.float32]
 
     @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return "cpu"
 
@@ -84,13 +144,30 @@ class CpuPlatform(Platform):
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on CPU.")
         if attn_selector_config.use_mla:
+            amx_available = (
+                cls.get_cpu_architecture() == CpuArchEnum.X86
+                and torch.cpu._is_amx_tile_supported()
+            )
+            if amx_available and selected_backend != AttentionBackendEnum.CPU_MLA:
+                # Prefer AMX when available, unless CPU_MLA was explicitly requested.
+                if (
+                    selected_backend
+                    and selected_backend != AttentionBackendEnum.AMX_MLA
+                ):
+                    logger.info("Cannot use %s backend on CPU.", selected_backend)
+                logger.info_once("Using %s backend.", AttentionBackendEnum.AMX_MLA.name)
+                return AttentionBackendEnum.AMX_MLA.get_path()
             # Reference MLA implementation on CPU. Performance is not the
             # goal here; the backend simply wires the CPU decode kernel
             # (`mla_decode_kvcache`) and an SDPA-based prefill together with
             # the shared MLA scaffolding so that DeepSeek-style models can
             # execute on CPU.
-            if selected_backend and selected_backend != AttentionBackendEnum.CPU_MLA:
+            if selected_backend and selected_backend not in (
+                AttentionBackendEnum.CPU_MLA,
+                AttentionBackendEnum.AMX_MLA,
+            ):
                 logger.info("Cannot use %s backend on CPU.", selected_backend)
+            logger.info_once("Using %s backend.", AttentionBackendEnum.CPU_MLA.name)
             return AttentionBackendEnum.CPU_MLA.get_path()
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
@@ -129,11 +206,20 @@ class CpuPlatform(Platform):
         # The CPU MLA decode kernel only compiles with block_size=16 today
         # (see csrc/cpu/mla_decode.cpp). If the model uses MLA we override
         # the default block size regardless of user preference to avoid a
-        # runtime kernel dispatch failure.
+        # runtime kernel dispatch failure. AMX MLA has no such constraint
+        # (same AMX-available condition as get_attn_backend_cls), so it's
+        # excluded from this override.
         cpu_mla_enabled = model_config is not None and getattr(
             model_config, "use_mla", False
         )
-        if cpu_mla_enabled:
+        amx_mla_enabled = (
+            cpu_mla_enabled
+            and cls.get_cpu_architecture() == CpuArchEnum.X86
+            and torch.cpu._is_amx_tile_supported()
+            and vllm_config.attention_config.backend != AttentionBackendEnum.CPU_MLA
+        )
+        reference_cpu_mla_enabled = cpu_mla_enabled and not amx_mla_enabled
+        if reference_cpu_mla_enabled:
             if cache_config.user_specified_block_size and cache_config.block_size != 16:
                 logger.warning(
                     "CPU MLA backend requires block_size=16, overriding "
@@ -144,19 +230,33 @@ class CpuPlatform(Platform):
         elif not cache_config.user_specified_block_size:
             cache_config.block_size = 128
 
-        if not cpu_mla_enabled and cache_config.block_size % 32 != 0:
+        if not reference_cpu_mla_enabled and cache_config.block_size % 32 != 0:
             logger.warning(
                 "CPU backend prefers block_size is multiples of 32, "
                 "otherwise the performance is not optimized."
             )
 
-        # AMX GDN requires float32 state
+        # Accelerated GDN uses AMX tiles or AVX-512BF16 VDPBF16PS.
         if (
-            torch.cpu._is_amx_tile_supported()
+            torch.cpu._is_avx512_bf16_supported()
             and cache_config.mamba_ssm_cache_dtype != "float32"
         ):
-            cache_config.mamba_ssm_cache_dtype = "float32"
-            logger.warning("Reset SSM cache type to float32 for AMX mamba attention.")
+            mamba_backend = _cpu_mamba_backend(vllm_config)
+            if (
+                cache_config.mamba_ssm_cache_dtype in ("float16", "bfloat16")
+                and mamba_backend == "gdn"
+            ):
+                logger.info(
+                    "Using %s SSM state storage for the CPU accelerated GDN backend.",
+                    cache_config.mamba_ssm_cache_dtype,
+                )
+            else:
+                cache_config.mamba_ssm_cache_dtype = "float32"
+                logger.warning(
+                    "Reset SSM cache type to float32 for accelerated GDN mamba "
+                    "backend '%s'.",
+                    mamba_backend,
+                )
 
         # Lagecy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
@@ -199,10 +299,7 @@ class CpuPlatform(Platform):
             # cache. So use VLLM_CPU_CI_ENV to indicate the CI environment,
             # and just execute model with dynamo + eager mode to save time.
             # VLLM_CPU_CI_ENV is only used as an internal variable.
-            if os.environ.get("VLLM_CPU_CI_ENV", "0") != "0":
-                backend = "eager"
-            else:
-                backend = "inductor"
+            backend = "eager" if envs.VLLM_CPU_CI_ENV else "inductor"
 
             compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
             compilation_config.backend = backend
@@ -262,8 +359,10 @@ class CpuPlatform(Platform):
         # Avoid inductor generates num_thread() and breaks the thread binding
         os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
 
-        # For efficient conv state memory access
-        if torch.cpu._is_amx_tile_supported():
+        # For efficient conv state memory access. The C++ causal_conv1d
+        # kernels (VDPBF16PS, no AMX tiles) consume the SD layout on any
+        # AVX-512BF16 CPU, so apply it beyond AMX (e.g. AMD Zen5/Turin).
+        if torch.cpu._is_avx512_bf16_supported():
             os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
 
         ld_preload_str = os.getenv("LD_PRELOAD", "")
@@ -340,7 +439,7 @@ class CpuPlatform(Platform):
             vllm_config.parallel_config.tensor_parallel_size
         )
 
-        if model_config is not None and model_config.use_mla:
+        if model_config is not None and model_config.use_mla and not amx_mla_enabled:
             logger.info_once(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled."
