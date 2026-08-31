@@ -252,7 +252,6 @@ def test_compilation_warmup_before_memory_profiling(mode, expect_warmup_pass):
 
     mock_profile_result = _profile_result(consumed=2 * GiB_bytes)
     mock_profile_result.non_kv_cache_memory = 2 * GiB_bytes
-    mock_snapshot = SimpleNamespace(free_memory=78 * GiB_bytes, device_="cuda:0")
 
     @contextmanager
     def mock_mem_profiling(*args, **kwargs):
@@ -260,7 +259,6 @@ def test_compilation_warmup_before_memory_profiling(mode, expect_warmup_pass):
 
     with (
         patch.object(gpu_worker, "maybe_apply_startup_plan"),
-        patch.object(gpu_worker, "MemorySnapshot", return_value=mock_snapshot),
         patch.object(gpu_worker, "memory_profiling", side_effect=mock_mem_profiling),
         patch.object(gpu_worker.torch.accelerator, "empty_cache") as mock_empty_cache,
         patch.object(gpu_worker.torch.accelerator, "synchronize") as mock_sync,
@@ -274,7 +272,6 @@ def test_compilation_warmup_before_memory_profiling(mode, expect_warmup_pass):
             assert worker.model_runner.profile_run.call_count == 2
             mock_empty_cache.assert_called_once()
             mock_sync.assert_called_once()
-            assert worker.init_snapshot == mock_snapshot
         else:
             # profile_run called only once inside profiler
             assert worker.model_runner.profile_run.call_count == 1
