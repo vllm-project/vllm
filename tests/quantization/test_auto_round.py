@@ -1016,7 +1016,7 @@ def test_inc_mxfp4_linear_applies_rotation_before_kernel(monkeypatch) -> None:
     assert torch.equal(result, torch.ones_like(value))
 
 
-def test_inc_mxfp4_rotation_requires_cuda(monkeypatch) -> None:
+def test_inc_mxfp4_rotation_requires_cuda_or_xpu(monkeypatch) -> None:
     config = INCConfig.from_config(
         {
             "bits": 4,
@@ -1036,8 +1036,13 @@ def test_inc_mxfp4_rotation_requires_cuda(monkeypatch) -> None:
         "inc_mxfp4_scheme.current_platform.is_cuda",
         lambda: False,
     )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_mxfp4_scheme.current_platform.is_xpu",
+        lambda: False,
+    )
 
-    with pytest.raises(NotImplementedError, match="requires CUDA Hadacore"):
+    with pytest.raises(NotImplementedError, match="requires CUDA Hadacore or XPU ARK"):
         INCMxfp4Scheme().get_linear_method(
             config,
             object.__new__(LinearBase),

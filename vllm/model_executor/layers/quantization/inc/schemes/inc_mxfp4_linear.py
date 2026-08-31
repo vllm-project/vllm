@@ -13,7 +13,9 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
 )
+from vllm.platforms import current_platform
 
+from . import inc_ark_ops  # noqa: F401
 from .inc_scheme import INCLinearScheme
 
 if TYPE_CHECKING:
@@ -26,7 +28,7 @@ class INCMxfp4LinearMethod(INCLinearScheme):
     E2M1 weights packed two per byte with per-group E8M0 scales
     (group_size=32, no global scale). The platform kernel is selected by
     ``init_mxfp4_linear_kernel`` (FlashInfer / Marlin on CUDA, ``fp4_gemm``
-    on XPU). Hadamard rotation currently requires CUDA.
+    on XPU). XPU rotation uses ARK's fused XMX Hadamard and MXFP4 kernel.
     """
 
     def __init__(
@@ -106,8 +108,27 @@ class INCMxfp4LinearMethod(INCLinearScheme):
                     f"Linear input width {x.shape[-1]} is not divisible by "
                     f"AutoRound rotation block_size={self.rotation_block_size}"
                 )
+            if current_platform.is_xpu():
+                return self._apply_xpu_rotation(layer, x, bias)
             original_shape = x.shape
             x = x.unflatten(-1, (-1, self.rotation_block_size)).contiguous().clone()
             x = ops.hadacore_transform(x)
             x = x.flatten(-2, -1).reshape(original_shape)
         return self.kernel.apply_weights(layer, x, bias)
+
+    def _apply_xpu_rotation(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        x_fp4, x_blockscale = torch.ops.vllm.inc_ark_mxfp4_hadamard_quant(x)
+        output = torch.ops._xpu_C.fp4_gemm(
+            x_fp4.view(torch.float4_e2m1fn_x2),
+            layer.weight,
+            x_blockscale.view(torch.float8_e8m0fnu),
+            layer.weight_scale,
+            x.dtype,
+            bias,
+        )
+        return output.reshape(*x.shape[:-1], layer.output_size_per_partition)

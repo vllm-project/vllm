@@ -40,18 +40,20 @@ class INCMxfp4Scheme(INCScheme):
         del layer, prefix
         from .inc_mxfp4_linear import INCMxfp4LinearMethod
 
-        if config.rotation_config is not None and not current_platform.is_cuda():
+        if (
+            config.rotation_config is not None
+            and not current_platform.is_cuda()
+            and not current_platform.is_xpu()
+        ):
             raise NotImplementedError(
-                "AutoRound Hadamard rotation currently requires CUDA Hadacore"
+                "AutoRound Hadamard rotation requires CUDA Hadacore or XPU ARK"
             )
         rotation_block_size = (
             config.rotation_config["block_size"]
             if config.rotation_config is not None
             else None
         )
-        return INCLinearMethod(
-            INCMxfp4LinearMethod(layer_config, rotation_block_size)
-        )
+        return INCLinearMethod(INCMxfp4LinearMethod(layer_config, rotation_block_size))
 
     def get_moe_method(
         self,
