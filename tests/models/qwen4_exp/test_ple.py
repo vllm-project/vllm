@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from functools import partial
+from itertools import accumulate
 from types import SimpleNamespace
 
 import pytest
@@ -399,3 +401,577 @@ def test_ple_short_conv_uses_fallback_when_profile_metadata_is_omitted(
     output = module._short_conv(inputs)
 
     assert output is expected
+
+
+def _reference_ngram_ids(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    layer_multipliers: torch.Tensor,
+    ngram_heads_vocab_sizes: torch.Tensor,
+    ngram_heads_offsets: torch.Tensor,
+    eos_token_id: int,
+    heads_per_ngram: int,
+) -> torch.Tensor:
+    tokens = input_ids.tolist()
+    starts = query_start_loc.tolist()
+    contexts = ngram_context.tolist()
+    multipliers = layer_multipliers.tolist()
+    sizes = ngram_heads_vocab_sizes.tolist()
+    offsets = ngram_heads_offsets.tolist()
+    rows = []
+    context_len = len(contexts[0])
+    for req, (start, end) in enumerate(zip(starts, starts[1:])):
+        history = contexts[req] + tokens[start:end]
+        for pos in range(context_len, len(history)):
+            shifted = [history[pos]]
+            crossed_eos = False
+            for shift in range(1, context_len + 1):
+                token = eos_token_id if crossed_eos else history[pos - shift]
+                shifted.append(token)
+                crossed_eos |= token == eos_token_id
+
+            row = []
+            mixed = shifted[0] * multipliers[0]
+            for ngram_order in range(2, context_len + 2):
+                shift = ngram_order - 1
+                mixed ^= shifted[shift] * multipliers[shift]
+                head_start = (ngram_order - 2) * heads_per_ngram
+                for head in range(head_start, head_start + heads_per_ngram):
+                    row.append(mixed % sizes[head] + offsets[head])
+            rows.append(row)
+    return torch.tensor(rows, dtype=torch.int64, device=input_ids.device)
+
+
+_NGRAM_MULTIPLIERS = (
+    18_014_398_509_481_983,
+    17_114_398_509_481_981,
+    16_214_398_509_481_979,
+    15_314_398_509_481_977,
+)
+_NGRAM_HEADS_VOCAB_SIZES = (
+    101,
+    103,
+    107,
+    109,
+    113,
+    127,
+    131,
+    137,
+    139,
+    149,
+    151,
+    157,
+    163,
+    167,
+    173,
+    179,
+    181,
+    191,
+    193,
+    197,
+    199,
+    211,
+    223,
+    227,
+)
+_NGRAM_EOS_TOKEN_ID = 251
+_NGRAM_HEADS_PER_NGRAM = 8
+
+
+def _ngram_hash_params(device: torch.device, context_len: int) -> dict:
+    num_heads = context_len * _NGRAM_HEADS_PER_NGRAM
+    sizes = torch.tensor(
+        _NGRAM_HEADS_VOCAB_SIZES[:num_heads], dtype=torch.int64, device=device
+    )
+    offsets = torch.zeros_like(sizes)
+    offsets[1:] = torch.cumsum(sizes, dim=0)[:-1]
+    return {
+        "layer_multipliers": torch.tensor(
+            _NGRAM_MULTIPLIERS[: context_len + 1],
+            dtype=torch.int64,
+            device=device,
+        ),
+        "ngram_heads_vocab_sizes": sizes,
+        "ngram_heads_offsets": offsets,
+        "eos_token_id": _NGRAM_EOS_TOKEN_ID,
+        "heads_per_ngram": _NGRAM_HEADS_PER_NGRAM,
+    }
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused PLE needs CUDA")
+@pytest.mark.parametrize(
+    ("query_lens", "eos_offsets", "contexts"),
+    [
+        ([1], [], [[11, 12]]),
+        ([3], [1], [[11]]),
+        ([4, 4], [0, 7], [[11, 12], [13, 14]]),
+        ([4, 0, 3], [], [[11, 12], [13, 14], [15, 16]]),
+        (
+            [1, 33, 2],
+            [5, 32],
+            [[_NGRAM_EOS_TOKEN_ID, 11], [12, 13], [14, _NGRAM_EOS_TOKEN_ID]],
+        ),
+        (
+            [5, 12, 16, 1, 16, 17],
+            [10, 40],
+            [[11, 12], [13, 14], [15, 16], [17, 18], [19, 20], [21, 22]],
+        ),
+        ([5, 3], [3], [[11, 12, 13], [14, 15, 16]]),
+    ],
+    ids=[
+        "single-token",
+        "bigram-only",
+        "power-of-two",
+        "empty-request",
+        "three-requests",
+        "six-requests",
+        "four-gram",
+    ],
+)
+def test_fused_ngram_ids_correctness(
+    query_lens: list[int],
+    eos_offsets: list[int],
+    contexts: list[list[int]],
+) -> None:
+    from vllm.models.qwen4_exp.nvidia.ops.ple_ngram import ple_ngram_ids
+
+    device = torch.device("cuda")
+    query_start_loc = torch.tensor(
+        [0, *accumulate(query_lens)], dtype=torch.int32, device=device
+    )
+    input_ids = torch.arange(
+        20,
+        20 + sum(query_lens),
+        dtype=torch.int32,
+        device=device,
+    )
+    if eos_offsets:
+        input_ids[eos_offsets] = _NGRAM_EOS_TOKEN_ID
+    ngram_context = torch.tensor(contexts, dtype=torch.int32, device=device)
+    params = _ngram_hash_params(device, ngram_context.shape[1])
+
+    expected = _reference_ngram_ids(input_ids, query_start_loc, ngram_context, **params)
+    actual = ple_ngram_ids(input_ids, query_start_loc, ngram_context, **params)
+
+    assert torch.equal(actual, expected)
+
+
+_KERNEL_STATE_BLOCKS = 64
+_ConvCall = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+def _make_conv_case(
+    device: torch.device,
+    seed: int,
+    channels: int,
+    kernel_size: int,
+    dilation: int,
+    spec_query_len: int = 1,
+) -> tuple[torch.Generator, torch.Tensor, torch.Tensor]:
+    generator = torch.Generator(device=device).manual_seed(seed)
+    state_len = (kernel_size - 1) * dilation
+    state_width = state_len + spec_query_len - 1
+    state = torch.randn(
+        _KERNEL_STATE_BLOCKS,
+        state_width,
+        channels,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    weights = torch.randn(
+        channels,
+        kernel_size,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    return generator, state, weights
+
+
+def _assert_conv_correctness(
+    inputs: torch.Tensor,
+    state: torch.Tensor,
+    weights: torch.Tensor,
+    eager_call: _ConvCall,
+    kernel_call: _ConvCall,
+) -> None:
+    state_eager = state.clone().transpose(-1, -2)
+    state_kernel = state.clone()
+    out_eager = eager_call(inputs, state_eager, weights)
+    out_kernel = kernel_call(inputs, state_kernel, weights)
+    torch.testing.assert_close(
+        out_kernel.float(), out_eager.float(), atol=3e-2, rtol=3e-2
+    )
+    assert torch.equal(state_kernel, state_eager.transpose(-1, -2).contiguous())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
+@pytest.mark.parametrize(
+    ("num_tokens", "channels", "kernel_size", "dilation"),
+    [(1, 512, 4, 3), (4, 640, 3, 2), (33, 2048, 5, 1)],
+)
+def test_fused_conv_decode_correctness(
+    num_tokens: int,
+    channels: int,
+    kernel_size: int,
+    dilation: int,
+) -> None:
+    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv_decode
+
+    device = torch.device("cuda")
+    module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
+    nn.Module.__init__(module)
+    module.conv_state_len = (kernel_size - 1) * dilation
+    module.short_conv_dilation = dilation
+    generator, state, weights = _make_conv_case(
+        device, num_tokens, channels, kernel_size, dilation
+    )
+    inputs = torch.randn(
+        num_tokens,
+        channels,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    state_indices = torch.randperm(
+        _KERNEL_STATE_BLOCKS - 1, device=device, generator=generator
+    )[:num_tokens].add_(1)
+    state_indices[::3] = 0
+    has_initial_states = (
+        torch.rand(num_tokens, device=device, generator=generator) < 0.7
+    )
+
+    _assert_conv_correctness(
+        inputs,
+        state,
+        weights,
+        lambda x, s, w: module._short_conv_dilated_decode_batched(
+            x, s, w, state_indices, has_initial_states
+        ),
+        lambda x, s, w: ple_conv_decode(
+            x, s, w, state_indices, has_initial_states, dilation
+        ),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
+@pytest.mark.parametrize(
+    ("num_reqs", "spec_query_len", "channels", "kernel_size", "dilation"),
+    [
+        (1, 2, 640, 3, 2),
+        (3, 4, 2048, 4, 3),
+        (6, 5, 512, 5, 1),
+    ],
+)
+def test_fused_conv_spec_correctness(
+    num_reqs: int,
+    spec_query_len: int,
+    channels: int,
+    kernel_size: int,
+    dilation: int,
+) -> None:
+    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv_spec
+
+    device = torch.device("cuda")
+    module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
+    nn.Module.__init__(module)
+    module.conv_state_len = (kernel_size - 1) * dilation
+    module.short_conv_dilation = dilation
+    generator, state, weights = _make_conv_case(
+        device,
+        num_reqs + 100,
+        channels,
+        kernel_size,
+        dilation,
+        spec_query_len,
+    )
+    query_lens = torch.randint(
+        1,
+        spec_query_len + 1,
+        (num_reqs,),
+        device=device,
+        dtype=torch.int32,
+        generator=generator,
+    )
+    query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
+    query_start_loc[1:] = query_lens.cumsum(0)
+    num_tokens = int(query_start_loc[-1]) + spec_query_len
+    inputs = torch.randn(
+        num_tokens,
+        channels,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    state_indices = torch.randperm(
+        _KERNEL_STATE_BLOCKS - 1, device=device, generator=generator
+    )[:num_reqs].add_(1)
+    if num_reqs > 1:
+        state_indices[1] = 0
+    num_accepted = torch.randint(
+        0,
+        spec_query_len + 1,
+        (num_reqs,),
+        device=device,
+        generator=generator,
+    )
+
+    _assert_conv_correctness(
+        inputs,
+        state,
+        weights,
+        lambda x, s, w: module._short_conv_dilated_spec_batched(
+            x,
+            s,
+            w,
+            state_indices,
+            query_start_loc,
+            num_accepted,
+            spec_query_len,
+        ),
+        lambda x, s, w: ple_conv_spec(
+            x,
+            s,
+            w,
+            state_indices,
+            query_start_loc,
+            num_accepted,
+            dilation,
+            spec_query_len,
+        ),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
+@pytest.mark.parametrize(
+    ("query_lens", "channels", "kernel_size", "dilation"),
+    [([37, 0, 5, 128], 2048, 4, 3), ([1, 8, 3], 640, 3, 2)],
+)
+def test_fused_conv_prefill_correctness(
+    query_lens: list[int],
+    channels: int,
+    kernel_size: int,
+    dilation: int,
+) -> None:
+    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv_prefill
+
+    device = torch.device("cuda")
+    module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
+    nn.Module.__init__(module)
+    module.conv_state_len = (kernel_size - 1) * dilation
+    module.short_conv_dilation = dilation
+    generator, state, weights = _make_conv_case(
+        device, sum(query_lens), channels, kernel_size, dilation
+    )
+    query_start_loc = torch.tensor(
+        [0, *accumulate(query_lens)], dtype=torch.int32, device=device
+    )
+    inputs = torch.randn(
+        sum(query_lens),
+        channels,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    num_reqs = len(query_lens)
+    state_indices = torch.arange(1, num_reqs + 1, device=device)
+    state_indices[-2] = 0
+    has_initial_states = torch.tensor(
+        [i % 2 == 0 for i in range(num_reqs)], device=device
+    )
+    metadata = SimpleNamespace(
+        non_spec_query_start_loc=query_start_loc,
+        has_initial_states_p=has_initial_states,
+        max_prefill_query_len=max(query_lens),
+    )
+
+    _assert_conv_correctness(
+        inputs,
+        state,
+        weights,
+        lambda x, s, w: module._short_conv_dilated_prefill_batched(
+            x, metadata, s, w, state_indices, num_reqs, 0, x.shape[0]
+        ),
+        lambda x, s, w: ple_conv_prefill(
+            x,
+            s,
+            w,
+            state_indices,
+            has_initial_states,
+            query_start_loc,
+            dilation,
+        ),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused gate needs CUDA")
+@pytest.mark.parametrize(("num_tokens", "strided_kv"), [(1, False), (64, True)])
+def test_fused_gate_correctness(num_tokens: int, strided_kv: bool) -> None:
+    import math
+
+    from vllm.models.qwen4_exp.nvidia.ops.ple_gate import ple_gate
+
+    device = torch.device("cuda")
+    hc, h = 4, 2560
+    generator = torch.Generator(device=device).manual_seed(num_tokens)
+    kv = torch.randn(
+        num_tokens,
+        hc * h + h,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    key = kv[:, : hc * h]
+    value = kv[:, hc * h :]
+    if not strided_kv:
+        key = key.contiguous()
+        value = value.contiguous()
+    hidden = torch.randn(
+        num_tokens,
+        hc * h,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    norm_key = torch.randn(
+        hc * h,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    ).mul_(0.05)
+    norm_query = torch.randn(
+        hc * h,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    ).mul_(0.05)
+    norm_conv = torch.randn(
+        hc * h,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    ).mul_(0.05)
+
+    def grouped_norm(inputs: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        grouped = inputs.float().unflatten(-1, (hc, h))
+        var = grouped.square().mean(dim=-1, keepdim=True)
+        normalized = grouped * torch.rsqrt(var + 1e-6)
+        return (normalized.flatten(-2) * (1.0 + weight.float())).to(inputs.dtype)
+
+    gated, normed = ple_gate(
+        key,
+        value,
+        hidden,
+        norm_key,
+        norm_query,
+        norm_conv,
+        1e-6,
+        hc,
+        h,
+    )
+    key_normalized = grouped_norm(key, norm_key).reshape(num_tokens, hc, h)
+    query_normalized = grouped_norm(hidden, norm_query).reshape(num_tokens, hc, h)
+    dot = (key_normalized * query_normalized).sum(dim=-1, keepdim=True)
+    dot = (dot / math.sqrt(h)).to(torch.bfloat16)
+    gate = torch.sigmoid(dot.sign() * dot.abs().clamp_min(1e-6).sqrt()).to(
+        torch.bfloat16
+    )
+    expected_gated = (gate * value.unsqueeze(-2)).flatten(-2)
+    expected_normed = grouped_norm(expected_gated, norm_conv)
+    torch.testing.assert_close(gated, expected_gated, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(normed, expected_normed, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
+def test_fused_conv_mixed_batch_correctness() -> None:
+    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import BLOCK_C
+
+    device = torch.device("cuda")
+    channels = 4 * BLOCK_C
+    module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
+    nn.Module.__init__(module)
+    module.conv_state_len = 9
+    module.short_conv_dilation = 3
+
+    generator = torch.Generator(device=device).manual_seed(17)
+    inputs = torch.randn(
+        13,
+        channels,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    state = torch.randn(
+        64,
+        12,
+        channels,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    weights = torch.randn(
+        channels,
+        4,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    metadata = SimpleNamespace(
+        num_prefills=1,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefill_tokens=5,
+        spec_sequence_masks=torch.tensor([True, True], device=device),
+        spec_token_indx=torch.arange(7, device=device),
+        non_spec_token_indx=torch.arange(7, 13, device=device),
+        num_actual_tokens=13,
+        spec_state_indices_tensor=torch.tensor([11, 12], device=device),
+        spec_query_start_loc=torch.tensor([0, 3, 7], device=device),
+        num_accepted_tokens=torch.tensor([2, 4], device=device),
+        spec_query_len=4,
+        state_indices_tensor=torch.tensor([13, 14], device=device),
+        has_initial_states_d=torch.tensor([True], device=device),
+        non_spec_query_start_loc=torch.tensor([0, 1, 6], device=device),
+        has_initial_states_p=torch.tensor([True], device=device),
+        max_prefill_query_len=5,
+        num_spec_decodes=2,
+    )
+    state_kernel = state.clone()
+    state_eager = state.clone().transpose(-1, -2)
+    output_kernel = module._short_conv_dilated_dispatch(
+        inputs, metadata, state_kernel, weights, True
+    )
+    output_eager = module._short_conv_dilated_dispatch(
+        inputs, metadata, state_eager, weights, False
+    )
+    torch.testing.assert_close(
+        output_kernel.float(), output_eager.float(), atol=3e-2, rtol=3e-2
+    )
+    assert torch.equal(state_kernel, state_eager.transpose(-1, -2).contiguous())
+
+
+def test_ple_kv_weights_mapper_routes_shards() -> None:
+    """The model mapper renames ckpt shards onto kv_proj with shard ids."""
+    from vllm.models.qwen4_exp.nvidia.model import (
+        _PLE_KV_WEIGHTS_MAPPER,
+    )
+
+    key_w = torch.randn(12, 8)
+    value_w = torch.randn(4, 8)
+    other = torch.randn(2, 2)
+    weights = [
+        ("model.layers.1.ple.key_proj.weight", key_w),
+        ("model.layers.1.ple.value_proj.weight", value_w),
+        ("model.layers.1.mlp.gate.weight", other),
+    ]
+    mapped = list(_PLE_KV_WEIGHTS_MAPPER.apply(weights))
+    assert [n for n, _ in mapped] == [
+        "model.layers.1.ple.kv_proj.weight",
+        "model.layers.1.ple.kv_proj.weight",
+        "model.layers.1.mlp.gate.weight",
+    ]
+    assert mapped[0][1].shard_id == 0
+    assert mapped[1][1].shard_id == 1
+    assert getattr(mapped[2][1], "shard_id", None) is None

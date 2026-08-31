@@ -156,6 +156,13 @@ _HC_WEIGHTS_MAPPER = WeightsMapper(
     }
 )
 
+_PLE_KV_WEIGHTS_MAPPER = WeightsMapper(
+    orig_to_new_stacked={
+        "ple.key_proj.weight": ("ple.kv_proj.weight", 0),
+        "ple.value_proj.weight": ("ple.kv_proj.weight", 1),
+    }
+)
+
 
 class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
     """Qwen3Next MoE with Qwen4Exp HC validation."""
@@ -393,6 +400,10 @@ class Qwen4ExpModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+        if vllm_config.quant_config is None:
+            self.hf_to_vllm_mapper = (
+                type(self).hf_to_vllm_mapper | _PLE_KV_WEIGHTS_MAPPER
+            )
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
         self.config = config
         self.num_redundant_experts = (

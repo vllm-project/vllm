@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GPU-resident Qwen4Exp position-learning enhancement layers."""
 
-import math
 from collections.abc import Iterable, Sequence
 
 import torch
@@ -11,7 +10,10 @@ from torch import nn
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
@@ -45,6 +47,8 @@ from vllm.v1.attention.backends.short_conv_attn import (
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from ..common.ple import PLEVocabParallelEmbedding
+from .ops.ple_conv import ple_conv_decode, ple_conv_prefill, ple_conv_spec
+from .ops.ple_gate import ple_gate
 
 
 class Qwen4ExpPLEGroupedNorm(nn.Module):
@@ -375,8 +379,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         ngram_context: torch.Tensor,
     ) -> torch.Tensor:
         """Compute n-gram embedding indices for the current request layout."""
-        input_ids = input_ids.reshape(-1).long()
-        query_start_loc = query_start_loc.long()
+        input_ids = input_ids.reshape(-1)
         num_reqs = query_start_loc.numel() - 1
         num_tokens = input_ids.shape[0]
         if num_tokens > self.positions_buffer.numel():
@@ -390,6 +393,21 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 f"at most {self.padded_buffer.shape[0]}"
             )
 
+        if input_ids.is_cuda:
+            from .ops.ple_ngram import ple_ngram_ids
+
+            return ple_ngram_ids(
+                input_ids,
+                query_start_loc,
+                ngram_context,
+                self.layer_multipliers,
+                self.ngram_heads_vocab_sizes,
+                self.ngram_heads_offsets,
+                self.eos_token_id,
+                self.heads_per_ngram,
+            )
+        input_ids = input_ids.long()
+        query_start_loc = query_start_loc.long()
         positions = self.positions_buffer[:num_tokens]
         packed = self.padded_buffer[:num_reqs, :num_tokens]
         packed.fill_(self.eos_token_id)
@@ -399,9 +417,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             0, packed.shape[1] - 1
         )
         packed[request_indices, columns] = input_ids
-        ngram_context = ngram_context[:num_reqs].to(
-            device=input_ids.device, dtype=torch.long
-        )
+        ngram_context = ngram_context[:num_reqs]
 
         context = torch.cat([ngram_context, packed], dim=-1)
         positions_2d, position_in_segment = self._shift_precompute(
@@ -563,20 +579,34 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             quant_config=quant_config,
             params_dtype=model_config.dtype,
         )
-        self.key_proj = ReplicatedLinear(
-            int(config.ple_embed_dim),
-            self.hc_hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.key_proj",
-        )
-        self.value_proj = ReplicatedLinear(
-            int(config.ple_embed_dim),
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.value_proj",
-        )
+        # The two projections share the embedding input; merging them into one
+        # weight turns two GEMM launches into one. FP8 checkpoints keep the
+        # separate ReplicatedLinears (quantized loaders handle their scales).
+        self._merged_kv = quant_config is None
+        if self._merged_kv:
+            self.kv_proj = MergedColumnParallelLinear(
+                int(config.ple_embed_dim),
+                [self.hc_hidden_size, self.hidden_size],
+                bias=False,
+                params_dtype=model_config.dtype,
+                prefix=f"{prefix}.kv_proj",
+                disable_tp=True,
+            )
+        else:
+            self.key_proj = ReplicatedLinear(
+                int(config.ple_embed_dim),
+                self.hc_hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.key_proj",
+            )
+            self.value_proj = ReplicatedLinear(
+                int(config.ple_embed_dim),
+                self.hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.value_proj",
+            )
         norm_args = (
             self.hc_hidden_size,
             config.rms_norm_eps,
@@ -647,12 +677,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             conv_kernel=self.conv_state_len + 1,
             num_spec=self.num_spec_tokens,
         )
-
-    def _apply_norm(
-        self, norm: Qwen4ExpPLEGroupedNorm, hidden_states: torch.Tensor
-    ) -> torch.Tensor:
-        shape = hidden_states.shape
-        return norm(hidden_states.flatten(-2)).reshape(shape)
 
     def _short_conv_fallback(self, inputs: torch.Tensor) -> torch.Tensor:
         # Profiling / CUDA graph capture only; conv state is not updated.
@@ -1001,6 +1025,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         metadata: PleShortConvAttentionMetadata,
         conv_state: torch.Tensor,
         conv_weights: torch.Tensor,
+        use_kernel: bool,
     ) -> torch.Tensor:
         num_prefills = metadata.num_prefills
         num_decodes = metadata.num_decodes
@@ -1031,17 +1056,30 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             assert metadata.spec_state_indices_tensor is not None
             assert metadata.spec_query_start_loc is not None
             assert metadata.num_accepted_tokens is not None
-            spec_output = self._short_conv_dilated_spec_batched(
-                x_spec=x_spec,
-                conv_state=conv_state,
-                conv_weights=conv_weights,
-                spec_state_indices_tensor=metadata.spec_state_indices_tensor[
-                    : metadata.num_spec_decodes
-                ],
-                spec_query_start_loc=metadata.spec_query_start_loc,
-                num_accepted_tokens=metadata.num_accepted_tokens,
-                spec_query_len=metadata.spec_query_len,
-            )
+            spec_state_indices = metadata.spec_state_indices_tensor[
+                : metadata.num_spec_decodes
+            ]
+            if use_kernel:
+                spec_output = ple_conv_spec(
+                    x_spec,
+                    conv_state,
+                    conv_weights,
+                    spec_state_indices,
+                    metadata.spec_query_start_loc,
+                    metadata.num_accepted_tokens,
+                    self.short_conv_dilation,
+                    metadata.spec_query_len,
+                )
+            else:
+                spec_output = self._short_conv_dilated_spec_batched(
+                    x_spec=x_spec,
+                    conv_state=conv_state,
+                    conv_weights=conv_weights,
+                    spec_state_indices_tensor=spec_state_indices,
+                    spec_query_start_loc=metadata.spec_query_start_loc,
+                    num_accepted_tokens=metadata.num_accepted_tokens,
+                    spec_query_len=metadata.spec_query_len,
+                )
 
         # 2. Run regular decode and prefill requests.
         conv_out_non_spec = None
@@ -1061,36 +1099,88 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 )
                 non_spec_parts: list[torch.Tensor] = []
                 if has_decode:
+                    if use_kernel:
+                        non_spec_parts.append(
+                            ple_conv_decode(
+                                x_d,
+                                conv_state,
+                                conv_weights,
+                                state_indices_tensor_d,
+                                metadata.has_initial_states_d,
+                                self.short_conv_dilation,
+                            )
+                        )
+                    else:
+                        non_spec_parts.append(
+                            self._short_conv_dilated_decode_batched(
+                                x_d=x_d,
+                                conv_state=conv_state,
+                                conv_weights=conv_weights,
+                                state_indices_tensor_d=state_indices_tensor_d,
+                                has_initial_states_d=metadata.has_initial_states_d,
+                            )
+                        )
+                # ``non_spec_query_start_loc`` covers the non-spec (decode +
+                # prefill) requests and equals ``query_start_loc`` when
+                # spec-decode is inactive.
+                non_spec_query_start_loc = metadata.non_spec_query_start_loc
+                if non_spec_query_start_loc is None:
+                    raise ValueError(
+                        "query_start_loc is required for prefill short-conv"
+                    )
+                query_start_loc_p = (
+                    non_spec_query_start_loc[-num_prefills - 1 :] - num_decode_tokens
+                )
+                if metadata.has_initial_states_p is None:
+                    raise ValueError(
+                        "has_initial_states_p is required for prefill short-conv"
+                    )
+                if use_kernel:
                     non_spec_parts.append(
-                        self._short_conv_dilated_decode_batched(
-                            x_d=x_d,
-                            conv_state=conv_state,
-                            conv_weights=conv_weights,
-                            state_indices_tensor_d=state_indices_tensor_d,
-                            has_initial_states_d=metadata.has_initial_states_d,
+                        ple_conv_prefill(
+                            x_p,
+                            conv_state,
+                            conv_weights,
+                            state_indices_tensor_p,
+                            metadata.has_initial_states_p,
+                            query_start_loc_p,
+                            self.short_conv_dilation,
                         )
                     )
-                non_spec_parts.append(
-                    self._short_conv_dilated_prefill_batched(
-                        x_p=x_p,
-                        metadata=metadata,
-                        conv_state=conv_state,
-                        conv_weights=conv_weights,
-                        state_indices_tensor_p=state_indices_tensor_p,
-                        num_prefills=num_prefills,
-                        num_decode_tokens=num_decode_tokens,
-                        num_prefill_tokens=num_prefill_tokens,
+                else:
+                    non_spec_parts.append(
+                        self._short_conv_dilated_prefill_batched(
+                            x_p=x_p,
+                            metadata=metadata,
+                            conv_state=conv_state,
+                            conv_weights=conv_weights,
+                            state_indices_tensor_p=state_indices_tensor_p,
+                            num_prefills=num_prefills,
+                            num_decode_tokens=num_decode_tokens,
+                            num_prefill_tokens=num_prefill_tokens,
+                        )
                     )
-                )
                 conv_out_non_spec = torch.vstack(non_spec_parts)
             else:
-                conv_out_non_spec = self._short_conv_dilated_decode_batched(
-                    x_d=x_non_spec,
-                    conv_state=conv_state,
-                    conv_weights=conv_weights,
-                    state_indices_tensor_d=state_indices_tensor[: x_non_spec.size(0)],
-                    has_initial_states_d=metadata.has_initial_states_d,
-                )
+                if use_kernel:
+                    conv_out_non_spec = ple_conv_decode(
+                        x_non_spec,
+                        conv_state,
+                        conv_weights,
+                        state_indices_tensor[: x_non_spec.size(0)],
+                        metadata.has_initial_states_d,
+                        self.short_conv_dilation,
+                    )
+                else:
+                    conv_out_non_spec = self._short_conv_dilated_decode_batched(
+                        x_d=x_non_spec,
+                        conv_state=conv_state,
+                        conv_weights=conv_weights,
+                        state_indices_tensor_d=state_indices_tensor[
+                            : x_non_spec.size(0)
+                        ],
+                        has_initial_states_d=metadata.has_initial_states_d,
+                    )
 
         # 3. Merge both parts back into the original token order.
         if has_spec and conv_out_non_spec is not None:
@@ -1132,24 +1222,36 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             )
 
         conv_state = self.kv_cache[0]
-        if not is_conv_state_dim_first():
-            conv_state = conv_state.transpose(-1, -2)
         conv_weights = self.conv1d.weight.squeeze(1)
 
         state_capacity = self.conv_state_len + self.num_spec_tokens
-        if state_capacity > 0:
-            if conv_state.size(-1) < state_capacity:
-                raise RuntimeError(
-                    "PLE short-conv cache is smaller than expected for "
-                    f"dilated convolution: got {conv_state.size(-1)}, "
-                    f"expect at least {state_capacity}."
-                )
-            conv_state = conv_state[..., -state_capacity:]
+        # Triton kernels require the [slot, window, channel] state layout.
+        use_kernel = not is_conv_state_dim_first()
+        if use_kernel:
+            if state_capacity > 0:
+                if conv_state.size(1) < state_capacity:
+                    raise RuntimeError(
+                        "PLE short-conv cache is smaller than expected for "
+                        f"dilated convolution: got {conv_state.size(1)}, "
+                        f"expect at least {state_capacity}."
+                    )
+                conv_state = conv_state[:, -state_capacity:, :]
+        else:
+            conv_state = conv_state.transpose(-1, -2)
+            if state_capacity > 0:
+                if conv_state.size(-1) < state_capacity:
+                    raise RuntimeError(
+                        "PLE short-conv cache is smaller than expected for "
+                        f"dilated convolution: got {conv_state.size(-1)}, "
+                        f"expect at least {state_capacity}."
+                    )
+                conv_state = conv_state[..., -state_capacity:]
         return self._short_conv_dilated_dispatch(
             inputs,
             layer_attn_metadata,
             conv_state,
             conv_weights.to(dtype=inputs.dtype),
+            use_kernel,
         )
 
     def forward(
@@ -1168,24 +1270,30 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             )
         embeddings = self.ple_embedding(input_ids, query_start_loc, ngram_context)
         embeddings = self._dequantize_embeddings(embeddings, hidden_states.dtype)
-        key, _ = self.key_proj(embeddings)
-        value, _ = self.value_proj(embeddings)
-        token_count = hidden_states.shape[0]
-        key = key.reshape(token_count, self.hc_count, self.hidden_size)
-        query = hidden_states.reshape(token_count, self.hc_count, self.hidden_size)
-        key = self._apply_norm(self.norm_key, key)
-        query = self._apply_norm(self.norm_query, query)
-        gate = (key * query).sum(dim=-1, keepdim=True) / math.sqrt(self.hidden_size)
-        gate = torch.sigmoid(gate.sign() * gate.abs().clamp_min(1e-6).sqrt())
-        gated_value = gate * value.unsqueeze(-2)
-        normalized = self._apply_norm(self.norm_conv, gated_value).flatten(-2)
+        if self._merged_kv:
+            kv, _ = self.kv_proj(embeddings)
+            key, value = kv.split(self.kv_proj.output_sizes, dim=-1)
+        else:
+            key, _ = self.key_proj(embeddings)
+            value, _ = self.value_proj(embeddings)
+        gated_value, normalized = ple_gate(
+            key,
+            value,
+            hidden_states,
+            self.norm_key.weight,
+            self.norm_query.weight,
+            self.norm_conv.weight,
+            float(self.norm_key.eps),
+            self.hc_count,
+            self.hidden_size,
+        )
         conv_output = torch.zeros_like(normalized)
         torch.ops.vllm.qwen4_exp_ple_short_conv(
             normalized,
             conv_output,
             self.prefix,
         )
-        return gated_value.flatten(-2) + conv_output
+        return gated_value + conv_output
 
 
 def qwen4_exp_compute_ple_ngram_ids(
