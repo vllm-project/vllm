@@ -4,6 +4,8 @@
 
 from typing import TYPE_CHECKING
 
+import torch
+
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -28,9 +30,9 @@ _GENERIC_SPARSE_MLA_BACKENDS = frozenset(
         "FLASHINFER_MLA_SPARSE_SM120",
     }
 )
-_INDEXER_PREFILL_CHUNK_METADATA_BACKENDS = frozenset({"DEEPSEEK_V32_INDEXER"})
-
-_INDEXER_PREFILL_CHUNK_METADATA_BACKENDS = frozenset({"DEEPSEEK_V32_INDEXER"})
+_PREFILL_CHUNK_METADATA_ONLY_BACKENDS = frozenset(
+    {"B12X_MLA_SPARSE", "DEEPSEEK_V32_INDEXER"}
+)
 
 
 def _attention_backend_name(backend: object) -> str | None:
@@ -41,6 +43,17 @@ def _attention_backend_name(backend: object) -> str | None:
         return get_name()
     except NotImplementedError:
         return None
+
+
+def _configured_attention_backend_name(
+    vllm_config: "VllmConfig",
+) -> str | None:
+    attention_config = getattr(vllm_config, "attention_config", None)
+    backend = getattr(attention_config, "backend", None)
+    if isinstance(backend, str):
+        return backend
+    name = getattr(backend, "name", None)
+    return name if isinstance(name, str) else None
 
 
 def _has_attention_backend(
@@ -75,6 +88,64 @@ def _compile_prefill_chunk_metadata_kernel(
     _BUILD_PREFILL_CHUNK_METADATA_KERNEL.warmup(vllm_config)
 
 
+def _execute_prefill_chunk_metadata_kernel(worker: "Worker") -> int:
+    """Populate Triton's in-process cache with runtime pointer variants."""
+    from vllm.v1.attention.backends.mla.indexer import (
+        _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+    )
+
+    parameter = next(worker.get_model().parameters(), None)
+    if parameter is None:
+        return 0
+    device = parameter.device
+    query_start_loc = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    cu_compressed_seq_lens = torch.tensor(
+        [0, 1], dtype=torch.int32, device=device
+    )
+    token_to_seq = torch.empty((1,), dtype=torch.int32, device=device)
+    cu_compressed_seq_len_ks = torch.empty(
+        (1,), dtype=torch.int32, device=device
+    )
+    cu_compressed_seq_len_ke = torch.empty(
+        (1,), dtype=torch.int32, device=device
+    )
+    compress_ratios = {
+        key.COMPRESS_RATIO
+        for key in _BUILD_PREFILL_CHUNK_METADATA_KERNEL.get_warmup_keys(
+            worker.vllm_config
+        )
+    }
+    warmed = 0
+    for compress_ratio in sorted(compress_ratios):
+        aligned = torch.tensor(
+            [compress_ratio], dtype=torch.int32, device=device
+        )
+        unaligned_storage = torch.tensor(
+            [-1, compress_ratio], dtype=torch.int32, device=device
+        )
+        for uncompressed_seq_lens in (aligned, unaligned_storage[1:]):
+            _BUILD_PREFILL_CHUNK_METADATA_KERNEL(
+                query_start_loc,
+                uncompressed_seq_lens,
+                cu_compressed_seq_lens,
+                cu_compressed_seq_lens,
+                token_to_seq,
+                cu_compressed_seq_len_ks,
+                cu_compressed_seq_len_ke,
+                0,
+                1,
+                0,
+                1,
+                1,
+                num_reqs=1,
+                COMPRESS_RATIO=compress_ratio,
+            )
+            warmed += 1
+    if warmed:
+        torch.accelerator.synchronize()
+    return warmed
+
+
 def _compile_combine_topk_swa_indices_kernel(
     vllm_config: "VllmConfig",
 ) -> None:
@@ -96,16 +167,32 @@ def sparse_mla_triton_warmup(worker: "Worker") -> None:
         return
 
     vllm_config = runner.vllm_config
+    warmed_prefill_chunk = False
     try:
         if _has_attention_backend(runner, _DEEPSEEK_V4_SPARSE_MLA_BACKENDS):
             _compile_sparse_swa_prefill_metadata_kernel(vllm_config)
             _compile_prefill_chunk_metadata_kernel(vllm_config)
+            warmed_prefill_chunk = True
             _compile_combine_topk_swa_indices_kernel(vllm_config)
         elif _has_attention_backend(runner, _GENERIC_SPARSE_MLA_BACKENDS):
             _compile_sparse_swa_prefill_metadata_kernel(vllm_config)
             _compile_prefill_chunk_metadata_kernel(vllm_config)
-        elif _has_attention_backend(runner, _INDEXER_PREFILL_CHUNK_METADATA_BACKENDS):
+            warmed_prefill_chunk = True
+        elif (
+            _configured_attention_backend_name(vllm_config)
+            in _PREFILL_CHUNK_METADATA_ONLY_BACKENDS
+            or _has_attention_backend(
+                runner, _PREFILL_CHUNK_METADATA_ONLY_BACKENDS
+            )
+        ):
             _compile_prefill_chunk_metadata_kernel(vllm_config)
+            warmed_prefill_chunk = True
+        if warmed_prefill_chunk:
+            warmed = _execute_prefill_chunk_metadata_kernel(worker)
+            logger.info(
+                "Warmed up %d sparse MLA prefill metadata runtime variants.",
+                warmed,
+            )
 
     except Exception:
         logger.warning("Skipping sparse MLA Triton warmup.", exc_info=True)
