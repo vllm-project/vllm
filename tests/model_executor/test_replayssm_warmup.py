@@ -10,7 +10,7 @@ import torch
 
 from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-from vllm.model_executor.warmup import kernel_warmup as warmup
+from vllm.model_executor.warmup import replayssm_warmup as warmup
 
 PREFILL_KWARGS = {
     "num_tokens": 128,
@@ -60,9 +60,7 @@ def test_replayssm_autotune_decode_kwargs(runner_kwargs, expected_num_reqs):
     with patch.object(
         warmup, "flashinfer_replayssm_autotune_supported", return_value=True
     ):
-        result = warmup._replayssm_autotune_kwargs(
-            _autotune_runner(**runner_kwargs), PREFILL_KWARGS
-        )
+        result = warmup._replayssm_autotune_kwargs(_autotune_runner(**runner_kwargs))
 
     expected_kwargs = {
         **PREFILL_KWARGS,
@@ -95,9 +93,7 @@ def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
         "flashinfer_replayssm_autotune_supported",
         return_value=flashinfer_supported,
     ):
-        result = warmup._replayssm_autotune_kwargs(
-            _autotune_runner(**runner_kwargs), PREFILL_KWARGS
-        )
+        result = warmup._replayssm_autotune_kwargs(_autotune_runner(**runner_kwargs))
     assert result is None
 
 
