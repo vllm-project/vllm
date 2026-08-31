@@ -1318,6 +1318,21 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
+def test_dcp_world_size_for_kv_cache_spec_shards_full_attention_only():
+    dcp = 8
+    full = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    mla = new_mla_spec()
+    mamba = new_mamba_spec()
+    uniform_mla = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer": mla})
+    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(full, dcp) == dcp
+    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(mla, dcp) == dcp
+    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(uniform_mla, dcp) == dcp
+    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(mamba, dcp) == 1
+    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(full, 1) == 1
+
+
 @pytest.mark.parametrize(
     "layer_type,dcp_size,expected_width",
     [

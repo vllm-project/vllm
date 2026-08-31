@@ -232,6 +232,83 @@ def make_kv_cache_config_three_types(
     )
 
 
+def test_prefix_cache_hit_uses_per_group_dcp_geometry():
+    """Prefix lookup must use each group's DCP size, not the process-wide one.
+
+    Target and draft MLA are both sharded (DCP=8); Mamba stays replicated
+    (DCP=1). Hits then align to the sharded full-attention block, not the
+    unsharded page size.
+    """
+    block_size = 16
+    dcp = 8
+    sharded_block = block_size * dcp
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["target_mla"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["draft_mla"],
+                MLAAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                ),
+            ),
+        ],
+    )
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        scheduler_block_size=sharded_block,
+        dcp_world_size=dcp,
+    )
+    target_mgr, draft_mgr, mamba_mgr = manager.coordinator.single_type_managers
+    assert target_mgr.dcp_world_size == dcp
+    assert draft_mgr.dcp_world_size == dcp
+    assert mamba_mgr.dcp_world_size == 1
+    assert target_mgr.block_size == sharded_block
+    assert draft_mgr.block_size == sharded_block
+    assert mamba_mgr.block_size == block_size
+
+    hash_fn = sha256
+    common_token_ids = [i for i in range(2) for _ in range(sharded_block)]
+    req0 = make_request("0", common_token_ids + [99] * 7, block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0, len(req0.prompt_token_ids), 0, computed_blocks
+    )
+    assert blocks is not None
+
+    req1 = make_request("1", common_token_ids + [100] * 5, block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == 2 * sharded_block
+    assert [len(group) for group in computed_blocks.blocks] == [2, 2, 16]
+
+    manager.free(req0)
+    manager.free(req1)
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_prefill(hash_fn):
     block_size = 16
