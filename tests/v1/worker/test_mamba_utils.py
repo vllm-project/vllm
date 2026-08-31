@@ -166,6 +166,65 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
     assert mamba_state_idx == {"keep": 99}
 
 
+def test_preprocess_mamba_calls_flashinfer_replayssm_materialize(monkeypatch):
+    """V1 STP align copies should materialize FlashInfer ReplaySSM SSM state."""
+    spec = MagicMock(block_size=4, num_speculative_blocks=0)
+    cache_config = MagicMock(enable_prefix_caching=True, use_replayssm=True)
+    input_batch = MagicMock()
+    input_batch.req_ids = ["r0"]
+    input_batch.num_accepted_tokens_cpu = np.array([1], dtype=np.int32)
+    copy_bufs = MagicMock(mamba_group_ids=[0], mamba_spec=spec)
+    requests = {"r0": MagicMock(num_computed_tokens=4)}
+    mamba_state_idx: dict[str, int] = {"r0": 0}
+    sched = _make_scheduler_output(set(), None, set())
+    sched.num_scheduled_tokens = {"r0": 1}
+
+    seen: dict[str, Any] = {}
+
+    def fake_materialize(
+        _kv_cache_config,
+        _mamba_group_ids,
+        _forward_context,
+        _req_ids,
+        _requests,
+        src_cols,
+        dst_cols,
+        num_reqs,
+    ):
+        seen["src_cols"] = src_cols
+        seen["dst_cols"] = dst_cols
+        seen["num_reqs"] = num_reqs
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.mamba_utils.materialize_replayssm_prefix",
+        fake_materialize,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.mamba_utils.collect_mamba_copy_meta",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.mamba_utils.do_mamba_copy_block",
+        lambda _copy_bufs: None,
+    )
+
+    preprocess_mamba(
+        sched,
+        MagicMock(),
+        cache_config,
+        mamba_state_idx,
+        input_batch,
+        requests,
+        {},
+        {},
+        copy_bufs,
+    )
+
+    assert seen["src_cols"] == [0]
+    assert seen["dst_cols"] == [1]
+    assert seen["num_reqs"] == 1
+
+
 # -----------------------------------------------------------------------------
 # Golden tests for postprocess_mamba_fused_kernel
 # -----------------------------------------------------------------------------

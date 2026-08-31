@@ -75,10 +75,11 @@ class BaseMambaAttentionMetadata:
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
-    # ReplaySSM standard decode — Triton: per-row ring cursor and flush flag,
-    # plus (decode_rows, ngroups, replayssm_buffer_len) fp32 scratch for
-    # precomputed B·C products. All None when use_replayssm is disabled or
-    # the FlashInfer ReplaySSM backend is selected.
+    # ReplaySSM decode — Triton: per-row ring cursor, flush flag, and
+    # (decode_rows, ngroups, replayssm_buffer_len) fp32 scratch for
+    # precomputed B·C products. write_pos_d / bc_pre_scratch are None on
+    # FlashInfer. is_flush_d is also used by FlashInfer ReplaySSM in align
+    # mode (block-boundary flushes only).
     write_pos_d: torch.Tensor | None = None
     is_flush_d: torch.Tensor | None = None
     bc_pre_scratch: torch.Tensor | None = None
@@ -227,6 +228,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             # buffer and refresh its contents before each replay.
             self.decode_replayssm_state_indices_d = torch.empty(
                 (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
+            )
+            self.decode_is_flush_d: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int8,
+                device=device,
             )
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
@@ -687,6 +693,30 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 device=common_attn_metadata.query_start_loc.device,
             )
 
+        # FlashInfer ReplaySSM: flush only when this step ends on a mamba
+        # block boundary (not on ring wrap or leftover-prompt rows).
+        elif (
+            self.use_flashinfer_replayssm
+            and self.vllm_config.cache_config.mamba_cache_mode == "align"
+            and num_decodes > 0
+        ):
+            num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
+            if num_computed_tokens_cpu is None:
+                raise ValueError(
+                    "--use-replayssm requires CPU computed-token counts "
+                    "to derive FlashInfer align-mode flush flags"
+                )
+            num_computed_d = num_computed_tokens_cpu[:num_decodes]
+            block_size = self.kv_cache_spec.block_size
+            is_flush_cpu = (
+                (num_computed_d + query_lens_cpu[:num_decodes]) % block_size == 0
+            )
+            is_flush_d = async_tensor_h2d(
+                is_flush_cpu.to(torch.int8).tolist(),
+                dtype=torch.int8,
+                device=common_attn_metadata.query_start_loc.device,
+            )
+
         if self.use_flashinfer_replayssm and num_decodes > 0:
             assert self.decode_replayssm_scratch is not None
             cb_scaled, cumAdt_vec, cb_old = self.decode_replayssm_scratch
@@ -851,6 +881,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 replayssm_state_indices_d = self.decode_replayssm_state_indices_d[
                     :padded_bs
                 ]
+                if is_flush_d is not None:
+                    self.decode_is_flush_d[: metadata.num_decodes].copy_(
+                        is_flush_d[: metadata.num_decodes],
+                        non_blocking=True,
+                    )
+                    is_flush_d = self.decode_is_flush_d[:padded_bs]
+                    is_flush_d[metadata.num_decodes :] = 0
 
         if (
             self.use_flashinfer_replayssm

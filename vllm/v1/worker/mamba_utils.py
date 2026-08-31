@@ -15,6 +15,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_temporal_copy_spec,
     is_conv_state_dim_first,
 )
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    materialize_replayssm_prefix,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
@@ -1457,6 +1460,8 @@ def preprocess_mamba(
 
     copy_bufs.offset = 0
     num_reqs = len(input_batch.req_ids)
+    src_cols = [-1] * num_reqs
+    dst_cols = [-1] * num_reqs
 
     if fused is not None:
         if num_reqs == 0:
@@ -1503,6 +1508,8 @@ def preprocess_mamba(
             fused.state_idx.np[i] = curr_state_idx
 
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
+            src_cols[i] = prev_state_idx
+            dst_cols[i] = curr_state_idx
             accept_token_bias = int(input_batch.num_accepted_tokens_cpu[i]) - 1
             if fused is not None:
                 assert accept_token_bias >= 0
@@ -1535,6 +1542,16 @@ def preprocess_mamba(
         )
     else:
         do_mamba_copy_block(copy_bufs)
+        materialize_replayssm_prefix(
+            kv_cache_config,
+            mamba_group_ids,
+            forward_context,
+            input_batch.req_ids,
+            requests,
+            src_cols,
+            dst_cols,
+            num_reqs,
+        )
 
 
 def postprocess_mamba_all(
