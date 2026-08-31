@@ -5,6 +5,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.kernels.helion.utils import skip_if_platform_unsupported
 from vllm.utils.import_utils import has_helion
 
 if not has_helion():
@@ -21,28 +22,6 @@ from vllm.kernels.helion.ops.silu_mul_fp8 import (
     silu_mul_fp8,
     silu_mul_fp8_baseline,
 )
-
-
-def skip_if_platform_unsupported():
-    try:
-        from vllm.kernels.helion.utils import get_canonical_gpu_name
-
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA not available")
-
-        platform = get_canonical_gpu_name()
-
-        try:
-            config_manager = ConfigManager.get_instance()
-        except RuntimeError:
-            config_manager = ConfigManager()
-
-        configs = config_manager.get_platform_configs("silu_mul_fp8", platform)
-        if len(configs) == 0:
-            pytest.skip("Current GPU platform not supported for silu_mul_fp8 kernel")
-
-    except (ImportError, RuntimeError, KeyError):
-        pytest.skip("Error detecting platform support for silu_mul_fp8 kernel")
 
 
 @pytest.fixture(autouse=True)
@@ -155,7 +134,7 @@ class TestSiluMulFp8Correctness:
     @pytest.mark.parametrize("intermediate_size", [2048, 3000, 3500, 4096, 5000])
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     def test_silu_mul_fp8_correctness(self, batch_size, intermediate_size, dtype):
-        skip_if_platform_unsupported()
+        skip_if_platform_unsupported("silu_mul_fp8")
 
         input_size = 2 * intermediate_size
         input_tensor = torch.randn(batch_size, input_size, dtype=dtype, device="cuda")
@@ -181,7 +160,7 @@ class TestSiluMulFp8Correctness:
         )
 
     def test_silu_mul_fp8_shape_inference(self):
-        skip_if_platform_unsupported()
+        skip_if_platform_unsupported("silu_mul_fp8")
         batch_size, input_size = 32, 8192
         intermediate_size = input_size // 2
 
@@ -197,7 +176,7 @@ class TestSiluMulFp8Correctness:
         assert output.dtype == torch.float8_e4m3fn
 
     def test_silu_mul_fp8_scale_variations(self):
-        skip_if_platform_unsupported()
+        skip_if_platform_unsupported("silu_mul_fp8")
         batch_size, input_size = 16, 4096
 
         input_tensor = torch.randn(
@@ -235,7 +214,7 @@ class TestSiluMulFp8Correctness:
         ],
     )
     def test_silu_mul_fp8_various_shapes(self, shape):
-        skip_if_platform_unsupported()
+        skip_if_platform_unsupported("silu_mul_fp8")
 
         input_tensor = torch.randn(*shape, dtype=torch.bfloat16, device="cuda")
         scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
@@ -276,7 +255,7 @@ class TestSiluMulFp8PytorchReference:
     @pytest.mark.parametrize("intermediate_size", [1024, 2048, 4096])
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     def test_silu_mul_fp8_vs_pytorch(self, batch_size, intermediate_size, dtype):
-        skip_if_platform_unsupported()
+        skip_if_platform_unsupported("silu_mul_fp8")
 
         input_tensor = torch.randn(
             batch_size, 2 * intermediate_size, dtype=dtype, device="cuda"
@@ -313,7 +292,7 @@ class TestSiluMulFp8PytorchReference:
         ],
     )
     def test_silu_mul_fp8_multidim_vs_pytorch(self, shape):
-        skip_if_platform_unsupported()
+        skip_if_platform_unsupported("silu_mul_fp8")
 
         input_tensor = torch.randn(*shape, dtype=torch.bfloat16, device="cuda")
         scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
@@ -347,7 +326,7 @@ class TestSiluMulFp8Integration:
         assert kernel_wrapper._config_picker is not None
 
     def test_fake_impl_functionality(self):
-        skip_if_platform_unsupported()
+        skip_if_platform_unsupported("silu_mul_fp8")
         from vllm.kernels.helion.register import get_registered_kernels
 
         input_tensor = torch.randn(32, 4096, dtype=torch.bfloat16, device="cuda")
