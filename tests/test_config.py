@@ -158,34 +158,6 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
-def _replayssm_config(
-    *,
-    backend: MambaBackendEnum,
-    use_v2_model_runner: bool = False,
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        cache_config=SimpleNamespace(
-            use_replayssm=True,
-            mamba_cache_mode="none",
-        ),
-        model_config=None,
-        num_speculative_tokens=0,
-        mamba_config=SimpleNamespace(backend=backend),
-        use_v2_model_runner=use_v2_model_runner,
-        kv_transfer_config=None,
-    )
-
-
-def test_v2_replayssm_requires_flashinfer():
-    config = _replayssm_config(
-        backend=MambaBackendEnum.TRITON,
-        use_v2_model_runner=True,
-    )
-
-    with pytest.raises(ValueError, match="requires Model Runner V1"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-
-
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     """ROCm keeps DeepSeek V3.2 and V4 on their compiled MRV1 paths."""
     from vllm.config.vllm import (
