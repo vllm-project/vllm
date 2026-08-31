@@ -586,6 +586,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
         user_kwargs = self.chat_template_kwargs or {}
         if self.reasoning_effort is not None and "enable_thinking" not in user_kwargs:
             extra_kwargs["enable_thinking"] = self.reasoning_effort != "none"
+        if (
+            self.thinking_token_budget is not None
+            and "thinking_token_budget" not in user_kwargs
+        ):
+            extra_kwargs["thinking_token_budget"] = self.thinking_token_budget
 
         return ChatParams(
             chat_template=self.chat_template or default_template,
