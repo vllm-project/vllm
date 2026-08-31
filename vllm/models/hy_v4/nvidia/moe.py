@@ -91,6 +91,7 @@ class HYV4MoEFused(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
+        fuse_shared_experts: bool = False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -128,8 +129,11 @@ class HYV4MoEFused(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        self.is_fused_shared_expert_enabled = bool(
+            fuse_shared_experts and config.num_shared_experts > 0
+        )
         self.shared_experts: HYV4FeedForward | None
-        if config.num_shared_experts > 0:
+        if config.num_shared_experts > 0 and not self.is_fused_shared_expert_enabled:
             self.shared_experts = HYV4FeedForward(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.expert_hidden_dim * config.num_shared_experts,
@@ -167,6 +171,12 @@ class HYV4MoEFused(nn.Module):
             e_score_correction_bias=self.expert_bias,
             shared_experts=self.shared_experts,
             swiglu_limit=moe_swiglu_limit,
+            n_shared_experts=(
+                config.num_shared_experts
+                if self.is_fused_shared_expert_enabled
+                else None
+            ),
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
         )
         self.prefix = prefix
         if use_swiglu_clamp:

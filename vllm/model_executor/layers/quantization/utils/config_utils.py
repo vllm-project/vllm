@@ -144,17 +144,21 @@ def is_shared_expert_quant_fse_compatible(
             return True, None
         return (
             False,
-            "Quark uses different quantization configurations for routed and "
-            f"shared experts at {shared_expert_prefix}",
+            (
+                "Quark uses different quantization configurations for routed and "
+                f"shared experts at {shared_expert_prefix}"
+            ),
         )
 
     if isinstance(quant_config, Fp8Config):
         if quant_config.store_dtype is not None:
             return (
                 False,
-                f"FP8 stores routed experts as {quant_config.store_dtype}, which "
-                f"is not supported for fused shared experts at "
-                f"{shared_expert_prefix}",
+                (
+                    f"FP8 stores routed experts as {quant_config.store_dtype}, which "
+                    "is not supported for fused shared experts at "
+                    f"{shared_expert_prefix}"
+                ),
             )
 
         # Serialized per-tensor checkpoints store 0-D or size-1 scales, which
@@ -163,8 +167,10 @@ def is_shared_expert_quant_fse_compatible(
         if quant_config.weight_block_size is None:
             return (
                 False,
-                "FP8 shared-expert FSE is only implemented for block-quantized "
-                "checkpoints",
+                (
+                    "FP8 shared-expert FSE is only implemented for block-quantized "
+                    "checkpoints"
+                ),
             )
 
         def is_ignored(layer_name: str) -> bool:
@@ -182,11 +188,37 @@ def is_shared_expert_quant_fse_compatible(
         ):
             return (
                 False,
-                "FP8 ignores routed and shared experts inconsistently at "
-                f"{shared_expert_prefix}",
+                (
+                    "FP8 ignores routed and shared experts inconsistently at "
+                    f"{shared_expert_prefix}"
+                ),
             )
 
         return True, None
+
+    # ModelOpt MXFP8 uses one global scheme plus an exclusion list. Fusing is
+    # safe only when the routed container and every shared-expert projection
+    # resolve to the same included/excluded state.
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+
+    if isinstance(quant_config, ModelOptMxFp8Config):
+        if not quant_config.is_checkpoint_mxfp8_serialized:
+            return False, "ModelOpt MXFP8 shared-expert FSE requires serialized weights"
+
+        expert_is_excluded = quant_config.is_layer_excluded(expert_prefix)
+        shared_projection_states = [
+            quant_config.is_layer_excluded(f"{shared_expert_prefix}.{projection_name}")
+            for projection_name in projection_names
+        ]
+        if all(state == expert_is_excluded for state in shared_projection_states):
+            return True, None
+        return (
+            False,
+            (
+                "ModelOpt MXFP8 uses different quantization inclusion for routed and "
+                f"shared experts at {shared_expert_prefix}"
+            ),
+        )
 
     # TODO: Extend FSE support detection to other quantization methods. Typically,
     # one would check that the experts and shared_experts use the same
@@ -194,6 +226,8 @@ def is_shared_expert_quant_fse_compatible(
 
     return (
         False,
-        "shared-expert FSE quantization compatibility is not implemented for "
-        f"{type(quant_config).__name__}",
+        (
+            "shared-expert FSE quantization compatibility is not implemented for "
+            f"{type(quant_config).__name__}"
+        ),
     )

@@ -412,6 +412,11 @@ def rocm_aiter_fused_experts(
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
             moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
+            swiglu_limit=(
+                0.0
+                if moe_config.swiglu_limit is None
+                else float(moe_config.swiglu_limit)
+            ),
             beta=moe_config.activation_situ_beta,
             linear_beta=moe_config.activation_situ_linear_beta,
         )

@@ -57,6 +57,9 @@ def _make_builder():
     builder.paged_kv_indptr = torch.zeros(
         max_num_batched_tokens + 1, dtype=torch.int32, device="cpu"
     )
+    builder.sparse_seqlen_buffer = torch.zeros(
+        max_num_batched_tokens, dtype=torch.int32, device="cpu"
+    )
     builder._use_persistent_metadata = True
     builder._num_attention_heads = 16
     builder._num_compute_units = current_platform.num_compute_units()
@@ -112,9 +115,18 @@ def _patch_build_deps(monkeypatch, events=None):
     on CPU."""
 
     def fake_generate_sparse_seqlen_triton(
-        query_lens, seq_lens, cu_query_lens, topk_token, num_tokens, max_query_len
+        seq_lens,
+        cu_query_lens,
+        topk_token,
+        num_tokens,
+        max_query_len,
+        out=None,
     ):
-        return torch.zeros(num_tokens, dtype=torch.int32, device="cpu")
+        result = torch.zeros(num_tokens, dtype=torch.int32, device="cpu")
+        if out is not None:
+            out[:num_tokens].copy_(result)
+            return out[:num_tokens]
+        return result
 
     fake_aiter = _FakeAiter("aiter")
     fake_aiter.get_mla_metadata_v1 = Mock(side_effect=lambda *a, **k: None)
@@ -221,3 +233,87 @@ def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
 
     assert events == []
     assert fake_get_mla_metadata_v1_mock.call_count == 1
+
+
+def test_nonpersistent_sparse_metadata_updates_decode_lengths(monkeypatch):
+    builder = _make_builder()
+    builder.use_persistent_mla_metadata = False
+    builder._use_persistent_metadata = False
+    builder.supports_draft_decode_metadata_update = True
+    common_metadata = _make_common_metadata()
+    common_metadata.seq_lens.copy_(torch.tensor([3, 2], dtype=torch.int32))
+
+    def fake_generate_sparse_seqlen_triton(
+        seq_lens,
+        cu_query_lens,
+        topk_token,
+        num_tokens,
+        max_query_len,
+        out=None,
+    ):
+        assert out is not None
+        out[:num_tokens].copy_(seq_lens[:num_tokens].clamp(max=topk_token))
+        return out[:num_tokens]
+
+    fake_aiter = _FakeAiter("aiter")
+    fake_aiter.get_mla_metadata_v1 = Mock(side_effect=AssertionError)
+    monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
+    monkeypatch.setattr(
+        sparse_mod, "generate_sparse_seqlen_triton", fake_generate_sparse_seqlen_triton
+    )
+
+    metadata = builder.build(common_prefix_len=0, common_attn_metadata=common_metadata)
+    assert metadata.work_meta_data is None
+    assert metadata.paged_kv_indptr.tolist() == [0, 3, 5]
+
+    common_metadata.seq_lens.add_(1)
+    builder.update_draft_decode_metadata(metadata)
+
+    assert metadata.paged_kv_indptr.tolist() == [0, 4, 7]
+    assert fake_aiter.get_mla_metadata_v1.call_count == 0
+
+
+def test_sparse_mla_zero_initializes_graph_padding_output(monkeypatch):
+    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    impl.num_heads = 2
+    impl.kv_lora_rank = 4
+    impl.scale = 1.0
+    impl.sinks = None
+
+    monkeypatch.setattr(
+        sparse_mod.AiterMLAHelper,
+        "get_actual_mla_num_heads",
+        lambda num_heads: num_heads,
+    )
+    monkeypatch.setattr(
+        sparse_mod.AiterMLAHelper,
+        "get_mla_unpadded_o",
+        lambda num_heads, output: output,
+    )
+
+    def fake_mla_decode_fwd(q, kv, output, *args, **kwargs):
+        assert torch.count_nonzero(output).item() == 0
+        output.fill_(1)
+
+    monkeypatch.setattr(
+        sparse_mod.rocm_aiter_ops,
+        "mla_decode_fwd",
+        fake_mla_decode_fwd,
+    )
+
+    metadata = SimpleNamespace(
+        attn_out_dtype=torch.float32,
+        qo_indptr=torch.tensor([0, 1, 2], dtype=torch.int32),
+        paged_kv_indptr=torch.tensor([0, 1, 2], dtype=torch.int32),
+        paged_kv_indices=torch.tensor([0, 1], dtype=torch.int32),
+        paged_kv_last_page_len=torch.ones(2, dtype=torch.int32),
+        work_meta_data=None,
+    )
+    layer = SimpleNamespace(_q_scale=None, _k_scale=None)
+    q = torch.empty((2, 2, 8), dtype=torch.float32)
+    kv = torch.empty((2, 1, 8), dtype=torch.float32)
+
+    output, lse = impl._forward_mla(layer, q, kv, metadata)
+
+    assert lse is None
+    assert torch.equal(output, torch.ones((2, 2, 4), dtype=torch.float32))

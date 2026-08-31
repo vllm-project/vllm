@@ -34,6 +34,9 @@ if not current_platform.is_rocm():
 if not torch.cuda.is_available():
     pytest.skip("Requires a GPU.", allow_module_level=True)
 
+from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
+    MoEActivation,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa: E402
     _mxfp8_e4m3_quantize_torch,
     _mxfp8_e4m3_quantize_triton,
@@ -186,6 +189,20 @@ def test_mxfp8_quant_triton_matches_torch(shape, dtype):
     deq_t = dequant_mxfp8_to_bf16(xq_t, s_t)
     deq_k = dequant_mxfp8_to_bf16(xq_k, s_k)
     assert _relerr(deq_k, deq_t) < 1e-2
+
+
+@pytest.mark.parametrize("shape", [(1, 2048), (64, 6144)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_mxfp8_quant_triton_zero_input(shape, dtype):
+    """Scale byte 0 must not make an all-zero activation block NaN."""
+    x = torch.zeros(*shape, device=DEVICE, dtype=dtype)
+    xq_ref, scale_ref = _mxfp8_e4m3_quantize_torch(x, is_sf_swizzled_layout=False)
+    xq, scale = _mxfp8_e4m3_quantize_triton(x)
+
+    torch.testing.assert_close(scale, scale_ref, rtol=0, atol=0)
+    torch.testing.assert_close(xq.float(), xq_ref.float(), rtol=0, atol=0)
+    assert torch.isfinite(xq.float()).all()
 
 
 # --------------------------------------------------------------------------- #
@@ -432,7 +449,12 @@ def test_mxfp8_linear_emulation_bf16_at_load(
 # forwards that mask to aiter unchanged (it no longer rebuilds it via
 # ``(expert_map >= 0)``, which collapsed an already-0/1 mask to all-ones and
 # produced EP garbage).
-def _capture_expert_mask(expert_mask, *, global_num_experts):
+def _capture_aiter_mxfp8_apply(
+    expert_mask,
+    *,
+    global_num_experts,
+    activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+):
     """Drive the real ``AiterMxfp8Experts.apply`` mask branch and capture the
     ``expert_mask`` it forwards to ``rocm_aiter_ops.fused_moe``."""
     from types import SimpleNamespace
@@ -452,6 +474,7 @@ def _capture_expert_mask(expert_mask, *, global_num_experts):
 
     def _fake_fused_moe(hidden_states, w1, w2, tw, ti, *, expert_mask, **kw):
         captured["expert_mask"] = expert_mask
+        captured.update(kw)
         return torch.zeros_like(hidden_states)
 
     w1 = torch.zeros(1, device=DEVICE)
@@ -469,7 +492,7 @@ def _capture_expert_mask(expert_mask, *, global_num_experts):
             w2=w2,
             topk_weights=tw,
             topk_ids=ti,
-            activation=None,
+            activation=activation,
             global_num_experts=global_num_experts,
             expert_map=expert_mask,
             a1q_scale=None,
@@ -479,7 +502,7 @@ def _capture_expert_mask(expert_mask, *, global_num_experts):
             expert_tokens_meta=None,
             apply_router_weight_on_input=False,
         )
-    return captured["expert_mask"]
+    return captured
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
@@ -490,9 +513,31 @@ def test_aiter_mxfp8_apply_forwards_expert_mask_unchanged():
     ep_mask = torch.tensor(
         [1, 1, 1, 1, 0, 0, 0, 0, 0], dtype=torch.int32, device=DEVICE
     )
-    got = _capture_expert_mask(ep_mask, global_num_experts=8)
+    got = _capture_aiter_mxfp8_apply(ep_mask, global_num_experts=8)["expert_mask"]
     assert torch.equal(got.cpu().to(torch.int32), ep_mask.cpu().to(torch.int32))
     assert got.sum().item() == 4  # the 4 local experts, not all 9
+
+
+@pytest.mark.parametrize(
+    "activation,expected_activation,expected_gate_mode",
+    [
+        (MoEActivation.SILU, "Silu", "interleave"),
+        (MoEActivation.SWIGLUOAI_UNINTERLEAVE, "Swiglu", "interleave"),
+    ],
+)
+def test_aiter_mxfp8_apply_uses_matching_activation_and_layout(
+    activation, expected_activation, expected_gate_mode
+):
+    from aiter import ActivationType
+
+    captured = _capture_aiter_mxfp8_apply(
+        None, global_num_experts=8, activation=activation
+    )
+    assert (
+        captured["activation_method"]
+        == getattr(ActivationType, expected_activation).value
+    )
+    assert captured["gate_mode"] == expected_gate_mode
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
