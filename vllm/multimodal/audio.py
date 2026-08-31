@@ -3,6 +3,7 @@
 import math
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from typing import Literal
 
 import numpy as np
@@ -279,6 +280,16 @@ def resample_audio_soxr(
     return soxr.resample(audio, orig_sr_int, target_sr_int)
 
 
+@lru_cache(maxsize=32)
+def _get_torchaudio_resampler(
+    orig_sr: int, target_sr: int
+) -> "torchaudio.transforms.Resample":
+    # `torchaudio.transforms.Resample` precomputes its kernel for a fixed
+    # (orig_sr, target_sr) pair; cache instances so repeated requests at a
+    # common input rate skip the kernel rebuild.
+    return torchaudio.transforms.Resample(orig_sr, target_sr)
+
+
 def resample_audio_torchaudio(
     audio: npt.NDArray[np.floating],
     *,
@@ -310,34 +321,29 @@ def resample_audio_torchaudio(
     # The kernel is float32; cast the input to match (same coercion as the
     # PyAV path).
     tensor = torch.as_tensor(audio, dtype=torch.float32)
-    return torchaudio.functional.resample(tensor, orig_sr_int, target_sr_int).numpy()
+    resampler = _get_torchaudio_resampler(orig_sr_int, target_sr_int)
+    return resampler(tensor).numpy()
 
 
 class AudioResampler:
     """Resample audio data to a target sample rate."""
 
+    _METHODS = ("pyav", "scipy", "soxr", "torchaudio")
+
     def __init__(
         self,
         target_sr: float | None = None,
-        method: Literal["pyav", "scipy", "soxr", "torchaudio"] = "pyav",
+        method: Literal["pyav", "scipy", "soxr", "torchaudio"] = "torchaudio",
     ):
+        # Eager validation so a bad method fails at construction rather than
+        # on the first audio request.
+        if method not in self._METHODS:
+            raise ValueError(
+                f"Invalid resampling method: {method!r}. "
+                f"Supported methods: {list(self._METHODS)}."
+            )
         self.target_sr = target_sr
         self.method = method
-        # `torchaudio.transforms.Resample` precomputes its kernel for a fixed
-        # (orig_sr, target_sr) pair; cache instances per orig_sr so repeated
-        # requests at a common input rate skip the kernel rebuild.
-        self._resampler_cache: dict[int, torchaudio.transforms.Resample] = {}
-
-    def _get_torchaudio_resampler(
-        self, orig_sr: int
-    ) -> "torchaudio.transforms.Resample":
-        assert self.target_sr is not None  # checked in `resample`
-        target_sr = int(round(self.target_sr))
-        resampler = self._resampler_cache.get(orig_sr)
-        if resampler is None or resampler.new_freq != target_sr:
-            resampler = torchaudio.transforms.Resample(orig_sr, target_sr)
-            self._resampler_cache[orig_sr] = resampler
-        return resampler
 
     def resample(
         self,
@@ -365,13 +371,13 @@ class AudioResampler:
         elif self.method == "soxr":
             return resample_audio_soxr(audio, orig_sr=orig_sr, target_sr=self.target_sr)
         elif self.method == "torchaudio":
-            resampler = self._get_torchaudio_resampler(int(round(orig_sr)))
-            tensor = torch.as_tensor(audio, dtype=torch.float32)
-            return resampler(tensor).numpy()
+            return resample_audio_torchaudio(
+                audio, orig_sr=orig_sr, target_sr=self.target_sr
+            )
         else:
             raise ValueError(
                 f"Invalid resampling method: {self.method}. "
-                "Supported methods are 'pyav', 'scipy', 'soxr', and 'torchaudio'."
+                f"Supported methods are {list(self._METHODS)}."
             )
 
 
