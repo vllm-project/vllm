@@ -15,7 +15,6 @@ import torch
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
-    _wait_for_file_size,
 )
 
 
@@ -119,31 +118,6 @@ def test_only_creator_unlinks_file_on_cleanup():
     # Creator goes away — file is removed.
     r1.cleanup()
     assert not os.path.exists(path), "creator cleanup must unlink the file"
-
-
-# ── _wait_for_file_size ──────────────────────────────────────────────────────
-
-
-def test_wait_for_file_size_returns_when_already_big_enough(tmp_path):
-    """The fast path: file already at expected size — return immediately."""
-    p = tmp_path / "f.bin"
-    p.write_bytes(b"\x00" * 128)
-    fd = os.open(str(p), os.O_RDONLY)
-    try:
-        _wait_for_file_size(fd, expected_size=128, timeout=1.0)  # must not raise
-    finally:
-        os.close(fd)
-
-
-def test_wait_for_file_size_times_out_when_file_stays_empty(tmp_path):
-    p = tmp_path / "f.bin"
-    p.write_bytes(b"")
-    fd = os.open(str(p), os.O_RDONLY)
-    try:
-        with pytest.raises(TimeoutError):
-            _wait_for_file_size(fd, expected_size=4096, timeout=0.05)
-    finally:
-        os.close(fd)
 
 
 # ── MADV_POPULATE_WRITE pre-faulting / fallback ──────────────────────────────

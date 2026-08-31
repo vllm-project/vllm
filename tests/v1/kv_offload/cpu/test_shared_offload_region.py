@@ -14,11 +14,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vllm.utils.shm_utils import wait_for_file_size
 from vllm.utils.system_utils import get_mp_context
-from vllm.v1.kv_offload.cpu.shared_offload_region import (
-    SharedOffloadRegion,
-    _wait_for_file_size,
-)
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 PAGE_SIZE = mmap.PAGESIZE
 
@@ -766,24 +764,24 @@ def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
 
 
 # ---------------------------------------------------------------------------
-# _wait_for_file_size
+# wait_for_file_size
 # ---------------------------------------------------------------------------
 
 
-def test_wait_for_file_size_already_large_enough(tmp_path):
-    """_wait_for_file_size must return immediately when file is already big enough."""
+def testwait_for_file_size_already_large_enough(tmp_path):
+    """wait_for_file_size must return immediately when file is already big enough."""
     fd = os.open(str(tmp_path / "ready.mmap"), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         os.ftruncate(fd, PAGE_SIZE)
         start = time.monotonic()
-        _wait_for_file_size(fd, PAGE_SIZE, timeout=5.0)
+        wait_for_file_size(fd, PAGE_SIZE, timeout=5.0)
         assert time.monotonic() - start < 0.5
     finally:
         os.close(fd)
 
 
-def test_wait_for_file_size_waits_for_grow(tmp_path):
-    """_wait_for_file_size must return once a background thread grows the file."""
+def testwait_for_file_size_waits_for_grow(tmp_path):
+    """wait_for_file_size must return once a background thread grows the file."""
     fd = os.open(str(tmp_path / "grow.mmap"), os.O_CREAT | os.O_RDWR, 0o600)
     try:
 
@@ -793,18 +791,18 @@ def test_wait_for_file_size_waits_for_grow(tmp_path):
 
         t = threading.Thread(target=grow)
         t.start()
-        _wait_for_file_size(fd, PAGE_SIZE, timeout=5.0)  # must not raise
+        wait_for_file_size(fd, PAGE_SIZE, timeout=5.0)  # must not raise
         t.join()
     finally:
         os.close(fd)
 
 
-def test_wait_for_file_size_timeout(tmp_path):
-    """_wait_for_file_size must raise TimeoutError when the file never grows."""
+def testwait_for_file_size_timeout(tmp_path):
+    """wait_for_file_size must raise TimeoutError when the file never grows."""
     fd = os.open(str(tmp_path / "stuck.mmap"), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         with pytest.raises(TimeoutError):
-            _wait_for_file_size(fd, PAGE_SIZE, timeout=0.1)
+            wait_for_file_size(fd, PAGE_SIZE, timeout=0.1)
     finally:
         os.close(fd)
 
@@ -816,70 +814,33 @@ def test_wait_for_file_size_timeout(tmp_path):
 
 def test_insufficient_space_raises_clear_error(monkeypatch):
     """A failed creator capacity check must clean up and give a clear error."""
-    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+    import vllm.distributed.device_communicators.shm_broadcast as shm_broadcast
+    from vllm.utils.shm_utils import open_region_file
 
-    engine_id = str(uuid.uuid4())
-    mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
-    mock_open = MagicMock(return_value=9999)
-    mock_unlink = MagicMock()
-    mock_close = MagicMock()
-    monkeypatch.setattr(region.os, "open", mock_open)
-    monkeypatch.setattr(region.os, "unlink", mock_unlink)
-    monkeypatch.setattr(region.os, "close", mock_close)
-    monkeypatch.setattr(region, "hold_region_file_lock", MagicMock())
-    monkeypatch.setattr(region, "reap_orphaned_region_files", MagicMock())
     monkeypatch.setattr(
-        region,
+        shm_broadcast,
         "check_shm_free_space",
-        lambda *a, **kw: (_ for _ in ()).throw(
-            RuntimeError("Insufficient space in /dev/shm: 30 GB required.")
+        MagicMock(
+            side_effect=RuntimeError("Insufficient space in /dev/shm: 30 GB required.")
         ),
     )
-
+    path = f"/dev/shm/vllm_offload_{uuid.uuid4()}.mmap"
     with pytest.raises(RuntimeError, match="Insufficient space"):
-        SharedOffloadRegion(
-            engine_id=engine_id,
-            num_blocks=4,
-            rank=0,
-            kv_bytes_per_block=PAGE_SIZE,
-            cpu_page_size=PAGE_SIZE,
-        )
-
-    mock_unlink.assert_called_once_with(mmap_path)
-    mock_close.assert_called_once_with(9999)
+        open_region_file(path, PAGE_SIZE)
+    assert not os.path.exists(path)
 
 
 def test_ftruncate_failure_cleans_up_creator(monkeypatch):
     """A failed creator ftruncate must close and unlink before re-raising."""
-    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+    from vllm.utils.shm_utils import open_region_file
 
-    engine_id = str(uuid.uuid4())
-    mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
-    mock_unlink = MagicMock()
-    mock_close = MagicMock()
-    monkeypatch.setattr(region.os, "open", MagicMock(return_value=9999))
-    monkeypatch.setattr(region.os, "unlink", mock_unlink)
-    monkeypatch.setattr(region.os, "close", mock_close)
-    monkeypatch.setattr(region, "hold_region_file_lock", MagicMock())
-    monkeypatch.setattr(region, "reap_orphaned_region_files", MagicMock())
-    monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
     monkeypatch.setattr(
-        region.os,
-        "ftruncate",
-        MagicMock(side_effect=OSError("ftruncate failed")),
+        os, "ftruncate", MagicMock(side_effect=OSError("ftruncate failed"))
     )
-
+    path = f"/dev/shm/vllm_offload_{uuid.uuid4()}.mmap"
     with pytest.raises(OSError, match="ftruncate failed"):
-        SharedOffloadRegion(
-            engine_id=engine_id,
-            num_blocks=4,
-            rank=0,
-            kv_bytes_per_block=PAGE_SIZE,
-            cpu_page_size=PAGE_SIZE,
-        )
-
-    mock_unlink.assert_called_once_with(mmap_path)
-    mock_close.assert_called_once_with(9999)
+        open_region_file(path, PAGE_SIZE)
+    assert not os.path.exists(path)
 
 
 # ---------------------------------------------------------------------------
@@ -911,7 +872,7 @@ def test_backing_file_unlinked_after_barrier(iid):
 
 def test_barrier_failure_unlinks_creator_and_raises(iid):
     """A failed rendezvous must remove the creator's file and re-raise, not
-    leave a stub that wedges the next start in _wait_for_file_size."""
+    leave a stub that wedges the next start in wait_for_file_size."""
     path = f"/dev/shm/vllm_offload_{iid}.mmap"
     with pytest.raises(RuntimeError, match="peer died"):
         _make_region(iid, barrier=MagicMock(side_effect=RuntimeError("peer died")))
@@ -959,7 +920,7 @@ def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch):
 
     monkeypatch.setattr(
         region,
-        "check_shm_free_space",
+        "open_region_file",
         MagicMock(side_effect=RuntimeError("Insufficient space")),
     )
     barrier = MagicMock()
@@ -991,7 +952,7 @@ def test_barrier_release_failure_keeps_original_error(iid, monkeypatch):
 
     monkeypatch.setattr(
         region,
-        "check_shm_free_space",
+        "open_region_file",
         MagicMock(side_effect=RuntimeError("Insufficient space")),
     )
 
