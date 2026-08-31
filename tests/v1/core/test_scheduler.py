@@ -3161,6 +3161,45 @@ def test_fcfs_preemption_victim_unchanged():
     assert waiting_ids == {"z"}, waiting_ids
 
 
+def _lcf_victim(running, request, scheduled_encoder_inputs=None):
+    """Run LCF victim selection over a hand-built running list."""
+    scheduler = create_scheduler(preemption_victim="lcf")
+    scheduler.running = running
+    return scheduler._select_preemption_victim(request, scheduled_encoder_inputs or {})
+
+
+def test_lcf_victim_skips_pending_encoder_allocation():
+    """LCF must not evict a request holding a pending same-step encoder
+    allocation: cancelling its worker-side encoder compute while leaving the
+    encoder-cache reservation makes a resumed request falsely hit
+    check_and_update_cache and skip encoder execution.
+    """
+    # `a` is least-computed but has an encoder input scheduled this step, so
+    # the next-least eligible request `c` must be chosen. `b` is the request
+    # being scheduled.
+    a = Mock(request_id="a", num_computed_tokens=1)
+    b = Mock(request_id="b", num_computed_tokens=5)
+    c = Mock(request_id="c", num_computed_tokens=3)
+    victim = _lcf_victim([a, b, c], request=b, scheduled_encoder_inputs={"a": [0]})
+    assert victim is c, victim
+
+
+def test_lcf_victim_avoids_self_preemption_on_tie():
+    """On a tied num_computed_tokens minimum, LCF must not pick the request
+    being scheduled (which would yield a no-progress step); it prefers the
+    last-admitted victim instead.
+    """
+    a = Mock(request_id="a", num_computed_tokens=2)
+    b = Mock(request_id="b", num_computed_tokens=2)  # request being scheduled
+    c = Mock(request_id="c", num_computed_tokens=2)
+    # All tied; reversed() prefers last-admitted, and `b` is excluded.
+    assert _lcf_victim([a, b, c], request=b) is c
+
+    # Only the request being scheduled is eligible -> None, so the caller
+    # falls back to the last-admitted pop() path.
+    assert _lcf_victim([b], request=b) is None
+
+
 def test_priority_scheduling_equal_priority_preemption():
     """Test arrival time tiebreaker when requests have equal priority."""
     # This test verifies that arrival time is used as a tiebreaker for equal

@@ -676,22 +676,11 @@ class Scheduler(SchedulerInterface):
                     # preempt. LCF and PRIORITY may pick a request already
                     # scheduled this step, so they share the remove +
                     # bookkeeping path below and differ only in the key; FCFS
-                    # keeps the last-admitted pop() fast path.
-                    if self.preemption_victim == PreemptionVictim.LCF:
-                        # Least-computed-first: evict the running request with
-                        # the smallest sunk compute to minimize wasted
-                        # recompute on the preempted request.
-                        preempted_req = min(
-                            self.running,
-                            key=lambda r: r.num_computed_tokens,
-                        )
-                    elif self.policy == SchedulingPolicy.PRIORITY:
-                        preempted_req = max(
-                            self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
-                        )
-                    else:
-                        preempted_req = None
+                    # (and any policy with no eligible victim) keeps the
+                    # last-admitted pop() fast path.
+                    preempted_req = self._select_preemption_victim(
+                        request, scheduled_encoder_inputs
+                    )
 
                     if preempted_req is None:
                         preempted_req = self.running.pop()
@@ -1384,6 +1373,46 @@ class Scheduler(SchedulerInterface):
             skip.clear()
 
         return new_block_ids_to_zero or None
+
+    def _select_preemption_victim(
+        self,
+        request: Request,
+        scheduled_encoder_inputs: dict[str, list[int]],
+    ) -> Request | None:
+        """Select which running request to evict to free KV cache.
+
+        Args:
+            request: The request currently being scheduled, which triggered
+                the preemption.
+            scheduled_encoder_inputs: Encoder inputs already scheduled this
+                step, keyed by request id.
+
+        Returns:
+            The request to preempt, or None to signal the caller to fall back
+            to popping the last-admitted running request (the FCFS fast path).
+            The tail request can never hold a pending same-step encoder
+            allocation, so that fallback is always encoder-cache safe.
+        """
+        if self.preemption_victim == PreemptionVictim.LCF:
+            # Least-computed-first: evict the running request with the smallest
+            # sunk compute to minimize wasted recompute. Exclude the request
+            # being scheduled (self-preemption on a tied num_computed_tokens
+            # minimum would waste the step) and any request holding a pending
+            # same-step encoder allocation, whose worker-side compute we would
+            # cancel while leaving an encoder-cache reservation that a resumed
+            # request would falsely hit. reversed() breaks ties toward the
+            # last-admitted victim.
+            candidates = [
+                r
+                for r in reversed(self.running)
+                if r is not request and r.request_id not in scheduled_encoder_inputs
+            ]
+            if not candidates:
+                return None
+            return min(candidates, key=lambda r: r.num_computed_tokens)
+        if self.policy == SchedulingPolicy.PRIORITY:
+            return max(self.running, key=lambda r: (r.priority, r.arrival_time))
+        return None
 
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
