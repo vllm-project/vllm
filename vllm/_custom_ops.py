@@ -260,6 +260,49 @@ def rms_norm(
     torch.ops._C.rms_norm(out, input, weight, epsilon)
 
 
+# Fused vocab-parallel embedding lookup
+# (see csrc/.../vocab_parallel_embedding_kernels.cu).
+def vocab_parallel_embedding(
+    input_ids: torch.Tensor,
+    weight: torch.Tensor,
+    org_vocab_start_index: int,
+    org_vocab_end_index: int,
+    num_org_vocab_padding: int,
+    added_vocab_start_index: int,
+    added_vocab_end_index: int,
+) -> torch.Tensor:
+    """Gather the embedding rows owned by this rank, zeros for the others.
+
+    Fuses the range mask, id shift, gather and output masking of the TP > 1
+    embedding path into a single kernel. Out-of-shard tokens produce zero rows,
+    so an all-reduce over the ranks yields the full embedding.
+
+    Args:
+        input_ids: ``[num_tokens]`` int32 or int64 token ids.
+        weight: ``[num_embeddings_per_partition, embedding_dim]`` shard.
+
+    Returns:
+        ``[num_tokens, embedding_dim]`` partial embeddings.
+    """
+    out = torch.empty(
+        input_ids.shape[0],
+        weight.shape[1],
+        dtype=weight.dtype,
+        device=weight.device,
+    )
+    torch.ops._C.vocab_parallel_embedding(
+        out,
+        input_ids,
+        weight,
+        org_vocab_start_index,
+        org_vocab_end_index,
+        num_org_vocab_padding,
+        added_vocab_start_index,
+        added_vocab_end_index,
+    )
+    return out
+
+
 # LongCat n-gram embedding index kernel (see csrc/.../ngram_embedding_kernels.cu).
 def ngram_compute_n_gram_ids(
     ne_n: int,
