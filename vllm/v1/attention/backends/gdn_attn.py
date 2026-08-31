@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend for GatedDeltaNet attention."""
 
+import os
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.ops.gdn_scatter import (
+    gdn_inkernel_ckpt_write_enabled,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -26,6 +30,15 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.mamba.ops.gdn_index_prep import (
+        GDNBlockIdxPrepBuffers,
+    )
+
+
+def gdn_hoist_mask_selects_enabled() -> bool:
+    return os.environ.get("VLLM_GDN_HOIST_MASK_SELECTS", "1") != "0"
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -78,11 +91,36 @@ class GDNAttentionMetadata:
     block_idx_first_scheduled_token: torch.Tensor | None = None  # shape: [batch,]
     block_idx_last_computed_token: torch.Tensor | None = None  # shape: [batch,]
     block_idx_last_scheduled_token_prev_step: torch.Tensor | None = None
+    # Packed (read, write) anchor pairs for the decode kernels' single 64-bit
+    # anchor load ([:, 0] = read, [:, 1] = write). Only populated when the
+    # runner supplies the shared prep-kernel buffers
+    # (VLLM_GDN_INKERNEL_CKPT_IDX); the nospec pair reads the last computed
+    # block, the spec pair the resolved prev-step anchor.
+    block_idx_packed_anchors: torch.Tensor | None = None  # shape: [batch, 2]
+    block_idx_packed_anchors_spec: torch.Tensor | None = None  # shape: [batch, 2]
     # Only consumed by prefill (never by captured decode kernels).
     num_computed_tokens: torch.Tensor | None = None  # shape: [batch,]
     # Full per-request block table (all blocks, not sliced to the leading
     # 1 + num_spec entries); the all-mode scatter/gather indexes into it.
     all_state_indices_tensor: torch.Tensor | None = None
+
+    # Builder-preselected all-mode row slices for mixed (spec + prefill)
+    # eager batches, selected once per step with the CPU spec mask (sync-free;
+    # a device-bool-mask select in the layer runs torch.nonzero -> count DtoH
+    # + cudaStreamSynchronize, once per select per GDN layer). ns_* = non-spec
+    # rows, spec_* = spec rows, both in build order. Populated only when
+    # VLLM_GDN_HOIST_MASK_SELECTS is on and the batch is mixed.
+    ns_all_state_indices_sel: torch.Tensor | None = None
+    ns_block_idx_last_computed_sel: torch.Tensor | None = None
+    ns_block_idx_first_scheduled_sel: torch.Tensor | None = None
+    ns_block_idx_last_scheduled_sel: torch.Tensor | None = None
+    ns_num_computed_tokens_sel: torch.Tensor | None = None
+    spec_all_state_indices_sel: torch.Tensor | None = None
+    spec_block_idx_last_scheduled_sel: torch.Tensor | None = None
+    spec_block_idx_last_computed_sel: torch.Tensor | None = None
+    spec_block_idx_prev_step_sel: torch.Tensor | None = None
+    spec_block_idx_packed_anchors_sel: torch.Tensor | None = None
+    spec_block_idx_packed_anchors_spec_sel: torch.Tensor | None = None
 
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
@@ -270,6 +308,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         prev_last_scheduled_idx: torch.Tensor | None = None,
+        block_idx_prep: "GDNBlockIdxPrepBuffers | None" = None,
         fast_build: bool = False,
     ) -> GDNAttentionMetadata:
         m = common_attn_metadata
@@ -488,36 +527,125 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         block_idx_first_scheduled_token = None
         block_idx_last_computed_token = None
         block_idx_last_scheduled_token_prev_step = None
+        block_idx_packed_anchors = None
+        block_idx_packed_anchors_spec = None
         num_computed_tokens = None
         all_state_indices_tensor = None
+        ns_all_state_indices_sel = None
+        ns_block_idx_last_computed_sel = None
+        ns_block_idx_first_scheduled_sel = None
+        ns_block_idx_last_scheduled_sel = None
+        ns_num_computed_tokens_sel = None
+        spec_all_state_indices_sel = None
+        spec_block_idx_last_scheduled_sel = None
+        spec_block_idx_last_computed_sel = None
+        spec_block_idx_prev_step_sel = None
+        spec_block_idx_packed_anchors_sel = None
+        spec_block_idx_packed_anchors_spec_sel = None
         if self.vllm_config.cache_config.mamba_cache_mode == "all":
             mamba_block_size = self.kv_cache_spec.block_size
             num_computed_tokens = context_lens_tensor
-            (
-                block_idx_last_computed_token,
-                block_idx_first_scheduled_token,
-                block_idx_last_scheduled_token,
-            ) = compute_mamba_prefix_caching_block_indices(
-                num_computed_tokens, m.seq_lens, mamba_block_size
-            )
             # In all-mode, mamba_get_block_table_tensor returns the full
             # (#requests, #max blocks) table unsliced.
             all_state_indices_tensor = block_table_tensor
-            if self.use_spec_decode and num_accepted_tokens is not None:
-                # Spec-decode read anchor: the block the previous step
-                # checkpointed its running state into (plumbed by the runner);
-                # fall back to the last computed block for first-step or
-                # untracked requests (and during cudagraph capture).
-                fallback = torch.clamp(
-                    (num_computed_tokens - 1) // mamba_block_size, min=0
+            if block_idx_prep is not None:
+                # The block anchors were computed once per step by the
+                # runner's prep kernel into shared persistent buffers (they
+                # are identical for every GDN group); point the metadata at
+                # the shared buffers instead of recomputing per builder.
+                block_idx_last_computed_token = (
+                    block_idx_prep.block_idx_last_computed_token[: m.num_reqs]
                 )
-                if prev_last_scheduled_idx is not None:
-                    prev = prev_last_scheduled_idx[: fallback.shape[0]]
-                    block_idx_last_scheduled_token_prev_step = torch.where(
-                        prev >= 0, prev, fallback
+                block_idx_first_scheduled_token = (
+                    block_idx_prep.block_idx_first_scheduled_token[: m.num_reqs]
+                )
+                block_idx_last_scheduled_token = (
+                    block_idx_prep.block_idx_last_scheduled_token[: m.num_reqs]
+                )
+                block_idx_packed_anchors = block_idx_prep.packed_anchors[
+                    : m.num_reqs
+                ]
+                if self.use_spec_decode and num_accepted_tokens is not None:
+                    block_idx_last_scheduled_token_prev_step = (
+                        block_idx_prep.block_idx_last_scheduled_token_prev_step[
+                            : m.num_reqs
+                        ]
                     )
-                else:
-                    block_idx_last_scheduled_token_prev_step = fallback
+                    block_idx_packed_anchors_spec = (
+                        block_idx_prep.packed_anchors_spec[: m.num_reqs]
+                    )
+            else:
+                (
+                    block_idx_last_computed_token,
+                    block_idx_first_scheduled_token,
+                    block_idx_last_scheduled_token,
+                ) = compute_mamba_prefix_caching_block_indices(
+                    num_computed_tokens, m.seq_lens, mamba_block_size
+                )
+                if self.use_spec_decode and num_accepted_tokens is not None:
+                    # Spec-decode read anchor: the block the previous step
+                    # checkpointed its running state into (plumbed by the
+                    # runner); fall back to the last computed block for
+                    # first-step or untracked requests (and during cudagraph
+                    # capture).
+                    fallback = torch.clamp(
+                        (num_computed_tokens - 1) // mamba_block_size, min=0
+                    )
+                    if prev_last_scheduled_idx is not None:
+                        prev = prev_last_scheduled_idx[: fallback.shape[0]]
+                        block_idx_last_scheduled_token_prev_step = torch.where(
+                            prev >= 0, prev, fallback
+                        )
+                    else:
+                        block_idx_last_scheduled_token_prev_step = fallback
+
+            # Mixed (spec + prefill) eager batches: pre-select the ns_*/spec_*
+            # row slices once per step with the CPU spec mask — CPU-mask
+            # indexing of device tensors does not sync (the
+            # spec_state_indices_tensor select above already relies on this).
+            # The layer otherwise re-selects with the DEVICE mask in every GDN
+            # layer, each select costing a torch.nonzero count DtoH +
+            # cudaStreamSynchronize.
+            if (
+                gdn_hoist_mask_selects_enabled()
+                and num_prefills > 0
+                and spec_sequence_masks_cpu is not None
+            ):
+                ns_cpu = ~spec_sequence_masks_cpu
+                ns_all_state_indices_sel = all_state_indices_tensor[ns_cpu]
+                ns_block_idx_last_computed_sel = block_idx_last_computed_token[
+                    ns_cpu
+                ]
+                ns_block_idx_first_scheduled_sel = block_idx_first_scheduled_token[
+                    ns_cpu
+                ]
+                ns_block_idx_last_scheduled_sel = block_idx_last_scheduled_token[
+                    ns_cpu
+                ]
+                ns_num_computed_tokens_sel = num_computed_tokens[ns_cpu]
+                spec_all_state_indices_sel = all_state_indices_tensor[
+                    spec_sequence_masks_cpu
+                ]
+                spec_block_idx_last_scheduled_sel = block_idx_last_scheduled_token[
+                    spec_sequence_masks_cpu
+                ]
+                spec_block_idx_last_computed_sel = block_idx_last_computed_token[
+                    spec_sequence_masks_cpu
+                ]
+                if block_idx_last_scheduled_token_prev_step is not None:
+                    spec_block_idx_prev_step_sel = (
+                        block_idx_last_scheduled_token_prev_step[
+                            spec_sequence_masks_cpu
+                        ]
+                    )
+                if block_idx_packed_anchors is not None:
+                    spec_block_idx_packed_anchors_sel = block_idx_packed_anchors[
+                        spec_sequence_masks_cpu
+                    ]
+                if block_idx_packed_anchors_spec is not None:
+                    spec_block_idx_packed_anchors_spec_sel = (
+                        block_idx_packed_anchors_spec[spec_sequence_masks_cpu]
+                    )
 
         # Prepare per-request tensors for cudagraph. m.num_actual_tokens is
         # token-padded for FULL graph replay, but the GDN state/query/accepted
@@ -616,44 +744,56 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             # rows always precede padded rows in build order.
             num_real_reqs = num_decodes + num_spec_decodes
             num_blocks = all_state_indices_tensor.size(1)
-            self.all_state_indices_tensor[:num_real_reqs, :num_blocks].copy_(
-                all_state_indices_tensor[:num_real_reqs], non_blocking=True
-            )
-            all_state_indices_tensor = self.all_state_indices_tensor[
-                :batch_size, :num_blocks
-            ]
-            all_state_indices_tensor[num_real_reqs:].fill_(NULL_BLOCK_ID)
+            if not gdn_inkernel_ckpt_write_enabled():
+                self.all_state_indices_tensor[:num_real_reqs, :num_blocks].copy_(
+                    all_state_indices_tensor[:num_real_reqs], non_blocking=True
+                )
+                all_state_indices_tensor = self.all_state_indices_tensor[
+                    :batch_size, :num_blocks
+                ]
+                all_state_indices_tensor[num_real_reqs:].fill_(NULL_BLOCK_ID)
+            # else: captured kernels read the runner-persistent block table
+            # directly — it is a stable row-0-based slice of a per-run
+            # allocation, and the runner NULL-fills padded rows every step,
+            # so both reasons for the staging copy are already satisfied.
 
-            assert block_idx_last_scheduled_token is not None
-            self.block_idx_last_scheduled_token[:num_real_reqs].copy_(
-                block_idx_last_scheduled_token[:num_real_reqs], non_blocking=True
-            )
-            block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
-                :batch_size
-            ]
-            block_idx_last_scheduled_token[num_real_reqs:].fill_(0)
-
-            assert block_idx_last_computed_token is not None
-            self.block_idx_last_computed_token[:num_real_reqs].copy_(
-                block_idx_last_computed_token[:num_real_reqs], non_blocking=True
-            )
-            block_idx_last_computed_token = self.block_idx_last_computed_token[
-                :batch_size
-            ]
-            block_idx_last_computed_token[num_real_reqs:].fill_(0)
-
-            if (
-                self.use_spec_decode
-                and block_idx_last_scheduled_token_prev_step is not None
-            ):
-                self.block_idx_last_scheduled_token_prev_step[:num_real_reqs].copy_(
-                    block_idx_last_scheduled_token_prev_step[:num_real_reqs],
+            # With the prep kernel the anchors already live in shared
+            # runner-persistent buffers (padded rows included) — no staging.
+            if block_idx_prep is None:
+                assert block_idx_last_scheduled_token is not None
+                self.block_idx_last_scheduled_token[:num_real_reqs].copy_(
+                    block_idx_last_scheduled_token[:num_real_reqs],
                     non_blocking=True,
                 )
-                block_idx_last_scheduled_token_prev_step = (
-                    self.block_idx_last_scheduled_token_prev_step[:batch_size]
+                block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
+                    :batch_size
+                ]
+                block_idx_last_scheduled_token[num_real_reqs:].fill_(0)
+
+                assert block_idx_last_computed_token is not None
+                self.block_idx_last_computed_token[:num_real_reqs].copy_(
+                    block_idx_last_computed_token[:num_real_reqs],
+                    non_blocking=True,
                 )
-                block_idx_last_scheduled_token_prev_step[num_real_reqs:].fill_(0)
+                block_idx_last_computed_token = self.block_idx_last_computed_token[
+                    :batch_size
+                ]
+                block_idx_last_computed_token[num_real_reqs:].fill_(0)
+
+                if (
+                    self.use_spec_decode
+                    and block_idx_last_scheduled_token_prev_step is not None
+                ):
+                    self.block_idx_last_scheduled_token_prev_step[
+                        :num_real_reqs
+                    ].copy_(
+                        block_idx_last_scheduled_token_prev_step[:num_real_reqs],
+                        non_blocking=True,
+                    )
+                    block_idx_last_scheduled_token_prev_step = (
+                        self.block_idx_last_scheduled_token_prev_step[:batch_size]
+                    )
+                    block_idx_last_scheduled_token_prev_step[num_real_reqs:].fill_(0)
 
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
@@ -683,6 +823,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             block_idx_last_scheduled_token_prev_step=(
                 block_idx_last_scheduled_token_prev_step
             ),
+            block_idx_packed_anchors=block_idx_packed_anchors,
+            block_idx_packed_anchors_spec=block_idx_packed_anchors_spec,
+            ns_all_state_indices_sel=ns_all_state_indices_sel,
+            ns_block_idx_last_computed_sel=ns_block_idx_last_computed_sel,
+            ns_block_idx_first_scheduled_sel=ns_block_idx_first_scheduled_sel,
+            ns_block_idx_last_scheduled_sel=ns_block_idx_last_scheduled_sel,
+            ns_num_computed_tokens_sel=ns_num_computed_tokens_sel,
+            spec_all_state_indices_sel=spec_all_state_indices_sel,
+            spec_block_idx_last_scheduled_sel=spec_block_idx_last_scheduled_sel,
+            spec_block_idx_last_computed_sel=spec_block_idx_last_computed_sel,
+            spec_block_idx_prev_step_sel=spec_block_idx_prev_step_sel,
+            spec_block_idx_packed_anchors_sel=spec_block_idx_packed_anchors_sel,
+            spec_block_idx_packed_anchors_spec_sel=(
+                spec_block_idx_packed_anchors_spec_sel
+            ),
             num_computed_tokens=num_computed_tokens,
             all_state_indices_tensor=all_state_indices_tensor,
             nums_dict=nums_dict,
@@ -692,7 +847,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         return attn_metadata
 
     def build_for_cudagraph_capture(
-        self, common_attn_metadata: CommonAttentionMetadata
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        block_idx_prep: "GDNBlockIdxPrepBuffers | None" = None,
     ):
         """
         This method builds the metadata for full cudagraph capture.
@@ -714,4 +871,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         num_accepted_tokens = torch.diff(m.query_start_loc)
         num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
 
-        return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)
+        return self.build(
+            0,
+            m,
+            num_accepted_tokens,
+            num_decode_draft_tokens_cpu,
+            block_idx_prep=block_idx_prep,
+        )

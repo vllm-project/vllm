@@ -266,6 +266,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     block_table,
     read_anchor,
     write_anchor,
+    packed_anchors,
     scale,
     stride_mixed_qkv_tok: tl.constexpr,
     stride_a_tok: tl.constexpr,
@@ -284,6 +285,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     HAS_TABLE: tl.constexpr,
     SPLIT_BATCH_HEAD_GRID: tl.constexpr,
+    HAS_PACKED_ANCHORS: tl.constexpr,
 ):
     if SPLIT_BATCH_HEAD_GRID:
         i_v, i_hv, i_n = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -301,7 +303,13 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     if HAS_TABLE:
         # Derive the write slot in-kernel from the block table:
         # block_table[i_n, write_anchor[i_n]].
-        o_w = tl.load(write_anchor + i_n).to(tl.int64)
+        if HAS_PACKED_ANCHORS:
+            # Packed (read, write) anchor pair: one 64-bit load, low word =
+            # read anchor, high word = write anchor.
+            b_pair = tl.load(packed_anchors + i_n)
+            o_w = b_pair >> 32
+        else:
+            o_w = tl.load(write_anchor + i_n).to(tl.int64)
         state_idx = tl.load(block_table + i_n * stride_block_table_seq + o_w).to(
             tl.int64
         )
@@ -320,7 +328,10 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
         # Same block as the write slot within a mamba block; differs at a
         # block-boundary crossing, where the state migrates to the fresh
         # block.
-        o_r = tl.load(read_anchor + i_n).to(tl.int64)
+        if HAS_PACKED_ANCHORS:
+            o_r = b_pair & 0xFFFFFFFF
+        else:
+            o_r = tl.load(read_anchor + i_n).to(tl.int64)
         read_idx = tl.load(block_table + i_n * stride_block_table_seq + o_r).to(
             tl.int64
         )
@@ -378,6 +389,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     block_table: torch.Tensor | None = None,
     read_anchor: torch.Tensor | None = None,
     write_anchor: torch.Tensor | None = None,
+    packed_anchors: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Single-token packed decode.
@@ -388,6 +400,9 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     derives read slot ``block_table[i, read_anchor[i]]`` and write slot
     ``block_table[i, write_anchor[i]]`` in-kernel — equivalent to host-side
     ``block_table.gather(1, anchor.unsqueeze(1)).squeeze(1)`` tensors.
+    The two anchors may instead be given packed as ``packed_anchors``
+    (``(num_seqs, 2)`` int32, ``[:, 0]`` read / ``[:, 1]`` write): the kernel
+    then fetches both with a single 64-bit load. Results are identical.
     """
     if mixed_qkv.ndim != 2:
         raise ValueError(
@@ -410,7 +425,24 @@ def fused_recurrent_gated_delta_rule_packed_decode(
             "Exactly one of `ssm_state_indices` and `block_table` must be provided."
         )
     if block_table is not None:
-        if read_anchor is None or write_anchor is None:
+        if packed_anchors is not None:
+            if read_anchor is not None or write_anchor is not None:
+                raise ValueError(
+                    "`packed_anchors` and `read_anchor`/`write_anchor` are "
+                    "mutually exclusive."
+                )
+            if (
+                packed_anchors.ndim != 2
+                or packed_anchors.shape[-1] != 2
+                or packed_anchors.dtype != torch.int32
+                or packed_anchors.stride(-1) != 1
+                or packed_anchors.stride(0) != 2
+            ):
+                raise ValueError(
+                    "`packed_anchors` must be a contiguous (num_seqs, 2) "
+                    "int32 tensor."
+                )
+        elif read_anchor is None or write_anchor is None:
             raise ValueError(
                 "`read_anchor` and `write_anchor` are required with `block_table`."
             )
@@ -418,8 +450,12 @@ def fused_recurrent_gated_delta_rule_packed_decode(
             raise ValueError(
                 "`block_table` must be 2D and contiguous in the last dim."
             )
-        if read_anchor.ndim != 1 or write_anchor.ndim != 1:
+        if packed_anchors is None and (
+            read_anchor.ndim != 1 or write_anchor.ndim != 1
+        ):
             raise ValueError("`read_anchor`/`write_anchor` must be 1D tensors.")
+    elif packed_anchors is not None:
+        raise ValueError("`packed_anchors` requires `block_table`.")
     elif ssm_state_indices.ndim != 1:
         raise ValueError(
             f"`ssm_state_indices` must be 1D for packed decode (got ndim={ssm_state_indices.ndim})."
@@ -428,10 +464,11 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         raise ValueError("`out` must be contiguous.")
 
     dev = mixed_qkv.device
-    index_tensors = (
-        (ssm_state_indices,)
-        if ssm_state_indices is not None
-        else (block_table, read_anchor, write_anchor)
+    index_tensors = tuple(
+        t
+        for t in (ssm_state_indices, block_table, read_anchor, write_anchor,
+                  packed_anchors)
+        if t is not None
     )
     if (
         a.device != dev
@@ -454,16 +491,21 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         raise ValueError(
             f"`ssm_state_indices` must have shape [B] (got {tuple(ssm_state_indices.shape)}; expected ({B},))."
         )
-    if block_table is not None and (
-        block_table.shape[0] != B
-        or read_anchor.shape[0] != B
-        or write_anchor.shape[0] != B
-    ):
-        raise ValueError(
-            "`block_table`/`read_anchor`/`write_anchor` must have B="
-            f"{B} rows (got {block_table.shape[0]}, {read_anchor.shape[0]}, "
-            f"{write_anchor.shape[0]})."
+    if block_table is not None:
+        anchor_rows = (
+            packed_anchors.shape[0]
+            if packed_anchors is not None
+            else (read_anchor.shape[0], write_anchor.shape[0])
         )
+        if block_table.shape[0] != B or (
+            packed_anchors.shape[0] != B
+            if packed_anchors is not None
+            else (read_anchor.shape[0] != B or write_anchor.shape[0] != B)
+        ):
+            raise ValueError(
+                "`block_table` and its anchors must have B="
+                f"{B} rows (got {block_table.shape[0]}, {anchor_rows})."
+            )
 
     if initial_state.ndim != 4:
         raise ValueError(
@@ -518,6 +560,10 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         ssm_state_indices.stride(0) if ssm_state_indices is not None else 0
     )
     stride_block_table_seq = block_table.stride(0) if block_table is not None else 0
+    if packed_anchors is not None:
+        # Reinterpret each (read, write) int32 pair as one int64 so the
+        # kernel fetches both anchors with a single load.
+        packed_anchors = packed_anchors.view(torch.int64).squeeze(-1)
 
     NV = triton.cdiv(V, BV)
     # CUDA limits grid Y/Z dimensions to 65535.
@@ -536,6 +582,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         block_table=block_table,
         read_anchor=read_anchor,
         write_anchor=write_anchor,
+        packed_anchors=packed_anchors,
         scale=scale,
         stride_mixed_qkv_tok=stride_mixed_qkv_tok,
         stride_a_tok=stride_a_tok,
@@ -554,6 +601,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         HAS_TABLE=block_table is not None,
         SPLIT_BATCH_HEAD_GRID=split_batch_head_grid,
+        HAS_PACKED_ANCHORS=packed_anchors is not None,
         num_warps=num_warps,
         num_stages=num_stages,
     )

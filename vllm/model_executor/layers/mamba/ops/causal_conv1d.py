@@ -771,6 +771,7 @@ def _causal_conv1d_update_kernel(
     query_start_loc_ptr,  # (batch + 1)
     block_idx_last_scheduled_token,  # (batch,)
     initial_state_idx,  # (batch,)
+    packed_anchors_ptr,  # (batch, 2) int32 viewed as (batch,) int64
     o_ptr,  # (batch, dim, seqlen)
     # Matrix dimensions
     batch: int,
@@ -800,6 +801,7 @@ def _causal_conv1d_update_kernel(
     IS_VARLEN: tl.constexpr,
     IS_APC_ENABLED: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
+    HAS_PACKED_ANCHORS: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
     HAS_NULL_BLOCK: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -819,9 +821,16 @@ def _causal_conv1d_update_kernel(
     idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
 
     if IS_APC_ENABLED:
-        # Get the state from the initial_state_idx
-        conv_state_init = tl.load(initial_state_idx + idx_seq)
-        current_last_index = tl.load(block_idx_last_scheduled_token + idx_seq)
+        if HAS_PACKED_ANCHORS:
+            # Packed (read, write) anchor pair: one 64-bit load, low word =
+            # read (initial-state) anchor, high word = write anchor.
+            anchor_pair = tl.load(packed_anchors_ptr + idx_seq)
+            conv_state_init = anchor_pair & 0xFFFFFFFF
+            current_last_index = anchor_pair >> 32
+        else:
+            # Get the state from the initial_state_idx
+            conv_state_init = tl.load(initial_state_idx + idx_seq)
+            current_last_index = tl.load(block_idx_last_scheduled_token + idx_seq)
     else:
         conv_state_init = 0
         current_last_index = 0
@@ -943,9 +952,24 @@ def _causal_conv1d_update_kernel(
 
     # Get the state from the initial_state_idx
     # cache_idx
-    conv_states_offset = tl.load(
-        conv_state_indices_ptr + idx_seq * stride_state_indices + current_last_index
-    ).to(tl.int64)
+    if HAS_PACKED_ANCHORS:
+        # Second table walk only on a block-boundary crossing (write !=
+        # read); predicated, not branched, so the FP codegen is unaffected.
+        crossed = current_last_index != conv_state_init
+        loaded_offset = tl.load(
+            conv_state_indices_ptr
+            + idx_seq * stride_state_indices
+            + current_last_index,
+            mask=crossed,
+            other=0,
+        ).to(tl.int64)
+        conv_states_offset = tl.where(
+            crossed, loaded_offset, conv_states_input_coord
+        )
+    else:
+        conv_states_offset = tl.load(
+            conv_state_indices_ptr + idx_seq * stride_state_indices + current_last_index
+        ).to(tl.int64)
     conv_state_ptrs_target = (
         conv_state_ptr
         + (conv_states_offset * stride_conv_state_seq)  # Offset from seq
@@ -1106,6 +1130,7 @@ def causal_conv1d_update(
     null_block_id: int = NULL_BLOCK_ID,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
+    packed_anchors: torch.Tensor | None = None,
     validate_data=False,
     out: torch.Tensor | None = None,
 ):
@@ -1128,6 +1153,11 @@ def causal_conv1d_update(
         The pointer into conv_state_indices, where the last cache block to be filled is located.
     initial_state_idx: (batch,), dtype int32
         The pointer into conv_state_indices, where the cache block containing the initial state is located.
+    packed_anchors: (batch, 2), dtype int32
+        The (initial_state_idx, block_idx_last_scheduled_token) pairs packed
+        so the kernel fetches both with a single 64-bit load ([:, 0] read,
+        [:, 1] write). Mutually exclusive with the two separate tensors;
+        results are identical.
     num_accepted_tokens: (batch,), dtype int32
         If not None, it indicates the number of accepted tokens for each
         sequence in the batch.
@@ -1151,6 +1181,20 @@ def causal_conv1d_update(
     if validate_data:
         assert null_block_id is not None
         assert x.stride(1) == 1
+    if packed_anchors is not None:
+        assert block_idx_last_scheduled_token is None and initial_state_idx is None, (
+            "packed_anchors and the separate anchor tensors are mutually exclusive"
+        )
+        assert (
+            packed_anchors.ndim == 2
+            and packed_anchors.shape[-1] == 2
+            and packed_anchors.dtype == torch.int32
+            and packed_anchors.stride(-1) == 1
+            and packed_anchors.stride(0) == 2
+        ), "packed_anchors must be a contiguous (batch, 2) int32 tensor"
+        # Reinterpret each (read, write) int32 pair as one int64 so the
+        # kernel fetches both anchors with a single load.
+        packed_anchors = packed_anchors.view(torch.int64).squeeze(-1)
     if isinstance(activation, bool):
         activation = "silu" if activation is True else None
     elif activation is not None:
@@ -1240,6 +1284,7 @@ def causal_conv1d_update(
         query_start_loc,
         block_idx_last_scheduled_token,
         initial_state_idx,
+        packed_anchors,
         out,
         # Matrix dimensions
         batch,
@@ -1267,8 +1312,11 @@ def causal_conv1d_update(
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
         IS_VARLEN=query_start_loc is not None,
-        IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
+        IS_APC_ENABLED=(
+            block_idx_last_scheduled_token is not None or packed_anchors is not None
+        ),
         IS_SPEC_DECODING=num_accepted_tokens is not None,
+        HAS_PACKED_ANCHORS=packed_anchors is not None,
         NP2_STATELEN=np2_statelen,
         HAS_NULL_BLOCK=null_block_id is not None,
         BLOCK_N=256,
