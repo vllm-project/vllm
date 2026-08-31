@@ -259,17 +259,15 @@ class Plamo3ReasoningParser(ReasoningParser):
 
         while True:
             if self._stream_phase == ReasoningParserStreamPhase.BEFORE_REASONING:
-                if not current_text:
+                if not compute_safe_until(
+                    current_text, floor=0, tags=(BEGIN_THINK_TAG,)
+                ):
                     break
-                if current_text.startswith(BEGIN_THINK_TAG):
-                    self._stream_emit_pos = len(BEGIN_THINK_TAG)
-                    self._stream_phase = ReasoningParserStreamPhase.IN_REASONING
-                    continue
-                # Wait if BEGIN_THINK_TAG is partially generated.
-                if current_text and BEGIN_THINK_TAG.startswith(current_text):
-                    break
-                # Treat everything as reasoning until END_THINK_TAG to cover the case
-                # where BEGIN_THINK_TAG is included in the chat template.
+                self._stream_emit_pos = (
+                    len(BEGIN_THINK_TAG)
+                    if current_text.startswith(BEGIN_THINK_TAG)
+                    else 0
+                )
                 self._stream_phase = ReasoningParserStreamPhase.IN_REASONING
                 continue
 
