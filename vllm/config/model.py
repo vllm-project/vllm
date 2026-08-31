@@ -467,6 +467,21 @@ class ModelConfig:
         # here early.
         if self.multimodal_config:
             factors["language_model_only"] = self.multimodal_config.language_model_only
+            # `language_model_only` is not the only way the MM code path gets
+            # disabled: `MultiModalRegistry.supports_multimodal_inputs` also
+            # falls back to text-only mode when every supported modality is
+            # limited to 0 (unless pre-computed embeddings are accepted via
+            # `enable_mm_embeds`). Text-only mode feeds the language model
+            # `input_ids` with `inputs_embeds=None`, while the MM path does the
+            # opposite, so these must take part in the hash as well.
+            # Only the per-modality `count` matters here: it is what decides
+            # whether a modality is disabled. The remaining dummy-data options
+            # (e.g. image width/height) only shape profiling inputs.
+            factors["mm_limit_per_prompt"] = {
+                modality: (opts if isinstance(opts, int) else opts.count)
+                for modality, opts in self.multimodal_config.limit_per_prompt.items()
+            }
+            factors["mm_enable_mm_embeds"] = self.multimodal_config.enable_mm_embeds
         return hash_factors(factors)
 
     def _update_nested(
