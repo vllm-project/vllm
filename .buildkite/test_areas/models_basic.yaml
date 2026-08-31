@@ -2,7 +2,7 @@ group: Models - Basic
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200) Basic Models (Initialization)"
+- label: ":nvidia: (H200 MIG 18GB) Basic Models (Initialization)"
   key: basic-models-tests-initialization
   timeout_in_minutes: 25
   device: h200_18gb
@@ -14,8 +14,16 @@ steps:
   commands:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
+  mirror:
+    amd:
+      label: ":amd: (MI355) Basic Models (Initialization)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
 
-- label: ":nvidia: (H200) Basic Models (Extra Initialization) Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Basic Models (Extra Initialization) Shard %N"
   device: h200_35gb
   key: basic-models-tests-extra-initialization
   timeout_in_minutes: 100
@@ -30,7 +38,7 @@ steps:
     - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 4
 
-- label: ":nvidia: (H200) Basic Models (Other)"
+- label: ":nvidia: (H200 MIG 35GB) Basic Models (Other)"
   device: h200_35gb
   key: basic-models-tests-other
   timeout_in_minutes: 35
