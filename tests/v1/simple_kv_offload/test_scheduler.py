@@ -18,6 +18,9 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
+    SimpleCPUOffloadConnector,
+)
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -434,6 +437,9 @@ def test_eager_store_preserves_secondary_block_hashes() -> None:
     req = make_request(num_blocks=1)
     kv_blocks = _alloc_and_register(fix, req, num_blocks=1)
     gpu_block = kv_blocks.blocks[0][0]
+    primary_hash = gpu_block.block_hash
+    primary_num_tokens = gpu_block.block_hash_num_tokens
+    assert primary_hash is not None
 
     fine_grained_req = Request(
         request_id="req-fine-grained-hash",
@@ -466,6 +472,8 @@ def test_eager_store_preserves_secondary_block_hashes() -> None:
         secondary_hash
     )
     assert cpu_block is not None
+    assert cpu_block.block_hash == primary_hash
+    assert cpu_block.block_hash_num_tokens == primary_num_tokens
     assert (
         secondary_hash
         in sched.cpu_block_pool.cached_block_hashes_by_block[cpu_block.block_id]
@@ -574,16 +582,21 @@ def test_finished_eager_store_is_reported_pending_before_metadata_build() -> Non
     sched = fix.scheduler
     request = make_request(num_blocks=2)
     kv_blocks = _alloc_and_register(fix, request, num_blocks=2)
+    connector = SimpleCPUOffloadConnector.__new__(SimpleCPUOffloadConnector)
+    connector.scheduler_manager = sched
     sched.update_state_after_alloc(request, kv_blocks, num_external_tokens=0)
 
     sched.request_finished_all_groups(request, kv_blocks.get_block_ids())
 
     assert sched.has_pending_stores()
+    assert connector.has_pending_push_work()
     meta = sched.build_connector_meta(make_scheduler_output({}))
     assert meta.store_event >= 0
     assert not sched._pending_finished_stores
+    assert connector.has_pending_push_work()
     simulate_store_completion(sched, meta.store_event)
     assert not sched.has_pending_stores()
+    assert not connector.has_pending_push_work()
 
 
 def test_finished_eager_store_caches_all_groups() -> None:
