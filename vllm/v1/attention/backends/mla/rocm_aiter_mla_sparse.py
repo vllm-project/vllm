@@ -304,7 +304,9 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
-        return True
+        from vllm.platforms.rocm import on_mi3xx
+
+        return on_mi3xx()
 
 
 @dataclass
@@ -747,8 +749,49 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         attn_metadata: ROCMAiterMLASparseMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         num_tokens = q.shape[0]
-        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
+        base_mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
+        mla_num_heads = base_mla_num_heads
         need_lse = self.sinks is not None
+        # AITER's nonpersistent return-LSE dispatch has discrete head kernels.
+        supported_head_buckets: tuple[int, ...] | None = None
+        head_dtype_name = ""
+        if need_lse:
+            if (
+                q.dtype == torch.bfloat16
+                and kv_c_and_k_pe_cache.dtype == torch.bfloat16
+            ):
+                supported_head_buckets = (16, 32, 64, 128)
+                head_dtype_name = "BF16"
+            elif (
+                q.dtype == current_platform.fp8_dtype()
+                and kv_c_and_k_pe_cache.dtype == current_platform.fp8_dtype()
+            ):
+                supported_head_buckets = (16, 128)
+                head_dtype_name = "FP8"
+
+        if supported_head_buckets is not None:
+            from vllm.platforms.rocm import on_mi3xx
+
+            if on_mi3xx():
+                supported_heads = next(
+                    (
+                        heads
+                        for heads in supported_head_buckets
+                        if heads >= mla_num_heads
+                    ),
+                    None,
+                )
+                if supported_heads is None:
+                    raise ValueError(
+                        "ROCm AITER MLA attention sinks support at most 128 "
+                        f"padded local {head_dtype_name} heads; increase "
+                        "tensor_parallel_size"
+                    )
+                if supported_heads != mla_num_heads:
+                    q = AiterMLAHelper.get_mla_padded_q(
+                        mla_num_heads, q, supported_heads
+                    )
+                    mla_num_heads = supported_heads
         if (
             need_lse
             and q.dtype == torch.bfloat16
@@ -815,6 +858,17 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
                 **mla_kwargs,
             )
             lse = None
+
+        if mla_num_heads != base_mla_num_heads:
+            if mla_num_heads % base_mla_num_heads == 0:
+                head_stride = mla_num_heads // base_mla_num_heads
+                output = output[:, ::head_stride]
+                if lse is not None:
+                    lse = lse[:, ::head_stride]
+            else:
+                output = output[:, :base_mla_num_heads]
+                if lse is not None:
+                    lse = lse[:, :base_mla_num_heads]
 
         output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
         if lse is not None:

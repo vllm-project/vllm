@@ -668,6 +668,21 @@ def _rocm_aiter_mla_decode_fwd_lse_impl(
         kwargs["q_scale"] = q_scale
         kwargs["kv_scale"] = kv_scale
 
+    if (
+        q.dtype == torch.bfloat16
+        and kv_buffer.dtype == torch.bfloat16
+        and q.shape[1] == 32
+    ):
+        from vllm.platforms.rocm import on_gfx950
+
+        if on_gfx950():
+            # The gfx950 H32 BF16 kernel mishandles ragged tails with split KV.
+            # Its single-split path returns correct output and natural-log LSE.
+            kwargs["num_kv_splits"] = 1
+            kwargs["num_kv_splits_indptr"] = torch.arange(
+                qo_indptr.shape[0], dtype=torch.int32, device=q.device
+            )
+
     if q.dtype == FP8_DTYPE:
         assert kv_indices is not None
         num_kv_splits, num_kv_splits_indptr = get_meta_param(

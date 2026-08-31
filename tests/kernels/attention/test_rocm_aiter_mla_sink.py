@@ -8,17 +8,17 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
-_SKIP_NON_MI3XX = True
+_SKIP_UNSUPPORTED_AITER_MLA = True
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_mi3xx
 
-    _SKIP_NON_MI3XX = not on_mi3xx()
+    _SKIP_UNSUPPORTED_AITER_MLA = not on_mi3xx()
 
-pytestmark = [
-    pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific tests"),
-    pytest.mark.skipif(_SKIP_NON_MI3XX, reason="MI300/MI350 ROCm only"),
-]
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific tests"
+)
 
 Q_HEAD_DIM = 576
 V_HEAD_DIM = 512
@@ -39,12 +39,18 @@ def _require_aiter() -> None:
         (4, "bf16"),
         (8, "bf16"),
         (8, "fp8"),
+        (32, "fp8"),
+        (64, "fp8"),
         (12, "bf16"),
         (16, "bf16"),
         (24, "bf16"),
         (32, "bf16"),
+        (48, "bf16"),
+        (64, "bf16"),
+        (80, "bf16"),
     ],
 )
+@pytest.mark.skipif(_SKIP_UNSUPPORTED_AITER_MLA, reason="MI300/MI350 AITER MLA only")
 @torch.inference_mode()
 def test_sparse_mla_sink_matches_ragged_reference(
     real_heads: int, cache_kind: str
@@ -56,7 +62,13 @@ def test_sparse_mla_sink_matches_ragged_reference(
         ROCMAiterMLASparseImpl,
     )
 
-    torch.manual_seed(real_heads * 17 + (cache_kind == "fp8"))
+    if cache_kind == "bf16" and real_heads in (48, 64):
+        from vllm.platforms.rocm import on_gfx942
+
+        if on_gfx942():
+            pytest.skip("This shape maps to gfx942's unsupported BF16 H64 kernel")
+
+    set_random_seed(real_heads * 17 + (cache_kind == "fp8"))
     device = torch.device("cuda")
     seq_lens = [1, 5, 23, 17]
     batch_size = len(seq_lens)
@@ -176,8 +188,12 @@ def test_sparse_mla_sink_validation(sinks: torch.Tensor, match: str) -> None:
         )
 
 
-def test_sparse_mla_sink_rejects_unsupported_gfx942_h64_at_runtime() -> None:
+@pytest.mark.parametrize("real_heads", [48, 64])
+def test_sparse_mla_sink_rejects_unsupported_gfx942_h64_at_runtime(
+    real_heads: int,
+) -> None:
     from vllm.platforms.rocm import on_gfx942
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
         ROCMAiterMLASparseImpl,
     )
@@ -187,27 +203,35 @@ def test_sparse_mla_sink_rejects_unsupported_gfx942_h64_at_runtime() -> None:
 
     device = torch.device("cuda")
     impl = object.__new__(ROCMAiterMLASparseImpl)
-    impl.num_heads = 64
+    impl.num_heads = real_heads
     impl.kv_lora_rank = V_HEAD_DIM
     impl.scale = SM_SCALE
-    impl.sinks = torch.zeros(64, dtype=torch.float32, device=device)
+    impl.sinks = torch.zeros(real_heads, dtype=torch.float32, device=device)
     metadata = SimpleNamespace(attn_out_dtype=torch.bfloat16)
+    padded_heads = AiterMLAHelper.get_actual_mla_num_heads(real_heads)
 
     with pytest.raises(ValueError, match="increase tensor_parallel_size"):
         impl._forward_mla(
             SimpleNamespace(_q_scale=None, _k_scale=None),
-            torch.empty(1, 64, Q_HEAD_DIM, dtype=torch.bfloat16, device=device),
+            torch.empty(
+                1,
+                padded_heads,
+                Q_HEAD_DIM,
+                dtype=torch.bfloat16,
+                device=device,
+            ),
             torch.empty(1, 1, Q_HEAD_DIM, dtype=torch.bfloat16, device=device),
             metadata,
         )
 
 
-def test_sparse_mla_backend_advertises_sink_support() -> None:
+def test_sparse_mla_backend_reports_sink_support_for_current_hardware() -> None:
+    from vllm.platforms.rocm import on_mi3xx
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
         ROCMAiterMLASparseBackend,
     )
 
-    assert ROCMAiterMLASparseBackend.supports_sink()
+    assert ROCMAiterMLASparseBackend.supports_sink() == on_mi3xx()
 
 
 def test_sparse_mla_backend_rejects_dcp() -> None:
