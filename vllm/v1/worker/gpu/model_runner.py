@@ -2016,7 +2016,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
-        torch.accelerator.synchronize()
+        sync_error: BaseException | None = None
+        try:
+            torch.accelerator.synchronize()
+        except BaseException as e:
+            # Continue dropping GPU references after an asynchronous device
+            # failure, then re-raise the original error to the caller.
+            sync_error = e
         self.cudagraph_manager = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
@@ -2043,6 +2049,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         gc.collect()
         torch.accelerator.empty_cache()
         logger.debug("Cleaned up model weights, KV caches, and workspace")
+        if sync_error is not None:
+            raise sync_error
 
     ########### EPLB methods start ###########
     @property

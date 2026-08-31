@@ -151,8 +151,8 @@ class UniProcExecutor(Executor):
 
     def shutdown(self) -> None:
         if worker := self.driver_worker:
-            worker.shutdown()
             self.driver_worker = None  # type: ignore[assignment]
+            worker.shutdown()
 
     @classmethod
     def supports_async_scheduling(cls) -> bool:

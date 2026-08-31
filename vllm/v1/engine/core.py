@@ -771,38 +771,27 @@ class EngineCore:
         self._shutdown = True
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
 
-        structured_output_manager = getattr(self, "structured_output_manager", None)
-        if structured_output_manager:
-            structured_output_manager.clear_backend()
-            self.structured_output_manager = None  # type: ignore[assignment]
+        # ExitStack runs every callback even if an earlier one fails. Register
+        # in reverse teardown order and detach each component even if its
+        # shutdown fails, so errors cannot keep object graphs reachable.
+        with ExitStack() as teardown:
+            teardown.callback(cleanup_dist_env_and_memory)
+            teardown.callback(gc.collect)
+            if self._freeze_gc_heap_on_init:
+                teardown.callback(gc.unfreeze)
 
-        model_executor = getattr(self, "model_executor", None)
-        if model_executor:
-            model_executor.shutdown()
-            self.model_executor = None  # type: ignore[assignment]
+            if getattr(self, "scheduler", None):
+                teardown.callback(setattr, self, "scheduler", None)
+                teardown.callback(self.scheduler.shutdown)
 
-        scheduler = getattr(self, "scheduler", None)
-        if scheduler:
-            scheduler.shutdown()
-            self.scheduler = None  # type: ignore[assignment]
+            if getattr(self, "model_executor", None):
+                teardown.callback(setattr, self, "model_executor", None)
+                teardown.callback(self.model_executor.shutdown)
 
-        # Drop torn-down components before empty_cache() so tensors released by
-        # cyclic GC are not still reachable through EngineCore attributes.
-        # Undo the gc.freeze() from __init__ so that the objects allocated
-        # during engine startup (model weights, KV caches, etc.) become
-        # visible to the garbage collector again. Without this, deleting
-        # the engine in-process (e.g. unit tests) leaks GPU memory.
-        if self._freeze_gc_heap_on_init:
-            gc.unfreeze()
-        # Drop the local references captured above so the executor,
-        # scheduler, and their tensors are unreachable before gc.collect().
-        model_executor = None
-        scheduler = None
-        structured_output_manager = None
-        gc.collect()
-        # Tear down distributed state initialized in this EngineCore process
-        # before it exits and release cached memory.
-        cleanup_dist_env_and_memory()
+            if getattr(self, "structured_output_manager", None):
+                teardown.callback(setattr, self, "structured_output_manager", None)
+                teardown.callback(self.structured_output_manager.clear_backend)
+
         logger.debug_once("[shutdown] EngineCore: local resource teardown complete")
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):

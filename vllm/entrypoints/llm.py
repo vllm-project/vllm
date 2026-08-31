@@ -388,8 +388,9 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown the engine and release resources held by this LLM."""
         if llm_engine := getattr(self, "llm_engine", None):
-            llm_engine.shutdown(timeout=timeout)
+            # Detach first so a teardown error cannot keep the engine alive.
             self.llm_engine = None  # type: ignore[assignment]
+            llm_engine.shutdown(timeout=timeout)
 
     def __del__(self):
         # Skip teardown during interpreter shutdown: module globals

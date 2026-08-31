@@ -5,6 +5,7 @@ import sys
 import time
 import weakref
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from copy import copy
 from typing import Any
 
@@ -468,22 +469,24 @@ class LLMEngine:
         if getattr(self, "_shutdown", False):
             return
         self._shutdown = True
-        try:
-            if finalizer := getattr(self, "_finalizer", None):
-                finalizer()
-            if renderer := getattr(self, "renderer", None):
-                renderer.shutdown()
-        finally:
-            # Always tear down the engine core (and DP group) even if renderer
-            # shutdown raised; this is what releases GPU memory, and __del__
-            # will not retry once _shutdown is set. Drop the v0 compatibility
-            # alias first so the torn-down executor is not still reachable when
-            # EngineCore empties the CUDA cache.
+        # ExitStack preserves the teardown order while ensuring a failure in
+        # one component cannot skip the remaining cleanup.
+        with ExitStack() as teardown:
+            teardown.callback(self._shutdown_dp_group)
+
+            if getattr(self, "engine_core", None):
+                teardown.callback(setattr, self, "engine_core", None)
+                teardown.callback(self.engine_core.shutdown, timeout=timeout)
+
+            # Drop the v0 compatibility alias before EngineCore empties the
+            # device cache.
             if hasattr(self, "model_executor"):
                 self.model_executor = None  # type: ignore[assignment]
-            if engine_core := getattr(self, "engine_core", None):
-                engine_core.shutdown(timeout=timeout)
-            self._shutdown_dp_group()
+
+            if renderer := getattr(self, "renderer", None):
+                teardown.callback(renderer.shutdown)
+            if finalizer := getattr(self, "_finalizer", None):
+                teardown.callback(finalizer)
 
     def __del__(self):
         if sys is None or sys.is_finalizing():
