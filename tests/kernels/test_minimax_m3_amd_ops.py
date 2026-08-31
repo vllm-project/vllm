@@ -180,12 +180,8 @@ def test_swiglu_oai_quantize_mxfp8_uses_e4m3_range_for_scale():
     up[:, 64:] = 0.0
     gate_up = torch.cat((gate, up), dim=-1)
 
-    got_q, got_s = swiglu_oai_quantize_mxfp8(
-        gate_up, alpha=0.0, beta=0.0, limit=None
-    )
-    ref_q, ref_s = _mxfp8_e4m3_quantize_torch(
-        up, is_sf_swizzled_layout=False
-    )
+    got_q, got_s = swiglu_oai_quantize_mxfp8(gate_up, alpha=0.0, beta=0.0, limit=None)
+    ref_q, ref_s = _mxfp8_e4m3_quantize_torch(up, is_sf_swizzled_layout=False)
 
     assert torch.equal(got_s, ref_s)
     assert torch.equal(got_q, ref_q)
