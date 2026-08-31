@@ -411,7 +411,11 @@ class RequestState:
         # Prepare logprobs, based on delta mode
         logprobs = self.logprobs_processor.logprobs
         if delta and logprobs:
-            logprobs = logprobs[-len(token_ids) :]
+            num_new_tokens = len(token_ids)
+            # Avoid [-0:], which returns the full accumulated history when a
+            # delta contains no new token IDs. [:0] preserves the concrete
+            # list or FlatLogprobs representation while returning no entries.
+            logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
 
         sampling_mask = None
         if finished and self.sampling_mask_chunks:

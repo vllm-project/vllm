@@ -196,8 +196,13 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         self.embed_dim = config.d_model
         self.num_heads = config.encoder_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
+        # Audio encoder uses 20 heads. Shard across TP when divisible
+        # (e.g. TP=2/4); otherwise keep unreplicated (e.g. TP=8).
         tp_size = get_tensor_model_parallel_world_size()
-        self.num_local_heads = self.num_heads // tp_size
+        self.disable_tp = self.num_heads % tp_size != 0
+        self.num_local_heads = (
+            self.num_heads if self.disable_tp else self.num_heads // tp_size
+        )
 
         if (self.head_dim * self.num_heads) != self.embed_dim:
             raise ValueError(
@@ -214,6 +219,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             total_num_kv_heads=self.num_heads,
             bias=True,
             prefix=f"{prefix}.qkv_proj",
+            disable_tp=self.disable_tp,
         )
 
         self.out_proj = RowParallelLinear(
@@ -221,6 +227,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             output_size=self.embed_dim,
             bias=True,
             prefix=f"{prefix}.out_proj",
+            disable_tp=self.disable_tp,
         )
 
         self.attn = MMEncoderAttention(
@@ -835,9 +842,14 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         return self.patch_embed.proj.weight.device
 
     def rot_pos_emb(self, grid_thw):
+        max_grid_size = grid_thw[:, 1:].max()
+
+        # Use pre-computed cos_sin_cache from RotaryEmbedding
+        cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
+
         pos_ids = []
         for t, h, w in grid_thw:
-            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+            hpos_ids = torch.arange(h, device=cos.device).unsqueeze(1).expand(-1, w)
             hpos_ids = hpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -847,7 +859,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             hpos_ids = hpos_ids.permute(0, 2, 1, 3)
             hpos_ids = hpos_ids.flatten()
 
-            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+            wpos_ids = torch.arange(w, device=cos.device).unsqueeze(0).expand(h, -1)
             wpos_ids = wpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -858,12 +870,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             wpos_ids = wpos_ids.flatten()
             pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
         pos_ids = torch.cat(pos_ids, dim=0)
-        max_grid_size = grid_thw[:, 1:].max()
 
-        # Use pre-computed cos_sin_cache from RotaryEmbedding
-        cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
-
-        pos_ids = pos_ids.to(cos.device, non_blocking=True)
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)
 
@@ -1597,6 +1604,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     SupportsTranscription,
 ):
     is_3d_moe_weight: bool = True
+    supports_tower_connector_lora: bool = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",
