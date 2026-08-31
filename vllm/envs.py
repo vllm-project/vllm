@@ -186,6 +186,7 @@ if TYPE_CHECKING:
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
+    VLLM_MARLIN_LARGE_M_BF16: int = 0
     VLLM_HUMMING_ONLINE_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
@@ -1519,6 +1520,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The activation dtype for marlin kernel
     "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(
         "VLLM_MARLIN_INPUT_DTYPE", None, ["int8", "fp8"]
+    ),
+    # Opt-in per-M dispatch for dense FP8/NVFP4 Marlin layers: GEMMs with
+    # M >= threshold dequantize the weight into a reused 16-bit workspace
+    # and run a full-rate 16-bit GEMM instead of the Marlin kernel.
+    # 0 disables (default), 1 enables at the default threshold (512),
+    # values >= 16 set the threshold directly. Enabling retains a second
+    # quantized copy of each dispatched dense layer plus the workspace.
+    "VLLM_MARLIN_LARGE_M_BF16": lambda: int(
+        os.environ.get("VLLM_MARLIN_LARGE_M_BF16", "0")
     ),
     # The online quantization dtype for humming kernel
     "VLLM_HUMMING_ONLINE_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(

@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 
 import torch
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
@@ -24,12 +26,314 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
 
 def is_fp8_marlin_supported():
     return current_platform.has_device_capability(75)
+
+
+MARLIN_LARGE_M_DEFAULT_THRESHOLD = 512
+_LARGE_M_MIN_THRESHOLD = 16
+_LARGE_M_MAX_WORKSPACE_BYTES = 256 * 1024 * 1024
+
+
+class MarlinLargeMWorkspace:
+    """Holder for the shared dequant workspace of one (device, dtype).
+
+    The holder's identity is stable across the grow-only reallocations
+    that happen while layers register at prepare (weight-loading) time,
+    so a `MarlinLargeMContext` can safely keep a reference to it; after
+    weight loading `buf` never changes again.
+    """
+
+    __slots__ = ("buf",)
+
+    def __init__(self, buf: torch.Tensor):
+        self.buf = buf
+
+
+_large_m_workspaces: dict[tuple[torch.device, torch.dtype], MarlinLargeMWorkspace] = {}
+
+
+def marlin_large_m_threshold() -> int | None:
+    """Resolve VLLM_MARLIN_LARGE_M_BF16 to a per-M dispatch threshold.
+
+    0 (default) disables the dispatch, 1 enables it at the default
+    threshold, and any value >= 16 is used directly. Values in [2, 16)
+    are rejected so captured decode/verify launches (M <= 8) can never
+    leave the Marlin kernel.
+    """
+    value = envs.VLLM_MARLIN_LARGE_M_BF16
+    if value <= 0:
+        return None
+    if value == 1:
+        return MARLIN_LARGE_M_DEFAULT_THRESHOLD
+    if value < _LARGE_M_MIN_THRESHOLD:
+        logger.warning_once(
+            "VLLM_MARLIN_LARGE_M_BF16=%d is below the minimum threshold %d; "
+            "disabling the large-M dequant dispatch.",
+            value,
+            _LARGE_M_MIN_THRESHOLD,
+        )
+        return None
+    return value
+
+
+def marlin_large_m_fits_workspace(size_k: int, size_n: int) -> bool:
+    return 2 * size_k * size_n <= _LARGE_M_MAX_WORKSPACE_BYTES
+
+
+@dataclass
+class MarlinLargeMContext:
+    """Dequant-to-16-bit dispatch state for one Marlin dense layer.
+
+    Attached to the repacked weight parameter by the prepare_* functions
+    when VLLM_MARLIN_LARGE_M_BF16 is enabled, and consulted by the
+    apply_* functions: GEMMs with M >= threshold dequantize the weight
+    and run a full-rate 16-bit GEMM; smaller M stays on Marlin.
+
+    Memory accounting (all of it only when the flag is on): `weight`
+    retains the original-format quantized tensor (FP8, or packed NVFP4
+    [N, K // 2]), i.e. a second quantized copy of every dispatched dense
+    layer stays alive (1 byte/elem FP8, 0.5 byte/elem NVFP4); `scales`
+    adds K * N / group_size 16-bit elements; the dequant target is one
+    shared grow-only 16-bit workspace per (device, dtype) sized by the
+    largest dispatched K x N (layers above
+    _LARGE_M_MAX_WORKSPACE_BYTES, e.g. an lm_head, are never
+    dispatched). The workspace is reserved at prepare (weight-loading)
+    time and never grown afterwards -- growth inside the forward would
+    invalidate dynamo guards and free a buffer that captured cudagraphs
+    still reference -- so it is covered by the KV-cache memory
+    accounting.
+    A persistent full-precision dequant cache is deliberately not
+    offered. The shared workspace is only safe with model forwards on a
+    single stream.
+
+    `scales` are dequant-ready multipliers reproducing the Marlin
+    kernel's effective dequantization, including the NVFP4
+    processed-scale clamp-to-zero semantics. `bias` is the original,
+    unpermuted bias. Accumulation order differs from Marlin, so outputs
+    match at kernel-test tolerance, not bitwise.
+    """
+
+    threshold: int
+    wtype: str
+    weight: torch.Tensor
+    scales: torch.Tensor
+    bias: torch.Tensor | None
+    k_first: bool
+    size_k: int
+    size_n: int
+    workspace: MarlinLargeMWorkspace
+
+
+def reserve_large_m_workspace(
+    numel: int, device: torch.device, dtype: torch.dtype
+) -> MarlinLargeMWorkspace:
+    """Grow the shared dequant workspace at prepare (weight-loading) time.
+
+    The apply path runs inside the torch.compile-traced, cudagraph-captured
+    forward, where reallocating would both invalidate dynamo guards (a
+    mid-serving recompile) and free a buffer that earlier-captured graphs
+    still read and write; vllm::marlin_large_m_gemm therefore never
+    allocates the workspace.
+    """
+    key = (device, dtype)
+    holder = _large_m_workspaces.get(key)
+    if holder is None:
+        holder = MarlinLargeMWorkspace(torch.empty(numel, dtype=dtype, device=device))
+        _large_m_workspaces[key] = holder
+    elif holder.buf.numel() < numel:
+        holder.buf = torch.empty(numel, dtype=dtype, device=device)
+    return holder
+
+
+def _marlin_large_m_dequant_gemm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    scales: torch.Tensor,
+    bias: torch.Tensor | None,
+    workspace: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    wtype: str,
+    k_first: bool,
+) -> torch.Tensor | None:
+    """Dequantize into the reserved workspace and run the 16-bit GEMM.
+
+    Returns None (fail closed to Marlin) when the reserved workspace
+    cannot hold this layer's dequantized weight in the activation dtype;
+    never allocates the dequant target.
+    """
+    k, n = size_k, size_n
+    if workspace.dtype != x.dtype or workspace.numel() < k * n:
+        return None
+    if wtype == "fp8":
+        if k_first:
+            w = workspace[: k * n].view(k, n)
+            w.copy_(weight)
+            w.mul_(scales)
+            if bias is not None:
+                return torch.addmm(bias, x, w)
+            return torch.mm(x, w)
+        w = workspace[: k * n].view(n, k)
+        w.copy_(weight)
+        w.mul_(scales)
+    else:
+        w = workspace[: k * n].view(n, k)
+        packed = weight
+        hi = (packed & 0b10000000) | ((packed & 0b01110000) >> 2)
+        lo = packed << 4
+        lo = (lo & 0b10000000) | ((lo & 0b01110000) >> 2)
+        pairs = w.view(n, k // 2, 2)
+        pairs[..., 0].copy_(lo.view(torch.float8_e4m3fn))
+        pairs[..., 1].copy_(hi.view(torch.float8_e4m3fn))
+        w.view(n, -1, 16).mul_(scales.unsqueeze(-1))
+    return torch.nn.functional.linear(x, w, bias)
+
+
+def _marlin_16bit_gemm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    scales: torch.Tensor,
+    global_scale: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    workspace: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    num_bits: int,
+    use_fp32_reduce: bool,
+) -> torch.Tensor:
+    """The unchanged 16-bit-activation Marlin GEMM of the apply_*
+    functions, factored out so the custom op's small-M branch runs the
+    identical call sequence."""
+    padded_n, padded_k = marlin_repacked_nk(weight, num_bits=num_bits)
+    x = marlin_pad_dim(x, size_k, padded_k)
+    use_atomic_add = should_use_atomic_add_reduce(
+        m=x.size(0),
+        n=padded_n,
+        k=padded_k,
+        device=x.device,
+        dtype=x.dtype,
+    )
+    output = ops.marlin_gemm(
+        a=x,
+        c=None,
+        b_q_weight=weight,
+        b_bias=bias,
+        b_scales=scales,
+        a_scales=None,
+        global_scale=global_scale,
+        b_zeros=None,
+        g_idx=None,
+        perm=None,
+        workspace=workspace,
+        b_q_type=scalar_types.float8_e4m3fn
+        if num_bits == 8
+        else scalar_types.float4_e2m1f,
+        size_m=x.size(0),
+        size_n=padded_n,
+        size_k=padded_k,
+        use_atomic_add=use_atomic_add,
+        use_fp32_reduce=use_fp32_reduce,
+    )
+    return marlin_unpad_output(output, size_n, padded_n)
+
+
+def _marlin_large_m_gemm(
+    x: torch.Tensor,
+    marlin_weight: torch.Tensor,
+    marlin_scales: torch.Tensor,
+    marlin_global_scale: torch.Tensor | None,
+    marlin_bias: torch.Tensor | None,
+    marlin_workspace: torch.Tensor,
+    dequant_weight: torch.Tensor,
+    dequant_scales: torch.Tensor,
+    dequant_bias: torch.Tensor | None,
+    dequant_workspace: torch.Tensor,
+    threshold: int,
+    size_k: int,
+    size_n: int,
+    wtype: str,
+    k_first: bool,
+    use_fp32_reduce: bool,
+) -> torch.Tensor:
+    """Per-M dispatched GEMM for a Marlin dense layer with a large-M ctx.
+
+    The M-vs-threshold branch MUST live behind this custom-op boundary:
+    dynamo traces a Python `x.size(0) >= threshold` once (a BACKED guard
+    vLLM drops with evaluate_guards=False) and bakes that branch into
+    every compiled artifact regardless of compile ranges. As an opaque
+    op the branch is re-decided eagerly on every call from the real
+    x.size(0). The branch is a pure function of M, so a cudagraph
+    captured at some padded M legally freezes the branch that eager
+    execution would take at that M.
+    """
+    if x.size(0) >= threshold:
+        output = _marlin_large_m_dequant_gemm(
+            x,
+            dequant_weight,
+            dequant_scales,
+            dequant_bias,
+            dequant_workspace,
+            size_k,
+            size_n,
+            wtype,
+            k_first,
+        )
+        if output is not None:
+            return output
+    output = _marlin_16bit_gemm(
+        x,
+        marlin_weight,
+        marlin_scales,
+        marlin_global_scale,
+        marlin_bias,
+        marlin_workspace,
+        size_k,
+        size_n,
+        8 if wtype == "fp8" else 4,
+        use_fp32_reduce,
+    )
+    # marlin_unpad_output may return a narrowing view; match the
+    # contiguous strides the fake impl promises to the compiler.
+    return output if output.is_contiguous() else output.contiguous()
+
+
+def _marlin_large_m_gemm_fake(
+    x: torch.Tensor,
+    marlin_weight: torch.Tensor,
+    marlin_scales: torch.Tensor,
+    marlin_global_scale: torch.Tensor | None,
+    marlin_bias: torch.Tensor | None,
+    marlin_workspace: torch.Tensor,
+    dequant_weight: torch.Tensor,
+    dequant_scales: torch.Tensor,
+    dequant_bias: torch.Tensor | None,
+    dequant_workspace: torch.Tensor,
+    threshold: int,
+    size_k: int,
+    size_n: int,
+    wtype: str,
+    k_first: bool,
+    use_fp32_reduce: bool,
+) -> torch.Tensor:
+    # Both branches produce a fresh contiguous [M, size_n] tensor in the
+    # activation dtype, so one meta covers them and neither the compiled
+    # artifact nor its guards depend on the branch taken.
+    return x.new_empty((x.size(0), size_n))
+
+
+direct_register_custom_op(
+    op_name="marlin_large_m_gemm",
+    op_func=_marlin_large_m_gemm,
+    mutates_args=["marlin_workspace", "dequant_workspace"],
+    fake_impl=_marlin_large_m_gemm_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
 
 
 def fp8_fused_exponent_bias_into_scales(scales):
@@ -63,44 +367,46 @@ def apply_fp8_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
 
-    padded_n, padded_k = marlin_repacked_nk(weight, num_bits=8)
-    reshaped_x = marlin_pad_dim(reshaped_x, size_k, padded_k)
+    large_m_ctx = getattr(weight, "marlin_large_m_ctx", None)
+    if large_m_ctx is not None:
+        # Constant per layer at trace time; the M-vs-threshold branch is
+        # decided inside the opaque custom op, never by dynamo.
+        output = torch.ops.vllm.marlin_large_m_gemm(
+            reshaped_x,
+            weight,
+            weight_scale,
+            None,
+            bias,
+            workspace,
+            large_m_ctx.weight,
+            large_m_ctx.scales,
+            large_m_ctx.bias,
+            large_m_ctx.workspace.buf,
+            large_m_ctx.threshold,
+            size_k,
+            size_n,
+            large_m_ctx.wtype,
+            large_m_ctx.k_first,
+            use_fp32_reduce,
+        )
+        return output.reshape(out_shape)
 
-    use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0),
-        n=padded_n,
-        k=padded_k,
-        device=input.device,
-        dtype=input.dtype,
-    )
-
-    inputs = reshaped_x
-    a_scales = None
     if input_dtype is not None and input_dtype.itemsize == 1:
         # inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
         raise RuntimeError("Marlin W8A8 is not supported.")
 
-    output = ops.marlin_gemm(
-        a=inputs,
-        c=None,
-        b_q_weight=weight,
-        b_bias=bias,
-        b_scales=weight_scale,
-        a_scales=a_scales,
-        global_scale=None,
-        b_zeros=None,
-        g_idx=None,
-        perm=None,
-        workspace=workspace,
-        b_q_type=scalar_types.float8_e4m3fn,
-        size_m=reshaped_x.size(0),
-        size_n=padded_n,
-        size_k=padded_k,
-        use_atomic_add=use_atomic_add,
-        use_fp32_reduce=use_fp32_reduce,
+    output = _marlin_16bit_gemm(
+        reshaped_x,
+        weight,
+        weight_scale,
+        None,
+        bias,
+        workspace,
+        size_k,
+        size_n,
+        8,
+        use_fp32_reduce,
     )
-
-    output = marlin_unpad_output(output, size_n, padded_n)
     return output.reshape(out_shape)
 
 
@@ -128,6 +434,12 @@ def prepare_fp8_layer_for_marlin(
         assert layer.weight.shape == (part_size_k, part_size_n)
     else:
         assert layer.weight.shape == (part_size_n, part_size_k)
+
+    large_m_threshold = marlin_large_m_threshold()
+    orig_weight = layer.weight.data
+    orig_bias = None
+    if hasattr(layer, "bias") and layer.bias is not None:
+        orig_bias = layer.bias.data
 
     device = layer.weight.device
 
@@ -199,6 +511,27 @@ def prepare_fp8_layer_for_marlin(
         scales = scales.repeat_interleave(block_n, 1)
         # size_n may not divisible by block_size[0]
         scales = scales[:, :part_size_n]
+
+    if (
+        large_m_threshold is not None
+        and weight_block_size is None
+        and orig_weight.dtype == torch.float8_e4m3fn
+        and scales.dtype in (torch.float16, torch.bfloat16)
+        and marlin_large_m_fits_workspace(part_size_k, part_size_n)
+    ):
+        layer.weight.marlin_large_m_ctx = MarlinLargeMContext(
+            threshold=large_m_threshold,
+            wtype="fp8",
+            weight=orig_weight,
+            scales=scales if size_k_first else scales.T,
+            bias=orig_bias,
+            k_first=size_k_first,
+            size_k=part_size_k,
+            size_n=part_size_n,
+            workspace=reserve_large_m_workspace(
+                part_size_k * part_size_n, device, scales.dtype
+            ),
+        )
 
     scales = marlin_pad_scales(
         scales, part_size_n, part_size_k, padded_n, padded_k, group_size
