@@ -120,7 +120,7 @@ def interleaved_to_split(x):
 
 def calc_router_weights(
     router_logits: torch.Tensor,
-    router_bias: torch.Tensor | None,
+    e_score_correction_bias: torch.Tensor | None,
     score_func: str,
     top_k: int,
     scaling_factor: float | None,
@@ -135,8 +135,8 @@ def calc_router_weights(
         routing_scores = torch.sigmoid(router_logits.to(torch.float32))
 
     selection_scores = routing_scores
-    if router_bias is not None:
-        selection_scores = selection_scores + router_bias.to(selection_scores)
+    if e_score_correction_bias is not None:
+        selection_scores = selection_scores + e_score_correction_bias.to(selection_scores)
 
     selected_indices = torch.topk(selection_scores, top_k, dim=-1).indices
     routing_weights = torch.gather(routing_scores, dim=-1, index=selected_indices)
@@ -686,28 +686,25 @@ class K2HorizonMoVAAttention(nn.Module):
         self.router_score_func = router_score_func
         self.router_scaling_factor = router_scaling_factor
 
-        self.q_proj = ColumnParallelLinear(
+        self.qk_proj = MergedColumnParallelLinear(
             hidden_size,
-            self.total_num_heads * self.head_dim,
+            [self.total_num_heads * self.head_dim, self.kv_size * tp_size],
             bias=qkv_bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.q_proj",
-        )
-        self.k_proj = ColumnParallelLinear(
-            hidden_size,
-            self.kv_size * tp_size,
-            bias=qkv_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.k_proj",
+            prefix=f"{prefix}.qk_proj",
         )
 
         self.v_router = ReplicatedLinear(
             hidden_size,
             num_experts,
             bias=moe_gate_bias,
+            skip_bias_add=True,
             quant_config=quant_config,
             prefix=f"{prefix}.v_router",
         )
+        if self.v_router.bias is not None:
+            self.v_router.bias = nn.Parameter(self.v_router.bias.float(), requires_grad=False)
+
         self.v_experts = nn.ModuleList(
             [
                 ColumnParallelLinear(
@@ -797,12 +794,11 @@ class K2HorizonMoVAAttention(nn.Module):
         )
 
     def compute_mova_v_sparse(self, hidden_states):
-        router_logits = F.linear(hidden_states, self.v_router.weight)
-        router_bias = getattr(self.v_router, "bias", None)
+        router_logits, _ = self.v_router(hidden_states)
 
         routing_weights, selected_values = calc_router_weights(
             router_logits=router_logits,
-            router_bias=router_bias,
+            e_score_correction_bias=self.v_router.bias,
             score_func=self.router_score_func,
             top_k=self.num_experts_per_tok,
             scaling_factor=self.router_scaling_factor,
@@ -829,8 +825,8 @@ class K2HorizonMoVAAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        q, _ = self.q_proj(hidden_states)
-        k, _ = self.k_proj(hidden_states)
+        qk, _ = self.qk_proj(hidden_states)
+        q, k = qk.split([self.q_size, self.kv_size], dim=-1)
         v = self.compute_mova_v_sparse(hidden_states)
 
         if self.query_key_norm:
@@ -1183,7 +1179,6 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                             kv_rank
                         ]
 
-                # weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 default_weight_loader(param, loaded_weight)
                 loaded_params.add(name)
                 continue
@@ -1208,45 +1203,33 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                     and param_name == "qkv_proj"
                     and name.replace(weight_name, param_name) not in params_dict
                 ):
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    if name not in params_dict:
-                        continue
-
                     assert weight_name in ["q_proj", "k_proj"]
+                    qk_name = name.replace(weight_name, "qk_proj")
+                    if is_pp_missing_parameter(qk_name, self):
+                        continue
+                    if qk_name not in params_dict:
+                        continue
 
-                    # MoVA k_proj
                     if weight_name == "k_proj":
-                        if name not in params_dict:
-                            continue
-                        if is_pp_missing_parameter(name, self):
-                            continue
-
-                        param = params_dict[name]
-                        tp_rank = get_tensor_model_parallel_rank()
                         tp_size = get_tensor_model_parallel_world_size()
                         num_kv_heads = self.config.num_key_value_heads
+                        if num_kv_heads < tp_size:
+                            num_kv_head_replicas = tp_size // num_kv_heads
+                            loaded_weight = loaded_weight.reshape(
+                                num_kv_heads, -1, *loaded_weight.shape[1:]
+                            ).repeat_interleave(num_kv_head_replicas, dim=0).reshape(
+                                -1, *loaded_weight.shape[1:]
+                            )
 
-                        if loaded_weight.shape != param.shape:
-                            if num_kv_heads >= tp_size:
-                                loaded_weight = loaded_weight.chunk(tp_size, dim=0)[
-                                    tp_rank
-                                ]
-                            else:
-                                num_kv_head_replicas = tp_size // num_kv_heads
-                                kv_rank = tp_rank // num_kv_head_replicas
-                                loaded_weight = loaded_weight.chunk(
-                                    num_kv_heads, dim=0
-                                )[kv_rank]
-
-                        # weight_loader = getattr(
-                        #     param, "weight_loader", default_weight_loader
-                        # )
-                        default_weight_loader(param, loaded_weight)
-                        loaded_params.add(name)
-                        break
-
-                    continue
+                    param = params_dict[qk_name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(
+                        param, loaded_weight, 0 if weight_name == "q_proj" else 1
+                    )
+                    loaded_params.add(qk_name)
+                    break
 
                 name = name.replace(weight_name, param_name)
 
@@ -1348,7 +1331,11 @@ class K2HorizonForCausalLM(
             "q_proj",
             "k_proj",
             "v_proj",
-        ]
+        ],
+        "qk_proj": [
+            "q_proj",
+            "k_proj",
+        ],
     }
 
     embedding_modules = {
