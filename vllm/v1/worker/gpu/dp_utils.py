@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.distributed.parallel_state import get_dp_group, get_moe_dp_pcp_group
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
@@ -24,9 +24,12 @@ class DPSyncState:
     value here.
     """
 
-    # Per-rank token counts, for the forward context. All entries hold the
-    # agreed padded count, unless `eager`, where nothing was padded.
+    # Token counts for the DP ranks at this rank's PCP coordinate. All entries
+    # hold the agreed padded count, unless `eager`, where nothing was padded.
     num_tokens_across_dp: torch.Tensor
+    # DP -> PCP ordered token counts when PCP participates in batch
+    # coordination.
+    num_tokens_across_dp_pcp: torch.Tensor | None
     # Agreed uniform decode length. None means the ranks disagreed, which is an
     # answer, not "unknown".
     uniform_token_count: int | None
@@ -43,6 +46,8 @@ def sync_cudagraph_and_dp_padding(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
+    pcp_size: int = 1,
+    enable_expert_parallel: bool = False,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
@@ -52,15 +57,27 @@ def sync_cudagraph_and_dp_padding(
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
-    group = get_dp_group().cpu_group
-    tensor = torch.zeros(4, dp_size, dtype=torch.int32, device="cpu")
-    tensor[0][dp_rank] = num_tokens
-    tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
-    tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
-    tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
+    group_coordinator = get_dp_group()
+    if enable_expert_parallel and pcp_size > 1:
+        group_coordinator = get_moe_dp_pcp_group()
+    sync_size = group_coordinator.world_size
+    sync_rank = group_coordinator.rank_in_group
+    group = group_coordinator.cpu_group
+    tensor = torch.zeros(4, sync_size, dtype=torch.int32, device="cpu")
+    tensor[0][sync_rank] = num_tokens
+    tensor[1][sync_rank] = desired_batch_desc.cg_mode.value
+    tensor[2][sync_rank] = uniform_token_count or 0  # (0 means None)
+    tensor[3][sync_rank] = max_query_len or -1  # (-1 means None)
     dist.all_reduce(tensor, group=group)
 
-    num_tokens_across_dp = tensor[0]
+    synchronized_token_counts = tensor[0]
+    num_tokens_across_dp_pcp = None
+    num_tokens_across_dp = synchronized_token_counts
+    if enable_expert_parallel and pcp_size > 1:
+        num_tokens_across_dp_pcp = synchronized_token_counts
+        pcp_rank = sync_rank % pcp_size
+        num_tokens_across_dp = synchronized_token_counts[pcp_rank::pcp_size]
+        assert len(num_tokens_across_dp) == dp_size
     cg_mode_across_dp = tensor[1]
     uniform_token_counts_across_dp = tensor[2]
     max_query_lens_across_dp = tensor[3]
@@ -72,7 +89,7 @@ def sync_cudagraph_and_dp_padding(
     ):
         synced_uniform_token_count = None
 
-    if torch.all(num_tokens_across_dp == 0).item():
+    if torch.all(synchronized_token_counts == 0).item():
         synced_desc = BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE, num_tokens=0, num_reqs=0
         )
@@ -91,6 +108,7 @@ def sync_cudagraph_and_dp_padding(
             ),
             DPSyncState(
                 num_tokens_across_dp=num_tokens_across_dp,
+                num_tokens_across_dp_pcp=num_tokens_across_dp_pcp,
                 uniform_token_count=synced_uniform_token_count,
                 eager=True,
             ),
@@ -100,7 +118,7 @@ def sync_cudagraph_and_dp_padding(
         "cudagraph_manager should only be None during profile run, "
         "where synced_cg_mode must be NONE across all DP ranks"
     )
-    synced_num_tokens = int(num_tokens_across_dp.max().item())
+    synced_num_tokens = int(synchronized_token_counts.max().item())
 
     # Varlen decode graphs are selected by the query-length bound, so ranks must agree
     # on it or they pad to different token counts below.
@@ -120,10 +138,11 @@ def sync_cudagraph_and_dp_padding(
     )
 
     # Update num_tokens_across_dp to reflect padded size.
-    num_tokens_across_dp[:] = synced_desc.num_tokens
+    synchronized_token_counts[:] = synced_desc.num_tokens
 
     return synced_desc, DPSyncState(
         num_tokens_across_dp=num_tokens_across_dp,
+        num_tokens_across_dp_pcp=num_tokens_across_dp_pcp,
         uniform_token_count=synced_uniform_token_count,
         eager=False,
     )
@@ -136,6 +155,8 @@ def dispatch_cg_and_sync_dp(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
+    pcp_size: int = 1,
+    enable_expert_parallel: bool = False,
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
@@ -158,6 +179,8 @@ def dispatch_cg_and_sync_dp(
             place when a sync is reused, since that one is agreed across ranks.
         dp_size: Data-parallel world size. 1 skips all cross-rank work.
         dp_rank: This rank's index in the DP group.
+        pcp_size: Prefill-context-parallel world size.
+        enable_expert_parallel: Whether MoE expert parallelism is enabled.
         max_query_len: Upper bound on per-request query length, for selecting
             varlen decode graphs. None means the graph must not constrain it.
         need_eager: Force `CUDAGraphMode.NONE` instead of dispatching.
@@ -214,6 +237,14 @@ def dispatch_cg_and_sync_dp(
                 num_tokens_across_dp=torch.full_like(
                     dp_sync.num_tokens_across_dp, batch_desc.num_tokens
                 ),
+                num_tokens_across_dp_pcp=(
+                    torch.full_like(
+                        dp_sync.num_tokens_across_dp_pcp,
+                        batch_desc.num_tokens,
+                    )
+                    if dp_sync.num_tokens_across_dp_pcp is not None
+                    else None
+                ),
             )
         return batch_desc, dp_sync
 
@@ -225,6 +256,8 @@ def dispatch_cg_and_sync_dp(
         uniform_token_count,
         dp_size,
         dp_rank,
+        pcp_size,
+        enable_expert_parallel,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
     )

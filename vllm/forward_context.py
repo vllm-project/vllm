@@ -95,6 +95,7 @@ class DPMetadata:
         parallel_config: ParallelConfig,
         num_tokens: int,
         num_tokens_across_dp_cpu: torch.Tensor,
+        num_tokens_across_dp_pcp_cpu: torch.Tensor | None = None,
     ) -> "DPMetadata":
         assert num_tokens_across_dp_cpu is not None
         assert (
@@ -110,28 +111,14 @@ class DPMetadata:
         assert num_tokens_across_dp_cpu[dp_rank] == batchsize, (
             f"{num_tokens_across_dp_cpu[dp_rank]} {batchsize}"
         )
-        num_tokens_across_dp_pcp_cpu = None
         if (
             parallel_config.data_parallel_size > 1
             and parallel_config.prefill_context_parallel_size > 1
             and parallel_config.enable_expert_parallel
         ):
-            from vllm.distributed import get_pcp_group
-
-            pcp_group = get_pcp_group()
-            counts_by_pcp = [
-                torch.empty_like(num_tokens_across_dp_cpu)
-                for _ in range(pcp_group.world_size)
-            ]
-            torch.distributed.all_gather(
-                counts_by_pcp,
-                num_tokens_across_dp_cpu,
-                group=pcp_group.cpu_group,
+            assert num_tokens_across_dp_pcp_cpu is not None, (
+                "DP-PCP token counts must be supplied by batch coordination"
             )
-            # all_gather produces PCP -> DP. EP ranks are DP -> PCP -> TP.
-            num_tokens_across_dp_pcp_cpu = torch.stack(
-                counts_by_pcp, dim=1
-            ).flatten()
 
         return DPMetadata(
             num_tokens_across_dp_cpu,
@@ -324,6 +311,7 @@ def set_forward_context(
     vllm_config: VllmConfig,
     num_tokens: int | None = None,
     num_tokens_across_dp: torch.Tensor | None = None,
+    num_tokens_across_dp_pcp: torch.Tensor | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
@@ -358,7 +346,12 @@ def set_forward_context(
         ):
             assert ubatch_slices is None
             assert num_tokens is not None
-            _, num_tokens_across_dp, _ = coordinate_batch_across_dp(
+            (
+                _,
+                num_tokens_across_dp,
+                num_tokens_across_dp_pcp,
+                _,
+            ) = coordinate_batch_across_dp(
                 num_tokens_unpadded=num_tokens,
                 parallel_config=vllm_config.parallel_config,
                 allow_microbatching=False,
@@ -368,7 +361,10 @@ def set_forward_context(
             assert num_tokens is not None
             num_tokens_across_dp = torch.tensor([num_tokens], dtype=torch.int32)
         dp_metadata = DPMetadata.make(
-            vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
+            vllm_config.parallel_config,
+            num_tokens or 0,
+            num_tokens_across_dp,
+            num_tokens_across_dp_pcp,
         )
 
     # Convenience: if cudagraph is used and num_tokens is given, we can just

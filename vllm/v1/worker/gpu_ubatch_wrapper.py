@@ -478,15 +478,29 @@ class UBatchWrapper:
         assert dp_metadata is not None
         ubatch_dp_metadata = []
         for ubatch_slice in ubatch_slices:
-            dp_size = self.vllm_config.parallel_config.data_parallel_size
+            parallel_config = self.vllm_config.parallel_config
+            dp_size = parallel_config.data_parallel_size
             ubatch_num_tokens_across_dp = torch.tensor(
                 [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
             )
+            ubatch_num_tokens_across_dp_pcp = None
+            if (
+                parallel_config.enable_expert_parallel
+                and parallel_config.prefill_context_parallel_size > 1
+            ):
+                ubatch_num_tokens_across_dp_pcp = torch.tensor(
+                    [ubatch_slice.num_tokens]
+                    * dp_size
+                    * parallel_config.prefill_context_parallel_size,
+                    device="cpu",
+                    dtype=torch.int32,
+                )
             ubatch_dp_metadata.append(
                 DPMetadata.make(
-                    self.vllm_config.parallel_config,
+                    parallel_config,
                     ubatch_slice.num_tokens,
                     ubatch_num_tokens_across_dp,
+                    ubatch_num_tokens_across_dp_pcp,
                 )
             )
 

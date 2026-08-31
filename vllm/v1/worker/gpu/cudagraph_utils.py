@@ -522,6 +522,19 @@ class ModelCudaGraphManager(CudaGraphManager):
                 if self.dp_size > 1
                 else None
             )
+            parallel_config = self.vllm_config.parallel_config
+            num_tokens_across_dp_pcp = None
+            if (
+                self.dp_size > 1
+                and parallel_config.enable_expert_parallel
+                and parallel_config.prefill_context_parallel_size > 1
+            ):
+                num_tokens_across_dp_pcp = torch.full(
+                    (self.dp_size * parallel_config.prefill_context_parallel_size,),
+                    num_tokens,
+                    dtype=torch.int32,
+                    device="cpu",
+                )
 
             model_inputs = {
                 "input_ids": input_buffers.input_ids[:num_tokens],
@@ -565,6 +578,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     num_tokens=num_tokens,
                     cudagraph_runtime_mode=cg_mode,
                     num_tokens_across_dp=num_tokens_across_dp,
+                    num_tokens_across_dp_pcp=num_tokens_across_dp_pcp,
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
                     is_padding=input_buffers.is_padding[:num_tokens],
