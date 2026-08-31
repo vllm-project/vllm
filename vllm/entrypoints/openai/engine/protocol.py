@@ -119,6 +119,8 @@ class PromptTokenUsageInfo(OpenAIBaseModel):
 
 class CompletionTokenUsageInfo(OpenAIBaseModel):
     reasoning_tokens: int = 0
+    accepted_prediction_tokens: int | None = None
+    rejected_prediction_tokens: int | None = None
 
 
 class UsageInfo(OpenAIBaseModel):
