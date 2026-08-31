@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.kv_transfer.kv_connector.v1.base import NoOpKVConnectorMetadata
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.v1.outputs import (
     KVConnectorOutput,
@@ -59,8 +60,9 @@ class KVConnectorModelRunnerMixin:
         """
         if has_kv_transfer_group():
             kv_connector = get_kv_transfer_group()
-            kv_connector.wait_for_save()
-            kv_connector.clear_connector_metadata()
+            if kv_connector.has_connector_metadata():
+                kv_connector.wait_for_save()
+                kv_connector.clear_connector_metadata()
 
     # This context manager must be used within an active forward context.
     # It encapsulates the entire KV connector lifecycle within execute_model
@@ -76,32 +78,36 @@ class KVConnectorModelRunnerMixin:
         # Update KVConnector with the KVConnector metadata forward().
         kv_connector = get_kv_transfer_group()
         assert isinstance(kv_connector, KVConnectorBase)
-        assert scheduler_output.kv_connector_metadata is not None
-        kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
+        connector_metadata = scheduler_output.kv_connector_metadata
+        assert connector_metadata is not None
+        connector_active = not isinstance(connector_metadata, NoOpKVConnectorMetadata)
+        if connector_active:
+            kv_connector.bind_connector_metadata(connector_metadata)
 
         # Start this step's KV loads, ordered after any in-flight KV block
         # zeroing. Sync loads feed this step's forward so must precede it;
         # otherwise start (async) loads after the forward launch, keeping
         # their host-side submission cost off the critical path.
         start_after_forward = not scheduler_output.has_sync_kv_loads
-        if not start_after_forward:
+        if connector_active and not start_after_forward:
             kv_connector.start_load_kv(get_forward_context())
         try:
             yield output
         finally:
-            if start_after_forward:
+            if connector_active and start_after_forward:
                 kv_connector.start_load_kv(get_forward_context())
-            if wait_for_save and not defer_finalize:
+            if connector_active and wait_for_save and not defer_finalize:
                 kv_connector.wait_for_save()
 
-            output.finished_sending, output.finished_recving = (
-                kv_connector.get_finished(scheduler_output.finished_req_ids)
-            )
-            output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
-
-            output.kv_connector_stats = kv_connector.get_kv_connector_stats()
-            output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
+            if connector_active:
+                output.finished_sending, output.finished_recving = (
+                    kv_connector.get_finished(scheduler_output.finished_req_ids)
+                )
+                output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
+                output.kv_connector_stats = kv_connector.get_kv_connector_stats()
+                output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
             output.kv_connector_worker_meta = kv_connector.build_connector_worker_meta()
+            output.kv_connector_init_status = kv_connector.build_connector_init_status()
 
-            if not defer_finalize:
+            if connector_active and not defer_finalize:
                 kv_connector.clear_connector_metadata()
