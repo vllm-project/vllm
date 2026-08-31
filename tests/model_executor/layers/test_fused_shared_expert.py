@@ -18,7 +18,11 @@ from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
+    get_quark_ocp_mx_group_size,
     is_shared_expert_quant_fse_compatible,
+)
+from vllm.model_executor.models.qwen3_next import (
+    _should_replicate_misaligned_shared_expert,
 )
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
@@ -603,6 +607,82 @@ def test_quark_shared_expert_fse_compatibility(
             reason
             == "Quark excludes shared experts at model.layers.0.mlp.shared_expert"
         )
+
+
+def test_quark_ocp_mx_group_size_for_layer() -> None:
+    quant_config = QuarkConfig({**_QUARK_FSE_CONFIG, "exclude": []})
+    assert (
+        get_quark_ocp_mx_group_size(
+            quant_config,
+            "model.layers.0.mlp.shared_expert.down_proj",
+        )
+        == 32
+    )
+
+    quant_config.quant_config["exclude"] = ["model.layers.0.mlp.shared_expert_gate"]
+    assert (
+        get_quark_ocp_mx_group_size(
+            quant_config,
+            "model.layers.0.mlp.shared_expert.down_proj",
+        )
+        == 32
+    )
+
+    quant_config.quant_config["exclude"] = [
+        "model.layers.0.mlp.shared_expert.down_proj"
+    ]
+    assert (
+        get_quark_ocp_mx_group_size(
+            quant_config,
+            "model.layers.0.mlp.shared_expert.down_proj",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+def test_quark_ocp_mx_shared_expert_uses_supported_tp_shards(tp_size: int) -> None:
+    assert not _should_replicate_misaligned_shared_expert(
+        intermediate_size=640,
+        tp_size=tp_size,
+        group_size=32,
+        enable_expert_parallel=False,
+        is_sequence_parallel=False,
+    )
+
+
+def test_quark_ocp_mx_shared_expert_rejects_plain_tp8() -> None:
+    with pytest.raises(
+        ValueError,
+        match="TP size 8 produces a partition of 80",
+    ):
+        _should_replicate_misaligned_shared_expert(
+            intermediate_size=640,
+            tp_size=8,
+            group_size=32,
+            enable_expert_parallel=False,
+            is_sequence_parallel=False,
+        )
+
+
+def test_quark_ocp_mx_shared_expert_is_replicated_for_tep8() -> None:
+    assert _should_replicate_misaligned_shared_expert(
+        intermediate_size=640,
+        tp_size=8,
+        group_size=32,
+        enable_expert_parallel=True,
+        is_sequence_parallel=False,
+    )
+
+
+def test_quark_ocp_mx_shared_expert_is_replicated_when_not_tp_divisible() -> None:
+    assert _should_replicate_misaligned_shared_expert(
+        intermediate_size=672,
+        tp_size=8,
+        group_size=32,
+        enable_expert_parallel=True,
+        is_sequence_parallel=False,
+    )
 
 
 def test_quark_shared_expert_fse_requires_matching_layer_quant_configs() -> None:

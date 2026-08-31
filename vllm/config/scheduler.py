@@ -215,6 +215,10 @@ class SchedulerConfig:
         #   https://github.com/vllm-project/vllm/issues/29585
         factors.append(self.max_num_batched_tokens)
 
+        # PLE and other model components allocate static per-request buffers.
+        # Their shapes are captured in compiled graphs.
+        factors.append(self.max_num_seqs)
+
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 

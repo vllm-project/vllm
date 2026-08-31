@@ -9,6 +9,41 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 
+def get_quark_ocp_mx_group_size(
+    quant_config: "QuantizationConfig | None",
+    layer_name: str,
+) -> int | None:
+    """Return the OCP MX group size for a quantized Quark linear layer."""
+    if quant_config is None:
+        return None
+
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.model_executor.layers.quantization.quark.utils import should_ignore_layer
+
+    if not isinstance(quant_config, QuarkConfig):
+        return None
+
+    if should_ignore_layer(
+        layer_name,
+        ignore=quant_config.quant_config.get("exclude") or [],
+        fused_mapping=quant_config.packed_modules_mapping,
+    ):
+        return None
+
+    layer_quant_config = (
+        quant_config.get_layer_quant_config_from_name(layer_name)
+        or quant_config.quant_config.get("global_quant_config")
+        or {}
+    )
+    weight_quant = layer_quant_config.get("weight")
+    input_quant = layer_quant_config.get("input_tensors")
+    if not quant_config._is_w_ocp_mx_a_x(weight_quant, input_quant):
+        return None
+
+    assert weight_quant is not None
+    return int(weight_quant["group_size"])
+
+
 def is_shared_expert_quant_fse_compatible(
     quant_config: "QuantizationConfig | None",
     expert_prefix: str,
