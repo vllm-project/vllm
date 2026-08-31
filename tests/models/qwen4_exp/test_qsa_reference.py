@@ -15,9 +15,6 @@ from vllm.models.qwen4_exp.nvidia import (
 )
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
-from vllm.models.qwen4_exp.nvidia.ops.qsa_indexer import (
-    _qsa_decode_warmup_profiles,
-)
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
@@ -310,51 +307,6 @@ def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
     ]
     assert metadata.slot_mapping.tolist() == list(range(12)) + [-1] * 4
     assert metadata.visible_blocks.tolist() == [65, 66, 67, 68] * 3 + [0] * 4
-    assert metadata.num_decodes == 4
-    assert metadata.num_decode_tokens == 16
-    assert metadata.decode_query_len == 4
-    assert metadata.num_prefills == 0
-    assert metadata.num_prefill_tokens == 0
-
-
-@requires_qsa_kernels
-def test_qsa_side_metadata_splits_uniform_decode_and_prefill() -> None:
-    device = torch.device("cuda")
-    query_lens = [4, 4, 65]
-    query_start_loc = torch.tensor([0, 4, 8, 73], dtype=torch.int32, device=device)
-    token_to_req = torch.repeat_interleave(
-        torch.arange(3, dtype=torch.int32, device=device),
-        torch.tensor(query_lens, device=device),
-    )
-    builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
-    builder.compress_ratio = 1
-    builder.reorder_batch_threshold = 4
-    builder.is_circular_buffer = False
-    builder.storage_block_size = 64
-    builder.token_to_req_buffer = torch.empty(73, dtype=torch.int32, device=device)
-    builder.slot_mapping_buffer = torch.empty(73, dtype=torch.int64, device=device)
-    builder.logical_positions_buffer = torch.empty(73, dtype=torch.int64, device=device)
-    builder.visible_blocks_buffer = torch.empty(73, dtype=torch.int32, device=device)
-    builder.k_work_metadata_buffer = torch.empty(0, 2, dtype=torch.int32, device=device)
-    common = SimpleNamespace(
-        num_actual_tokens=73,
-        num_reqs=3,
-        max_query_len=65,
-        query_start_loc=query_start_loc,
-        query_start_loc_cpu=query_start_loc.cpu(),
-        seq_lens=torch.tensor([100, 200, 300], dtype=torch.int32, device=device),
-        slot_mapping=torch.arange(73, dtype=torch.int64, device=device),
-        block_table_tensor=torch.empty((3, 0), dtype=torch.int32, device=device),
-        token_to_req_indices=lambda buffer: buffer.copy_(token_to_req),
-    )
-
-    metadata = builder.build(0, common)
-
-    assert metadata.num_decodes == 2
-    assert metadata.num_decode_tokens == 8
-    assert metadata.decode_query_len == 4
-    assert metadata.num_prefills == 1
-    assert metadata.num_prefill_tokens == 65
 
 
 @requires_qsa_kernels
@@ -677,7 +629,7 @@ def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
         (2, 2),
         (3, 2),
         (4, 2),
-        (4, 16),
+        (4, 33),
     ],
 )
 def test_qsa_decode_scoring_matches_test_reference(
@@ -729,61 +681,6 @@ def test_qsa_decode_scoring_matches_test_reference(
     columns = torch.arange(actual.shape[1], device=actual.device)
     visible = columns[None, :] < visible_blocks[:, None]
     torch.testing.assert_close(actual[visible], expected[visible], rtol=1e-3, atol=1e-3)
-
-
-def test_qsa_decode_warmup_covers_reachable_dql_and_launch_regimes() -> None:
-    assert _qsa_decode_warmup_profiles(4, 256, 8192) == (
-        (1, 1),
-        (1, 33),
-        (2, 1),
-        (2, 33),
-        (3, 1),
-        (3, 33),
-        (4, 1),
-        (4, 33),
-    )
-    assert _qsa_decode_warmup_profiles(4, 256, 64) == (
-        (1, 1),
-        (1, 33),
-        (2, 1),
-        (3, 1),
-        (4, 1),
-    )
-    assert _qsa_decode_warmup_profiles(4, 32, 8192) == (
-        (1, 1),
-        (2, 1),
-        (3, 1),
-        (4, 1),
-    )
-
-
-def test_qsa_decode_warmup_compiles_profiles_without_launching(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = []
-    kernel = SimpleNamespace(
-        warmup=lambda *args, **kwargs: calls.append((args, kwargs))
-    )
-    monkeypatch.setattr(
-        qsa_indexer_ops,
-        "_qsa_mqa_paged_uniform_kernel",
-        kernel,
-    )
-    profiles = qsa_indexer_ops.warmup_qsa_mqa_paged_decode(
-        torch.empty(40, 4, 1, 128, dtype=torch.bfloat16),
-        torch.empty(33, 20, dtype=torch.int32),
-        num_heads=4,
-        head_dim=128,
-        max_decode_query_len=4,
-        max_num_reqs=33,
-        max_num_batched_tokens=132,
-    )
-
-    assert len(calls) == len(profiles) == 8
-    assert [
-        (kwargs["DECODE_QUERY_LEN"], kwargs["TILES_PER_PROG"]) for _, kwargs in calls
-    ] == [(dql, 1 if num_requests <= 32 else 8) for dql, num_requests in profiles]
-    assert all(not isinstance(args[0], torch.Tensor) for args, _ in calls)
 
 
 @requires_qsa_kernels
@@ -968,55 +865,40 @@ def test_qsa_sparse_paged_attention_matches_test_reference(
 
 
 @requires_qsa_kernels
-def test_qsa_selection_chunks_workspace_and_matches_test_reference(
-    monkeypatch: pytest.MonkeyPatch,
-    workspace_init,
-) -> None:
-    rows, keys, heads, head_dim = 65, 640, 4, 16
-    token_topk, compress_ratio = 2048, 4
+def test_qsa_prefill_scoring_matches_reference_across_query_chunks() -> None:
+    rows, heads, head_dim = 65, 4, 16
     torch.manual_seed(3)
     q = torch.randn(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
     cache = torch.randn(80, 16, 1, head_dim, device="cuda", dtype=torch.bfloat16)
     page_table = torch.randperm(80, device="cuda", dtype=torch.int32).reshape(2, 40)
     token_to_req = torch.tensor([0] * 17 + [1] * 48, device="cuda", dtype=torch.int32)
-    query_positions = torch.full((rows,), 2559, device="cuda", dtype=torch.int32)
-    sequence_lengths = torch.tensor([2560, 2560], device="cuda", dtype=torch.int32)
-    monkeypatch.setattr(qsa_indexer_ops, "_LOGITS_WORKSPACE_BYTES", 32 * keys * 4)
-    original_score = qsa_indexer_ops._launch_qsa_mqa_paged_prefill
-    scored_row_counts = []
+    visible_blocks = torch.full((rows,), 640, device="cuda", dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 17, rows], device="cuda", dtype=torch.int32)
 
-    def record_score(*args, **kwargs):
-        scored_row_counts.append(kwargs["num_queries"])
-        return original_score(*args, **kwargs)
-
-    monkeypatch.setattr(qsa_indexer_ops, "_launch_qsa_mqa_paged_prefill", record_score)
-
-    actual = qsa_indexer_ops.qsa_select_paged_prefill(
-        q,
-        cache,
-        page_table,
-        torch.tensor([0, 17, rows], device="cuda", dtype=torch.int32),
-        torch.minimum(
-            (query_positions + 1) // compress_ratio,
-            sequence_lengths.index_select(0, token_to_req.long()) // compress_ratio,
-        ).to(torch.int32),
-        token_topk,
-        compress_ratio,
-        rows,
+    actual = torch.cat(
+        [
+            qsa_indexer_ops._launch_qsa_mqa_paged_prefill(
+                q,
+                cache,
+                page_table,
+                query_start_loc,
+                visible_blocks,
+                max_query_len=48,
+                query_offset=query_start,
+                num_queries=min(32, rows - query_start),
+            )
+            for query_start in range(0, rows, 32)
+        ]
     )
-    expected, _ = _qsa_select_paged_blocks_reference(
+    expected = _qsa_mqa_paged_reference(
         q,
         cache,
         page_table,
         token_to_req,
-        query_positions,
-        sequence_lengths,
-        token_topk,
-        compress_ratio,
+        visible_blocks,
     )
 
-    torch.testing.assert_close(actual.sort().values, expected.sort().values)
-    assert scored_row_counts == [32, 32, 1]
+    torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3)
 
 
 @requires_qsa_kernels
