@@ -8,9 +8,8 @@ import torch
 from tqdm import tqdm
 
 from vllm import RequestOutput, TextPrompt, TokensPrompt
-from vllm.frontend.entrypoints.offline_utils import OfflineInferenceMixin
 from vllm.foundation.observability.logger import init_logger
-from vllm.runtime.modeling.lora.request import LoRARequest
+from vllm.frontend.entrypoints.offline_utils import OfflineInferenceMixin
 from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.frontend.processing.sampling_params import (
     BeamSearchParams,
@@ -18,6 +17,7 @@ from vllm.frontend.processing.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.frontend.processing.tokenizers import TokenizerLike
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 from vllm.v1.structured_output.request import get_structured_output_key
 

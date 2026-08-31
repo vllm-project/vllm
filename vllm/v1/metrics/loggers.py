@@ -10,13 +10,16 @@ from prometheus_client import Counter, Gauge, Histogram
 
 import vllm.foundation.system.envs as envs
 from vllm.backends.compiler.cuda_graph import CUDAGraphLogging
-from vllm.foundation.config import SupportsMetricsInfo, VllmConfig
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging,
     KVConnectorProm,
 )
+from vllm.foundation.config import SupportsMetricsInfo, VllmConfig
+from vllm.foundation.extensibility.plugins import (
+    STAT_LOGGER_PLUGINS_GROUP,
+    load_plugins_by_group,
+)
 from vllm.foundation.observability.logger import init_logger
-from vllm.foundation.extensibility.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics

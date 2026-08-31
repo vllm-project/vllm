@@ -3,10 +3,10 @@
 
 from typing import TYPE_CHECKING
 
-from vllm.foundation.observability.logger import init_logger
-from vllm.models.minimax_m3.nvidia.model import MiniMaxM3SparseAttention
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.tracing import instrument
+from vllm.models.minimax_m3.nvidia.model import MiniMaxM3SparseAttention
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker

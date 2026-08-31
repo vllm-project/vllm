@@ -6,10 +6,8 @@ import torch
 import torch.nn as nn
 
 from vllm.foundation.config import ModelConfig, VllmConfig
-from vllm.frontend.processing.inputs import TokensPrompt
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.pooler import DispatchPooler
+from vllm.frontend.processing.inputs import TokensPrompt
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsItems
 from vllm.frontend.processing.multimodal.processing.processor import (
@@ -17,6 +15,8 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     ProcessorInputs,
     TimingContext,
 )
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding, SupportsMultiModal, SupportsScoreTemplate

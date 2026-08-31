@@ -11,9 +11,9 @@ from typing import TYPE_CHECKING, Any
 import cloudpickle
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
 from vllm.backends.distributed.ray.ray_env import get_env_vars_to_copy
+from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.network_utils import (
     get_distributed_init_method,
     get_ip,
@@ -614,7 +614,7 @@ class RayDistributedExecutor(Executor):
                 register_accelerator_context,
             )
 
-            from vllm.backends.distributed.device_communicators.ray_communicator import (
+            from vllm.backends.distributed.device_communicators.ray_communicator import (  # noqa: E501
                 RayPPCommunicator,
             )
 

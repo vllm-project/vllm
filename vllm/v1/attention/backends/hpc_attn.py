@@ -14,11 +14,11 @@ from typing import ClassVar
 import torch
 from typing_extensions import override
 
+from vllm.backends.platform import current_platform
+from vllm.backends.platform.interface import DeviceCapability
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.cache import CacheDType
 from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
-from vllm.backends.platform.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

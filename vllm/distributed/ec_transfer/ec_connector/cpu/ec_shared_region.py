@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E501
 # COMPAT SHIM (auto-generated): old path -> canonical new path
 
 """Compatibility shim: vllm.distributed/ec_transfer/ec_connector/cpu/ec_shared_region -> vllm.backends.distributed.ec_transfer.ec_connector.cpu.ec_shared_region (sys.modules alias)."""
+
 import importlib
 import sys
 
-_real = importlib.import_module("vllm.backends.distributed.ec_transfer.ec_connector.cpu.ec_shared_region")
+_real = importlib.import_module(
+    "vllm.backends.distributed.ec_transfer.ec_connector.cpu.ec_shared_region"
+)
 sys.modules[__name__] = _real

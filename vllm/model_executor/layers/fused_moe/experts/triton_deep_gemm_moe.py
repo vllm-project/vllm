@@ -4,6 +4,9 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.foundation.utilities.deep_gemm import (
+    is_deep_gemm_e8m0_used,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -16,9 +19,6 @@ from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-from vllm.foundation.utilities.deep_gemm import (
-    is_deep_gemm_e8m0_used,
-)
 
 
 class TritonOrDeepGemmExperts(FallbackExperts):

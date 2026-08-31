@@ -5,15 +5,13 @@
 import torch
 from transformers import PretrainedConfig
 
-from vllm import envs
+from vllm.backends.distributed.utils import divide
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import get_current_vllm_config
 from vllm.foundation.config.lora import LoRAConfig
-from vllm.backends.distributed.utils import divide
-from vllm.runtime.execution.forward_context import (
-    ForwardContext,
-    get_forward_context,
-    is_forward_context_available,
-)
+from vllm.foundation.system import envs
+from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
@@ -21,9 +19,11 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
-from vllm.foundation.utilities.torch_utils import direct_register_custom_op
+from vllm.runtime.execution.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    is_forward_context_available,
+)
 
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_aux_cuda_stream, _get_lora_device

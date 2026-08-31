@@ -4,8 +4,8 @@ import argparse
 import inspect
 
 from vllm.benchmarks.mm_processor import add_cli_args, main
-from vllm.frontend.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.frontend.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 
 
 class BenchmarkMMProcessorSubcommand(BenchmarkSubcommandBase):

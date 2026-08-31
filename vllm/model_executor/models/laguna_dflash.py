@@ -16,6 +16,7 @@ from vllm import _custom_ops as ops
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.multimodal.inputs import NestedTensors
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -28,7 +29,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle3
-from vllm.frontend.processing.multimodal.inputs import NestedTensors
 
 from .laguna import LagunaDecoderLayer
 from .qwen3_dflash import DFlashQwen3Model

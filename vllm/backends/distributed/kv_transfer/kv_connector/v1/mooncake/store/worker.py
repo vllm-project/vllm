@@ -27,7 +27,6 @@ import torch
 import zmq
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import (
     get_dcp_group,
     get_pcp_group,
@@ -59,6 +58,7 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.mooncake.store.protoc
     decode_lookup_response,
     encode_lookup_response,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.foundation.utilities.network_utils import get_ip, make_zmq_socket

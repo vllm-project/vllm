@@ -19,6 +19,7 @@ from openai.types.responses import (
 from openai.types.responses.tool import Tool as ResponsesTool
 from partial_json_parser.core.options import Allow
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaToolCall,
@@ -29,7 +30,6 @@ from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
-from vllm.foundation.observability.logger import init_logger
 
 Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
 

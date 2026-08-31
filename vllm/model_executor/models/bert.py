@@ -9,8 +9,9 @@ from torch import nn
 from transformers import BertConfig
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, ModelConfig, PoolerConfig, VllmConfig
 from vllm.backends.distributed import get_tensor_model_parallel_world_size
+from vllm.foundation.config import CacheConfig, ModelConfig, PoolerConfig, VllmConfig
+from vllm.frontend.processing.tasks import PoolingTask
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
@@ -39,7 +40,6 @@ from vllm.model_executor.layers.pooler.tokwise import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.frontend.processing.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant

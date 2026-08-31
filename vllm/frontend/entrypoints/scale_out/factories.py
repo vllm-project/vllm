@@ -44,7 +44,9 @@ def init_scale_out_state(
 ):
     init_render_state(state, request_logger)
 
-    from vllm.frontend.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+    from vllm.frontend.entrypoints.scale_out.token_in_token_out.serving import (
+        ServingTokens,
+    )
 
     state.serving_tokens = ServingTokens(
         engine_client,

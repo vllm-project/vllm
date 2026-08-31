@@ -12,7 +12,10 @@ from vllm.foundation.system.exceptions import VLLMValidationError
 if TYPE_CHECKING:
     import torch
 
-    from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsOptionalItems, PlaceholderRange
+    from vllm.frontend.processing.multimodal.inputs import (
+        MultiModalKwargsOptionalItems,
+        PlaceholderRange,
+    )
 
 
 class _InputOptions(TypedDict):
@@ -254,7 +257,8 @@ which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
 
 class EncoderDecoderInput(TypedDict):
     """
-    A rendered [`EncoderDecoderPrompt`][vllm.frontend.processing.inputs.llm.EncoderDecoderPrompt]
+    A rendered
+    [`EncoderDecoderPrompt`][vllm.frontend.processing.inputs.llm.EncoderDecoderPrompt]
     which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
     """
 

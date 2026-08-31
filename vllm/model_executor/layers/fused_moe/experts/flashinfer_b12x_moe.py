@@ -6,6 +6,11 @@ from typing import Any
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.backends.platform import current_platform
+from vllm.foundation.utilities.flashinfer import (
+    flashinfer_convert_sf_to_mma_layout,
+    has_flashinfer_b12x_moe,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -19,11 +24,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
     kNvfp4Static,
-)
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.flashinfer import (
-    flashinfer_convert_sf_to_mma_layout,
-    has_flashinfer_b12x_moe,
 )
 
 

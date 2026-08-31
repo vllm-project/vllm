@@ -35,22 +35,22 @@ CHECK_IMPORTS = {
         ),
         allowed_files={
             # pickle
-            "vllm/multimodal/hasher.py",
-            "vllm/transformers_utils/config.py",
+            "vllm/frontend/processing/multimodal/hasher.py",
+            "vllm/foundation/integrations/transformers_utils/config.py",
             "vllm/model_executor/models/registry.py",
-            "vllm/compilation/caching.py",
-            "vllm/env_override.py",
-            "vllm/compilation/piecewise_backend.py",
-            "vllm/distributed/utils.py",
-            "vllm/distributed/parallel_state.py",
-            "vllm/distributed/device_communicators/all_reduce_utils.py",
-            "vllm/distributed/device_communicators/shm_broadcast.py",
-            "vllm/distributed/device_communicators/shm_object_storage.py",
-            "vllm/distributed/weight_transfer/ipc_engine.py",
-            "vllm/distributed/weight_transfer/clients.py",
+            "vllm/backends/compiler/caching.py",
+            "vllm/foundation/system/env_override.py",
+            "vllm/backends/compiler/piecewise_backend.py",
+            "vllm/backends/distributed/utils.py",
+            "vllm/backends/distributed/parallel_state.py",
+            "vllm/backends/distributed/device_communicators/all_reduce_utils.py",
+            "vllm/backends/distributed/device_communicators/shm_broadcast.py",
+            "vllm/backends/distributed/device_communicators/shm_object_storage.py",
+            "vllm/backends/distributed/weight_transfer/ipc_engine.py",
+            "vllm/backends/distributed/weight_transfer/clients.py",
             "tests/distributed/test_shm_broadcast.py",
             "tests/distributed/test_weight_transfer.py",
-            "vllm/utils/hashing.py",
+            "vllm/foundation/utilities/hashing.py",
             "tests/multimodal/media/test_base.py",
             "tests/tokenizers_/test_hf.py",
             "tests/utils_/test_hashing.py",
@@ -64,7 +64,7 @@ CHECK_IMPORTS = {
             # cloudpickle
             "vllm/v1/executor/multiproc_executor.py",
             "vllm/v1/executor/ray_executor.py",
-            "vllm/entrypoints/llm.py",
+            "vllm/frontend/entrypoints/llm.py",
             "tests/utils.py",
             # pickle and cloudpickle
             "vllm/v1/serial_utils.py",
@@ -86,20 +86,25 @@ CHECK_IMPORTS = {
     ),
     "triton": ForbiddenImport(
         pattern=r"^(from|import)\s+triton(\s|\.|$)",
-        tip="Use 'from vllm.triton_utils import triton' instead.",
-        allowed_pattern=re.compile(
-            "from vllm.triton_utils import (triton|tl|tl, triton)"
+        tip=(
+            "Use 'from vllm.backends.compute.dsl.triton_utils import triton' instead."
         ),
-        allowed_files={"vllm/triton_utils/importing.py"},
+        allowed_pattern=re.compile(
+            "from vllm.backends.compute.dsl.triton_utils import (triton|tl|tl, triton)"
+        ),
+        allowed_files={"vllm/backends/compute/dsl/triton_utils/importing.py"},
     ),
     "tilelang": ForbiddenImport(
         pattern=r"^(from|import)\s+tilelang(\s|\.|$)",
-        tip="Use 'from vllm.tilelang_utils import tilelang, T' instead.",
+        tip=(
+            "Use 'from vllm.backends.compute.dsl.tilelang_utils import "
+            "tilelang, T' instead."
+        ),
         allowed_pattern=re.compile(
-            r"from\s+vllm\.tilelang_utils\s+import\s+"
+            r"from\s+vllm\.backends\.compute\.dsl\.tilelang_utils\s+import\s+"
             r"(tilelang|T|T, tilelang|tilelang, T)\b"
         ),
-        allowed_files={"vllm/tilelang_utils/__init__.py"},
+        allowed_files={"vllm/backends/compute/dsl/tilelang_utils/__init__.py"},
     ),
     "huggingface_hub repo API": ForbiddenImport(
         # Catch `from huggingface_hub import <fn>`, including parenthesized,
@@ -111,11 +116,12 @@ CHECK_IMPORTS = {
         ),
         tip=(
             "Use the shared, vLLM-tagged helpers from "
-            "vllm.transformers_utils.repo_utils (e.g. hf_api(), hf_fs(), "
-            "list_repo_files, file_exists) instead of calling "
+            "vllm.foundation.integrations.transformers_utils.repo_utils "
+            "(e.g. hf_api(), hf_fs(), list_repo_files, file_exists) instead "
+            "of calling "
             "huggingface_hub directly."
         ),
-        allowed_files={"vllm/transformers_utils/repo_utils.py"},
+        allowed_files={"vllm/foundation/integrations/transformers_utils/repo_utils.py"},
         allowed_dirs={"examples/"},
     ),
 }

@@ -13,12 +13,40 @@ from transformers import (
     Qwen3Config,
 )
 
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.backends.distributed import get_tensor_model_parallel_world_size
-from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_processor_from_config,
+)
+from vllm.foundation.integrations.transformers_utils.processors.funasr import (
+    FunASRFeatureExtractor,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.frontend.processing.multimodal.parse import (
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
+from vllm.frontend.processing.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    ProcessorInputs,
+    PromptReplacement,
+    PromptUpdate,
+    TimingContext,
+)
+from vllm.frontend.processing.multimodal.processing.processor import (
+    MultiModalProcessingInfo,
+)
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
@@ -34,25 +62,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.whisper_utils import (
     ISO639_1_SUPPORTED_LANGS,
 )
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
-from vllm.frontend.processing.multimodal.parse import MultiModalDataItems, MultiModalDataParser
-from vllm.frontend.processing.multimodal.processing import (
-    BaseDummyInputsBuilder,
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
-    ProcessorInputs,
-    PromptReplacement,
-    PromptUpdate,
-    TimingContext,
-)
-from vllm.frontend.processing.multimodal.processing.processor import MultiModalProcessingInfo
-from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
-from vllm.foundation.integrations.transformers_utils.processors.funasr import FunASRFeatureExtractor
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

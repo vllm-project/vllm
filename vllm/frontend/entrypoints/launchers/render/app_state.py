@@ -5,13 +5,15 @@ from argparse import Namespace
 from starlette.datastructures import State
 
 from vllm.foundation.config import VllmConfig
+from vllm.foundation.extensibility.plugins.endpoint_plugins.interface import (
+    init_endpoint_plugins_state,
+)
 from vllm.frontend.entrypoints.chat_utils import load_chat_template
 from vllm.frontend.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.frontend.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.frontend.entrypoints.scale_out.factories import init_render_state
 from vllm.frontend.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.foundation.extensibility.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
 from vllm.frontend.processing.renderers import renderer_from_config
 from vllm.frontend.processing.renderers.online_derenderer import OnlineDerenderer
 from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer

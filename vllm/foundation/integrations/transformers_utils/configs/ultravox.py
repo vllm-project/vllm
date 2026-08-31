@@ -102,11 +102,15 @@ class UltravoxConfig(transformers.PretrainedConfig):
         #
         # to behave as intended.
         if key == "text_model_id" and value is not None:
-            from vllm.foundation.integrations.transformers_utils.config import get_config
+            from vllm.foundation.integrations.transformers_utils.config import (
+                get_config,
+            )
 
             self.wrapped_model_config = get_config(value, trust_remote_code=False)
         elif key == "audio_model_id" and value is not None:
-            from vllm.foundation.integrations.transformers_utils.config import get_config
+            from vllm.foundation.integrations.transformers_utils.config import (
+                get_config,
+            )
 
             self.audio_config = get_config(value, trust_remote_code=False)
 

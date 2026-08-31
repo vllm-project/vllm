@@ -16,23 +16,23 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.backends.compiler.passes.fusion.rms_quant_fusion import (
     _rms_input_weight_dtype_match,
 )
-from vllm.foundation.config import VllmConfig
-from vllm.foundation.config.utils import Range
 from vllm.backends.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.backends.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.utils import Range
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import (
+    direct_register_custom_op,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
     kFp8StaticTensorSym,
-)
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.torch_utils import (
-    direct_register_custom_op,
 )
 
 from ..inductor_pass import enable_fake_mode
@@ -392,7 +392,9 @@ class AllReduceRMSNormPattern(BasePattern):
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms = vllm.backends.compute.ir.ops.rms_norm(allreduce_output, weight, self.epsilon)
+            rms = vllm.backends.compute.ir.ops.rms_norm(
+                allreduce_output, weight, self.epsilon
+            )
 
             return rms, allreduce_output
 
@@ -661,7 +663,9 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = tensor_model_parallel_all_reduce(input)
-            rms = vllm.backends.compute.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
+            rms = vllm.backends.compute.ir.ops.rms_norm(
+                all_reduce, weight, self.epsilon
+            )
             quant, _ = self.quant_matcher(rms, scale)
             return quant, all_reduce
 
@@ -824,7 +828,9 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
             output_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             all_reduce = tensor_model_parallel_all_reduce(input)
-            rms = vllm.backends.compute.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
+            rms = vllm.backends.compute.ir.ops.rms_norm(
+                all_reduce, weight, self.epsilon
+            )
             quant_out_tuple = auto_functionalized(
                 STATIC_FP4_QUANT_OP,
                 input=rms,
@@ -1195,7 +1201,9 @@ class AiterAllreduceFusedRMSNormPattern(BasePattern, VllmPatternReplacement):
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms = vllm.backends.compute.ir.ops.rms_norm(allreduce_output, weight, self.epsilon)
+            rms = vllm.backends.compute.ir.ops.rms_norm(
+                allreduce_output, weight, self.epsilon
+            )
 
             return rms, allreduce_output
 
@@ -1346,7 +1354,9 @@ class AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms = vllm.backends.compute.ir.ops.rms_norm(allreduce_output, weight, self.epsilon)
+            rms = vllm.backends.compute.ir.ops.rms_norm(
+                allreduce_output, weight, self.epsilon
+            )
             quant, scale = self.quant_matcher(rms)
             return quant, scale
 

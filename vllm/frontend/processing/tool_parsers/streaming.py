@@ -8,6 +8,7 @@ import partial_json_parser
 import regex as re
 from partial_json_parser.core.options import Allow
 
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 from vllm.frontend.entrypoints.chat_utils import make_tool_call_id
 from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -15,7 +16,6 @@ from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaToolCall,
 )
 from vllm.frontend.processing.tool_parsers.utils import partial_json_loads
-from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
     from vllm.frontend.processing.tokenizers import TokenizerLike

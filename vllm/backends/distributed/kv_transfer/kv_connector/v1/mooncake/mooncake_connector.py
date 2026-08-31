@@ -17,8 +17,6 @@ import torch
 import zmq
 import zmq.asyncio
 
-from vllm import envs
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
@@ -30,8 +28,10 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorStats,
+)
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (  # noqa: E501
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
@@ -43,13 +43,19 @@ from vllm.backends.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.runtime.execution.forward_context import ForwardContext
-from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.backends.platform import current_platform
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.math_utils import cdiv
-from vllm.foundation.utilities.network_utils import get_ip, make_zmq_path, make_zmq_socket
+from vllm.foundation.utilities.network_utils import (
+    get_ip,
+    make_zmq_path,
+    make_zmq_socket,
+)
 from vllm.foundation.utilities.torch_utils import is_non_overlapping_and_dense
+from vllm.model_executor.models.utils import extract_layer_index
+from vllm.runtime.execution.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput

@@ -7,13 +7,15 @@ from typing import Annotated, Any, TypeAlias
 from pydantic import ConfigDict, Field, model_validator
 
 from vllm.foundation.config import ModelConfig
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.frontend.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+)
 from vllm.frontend.entrypoints.serve.engine.protocol import OpenAIBaseModel
-from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.frontend.processing.renderers import ChatParams, TokenizeParams, merge_kwargs
 
 

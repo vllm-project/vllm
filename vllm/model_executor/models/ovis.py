@@ -30,17 +30,11 @@ from transformers import BatchFeature, PretrainedConfig
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.aimv2 import AIMv2Model
-from vllm.model_executor.models.siglip import SiglipVisionModel
-from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
-    flatten_bn,
-    init_vllm_registered_model,
-    maybe_prefix,
+from vllm.foundation.integrations.transformers_utils.processors.ovis import (
+    OvisProcessor,
 )
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -55,9 +49,17 @@ from vllm.frontend.processing.multimodal.processing import (
     cached_encode,
 )
 from vllm.frontend.processing.renderers import TokenizeParams
+from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.aimv2 import AIMv2Model
+from vllm.model_executor.models.siglip import SiglipVisionModel
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    flatten_bn,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.processors.ovis import OvisProcessor
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 

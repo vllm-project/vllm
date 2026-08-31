@@ -9,6 +9,8 @@ import numpy.typing as npt
 import torch
 
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import PlaceholderModule
+from vllm.foundation.utilities.registry import ExtensionManager
 from vllm.frontend.processing.multimodal.video_decoders import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VideoDecoderBackend,
@@ -17,8 +19,6 @@ from vllm.frontend.processing.multimodal.video_decoders import (
     decode_video,
     resolve_video_backend_kwargs,
 )
-from vllm.foundation.utilities.import_utils import PlaceholderModule
-from vllm.foundation.utilities.registry import ExtensionManager
 
 try:
     import cv2

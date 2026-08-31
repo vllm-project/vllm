@@ -31,9 +31,9 @@ from transformers.models.qwen2_audio import Qwen2AudioEncoder
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -53,9 +53,9 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

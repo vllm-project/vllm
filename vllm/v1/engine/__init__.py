@@ -12,10 +12,10 @@ import numpy as np
 import torch
 
 from vllm.foundation.config.kv_events import KVEventsConfig
-from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
 from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.frontend.processing.sampling_params import SamplingParams
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.v1.metrics.stats import (
     PrefillStats,
     RequestSpecDecodeMetrics,

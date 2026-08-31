@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 
-from vllm.frontend.entrypoints.cli.types import CLISubcommand
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.frontend.entrypoints.cli.types import CLISubcommand
 
 
 class BenchmarkSubcommandBase(CLISubcommand):

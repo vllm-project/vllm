@@ -5,14 +5,14 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.foundation.config.lora import LoRAConfig
 from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.backends.platform import current_platform
+from vllm.foundation.config.lora import LoRAConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.backends.platform import current_platform
 
 from .base import BaseLayerWithLoRA
 

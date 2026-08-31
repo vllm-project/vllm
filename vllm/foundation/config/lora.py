@@ -8,10 +8,10 @@ import torch
 from pydantic import ConfigDict, Field, model_validator
 from typing_extensions import Self
 
-from vllm import envs
+from vllm.backends.platform import current_platform
 from vllm.foundation.config.utils import config
 from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.hashing import safe_hash
 
 if TYPE_CHECKING:

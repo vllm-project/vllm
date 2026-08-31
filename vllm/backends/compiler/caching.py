@@ -19,10 +19,10 @@ import vllm.foundation.system.envs as envs
 from vllm.backends.compiler.codegen import compile_execution_fn
 from vllm.backends.compiler.compiler_interface import get_inductor_factors
 from vllm.backends.compiler.counter import compilation_counter
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.foundation.config.utils import hash_factors
 from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.hashing import safe_hash
 
 try:

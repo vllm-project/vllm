@@ -3,8 +3,8 @@
 import numpy as np
 import torch
 
-from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
 MAX_NUM_ALLOWED_TOKEN_IDS = 1024

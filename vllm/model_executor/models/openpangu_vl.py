@@ -31,9 +31,21 @@ from einops import rearrange
 from torchvision.transforms import v2
 from transformers.utils import logging
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import parallel_state
 from vllm.backends.distributed import utils as dist_utils
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItems,
+)
+from vllm.frontend.processing.multimodal.parse import MultiModalDataItems
+from vllm.frontend.processing.multimodal.processing import (
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -66,19 +78,7 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import (
-    MultiModalFeatureSpec,
-    MultiModalKwargsItems,
-)
-from vllm.frontend.processing.multimodal.parse import MultiModalDataItems
-from vllm.frontend.processing.multimodal.processing import (
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-)
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .vision import get_vit_attn_backend

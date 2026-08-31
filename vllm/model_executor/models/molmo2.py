@@ -24,8 +24,6 @@ from transformers.image_utils import ImageInput
 from transformers.video_utils import VideoMetadata
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, VllmConfig
-from vllm.foundation.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -33,25 +31,12 @@ from vllm.backends.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
 )
-from vllm.frontend.processing.inputs import MultiModalDataDict
+from vllm.foundation.config import CacheConfig, VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.activation import MulAndSilu, SiluAndMul, get_act_fn
-from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
-from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.foundation.utilities.math_utils import round_down
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -71,10 +56,27 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.frontend.processing.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
+from vllm.frontend.processing.multimodal.processing.dummy_inputs import (
+    BaseDummyInputsBuilder,
+)
+from vllm.model_executor.layers.activation import MulAndSilu, SiluAndMul, get_act_fn
+from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.math_utils import round_down
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

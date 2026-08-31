@@ -61,6 +61,7 @@ from openai.types.responses.response_reasoning_item import (
 from openai.types.responses.tool import Tool
 from openai_harmony import Message as HarmonyMessage
 
+from vllm.foundation.utilities import random_uuid
 from vllm.frontend.entrypoints.generate.base.protocol import DeltaMessage, DeltaToolCall
 from vllm.frontend.entrypoints.mcp.tool_server import ToolServer
 from vllm.frontend.entrypoints.openai.parser.harmony_utils import (
@@ -78,7 +79,6 @@ from vllm.frontend.entrypoints.openai.responses.utils import (
 )
 from vllm.frontend.processing.outputs import CompletionOutput
 from vllm.frontend.processing.parser.harmony import Segment
-from vllm.foundation.utilities import random_uuid
 
 TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {
     "python": "code_interpreter",

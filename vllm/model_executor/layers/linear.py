@@ -10,7 +10,6 @@ from torch.nn.parameter import Parameter
 from typing_extensions import TypeIs
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.backends.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -18,6 +17,11 @@ from vllm.backends.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
+)
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import (
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
 )
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
@@ -41,7 +45,6 @@ from vllm.model_executor.parameter import (
     RowvLLMParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

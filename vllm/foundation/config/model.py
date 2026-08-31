@@ -10,6 +10,7 @@ import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 import vllm.foundation.system.envs as envs
+from vllm.backends.platform import current_platform
 from vllm.foundation.config.model_arch import (
     ModelArchitectureConfig,
 )
@@ -25,9 +26,6 @@ from vllm.foundation.config.pooler import POOLER_CONFIG_LOG_FIELDS, PoolerConfig
 from vllm.foundation.config.quantization import QuantizationConfigArgs
 from vllm.foundation.config.scheduler import RunnerType
 from vllm.foundation.config.utils import config, getattr_iter
-from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
-from vllm.frontend.processing.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.foundation.integrations.transformers_utils.config import (
     ConfigFormat,
     checkpoint_has_lm_head,
@@ -44,14 +42,19 @@ from vllm.foundation.integrations.transformers_utils.config import (
     uses_mrope,
     uses_xdrope_dim,
 )
-from vllm.foundation.integrations.transformers_utils.model_arch_config_convertor import (
+from vllm.foundation.integrations.transformers_utils.model_arch_config_convertor import (  # noqa: E501
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
 )
 from vllm.foundation.integrations.transformers_utils.repo_utils import resolve_revision
-from vllm.foundation.integrations.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
+from vllm.foundation.integrations.transformers_utils.runai_utils import (
+    ObjectStorageModel,
+    is_runai_obj_uri,
+)
 from vllm.foundation.integrations.transformers_utils.utils import maybe_model_redirect
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.import_utils import LazyLoader
+from vllm.frontend.processing.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:

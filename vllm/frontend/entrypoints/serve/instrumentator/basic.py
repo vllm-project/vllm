@@ -4,9 +4,9 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.frontend.entrypoints.serve.tokenize.serving import ServingTokenization
-from vllm.foundation.observability.logger import init_logger
 from vllm.version import __version__ as VLLM_VERSION
 
 router = APIRouter()

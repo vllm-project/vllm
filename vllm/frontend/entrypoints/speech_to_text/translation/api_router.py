@@ -8,13 +8,13 @@ from typing import Annotated
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.frontend.entrypoints.serve.utils.api_utils import (
     load_aware_call,
     with_cancellation,
 )
 from vllm.frontend.entrypoints.speech_to_text.base.utils import read_upload_with_limit
-from vllm.foundation.observability.logger import init_logger
 
 from .protocol import TranslationRequest, TranslationResponseVariant
 from .serving import OpenAIServingTranslation

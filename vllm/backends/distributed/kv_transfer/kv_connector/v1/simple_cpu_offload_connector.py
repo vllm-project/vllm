@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.kv_events import KVCacheEvent
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -15,6 +14,7 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput

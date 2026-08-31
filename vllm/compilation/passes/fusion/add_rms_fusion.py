@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E501
 # COMPAT SHIM (auto-generated): old path -> canonical new path
 
 """Compatibility shim: vllm.compilation/passes/fusion/add_rms_fusion -> vllm.backends.compiler.passes.fusion.add_rms_fusion (sys.modules alias)."""
+
 import importlib
 import sys
 

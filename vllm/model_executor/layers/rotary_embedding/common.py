@@ -7,10 +7,10 @@ from importlib import import_module
 
 import torch
 
-from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
+from vllm.model_executor.custom_op import CustomOp
 
 logger = init_logger(__name__)
 

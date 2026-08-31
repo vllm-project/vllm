@@ -19,20 +19,18 @@ from transformers.models.cohere2_vision.processing_cohere2_vision import (
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.activation import MulAndSilu
-from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
-    RowParallelLinear,
-)
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.frontend.processing.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.frontend.processing.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
 from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -42,8 +40,14 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
+from vllm.model_executor.layers.activation import MulAndSilu
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

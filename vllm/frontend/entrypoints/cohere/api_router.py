@@ -38,6 +38,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.frontend.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.frontend.entrypoints.serve.utils.api_utils import (
@@ -45,7 +46,6 @@ from vllm.frontend.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
-from vllm.foundation.observability.logger import init_logger
 
 _COHERE_PATH_PREFIX = "/cohere/"
 
@@ -68,7 +68,9 @@ if _SDK_AVAILABLE:
     )
     from vllm.frontend.entrypoints.cohere.serving import CohereServingChatV2
     from vllm.frontend.entrypoints.scale_out.render.serving import ServingRender
-    from vllm.frontend.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
+    from vllm.frontend.entrypoints.scale_out.token_in_token_out.protocol import (
+        GenerateRequest,
+    )
 
     router = APIRouter()
 

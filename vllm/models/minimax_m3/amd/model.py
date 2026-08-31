@@ -24,17 +24,18 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm import _custom_ops as ops
-from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
+from vllm.backends.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.foundation.config import (
     CacheConfig,
     VllmConfig,
     get_current_vllm_config,
 )
-from vllm.backends.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
+from vllm.foundation.utilities.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -107,9 +108,8 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     select_main_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,

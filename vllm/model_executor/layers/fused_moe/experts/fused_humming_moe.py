@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import envs
-from vllm.runtime.execution.forward_context import get_forward_context
+from vllm.backends.compute.scalar_type import ScalarType
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
+from vllm.foundation.utilities.import_utils import has_humming
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation_supported,
@@ -60,20 +62,18 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.scalar_type import ScalarType
-from vllm.foundation.utilities.import_utils import has_humming
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.utils.humming_utils import (
-        HummingMoEQuantConfig,
-    )
     from vllm.foundation.utilities.humming import (
         GemmType as HummingGemmType,
     )
     from vllm.foundation.utilities.humming import (
         LayerConfig as HummingLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        HummingMoEQuantConfig,
     )
 
 

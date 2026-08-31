@@ -11,6 +11,7 @@ from pydantic import (
 )
 
 from vllm.foundation.config import ModelConfig
+from vllm.foundation.utilities import random_uuid
 from vllm.frontend.entrypoints.generate.base.protocol import StreamOptions
 from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
@@ -22,10 +23,9 @@ from vllm.frontend.entrypoints.openai.completion.protocol import (
     CompletionStreamResponse,
 )
 from vllm.frontend.entrypoints.serve.engine.protocol import UsageInfo
-from vllm.runtime.generation.logprobs import Logprob
 from vllm.frontend.processing.renderers import TokenizeParams
 from vllm.frontend.processing.sampling_params import SamplingParams
-from vllm.foundation.utilities import random_uuid
+from vllm.runtime.generation.logprobs import Logprob
 
 ####### Tokens IN <> Tokens OUT #######
 

@@ -10,6 +10,10 @@ from typing import Any, Final, cast
 
 from fastapi import Request
 
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system.exceptions import GenerationError
+from vllm.foundation.utilities.collection_utils import as_list
+from vllm.foundation.utilities.serial_utils import numpy2base64
 from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.frontend.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -49,23 +53,22 @@ from vllm.frontend.entrypoints.serve.engine.protocol import (
     PromptTokenUsageInfo,
     UsageInfo,
 )
-from vllm.frontend.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.frontend.entrypoints.serve.utils.api_utils import (
+    get_max_tokens,
+    should_include_usage,
+)
 from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.frontend.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
-from vllm.foundation.system.exceptions import GenerationError
 from vllm.frontend.processing.inputs import EngineInput, MultiModalPlaceholders
-from vllm.foundation.observability.logger import init_logger
-from vllm.runtime.generation.logprobs import Logprob
 from vllm.frontend.processing.outputs import RequestOutput
 from vllm.frontend.processing.parser import ParserManager
 from vllm.frontend.processing.parser.abstract_parser import Parser
 from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
 from vllm.frontend.processing.sampling_params import BeamSearchParams, SamplingParams
 from vllm.frontend.processing.tokenizers import TokenizerLike
-from vllm.foundation.utilities.collection_utils import as_list
-from vllm.foundation.utilities.serial_utils import numpy2base64
+from vllm.runtime.generation.logprobs import Logprob
 
 logger = init_logger(__name__)
 

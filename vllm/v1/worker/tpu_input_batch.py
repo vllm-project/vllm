@@ -7,10 +7,10 @@ from typing import cast
 import numpy as np
 import torch
 
-from vllm.runtime.modeling.lora.request import LoRARequest
-from vllm.frontend.processing.sampling_params import SamplingType
 from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
 from vllm.foundation.utilities.collection_utils import swap_dict_values
+from vllm.frontend.processing.sampling_params import SamplingType
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState

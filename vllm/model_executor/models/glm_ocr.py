@@ -40,10 +40,14 @@ if TYPE_CHECKING:
         GlmOcrVisionConfig,
     )
 
-from vllm.foundation.config import VllmConfig
-from vllm.backends.distributed import get_tensor_model_parallel_world_size, parallel_state
+from vllm.backends.distributed import (
+    get_tensor_model_parallel_world_size,
+    parallel_state,
+)
 from vllm.backends.distributed import utils as dist_utils
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
@@ -69,7 +73,6 @@ from vllm.model_executor.models.glm4_1v import (
     Glm4vVisionPatchEmbed,
     Glm4vVisionTransformer,
 )
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
 from .utils import (
     maybe_prefix,

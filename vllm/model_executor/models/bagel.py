@@ -15,14 +15,12 @@ import torch.nn as nn
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions, ImageDummyOptions
-from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    RowParallelLinear,
+from vllm.foundation.integrations.transformers_utils.processors.bagel import (
+    BagelProcessor,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.tensor_schema import TensorSchema
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -35,9 +33,13 @@ from vllm.frontend.processing.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
 )
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.processors.bagel import BagelProcessor
-from vllm.foundation.utilities.tensor_schema import TensorSchema
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -191,7 +193,9 @@ class BagelProcessingInfo(BaseProcessingInfo):
     """Processing information for BAGEL model."""
 
     def get_hf_processor(self, **kwargs: object) -> BagelProcessor:
-        from vllm.foundation.integrations.transformers_utils.processor import cached_get_image_processor
+        from vllm.foundation.integrations.transformers_utils.processor import (
+            cached_get_image_processor,
+        )
 
         image_processor = cached_get_image_processor(
             self.ctx.model_config.model,

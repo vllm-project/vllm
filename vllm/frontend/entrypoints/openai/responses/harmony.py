@@ -29,6 +29,8 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai_harmony import Author, Message, Role, TextContent
 
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities import random_uuid
 from vllm.frontend.entrypoints.openai.parser.harmony_utils import (
     BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
     extract_function_from_recipient,
@@ -40,8 +42,6 @@ from vllm.frontend.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
-from vllm.foundation.observability.logger import init_logger
-from vllm.foundation.utilities import random_uuid
 
 logger = init_logger(__name__)
 

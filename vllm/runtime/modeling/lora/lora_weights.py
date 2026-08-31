@@ -6,8 +6,8 @@ from collections.abc import Sequence as GenericSequence
 import torch
 import torch.types
 
-from vllm.runtime.modeling.lora.peft_helper import PEFTHelper
 from vllm.foundation.utilities.torch_utils import PIN_MEMORY
+from vllm.runtime.modeling.lora.peft_helper import PEFTHelper
 
 
 class LoRALayerWeights:

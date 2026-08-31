@@ -8,14 +8,16 @@ import regex as re
 import torch
 import torch.nn as nn
 
-from vllm.foundation.config import VllmConfig
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.backends.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.runtime.execution.forward_context import get_forward_context
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -59,10 +61,8 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.xpu.xpu_sparse import DeepseekV4XPUAttention
-from vllm.backends.platform import current_platform
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.backends.compute.dsl.triton_utils import tl, triton
-from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 
 class DeepseekV4MLP(nn.Module):

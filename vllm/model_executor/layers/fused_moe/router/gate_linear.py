@@ -4,12 +4,12 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm._custom_ops as ops
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import get_current_vllm_config_or_none
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 

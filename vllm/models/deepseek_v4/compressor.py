@@ -7,8 +7,8 @@ from typing import Any, ClassVar, cast
 import torch
 from torch import nn
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
-from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
@@ -20,7 +20,7 @@ from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     save_partial_states,
 )
-from vllm.backends.platform import current_platform
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

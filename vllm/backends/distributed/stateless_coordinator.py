@@ -7,7 +7,9 @@ from typing import Any, Optional
 import torch
 from torch.distributed import Backend, ProcessGroup, Store
 
-from vllm.backends.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.backends.distributed.device_communicators.cuda_communicator import (
+    CudaCommunicator,
+)
 from vllm.backends.distributed.parallel_state import (
     GroupCoordinator,
     TensorMetadata,

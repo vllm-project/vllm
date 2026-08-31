@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import torch
 
-from vllm.model_executor.offloader.base import get_offloader
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
+from vllm.model_executor.offloader.base import get_offloader
 
 # --- wait_prefetch op ---
 

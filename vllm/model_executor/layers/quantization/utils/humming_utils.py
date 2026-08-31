@@ -8,8 +8,9 @@ import regex as re
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import envs
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
+from vllm.foundation.utilities.import_utils import has_humming
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -34,10 +35,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
 )
-from vllm.foundation.utilities.import_utils import has_humming
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
     from vllm.foundation.utilities.humming import (
         AWQWeightSchema,
         BaseInputSchema,
@@ -51,6 +50,7 @@ if TYPE_CHECKING:
         LayerConfig,
     )
     from vllm.foundation.utilities.humming import dtypes as humming_dtypes
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
 logger = init_logger(__name__)
 
@@ -1045,10 +1045,13 @@ def convert_to_humming_moe_kernel_format(
                 "Must provide either weight_schema/input_schema or quant_config"
             )
 
+        from vllm.foundation.utilities.humming import (
+            BaseWeightSchema,
+            HummingInputSchema,
+        )
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             humming_is_layer_skipped,
         )
-        from vllm.foundation.utilities.humming import BaseWeightSchema, HummingInputSchema
 
         if weight_schema is None:
             weight_schema = BaseWeightSchema.from_config(quant_config)

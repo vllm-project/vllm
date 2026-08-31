@@ -8,11 +8,15 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from vllm.foundation.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.backends.distributed.eplb.eplb_state import EplbState
-from vllm.runtime.execution.forward_context import set_forward_context
+from vllm.foundation.config import (
+    CUDAGraphMode,
+    VllmConfig,
+    get_layers_from_vllm_config,
+)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
+from vllm.runtime.execution.forward_context import set_forward_context
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.utils import CpuGpuBuffer

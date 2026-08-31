@@ -4,11 +4,11 @@
 
 import torch
 
-from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseImpl,
     MiniMaxM3SparseMetadata,
 )
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.v1.attention.backend import (
     AttentionLayer,
 )

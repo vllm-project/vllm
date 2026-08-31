@@ -7,17 +7,17 @@ from collections.abc import Callable
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.math_utils import round_up
+from vllm.foundation.utilities.torch_utils import _USE_LAYERNAME, _encode_layer_name
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
     kStaticTensorScale,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.math_utils import round_up
-from vllm.foundation.utilities.torch_utils import _USE_LAYERNAME, _encode_layer_name
 
 from ..vllm_inductor_pass import VllmFusionPatternMatcherPass, VllmPatternReplacement
 from .matcher_utils import MatcherQuantFP8

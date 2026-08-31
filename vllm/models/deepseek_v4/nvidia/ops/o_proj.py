@@ -3,11 +3,11 @@
 import torch
 import torch.nn as nn
 
+from vllm.backends.platform import current_platform
+from vllm.foundation.utilities.deep_gemm import fp8_einsum
 from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
     fused_inv_rope_fp8_quant,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.deep_gemm import fp8_einsum
 
 
 def compute_fp8_einsum_recipe() -> tuple[tuple[int, int, int], bool]:

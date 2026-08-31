@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.backends.distributed.ec_transfer.ec_connector.base import ECConnectorBase
+from vllm.foundation.config import VllmConfig
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     ECConnectorOutput,

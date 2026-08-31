@@ -51,10 +51,10 @@ from vllm.benchmarks.lib.endpoint_request_func import (
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
-from vllm.frontend.processing.tokenizers import TokenizerLike, get_tokenizer
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 from vllm.foundation.utilities.gc_utils import freeze_gc_heap
 from vllm.foundation.utilities.network_utils import join_host_port
+from vllm.frontend.processing.tokenizers import TokenizerLike, get_tokenizer
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 

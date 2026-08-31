@@ -18,17 +18,45 @@ from transformers import (
 from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
+from vllm.foundation.config import (
+    CacheConfig,
+    ModelConfig,
+    SpeechToTextConfig,
+    VllmConfig,
+)
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.backends.distributed import get_tensor_model_parallel_world_size
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_processor_from_config,
+)
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.jsontree import json_map_leaves
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import set_default_torch_dtype
 from vllm.frontend.processing.inputs import (
     ExplicitEncoderDecoderPrompt,
     MultiModalDataDict,
     PromptType,
     TextPrompt,
 )
-from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.frontend.processing.multimodal.parse import (
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
+from vllm.frontend.processing.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseProcessingInfo,
+    EncDecMultiModalProcessor,
+    PromptReplacement,
+    PromptUpdate,
+)
+from vllm.frontend.processing.renderers import TokenizeParams
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -48,24 +76,6 @@ from vllm.model_executor.models.whisper_utils import (
     ISO639_1_SUPPORTED_LANGS,
 )
 from vllm.model_executor.offloader import get_offloader
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
-from vllm.frontend.processing.multimodal.parse import MultiModalDataItems, MultiModalDataParser
-from vllm.frontend.processing.multimodal.processing import (
-    BaseDummyInputsBuilder,
-    BaseProcessingInfo,
-    EncDecMultiModalProcessor,
-    PromptReplacement,
-    PromptUpdate,
-)
-from vllm.frontend.processing.renderers import TokenizeParams
-from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
-from vllm.foundation.utilities.jsontree import json_map_leaves
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
-from vllm.foundation.utilities.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backend import (
     AttentionType,
 )

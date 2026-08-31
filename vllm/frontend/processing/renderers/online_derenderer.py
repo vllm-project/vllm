@@ -3,6 +3,9 @@
 from typing import Any
 
 from vllm.foundation.config import ModelConfig
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities import random_uuid
+from vllm.foundation.utilities.async_utils import make_async
 from vllm.frontend.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.frontend.entrypoints.generate.base.protocol import DeltaMessage, ToolCall
 from vllm.frontend.entrypoints.generate.base.serving import resolve_token_id_placeholder
@@ -29,13 +32,12 @@ from vllm.frontend.entrypoints.scale_out.token_in_token_out.protocol import (
 )
 from vllm.frontend.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.parser import Parser, ParserManager
 from vllm.frontend.processing.renderers import BaseRenderer
 from vllm.frontend.processing.tokenizers import TokenizerLike
-from vllm.frontend.processing.tokenizers.detokenizer_utils import detokenize_incrementally
-from vllm.foundation.utilities import random_uuid
-from vllm.foundation.utilities.async_utils import make_async
+from vllm.frontend.processing.tokenizers.detokenizer_utils import (
+    detokenize_incrementally,
+)
 
 logger = init_logger(__name__)
 

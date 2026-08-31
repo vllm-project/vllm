@@ -33,8 +33,8 @@ import torch
 import torch.nn as nn
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import get_pp_group
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead

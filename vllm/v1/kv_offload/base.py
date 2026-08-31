@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 if TYPE_CHECKING:
-    from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (  # noqa: E501
         OffloadingConnectorStats,
     )
 

@@ -21,17 +21,13 @@ from transformers import BatchFeature, WhisperConfig
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType, TokensPrompt
-from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models import SupportsPP
-from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.whisper import (
-    WhisperEncoder,
-    _create_fake_bias_for_k_proj,
+from vllm.foundation.integrations.transformers_utils.processors.voxtral import (
+    MistralCommonFeatureExtractor,
+    MistralCommonVoxtralProcessor,
 )
-from vllm.model_executor.models.whisper_causal import WhisperCausalEncoder
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -54,14 +50,18 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.frontend.processing.tokenizers.mistral import MistralTokenizer
-from vllm.foundation.integrations.transformers_utils.processors.voxtral import (
-    MistralCommonFeatureExtractor,
-    MistralCommonVoxtralProcessor,
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models import SupportsPP
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.whisper import (
+    WhisperEncoder,
+    _create_fake_bias_for_k_proj,
 )
-from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.model_executor.models.whisper_causal import WhisperCausalEncoder
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsTranscription
 from .utils import init_vllm_registered_model, maybe_prefix

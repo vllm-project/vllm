@@ -8,8 +8,8 @@ from functools import cache
 
 import torch
 
-from vllm.backends.platform import current_platform
 from vllm.backends.compute.dsl.tilelang_utils import T, tilelang, tilelang_jit
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.math_utils import cdiv
 
 ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda()

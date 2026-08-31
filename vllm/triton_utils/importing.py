@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E501
 # COMPAT SHIM (auto-generated): old path -> canonical new path
 
 """Compatibility shim: vllm.triton_utils/importing -> vllm.backends.compute.dsl.triton_utils.importing (sys.modules alias)."""
+
 import importlib
 import sys
 

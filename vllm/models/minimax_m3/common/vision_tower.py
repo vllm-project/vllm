@@ -10,6 +10,7 @@ from transformers import PretrainedConfig
 
 from vllm.backends.distributed import parallel_state
 from vllm.backends.distributed import utils as dist_utils
+from vllm.backends.platform import current_platform
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
@@ -27,7 +28,6 @@ from vllm.model_executor.models.vision import (
     get_vit_attn_backend,
     is_vit_use_data_parallel,
 )
-from vllm.backends.platform import current_platform
 
 # ROCm caps a kernel-launch gridDim.y at 65536. The HIP flash-attn Triton
 # rotary kernel launches grid.y = cdiv(seqlen, BLOCK_M), so it fails with

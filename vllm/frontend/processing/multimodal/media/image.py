@@ -11,7 +11,9 @@ from PIL import Image
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.utilities.serial_utils import tensor2base64
-from vllm.foundation.utilities.sparse_utils import check_sparse_tensor_invariants_threadsafe
+from vllm.foundation.utilities.sparse_utils import (
+    check_sparse_tensor_invariants_threadsafe,
+)
 
 from ..image import convert_image_mode, normalize_image, rgba_to_rgb
 from .base import MediaIO, MediaWithBytes

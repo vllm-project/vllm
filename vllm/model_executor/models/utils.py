@@ -12,24 +12,24 @@ import torch
 import torch.nn as nn
 from torch.nn.modules.module import register_module_module_registration_hook
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.torch_utils import (
+    direct_register_custom_op,
+)
+from vllm.frontend.processing.multimodal import NestedTensors
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import supports_any_eagle
-from vllm.frontend.processing.multimodal import NestedTensors
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.math_utils import cdiv
-from vllm.foundation.utilities.torch_utils import (
-    direct_register_custom_op,
-)
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig

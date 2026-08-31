@@ -12,6 +12,7 @@ from compressed_tensors.transform import (
 )
 from compressed_tensors.utils import is_match
 
+from vllm.backends.platform import current_platform
 from vllm.model_executor.layers.linear import (
     WEIGHT_LOADER_V2_SUPPORTED,
     LinearMethodBase,
@@ -25,7 +26,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.module
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils import (  # noqa: E501
     TransformTuple,
 )
-from vllm.backends.platform import current_platform
 
 
 class CompressedTensorsLinearTransformMethod(LinearMethodBase):

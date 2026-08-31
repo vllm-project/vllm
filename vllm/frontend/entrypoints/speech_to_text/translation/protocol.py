@@ -12,16 +12,16 @@ from pydantic import (
 )
 
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system.exceptions import VLLMValidationError
+from vllm.foundation.utilities import random_uuid
 from vllm.frontend.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.frontend.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.sampling_params import (
     BeamSearchParams,
     RequestOutputKind,
     SamplingParams,
 )
-from vllm.foundation.utilities import random_uuid
 
 from ..base.protocol import _LONG_INFO, AudioResponseFormat
 

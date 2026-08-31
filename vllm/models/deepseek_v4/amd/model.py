@@ -10,12 +10,13 @@ import torch.nn as nn
 
 import vllm.foundation.system.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
@@ -64,7 +65,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
-from vllm.backends.platform import current_platform
 from vllm.runtime.modeling.sequence import IntermediateTensors
 
 logger = init_logger(__name__)

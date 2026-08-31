@@ -6,14 +6,14 @@ from enum import IntEnum
 import torch
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-)
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.torch_utils import (
     aux_stream,
     current_stream,
+)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
 )
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,

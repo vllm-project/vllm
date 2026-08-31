@@ -5,6 +5,9 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.backends.compute.dsl.triton_utils import tl, triton, use_tensor_descriptor
+from vllm.backends.compute.dsl.triton_utils.allocation import set_triton_allocator
+from vllm.backends.platform import current_platform
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -31,9 +34,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.dsl.triton_utils import tl, triton, use_tensor_descriptor
-from vllm.backends.compute.dsl.triton_utils.allocation import set_triton_allocator
 
 
 def _is_capturing_or_compiling() -> bool:

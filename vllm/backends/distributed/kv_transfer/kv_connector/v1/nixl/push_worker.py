@@ -56,7 +56,9 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping impor
     ReadSpec,
     _is_attention_spec,
 )
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_request_id
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
+    get_base_request_id,
+)
 from vllm.foundation.observability.logger import init_logger
 
 if TYPE_CHECKING:

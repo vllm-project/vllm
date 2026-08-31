@@ -17,8 +17,8 @@ from vllm.foundation.config import (
     CUDAGraphMode,
     VllmConfig,
 )
-from vllm.runtime.execution.forward_context import set_forward_context
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d
+from vllm.runtime.execution.forward_context import set_forward_context
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch

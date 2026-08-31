@@ -6,7 +6,9 @@ from vllm.backends.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorRole,
 )
-from vllm.backends.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
+from vllm.backends.distributed.ec_transfer.ec_connector.factory import (
+    ECConnectorFactory,
+)
 
 if TYPE_CHECKING:
     from vllm.foundation.config import VllmConfig

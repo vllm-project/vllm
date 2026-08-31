@@ -8,6 +8,8 @@ from typing import Any
 
 import regex as re
 
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities import random_uuid
 from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -20,13 +22,11 @@ from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.frontend.processing.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.foundation.utilities import random_uuid
 
 logger = init_logger(__name__)
 

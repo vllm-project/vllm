@@ -33,12 +33,12 @@ from transformers.models.glm4_moe import Glm4MoeConfig
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.backends.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
+from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (

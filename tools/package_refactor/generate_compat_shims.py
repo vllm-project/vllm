@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import TypedDict
 
 HEADER = """# SPDX-License-Identifier: Apache-2.0
-# SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E501
 # COMPAT SHIM (auto-generated): old path -> canonical new path
 """
 
@@ -37,6 +37,14 @@ def _module_path(path: str) -> str:
     return path.replace("/", ".")
 
 
+def _render_real_import(importer: str, new_module: str) -> str:
+    """Render an import assignment using Ruff-compatible line wrapping."""
+    statement = f'_real = {importer}.import_module("vllm.{new_module}")'
+    if len(statement) <= 88:
+        return statement + "\n"
+    return f'_real = {importer}.import_module(\n    "vllm.{new_module}"\n)\n'
+
+
 def _render_alias(old_path: str, new_module: str) -> str:
     """Render a shim that aliases a legacy module to its canonical module."""
     label = old_path[:-3] if old_path.endswith(".py") else old_path
@@ -44,10 +52,10 @@ def _render_alias(old_path: str, new_module: str) -> str:
         HEADER
         + "\n"
         + f'"""Compatibility shim: vllm.{label} -> vllm.{new_module} '
-        + '(sys.modules alias)."""\n'
+        + '(sys.modules alias)."""\n\n'
         + "import importlib\n"
         + "import sys\n\n"
-        + f'_real = importlib.import_module("vllm.{new_module}")\n'
+        + _render_real_import("importlib", new_module)
         + "sys.modules[__name__] = _real\n"
     )
 
@@ -59,13 +67,14 @@ def _render_package(old_path: str, new_module: str) -> str:
         HEADER
         + "\n"
         + f'"""Compatibility shim: vllm.{label} -> vllm.{new_module} '
-        + '(lazy __getattr__ delegation)."""\n'
+        + '(lazy __getattr__ delegation)."""\n\n'
         + "import importlib as _importlib\n\n"
-        + f'_real = _importlib.import_module("vllm.{new_module}")\n\n'
+        + _render_real_import("_importlib", new_module)
+        + "\n\n"
         + "def __getattr__(name):\n"
-        + "    return getattr(_real, name)\n\n"
+        + "    return getattr(_real, name)\n\n\n"
         + "def __dir__():\n"
-        + "    return dir(_real)\n\n"
+        + "    return dir(_real)\n\n\n"
         + '__all__ = getattr(_real, "__all__", [])\n'
     )
 

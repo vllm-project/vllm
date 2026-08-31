@@ -102,7 +102,9 @@ class ParserEngineConfig:
 
     @cached_property
     def terminal_defs(self):
-        from vllm.frontend.processing.parser.engine.incremental_lexer import terminals_from_literals
+        from vllm.frontend.processing.parser.engine.incremental_lexer import (
+            terminals_from_literals,
+        )
 
         return terminals_from_literals(self.terminals)
 

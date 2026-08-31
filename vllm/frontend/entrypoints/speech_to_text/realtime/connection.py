@@ -12,11 +12,11 @@ import pybase64 as base64
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
-from vllm import envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.frontend.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.frontend.entrypoints.serve.exception_handling.utils import sanitize_message
-from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.foundation.observability.logger import init_logger
 
 from .protocol import (
     ErrorEvent,
@@ -211,7 +211,10 @@ class RealtimeConnection:
 
         try:
             # Create sampling params
-            from vllm.frontend.processing.sampling_params import RequestOutputKind, SamplingParams
+            from vllm.frontend.processing.sampling_params import (
+                RequestOutputKind,
+                SamplingParams,
+            )
 
             sampling_params = SamplingParams.from_optional(
                 temperature=0.0,

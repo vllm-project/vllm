@@ -10,7 +10,13 @@ from typing import Any, cast
 import numpy as np
 import torch
 
-from vllm.runtime.modeling.lora.request import LoRARequest
+from vllm.foundation.observability.tracing import (
+    SpanAttributes,
+    SpanKind,
+    extract_trace_context,
+    instrument_manual,
+)
+from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
 from vllm.frontend.processing.outputs import (
     STREAM_FINISHED,
     CompletionOutput,
@@ -21,13 +27,7 @@ from vllm.frontend.processing.outputs import (
 )
 from vllm.frontend.processing.sampling_params import RequestOutputKind
 from vllm.frontend.processing.tokenizers import TokenizerLike
-from vllm.foundation.observability.tracing import (
-    SpanAttributes,
-    SpanKind,
-    extract_trace_context,
-    instrument_manual,
-)
-from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor

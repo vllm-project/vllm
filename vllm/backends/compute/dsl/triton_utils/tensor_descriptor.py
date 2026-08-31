@@ -4,8 +4,8 @@
 
 def use_tensor_descriptor(override: bool | None = None) -> bool:
     """Tri-state VLLM_TRITON_USE_TD: unset=auto (on for XPU), 1/0=force on/off."""
-    from vllm import envs
     from vllm.backends.platform import current_platform
+    from vllm.foundation.system import envs
 
     if override is None:
         override = envs.VLLM_TRITON_USE_TD

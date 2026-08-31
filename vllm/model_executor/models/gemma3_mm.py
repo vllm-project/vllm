@@ -12,16 +12,19 @@ from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm
-from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.frontend.processing.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.frontend.processing.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
 from vllm.frontend.processing.multimodal.processing import BaseDummyInputsBuilder
 from vllm.frontend.processing.multimodal.processing.processor import (
     BaseMultiModalProcessor,
@@ -35,8 +38,9 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     cached_encode,
     replace_token_matches,
 )
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

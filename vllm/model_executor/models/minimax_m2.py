@@ -32,12 +32,12 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear

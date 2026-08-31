@@ -14,6 +14,10 @@ from typing_extensions import assert_never
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.observability.tracing import instrument
+from vllm.foundation.utilities.mem_utils import release_device_memory_under_pressure
+from vllm.foundation.utilities.platform_utils import is_pin_memory_available
+from vllm.foundation.utilities.torch_utils import get_accelerator_view_from_cpu_tensor
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.hpc import HpcModule
 from vllm.model_executor.layers.quantization.base_config import (
@@ -26,10 +30,6 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
 from vllm.model_executor.models.interfaces import SupportsQuant
-from vllm.foundation.observability.tracing import instrument
-from vllm.foundation.utilities.mem_utils import release_device_memory_under_pressure
-from vllm.foundation.utilities.platform_utils import is_pin_memory_available
-from vllm.foundation.utilities.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
 

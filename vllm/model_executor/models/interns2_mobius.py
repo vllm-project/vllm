@@ -9,7 +9,6 @@ import torch
 from torch import nn
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import VllmConfig, replace, set_current_vllm_config
 from vllm.backends.distributed import (
     get_ep_group,
     get_pp_group,
@@ -17,6 +16,9 @@ from vllm.backends.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.foundation.config import VllmConfig, replace, set_current_vllm_config
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.tokenizers.registry import cached_tokenizer_from_config
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -27,9 +29,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.frontend.processing.tokenizers.registry import cached_tokenizer_from_config
 
 from .interfaces import EagleModelMixin
 from .interns2_preview import (

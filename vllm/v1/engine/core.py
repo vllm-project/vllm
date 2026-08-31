@@ -21,21 +21,19 @@ import msgspec
 import zmq
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import ParallelConfig, VllmConfig
-from vllm.foundation.config.pooler import POOLER_CONFIG_LOG_FIELDS
 from vllm.backends.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
-from vllm.foundation.system.envs import enable_envs_cache
+from vllm.foundation.config import ParallelConfig, VllmConfig
+from vllm.foundation.config.pooler import POOLER_CONFIG_LOG_FIELDS
+from vllm.foundation.integrations.transformers_utils.config import (
+    maybe_register_config_serialize_by_value,
+)
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.logging_utils.dump_input import dump_engine_exception
-from vllm.runtime.modeling.lora.request import LoRARequest
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.cache import MultiModalCacheMissError
-from vllm.frontend.processing.tasks import POOLING_TASKS, SupportedTask
 from vllm.foundation.observability.tracing import instrument, maybe_init_worker_tracer
-from vllm.foundation.integrations.transformers_utils.config import maybe_register_config_serialize_by_value
+from vllm.foundation.system.envs import enable_envs_cache
 from vllm.foundation.utilities import numa_utils
 from vllm.foundation.utilities.gc_utils import (
     freeze_gc_heap,
@@ -44,6 +42,10 @@ from vllm.foundation.utilities.gc_utils import (
 from vllm.foundation.utilities.hashing import get_hash_fn_by_name
 from vllm.foundation.utilities.network_utils import make_zmq_socket
 from vllm.foundation.utilities.system_utils import decorate_logs, set_process_title
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.cache import MultiModalCacheMissError
+from vllm.frontend.processing.tasks import POOLING_TASKS, SupportedTask
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -2035,7 +2037,9 @@ class DPEngineCoreProc(EngineCoreProc):
         self.pending_pause = False
         self.ignore_start_dp_wave = False
 
-        from vllm.backends.distributed.elastic_ep.elastic_state import ElasticEPScalingState
+        from vllm.backends.distributed.elastic_ep.elastic_state import (
+            ElasticEPScalingState,
+        )
 
         self.eep_scaling_state: ElasticEPScalingState | None = None
 
@@ -2292,7 +2296,9 @@ class DPEngineCoreProc(EngineCoreProc):
     ) -> str:
         from copy import deepcopy
 
-        from vllm.backends.distributed.elastic_ep.elastic_state import ElasticEPScalingState
+        from vllm.backends.distributed.elastic_ep.elastic_state import (
+            ElasticEPScalingState,
+        )
 
         new_parallel_config = deepcopy(self.vllm_config.parallel_config)
         old_dp_size = new_parallel_config.data_parallel_size
@@ -2383,7 +2389,9 @@ class DPEngineCoreProc(EngineCoreProc):
                 socket.send_multipart(encoder.encode(outputs))
 
     def _eep_scale_up_before_kv_init(self):
-        from vllm.backends.distributed.elastic_ep.elastic_state import ElasticEPScalingState
+        from vllm.backends.distributed.elastic_ep.elastic_state import (
+            ElasticEPScalingState,
+        )
 
         self.ignore_start_dp_wave = True
         state = ElasticEPScalingState(

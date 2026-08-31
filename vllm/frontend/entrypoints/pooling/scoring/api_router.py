@@ -4,13 +4,13 @@ from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, Request
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.frontend.entrypoints.serve.utils.api_utils import (
     load_aware_call,
     validate_json_request,
     with_cancellation,
 )
-from vllm.foundation.observability.logger import init_logger
 
 from .protocol import RerankRequest, ScoreRequest
 from .serving import ServingScores

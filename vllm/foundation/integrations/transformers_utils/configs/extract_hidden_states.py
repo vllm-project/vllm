@@ -7,7 +7,9 @@ import os
 
 from transformers import PretrainedConfig
 
-from vllm.foundation.integrations.transformers_utils.utils import without_trust_remote_code
+from vllm.foundation.integrations.transformers_utils.utils import (
+    without_trust_remote_code,
+)
 
 
 class ExtractHiddenStatesConfig(PretrainedConfig):

@@ -12,15 +12,15 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.backends.compute.ir.ops
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config
 from vllm.foundation.config.utils import Range
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.model_executor.layers.attention.attention import (
     Attention,
     get_attention_context,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass

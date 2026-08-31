@@ -4,11 +4,11 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.backends.platform import current_platform
 
 
 @dataclass

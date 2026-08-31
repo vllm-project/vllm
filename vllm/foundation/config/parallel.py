@@ -13,10 +13,10 @@ from torch.distributed import ProcessGroup, ReduceOp, Store
 from typing_extensions import Self
 
 import vllm.foundation.system.envs as envs
+from vllm.backends.platform import current_platform
 from vllm.foundation.config.fault_tolerance import FaultToleranceConfig
 from vllm.foundation.config.utils import config
 from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.network_utils import get_open_ports_list
 
 if TYPE_CHECKING:
@@ -366,7 +366,7 @@ class ParallelConfig:
       per layer for MLA models.
 
     `None` selects the model default, which is "ag_rs" unless the model
-    overrides it via [`set_dcp_defaults`][vllm.foundation.config.ParallelConfig.set_dcp_defaults].
+    overrides it via [`set_dcp_defaults`][].
     """
 
     dcp_q_replicate: bool | None = None

@@ -11,9 +11,13 @@ from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
-from vllm.foundation.config import VllmConfig
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.backends.distributed import divide, get_tensor_model_parallel_rank
-from vllm.runtime.execution.forward_context import get_forward_context
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import (
+    KimiLinearConfig,
+)
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -43,10 +47,8 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
 )
-from vllm.backends.platform import current_platform
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
-from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec

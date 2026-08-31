@@ -45,7 +45,9 @@ _EXPORTS: dict[str, str] = {
 def __getattr__(name: str) -> Any:
     spec = _EXPORTS.get(name)
     if spec is None:
-        raise AttributeError(f"module 'vllm.foundation.utilities.humming' has no attribute {name!r}")
+        raise AttributeError(
+            f"module 'vllm.foundation.utilities.humming' has no attribute {name!r}"
+        )
     if ":" in spec:
         mod_path, attr = spec.split(":", 1)
         obj = getattr(importlib.import_module(mod_path), attr)

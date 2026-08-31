@@ -6,7 +6,8 @@ import model_hosting_container_standards.sagemaker as sagemaker_standards
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from vllm import envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.frontend.entrypoints.openai.models.api_router import models
 from vllm.frontend.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.frontend.entrypoints.serve.engine.protocol import ErrorResponse
@@ -15,7 +16,6 @@ from vllm.frontend.entrypoints.serve.lora.protocol import (
     UnloadLoRAAdapterRequest,
 )
 from vllm.frontend.entrypoints.serve.utils.api_utils import validate_json_request
-from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 router = APIRouter()

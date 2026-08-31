@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E501
 # COMPAT SHIM (auto-generated): old path -> canonical new path
 
 """Compatibility shim: vllm.parser/kimi_k3 -> vllm.frontend.processing.parser.kimi_k3 (sys.modules alias)."""
+
 import importlib
 import sys
 

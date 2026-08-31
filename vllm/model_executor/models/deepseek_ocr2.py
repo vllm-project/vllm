@@ -12,20 +12,16 @@ from transformers import BatchFeature
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.integrations.transformers_utils.configs.deepseek_vl2 import (
+    DeepseekVLV2Config,
+)
+from vllm.foundation.integrations.transformers_utils.processors.deepseek_ocr import (
+    BASE_SIZE,
+    CROP_MODE,
+    DeepseekOCRProcessor,
+    count_tiles,
+)
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.models.interfaces import (
-    MultiModalEmbeddings,
-    SupportsLoRA,
-    SupportsMultiModal,
-    SupportsPP,
-)
-from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    init_vllm_registered_model,
-    maybe_prefix,
-)
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -45,17 +41,23 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.frontend.processing.tokenizers.hf import HfTokenizer
-from vllm.foundation.integrations.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
-from vllm.foundation.integrations.transformers_utils.processors.deepseek_ocr import (
-    BASE_SIZE,
-    CROP_MODE,
-    DeepseekOCRProcessor,
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
-from ...transformers_utils.processors.deepseek_ocr import count_tiles
 from .deepencoder import ImageEncoderViT
 from .deepencoder2 import build_qwen2_decoder_as_encoder
 from .deepseek_ocr import DeepseekOCRImagePixelInputs

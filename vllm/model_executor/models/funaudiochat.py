@@ -27,9 +27,8 @@ from transformers.modeling_outputs import BaseModelOutput
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.foundation.utilities.import_utils import _has_module
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
-from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -48,8 +47,9 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.import_utils import _has_module
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (

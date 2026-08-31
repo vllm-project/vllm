@@ -3,8 +3,8 @@
 
 import torch
 
-from vllm.model_executor.layers.utils import apply_penalties
 from vllm.foundation.utilities.torch_utils import PIN_MEMORY, make_tensor_with_pad
+from vllm.model_executor.layers.utils import apply_penalties
 
 
 def apply_all_penalties(

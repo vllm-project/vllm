@@ -43,24 +43,25 @@ from transformers.dynamic_module_utils import (
 )
 from typing_extensions import TypeVar
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import (
     BaseDummyOptions,
     ImageDummyOptions,
     VideoDummyOptions,
 )
-from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.resampler import (
-    BaseResampler,
-    Resampler2,
-    get_2d_sincos_pos_embed,
+from vllm.foundation.integrations.transformers_utils.processor import (
+    _merge_mm_kwargs,
+    cached_get_image_processor,
 )
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
-from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
-from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
+from vllm.foundation.integrations.transformers_utils.utils import (
+    convert_model_repo_to_path,
+)
+from vllm.foundation.utilities.collection_utils import flatten_2d_lists
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import set_default_torch_dtype
+from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -90,17 +91,18 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     ResolvedPromptUpdate,
     cached_encode,
 )
-from vllm.backends.platform import current_platform
-from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.processor import (
-    _merge_mm_kwargs,
-    cached_get_image_processor,
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.resampler import (
+    BaseResampler,
+    Resampler2,
+    get_2d_sincos_pos_embed,
 )
-from vllm.foundation.integrations.transformers_utils.utils import convert_model_repo_to_path
-from vllm.foundation.utilities.collection_utils import flatten_2d_lists
-from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
-from vllm.foundation.utilities.torch_utils import set_default_torch_dtype
+from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
+from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import (
@@ -630,7 +632,9 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         hf_processor = self.ctx.get_hf_processor(**kwargs)
         image_processor = self._get_checkpoint_image_processor(**kwargs)
 
-        from vllm.foundation.integrations.transformers_utils.processors.minicpmv import MiniCPMVProcessor
+        from vllm.foundation.integrations.transformers_utils.processors.minicpmv import (  # noqa: E501
+            MiniCPMVProcessor,
+        )
 
         vendored_processor = MiniCPMVProcessor(
             image_processor=image_processor,

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.backends.compute.scalar_type import scalar_types
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -16,7 +17,6 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
-from vllm.backends.compute.scalar_type import scalar_types
 
 from .inc_scheme import INCLinearScheme
 

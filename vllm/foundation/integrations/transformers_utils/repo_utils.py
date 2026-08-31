@@ -21,8 +21,8 @@ from huggingface_hub.utils import (
     RevisionNotFoundError,
 )
 
-from vllm import envs
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -145,7 +145,9 @@ def list_repo_files(
         # if model is remote, use hf_hub api to list files
         try:
             if envs.VLLM_USE_MODELSCOPE:
-                from vllm.foundation.integrations.transformers_utils.utils import modelscope_list_repo_files
+                from vllm.foundation.integrations.transformers_utils.utils import (
+                    modelscope_list_repo_files,
+                )
 
                 return modelscope_list_repo_files(
                     repo_id,

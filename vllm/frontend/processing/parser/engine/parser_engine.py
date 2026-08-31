@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
-from vllm.frontend.entrypoints.chat_utils import get_tool_call_id_type, make_tool_call_id
+from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.entrypoints.chat_utils import (
+    get_tool_call_id_type,
+    make_tool_call_id,
+)
 from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -22,11 +26,15 @@ from vllm.frontend.entrypoints.generate.base.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.parser.abstract_parser import Parser, StreamState
 from vllm.frontend.processing.parser.engine.events import EventType, SemanticEvent
-from vllm.frontend.processing.parser.engine.parser_engine_config import ParserEngineConfig, ParserState
-from vllm.frontend.processing.parser.engine.streaming_parser_engine import StreamingParserEngine
+from vllm.frontend.processing.parser.engine.parser_engine_config import (
+    ParserEngineConfig,
+    ParserState,
+)
+from vllm.frontend.processing.parser.engine.streaming_parser_engine import (
+    StreamingParserEngine,
+)
 from vllm.frontend.processing.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,

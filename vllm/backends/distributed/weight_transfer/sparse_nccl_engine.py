@@ -17,10 +17,9 @@ import torch
 from typing_extensions import Self
 
 if TYPE_CHECKING:
-    from vllm.foundation.config import VllmConfig
     from vllm.backends.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.foundation.config import VllmConfig
 
-from vllm.foundation.config.weight_transfer import WeightTransferConfig
 from vllm.backends.distributed.weight_transfer.base import (
     TrainerInitInfo,
     TrainerWeightTransferEngine,
@@ -36,6 +35,7 @@ from vllm.backends.distributed.weight_transfer.nccl_common import (
 from vllm.backends.distributed.weight_transfer.nccl_common import (
     trainer_init as open_trainer_endpoint,
 )
+from vllm.foundation.config.weight_transfer import WeightTransferConfig
 from vllm.model_executor.model_loader.checkpoint_weight_patch import (
     CheckpointWeightPatch,
     load_checkpoint_weight_patches,

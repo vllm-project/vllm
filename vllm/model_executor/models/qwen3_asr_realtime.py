@@ -23,18 +23,11 @@ import numpy as np
 import torch
 
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.frontend.processing.inputs import PromptType, TokensPrompt
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_processor_from_config,
+)
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.models.interfaces import (
-    SupportsRealtime,
-)
-from vllm.model_executor.models.qwen3_asr import (
-    Qwen3ASRDummyInputsBuilder,
-    Qwen3ASRForConditionalGeneration,
-    Qwen3ASRMultiModalProcessor,
-    Qwen3ASRProcessingInfo,
-    _get_feat_extract_output_lengths,
-)
+from vllm.frontend.processing.inputs import PromptType, TokensPrompt
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.cache import _I, BaseMultiModalProcessorCache
 from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsOptionalItems
@@ -46,7 +39,16 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     cached_encode,
 )
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
-from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
+from vllm.model_executor.models.interfaces import (
+    SupportsRealtime,
+)
+from vllm.model_executor.models.qwen3_asr import (
+    Qwen3ASRDummyInputsBuilder,
+    Qwen3ASRForConditionalGeneration,
+    Qwen3ASRMultiModalProcessor,
+    Qwen3ASRProcessingInfo,
+    _get_feat_extract_output_lengths,
+)
 
 logger = init_logger(__name__)
 

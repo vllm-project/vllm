@@ -7,7 +7,12 @@ import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
-from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
+from vllm.backends.platform import CpuArchEnum, current_platform
+from vllm.foundation.utilities.torch_utils import (
+    LayerNameType,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
     causal_conv1d_fn_cpu as causal_conv1d_torch,
@@ -16,12 +21,7 @@ from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
     causal_conv1d_update_cpu,
     causal_conv1d_update_torch,
 )
-from vllm.backends.platform import CpuArchEnum, current_platform
-from vllm.foundation.utilities.torch_utils import (
-    LayerNameType,
-    _resolve_layer_name,
-    direct_register_custom_op,
-)
+from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 _CPU_GDN_ATTENTION_OPS_REGISTERED = False

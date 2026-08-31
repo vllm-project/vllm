@@ -18,7 +18,11 @@ from vllm.backends.distributed.device_communicators.shm_object_storage import (
 )
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.cache import CacheInfo, LRUCache
-from vllm.foundation.utilities.jsontree import json_count_leaves, json_map_leaves, json_reduce_leaves
+from vllm.foundation.utilities.jsontree import (
+    json_count_leaves,
+    json_map_leaves,
+    json_reduce_leaves,
+)
 from vllm.foundation.utilities.mem_constants import GiB_bytes, MiB_bytes
 from vllm.foundation.utilities.mem_utils import format_gib
 

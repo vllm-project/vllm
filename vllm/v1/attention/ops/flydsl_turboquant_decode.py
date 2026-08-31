@@ -32,8 +32,8 @@ from typing import Any
 
 import torch
 
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

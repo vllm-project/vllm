@@ -14,9 +14,9 @@ import torch
 from regex import escape as regex_escape
 
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.foundation.utilities.import_utils import LazyLoader
 from vllm.foundation.utilities.torch_utils import PIN_MEMORY
+from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,

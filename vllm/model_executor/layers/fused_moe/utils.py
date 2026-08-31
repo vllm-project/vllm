@@ -12,7 +12,10 @@ from torch import nn
 import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.math_utils import cdiv
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     is_shared_expert_quant_fse_compatible,
 )
@@ -41,9 +44,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
 from vllm.model_executor.models.utils import PPMissingLayer
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.dsl.triton_utils import tl, triton
-from vllm.foundation.utilities.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig

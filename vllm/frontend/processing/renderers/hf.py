@@ -20,6 +20,15 @@ import jinja2.sandbox
 import torch
 from typing_extensions import override
 
+from vllm.foundation.integrations.transformers_utils.chat_templates import (
+    get_chat_template_fallback_path,
+)
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_get_processor,
+)
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.async_utils import make_async
+from vllm.foundation.utilities.func_utils import supports_kw
 from vllm.frontend.entrypoints.chat_utils import (
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
     ChatTemplateResolutionError,
@@ -29,7 +38,6 @@ from vllm.frontend.entrypoints.chat_utils import (
 )
 from vllm.frontend.processing.inputs import EmbedsPrompt
 from vllm.frontend.processing.inputs.engine import MultiModalInput
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.multimodal.hasher import MultiModalHasher
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldElem,
@@ -44,10 +52,6 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     find_mm_placeholders,
 )
 from vllm.frontend.processing.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
-from vllm.foundation.integrations.transformers_utils.chat_templates import get_chat_template_fallback_path
-from vllm.foundation.integrations.transformers_utils.processor import cached_get_processor
-from vllm.foundation.utilities.async_utils import make_async
-from vllm.foundation.utilities.func_utils import supports_kw
 
 from .base import BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
@@ -62,7 +66,11 @@ if TYPE_CHECKING:
         ChatTemplateContentFormatOption,
         ConversationMessage,
     )
-    from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
+    from vllm.frontend.processing.inputs import (
+        MultiModalDataDict,
+        MultiModalUUIDDict,
+        TokensPrompt,
+    )
     from vllm.frontend.processing.inputs.engine import TokensInput
     from vllm.frontend.processing.multimodal.processing.processor import (
         MultiModalPromptUpdates,

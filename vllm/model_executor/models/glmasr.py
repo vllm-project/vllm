@@ -10,21 +10,22 @@ from transformers import BatchFeature
 from transformers.models.glmasr import GlmAsrConfig, GlmAsrProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
 
+from vllm.backends.distributed.parallel_state import (
+    get_tensor_model_parallel_world_size,
+)
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.backends.distributed.parallel_state import get_tensor_model_parallel_world_size
-from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import MMEncoderAttention
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_processor_from_config,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
-from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import (
+    ModalityData,
+    MultiModalDataDict,
+    PromptType,
+    TokensPrompt,
+)
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -44,10 +45,18 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
-from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .glmasr_utils import (
     DEFAULT_CONV_PARAMS,

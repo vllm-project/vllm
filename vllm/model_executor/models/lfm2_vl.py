@@ -20,22 +20,18 @@ from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.runtime.execution.forward_context import set_forward_context
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateCopyFunc,
-    MambaStateCopyFuncCalculator,
-    MambaStateDtypeCalculator,
-    MambaStateShapeCalculator,
-)
-from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.frontend.processing.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.frontend.processing.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
 from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -45,8 +41,16 @@ from vllm.frontend.processing.multimodal.processing import (
     cached_encode,
 )
 from vllm.frontend.processing.renderers import TokenizeParams
+from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+)
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.runtime.execution.forward_context import set_forward_context
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     IsHybrid,

@@ -7,6 +7,7 @@ import torch
 
 from vllm import PromptType, TextPrompt
 from vllm.foundation.config import ModelConfig
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.frontend.entrypoints.chat_utils import (
     BaseMultiModalItemTracker,
     ChatCompletionContentPartParam,
@@ -15,7 +16,6 @@ from vllm.frontend.entrypoints.chat_utils import (
     MultiModalItemTracker,
     _parse_chat_message_content_parts,
 )
-from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalUUIDDict
 
 from .typing import (

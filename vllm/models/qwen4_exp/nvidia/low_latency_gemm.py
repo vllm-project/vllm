@@ -11,6 +11,8 @@ import torch
 from torch import nn
 
 import vllm.foundation.system.envs as envs
+from vllm.backends.platform import current_platform
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
     shape_dynamic_skinny_gemm,
@@ -20,8 +22,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 QWEN4_EXP_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
     # GDN fused QKVZ projection, TP=4.

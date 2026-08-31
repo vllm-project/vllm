@@ -7,8 +7,8 @@ from typing import Any
 import msgspec
 
 from vllm.foundation.config import ModelConfig, PoolerConfig
-from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.frontend.processing.sampling_params import RequestOutputKind
 from vllm.frontend.processing.tasks import PoolingTask, check_removed_pooling_task
 

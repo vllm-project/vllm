@@ -6,18 +6,18 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.backends.platform import current_platform
+from vllm.backends.platform.interface import DeviceCapability
 from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.foundation.config.cache import CacheDType
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.platform_utils import num_compute_units
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
     SparseMLACommonMetadataBuilder,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.platform.interface import DeviceCapability
-from vllm.foundation.utilities.platform_utils import num_compute_units
-from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

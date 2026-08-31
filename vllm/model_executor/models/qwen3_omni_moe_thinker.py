@@ -43,11 +43,33 @@ from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.backends.compiler.decorators import support_torch_compile
+from vllm.backends.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.backends.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.frontend.processing.inputs import PromptType
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_processor_from_config,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
+from vllm.frontend.processing.inputs import PromptType
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+)
+from vllm.frontend.processing.multimodal.parse import (
+    AudioProcessorItems,
+    MultiModalDataItems,
+)
+from vllm.frontend.processing.multimodal.processing.processor import (
+    MultiModalPromptUpdates,
+    PlaceholderFeaturesInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
@@ -65,24 +87,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_audio import Qwen2AudioProcessingInfo
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import (
-    MultiModalFeatureSpec,
-    MultiModalKwargsItem,
-    MultiModalKwargsItems,
-)
-from vllm.frontend.processing.multimodal.parse import AudioProcessorItems, MultiModalDataItems
-from vllm.frontend.processing.multimodal.processing.processor import (
-    MultiModalPromptUpdates,
-    PlaceholderFeaturesInfo,
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-)
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
-from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
-from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (

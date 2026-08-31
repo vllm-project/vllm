@@ -15,8 +15,8 @@ from transformers.models.llava_onevision.modeling_llava_onevision import (
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.activation import get_act_fn
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -28,9 +28,12 @@ from vllm.frontend.processing.multimodal.parse import (
     VideoEmbeddingItems,
     VideoProcessorItems,
 )
-from vllm.frontend.processing.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.frontend.processing.multimodal.processing import (
+    PromptReplacement,
+    PromptUpdate,
+)
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP

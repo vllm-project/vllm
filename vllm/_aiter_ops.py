@@ -9,8 +9,8 @@ import torch
 from torch._ops import OpOverload
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.import_utils import PlaceholderModule
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (

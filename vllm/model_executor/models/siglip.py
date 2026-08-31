@@ -15,24 +15,13 @@ from transformers import (
     SiglipVisionConfig,
 )
 
+from vllm.backends.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.backends.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalInput
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import (
-    EncoderOnlyAttention,
-    MMEncoderAttention,
-)
-from vllm.model_executor.layers.conv import Conv2dLayer
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
-from vllm.model_executor.layers.pooler import DispatchPooler
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -53,10 +42,21 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     TimingContext,
 )
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import (
+    EncoderOnlyAttention,
+    MMEncoderAttention,
+)
+from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.pooler import DispatchPooler
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
-from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 from .clip import dual_encoder_has_text_tokens, merge_dual_encoder_text_and_vision
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant

@@ -9,8 +9,8 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-from vllm.frontend.processing.multimodal.media.audio import load_audio_pyav
 from vllm.foundation.integrations.transformers_utils.repo_utils import hf_api
+from vllm.frontend.processing.multimodal.media.audio import load_audio_pyav
 
 from .base import get_cache_dir
 

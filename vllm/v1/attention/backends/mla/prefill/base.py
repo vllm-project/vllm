@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 
 if TYPE_CHECKING:
+    from vllm.backends.platform.interface import DeviceCapability
     from vllm.foundation.config import VllmConfig
     from vllm.model_executor.layers.attention.mla_attention import (
         MLACommonPrefillMetadata,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-    from vllm.backends.platform.interface import DeviceCapability
     from vllm.v1.attention.backends.mla.prefill.selector import (
         MLAPrefillSelectorConfig,
     )

@@ -16,8 +16,8 @@ from transformers import BatchFeature
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors,
@@ -38,12 +38,21 @@ if TYPE_CHECKING:
         EncoderCudaGraphReplayBuffers,
         EncoderItemSpec,
     )
-from vllm.model_executor.models.kimi_k25_vit import (
-    KimiK25MultiModalProjector,
-    MoonViT3dPretrainedModel,
-    vision_tower_forward,
+from vllm.backends.platform import current_platform
+from vllm.foundation.integrations.transformers_utils.configs.kimi_k25 import (
+    KimiK25Config,
 )
-from vllm.model_executor.models.vision import is_vit_use_data_parallel
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_get_image_processor,
+)
+from vllm.foundation.integrations.transformers_utils.processors.kimi_k25 import (
+    KimiK25Processor,
+)
+from vllm.foundation.integrations.transformers_utils.processors.kimi_k25_vision_fused import (  # noqa: E501
+    KimiK25FusedVisionProcessor,
+)
+from vllm.foundation.utilities.import_utils import is_numba_available
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -52,7 +61,10 @@ from vllm.frontend.processing.multimodal.inputs import (
     VisionChunkImage,
     VisionChunkVideo,
 )
-from vllm.frontend.processing.multimodal.parse import MultiModalDataItems, VisionChunkProcessorItems
+from vllm.frontend.processing.multimodal.parse import (
+    MultiModalDataItems,
+    VisionChunkProcessorItems,
+)
 from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -61,16 +73,13 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.backends.platform import current_platform
-from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.configs.kimi_k25 import KimiK25Config
-from vllm.foundation.integrations.transformers_utils.processor import cached_get_image_processor
-from vllm.foundation.integrations.transformers_utils.processors.kimi_k25 import KimiK25Processor
-from vllm.foundation.integrations.transformers_utils.processors.kimi_k25_vision_fused import (
-    KimiK25FusedVisionProcessor,
+from vllm.model_executor.models.kimi_k25_vit import (
+    KimiK25MultiModalProjector,
+    MoonViT3dPretrainedModel,
+    vision_tower_forward,
 )
-from vllm.foundation.utilities.import_utils import is_numba_available
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.model_executor.models.vision import is_vit_use_data_parallel
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .utils import (
     AutoWeightsLoader,

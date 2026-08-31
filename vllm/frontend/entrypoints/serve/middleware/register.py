@@ -7,8 +7,8 @@ from argparse import Namespace
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
-from vllm import envs
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.frontend.processing.tasks import SupportedTask
 
 from .log_response import log_response
@@ -42,7 +42,9 @@ def init_entrypoints_middleware(
 
     if "generate" in supported_tasks:
         # Add scaling middleware to check for scaling state
-        from vllm.frontend.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
+        from vllm.frontend.entrypoints.serve.elastic_ep.middleware import (
+            ScalingMiddleware,
+        )
 
         app.add_middleware(ScalingMiddleware)
 

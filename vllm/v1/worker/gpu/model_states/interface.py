@@ -8,11 +8,11 @@ import torch.nn as nn
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.compilation import CUDAGraphMode
+from vllm.frontend.processing.tasks import GenerationTask
 from vllm.model_executor.models.interfaces import (
     SupportsEncoderCudaGraph,
     supports_encoder_cudagraph,
 )
-from vllm.frontend.processing.tasks import GenerationTask
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig

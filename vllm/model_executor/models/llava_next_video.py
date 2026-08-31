@@ -11,9 +11,9 @@ from transformers import BatchFeature, LlavaNextVideoConfig, LlavaNextVideoProce
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -32,9 +32,9 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.collection_utils import is_list_of
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

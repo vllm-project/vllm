@@ -8,6 +8,7 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import (
     rocm_aiter_ops,
 )
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _upcast_e8m0_to_fp32,
@@ -16,7 +17,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.backends.platform import current_platform
 
 from .BlockScaledMMLinearKernel import (
     FP8BlockParams,

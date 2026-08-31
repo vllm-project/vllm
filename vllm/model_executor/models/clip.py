@@ -14,22 +14,11 @@ from transformers import (
     CLIPVisionConfig,
 )
 
+from vllm.backends.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.backends.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalInput
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
-from vllm.model_executor.layers.conv import Conv2dLayer
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
-from vllm.model_executor.layers.pooler import DispatchPooler
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -50,8 +39,19 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     TimingContext,
 )
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.pooler import DispatchPooler
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from .interfaces_base import default_pooling_type

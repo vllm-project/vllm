@@ -4,11 +4,11 @@ import torch
 import torch.nn as nn
 
 from vllm.foundation.config import ModelConfig
-from vllm.model_executor.models.interfaces import supports_multimodal_pruning
 from vllm.frontend.processing.multimodal.utils import (
     copy_mm_embedding_modality,
     get_mm_features_in_window,
 )
+from vllm.model_executor.models.interfaces import supports_multimodal_pruning
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.rope import RopeState

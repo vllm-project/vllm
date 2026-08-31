@@ -19,6 +19,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel
 from transformers import PretrainedConfig
 
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.model_executor.models.phi4mm_utils import (
     AbsolutePositionalEncoding,
     ConvModule,
@@ -32,7 +33,6 @@ from vllm.model_executor.models.phi4mm_utils import (
     get_offset,
     unfold_tensor,
 )
-from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 
 class ConformerEncoderLayer(nn.Module):

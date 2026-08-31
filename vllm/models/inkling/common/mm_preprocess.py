@@ -17,20 +17,6 @@ from vllm.foundation.config.multimodal import (
     BaseDummyOptions,
     ImageDummyOptions,
 )
-from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.frontend.processing.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
-from vllm.frontend.processing.multimodal.parse import MultiModalDataItems, MultiModalDataParser
-from vllm.frontend.processing.multimodal.processing import (
-    BaseDummyInputsBuilder,
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-)
 from vllm.foundation.integrations.transformers_utils.processors.inkling import (
     AUDIO_MARKER_ID,
     AUDIO_TOKEN_ID,
@@ -39,6 +25,23 @@ from vllm.foundation.integrations.transformers_utils.processors.inkling import (
     InklingAudioFeatureExtractor,
     InklingImageProcessor,
     InklingProcessor,
+)
+from vllm.frontend.processing.inputs import MultiModalDataDict
+from vllm.frontend.processing.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.frontend.processing.multimodal.parse import (
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
+from vllm.frontend.processing.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
 )
 
 from ..configs import InklingMMConfig

@@ -8,6 +8,7 @@ from torch._higher_order_ops import auto_functionalized
 from torch._ops import OpOverload
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNormGated
@@ -27,7 +28,6 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
     DeepseekScalingRotaryEmbedding,
 )
-from vllm.backends.platform import current_platform
 
 ROTARY_OP = torch.ops._C.rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default

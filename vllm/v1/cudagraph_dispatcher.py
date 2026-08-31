@@ -5,8 +5,8 @@ from dataclasses import replace
 from itertools import product
 
 from vllm.foundation.config import CUDAGraphMode, VllmConfig
-from vllm.runtime.execution.forward_context import BatchDescriptor
 from vllm.foundation.observability.logger import init_logger
+from vllm.runtime.execution.forward_context import BatchDescriptor
 from vllm.runtime.modeling.lora.utils import get_captured_lora_counts
 
 logger = init_logger(__name__)

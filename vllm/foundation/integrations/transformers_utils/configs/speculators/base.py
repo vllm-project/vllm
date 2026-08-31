@@ -9,7 +9,9 @@ from transformers import PretrainedConfig
 from vllm.foundation.integrations.transformers_utils.configs.speculators.algos import (
     SUPPORTED_SPECULATORS_TYPES,
 )
-from vllm.foundation.integrations.transformers_utils.utils import without_trust_remote_code
+from vllm.foundation.integrations.transformers_utils.utils import (
+    without_trust_remote_code,
+)
 
 
 class SpeculatorsConfig(PretrainedConfig):

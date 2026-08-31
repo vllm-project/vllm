@@ -8,8 +8,8 @@ import torch
 
 from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
 from vllm.foundation.utilities.math_utils import cdiv
+from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,

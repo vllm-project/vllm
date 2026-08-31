@@ -138,14 +138,18 @@ class QkNormRopePattern:
             q_by_head = q.view(
                 *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
             )
-            q_normed_by_head = vllm.backends.compute.ir.ops.rms_norm(q_by_head, q_weight, self.eps)
+            q_normed_by_head = vllm.backends.compute.ir.ops.rms_norm(
+                q_by_head, q_weight, self.eps
+            )
             q_flat = q_normed_by_head.view(q.shape)
 
             # K path: view -> RMS -> view back to k.shape
             k_by_head = k.view(
                 *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
             )
-            k_normed_by_head = vllm.backends.compute.ir.ops.rms_norm(k_by_head, k_weight, self.eps)
+            k_normed_by_head = vllm.backends.compute.ir.ops.rms_norm(
+                k_by_head, k_weight, self.eps
+            )
             k_flat = k_normed_by_head.view(k.shape)
 
             # RoPE: apply to flattened q/k

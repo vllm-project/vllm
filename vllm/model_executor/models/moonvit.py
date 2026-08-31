@@ -55,6 +55,12 @@ from transformers.activations import ACT2FN
 from transformers.modeling_utils import PreTrainedModel
 
 from vllm.backends.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.backends.platform import current_platform
+from vllm.foundation.integrations.transformers_utils.configs.moonvit import (
+    MoonViTConfig,
+)
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
@@ -64,10 +70,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
-from vllm.backends.platform import current_platform
-from vllm.foundation.integrations.transformers_utils.configs.moonvit import MoonViTConfig
-from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
-from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 
 def _apply_rope_input_validation(x, freqs_cis):

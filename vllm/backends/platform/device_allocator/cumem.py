@@ -17,9 +17,9 @@ from typing import Any
 
 import torch
 
+from vllm.backends.platform import current_platform
 from vllm.backends.platform.device_allocator import AllocationData, HandleType
 from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.system_utils import find_loaded_library
 from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 
@@ -34,7 +34,10 @@ try:
         python_create_and_map,
         python_unmap_and_release,
     )
-    from vllm.backends.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+
+    from vllm.backends.distributed.device_communicators.cuda_wrapper import (
+        CudaRTLibrary,
+    )
 
     lib_name = find_loaded_library("cumem_allocator")
     libcudart = CudaRTLibrary()

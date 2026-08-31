@@ -6,13 +6,15 @@ from __future__ import annotations
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
-from vllm.model_executor.utils import replace_parameter
 from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.b12x import B12xWarmupUnit
 from vllm.foundation.utilities.b12x import (
     get_b12x_blockscaled as _import_b12x_blockscaled,
 )
-from vllm.foundation.utilities.b12x import get_b12x_intrinsics as _import_b12x_intrinsics
+from vllm.foundation.utilities.b12x import (
+    get_b12x_intrinsics as _import_b12x_intrinsics,
+)
+from vllm.model_executor.utils import replace_parameter
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 

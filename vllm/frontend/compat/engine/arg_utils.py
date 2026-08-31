@@ -33,6 +33,8 @@ from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs
 
 import vllm.foundation.system.envs as envs
+from vllm.backends.distributed.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
+from vllm.backends.platform import CpuArchEnum, current_platform
 from vllm.foundation.config import (
     AttentionConfig,
     CacheConfig,
@@ -105,13 +107,13 @@ from vllm.foundation.config.parallel import (
 from vllm.foundation.config.scheduler import SchedulerPolicy
 from vllm.foundation.config.utils import get_field
 from vllm.foundation.config.vllm import OptimizationLevel, PerformanceMode
-from vllm.foundation.observability.logger import init_logger, suppress_logging
-from vllm.backends.platform import CpuArchEnum, current_platform
 from vllm.foundation.extensibility.plugins import load_general_plugins
-from vllm.backends.distributed.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.foundation.integrations.transformers_utils.config import maybe_override_with_speculators
+from vllm.foundation.integrations.transformers_utils.config import (
+    maybe_override_with_speculators,
+)
 from vllm.foundation.integrations.transformers_utils.repo_utils import get_model_path
 from vllm.foundation.integrations.transformers_utils.utils import is_cloud_storage
+from vllm.foundation.observability.logger import init_logger, suppress_logging
 from vllm.foundation.utilities.argparse_utils import (
     FlexibleArgumentParser,
     human_readable_int,
@@ -126,9 +128,9 @@ from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
     from vllm.foundation.config.quantization import QuantizationConfigArgs
+    from vllm.foundation.observability.usage.usage_lib import UsageContext
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.model_loader import LoadFormats
-    from vllm.foundation.observability.usage.usage_lib import UsageContext
     from vllm.v1.executor import Executor
 else:
     Executor = Any

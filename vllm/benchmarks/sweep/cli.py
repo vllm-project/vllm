@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 
-from vllm.frontend.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.frontend.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 
 from .plot import SweepPlotArgs
 from .plot import main as plot_main

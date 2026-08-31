@@ -15,19 +15,19 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.foundation.config import VllmConfig
+from vllm.foundation.integrations.transformers_utils.processors.internvl import (
+    InternVLImageProcessor,
+    InternVLProcessor,
+)
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.models.intern_vit import (
     InternVisionModel,
 )
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.processors.internvl import (
-    InternVLImageProcessor,
-    InternVLProcessor,
-)
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .internvl import (

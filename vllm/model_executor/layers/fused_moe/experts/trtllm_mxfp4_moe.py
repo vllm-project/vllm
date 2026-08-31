@@ -4,6 +4,8 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.backends.platform import current_platform
+from vllm.foundation.utilities.flashinfer import has_flashinfer
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -31,8 +33,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
     kMxfp8Dynamic,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.flashinfer import has_flashinfer
 
 
 class TrtLlmMxfp4ExpertsBase:

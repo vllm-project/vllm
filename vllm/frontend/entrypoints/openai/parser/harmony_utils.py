@@ -22,9 +22,11 @@ from openai_harmony import (
     load_harmony_encoding,
 )
 
-from vllm import envs
-from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+)
 
 logger = init_logger(__name__)
 

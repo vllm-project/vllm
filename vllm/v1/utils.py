@@ -28,9 +28,17 @@ from torch.autograd.profiler import record_function
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.foundation.observability.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
+from vllm.foundation.observability.usage.usage_lib import (
+    UsageContext,
+    is_usage_stats_enabled,
+    usage_message,
+)
 from vllm.foundation.utilities.network_utils import get_open_zmq_ipc_path, get_tcp_uri
-from vllm.foundation.utilities.system_utils import decorate_logs, kill_process_tree, set_process_title
+from vllm.foundation.utilities.system_utils import (
+    decorate_logs,
+    kill_process_tree,
+    set_process_title,
+)
 from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -366,7 +374,9 @@ class RustFrontendProcessManager:
         ]
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
-        from vllm.frontend.entrypoints.serve.utils.api_utils import jsonify_non_default_args
+        from vllm.frontend.entrypoints.serve.utils.api_utils import (
+            jsonify_non_default_args,
+        )
 
         args_dict = jsonify_non_default_args(
             args,
@@ -391,7 +401,9 @@ class RustFrontendProcessManager:
 
         # The subprocess needs the real values, but the log must not carry
         # credentials such as api_key or hf_token.
-        from vllm.frontend.entrypoints.serve.utils.api_utils import redact_sensitive_args
+        from vllm.frontend.entrypoints.serve.utils.api_utils import (
+            redact_sensitive_args,
+        )
 
         redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
         logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))

@@ -4,14 +4,17 @@ import torch
 from einops import rearrange
 from torch import nn
 
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils.allocation import set_triton_allocator
+from vllm.backends.distributed import (
+    divide,
+)
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import (
     VllmConfig,
     get_current_vllm_config,
 )
-from vllm.backends.distributed import (
-    divide,
-)
-from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
@@ -32,14 +35,11 @@ from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.backends.platform import current_platform
+from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 from vllm.third_party.flash_linear_attention.ops import (
     chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule,
 )
-from vllm.backends.compute.dsl.triton_utils import tl, triton
-from vllm.backends.compute.dsl.triton_utils.allocation import set_triton_allocator
-from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 

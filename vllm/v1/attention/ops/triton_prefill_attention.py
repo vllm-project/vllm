@@ -28,8 +28,8 @@ It supports page size = 1.
 # https://github.com/ModelTC/lightllm/blob/f2a54f0912293f683bf1d1695fd12c4098a5bf82/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py#L1
 import torch
 
-from vllm.backends.platform import current_platform
 from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.math_utils import RCP_LN2
 
 

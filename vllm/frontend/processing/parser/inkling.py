@@ -29,7 +29,9 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.frontend.entrypoints.generate.base.protocol import ExtractedToolCallInformation
+from vllm.frontend.entrypoints.generate.base.protocol import (
+    ExtractedToolCallInformation,
+)
 from vllm.frontend.processing.parser.engine.events import EventType
 from vllm.frontend.processing.parser.engine.parser_engine import ParserEngine
 from vllm.frontend.processing.parser.engine.parser_engine_config import (

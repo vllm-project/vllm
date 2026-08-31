@@ -9,10 +9,10 @@ from torch.distributed import ProcessGroup
 
 import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
-from vllm.foundation.config import get_current_vllm_config_or_none
 from vllm.backends.distributed.parallel_state import in_the_same_node_as
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.config import get_current_vllm_config_or_none
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

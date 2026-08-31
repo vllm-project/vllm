@@ -12,7 +12,6 @@ import torch
 from packaging.version import Version
 from safetensors.torch import load_file, save_file
 
-from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -20,6 +19,7 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 from vllm.backends.distributed.parallel_state import get_tensor_model_parallel_rank
+from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput

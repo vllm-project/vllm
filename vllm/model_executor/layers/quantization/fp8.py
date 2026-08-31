@@ -6,9 +6,13 @@ from typing import TYPE_CHECKING, Any, Literal
 import torch
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import get_current_vllm_config
 from vllm.backends.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import get_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.deep_gemm import (
+    is_deep_gemm_supported,
+)
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
@@ -75,10 +79,6 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.deep_gemm import (
-    is_deep_gemm_supported,
-)
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper

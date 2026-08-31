@@ -19,6 +19,8 @@ and the top-k weighted reduction run in PyTorch between/after the two GEMMs.
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform import current_platform
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
     Mxfp8TritonExpertsBase,
 )
@@ -28,8 +30,6 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 
 def _select_cfg(M, N, K, block_m):

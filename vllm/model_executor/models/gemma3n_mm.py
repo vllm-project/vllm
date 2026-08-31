@@ -20,17 +20,10 @@ from transformers.models.siglip import SiglipImageProcessorFast
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType, TextPrompt
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models.gemma3n import Gemma3nForCausalLM
-from vllm.model_executor.models.gemma3n_audio_utils import (
-    adjust_audio_features_to_expected_length,
-)
-from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
+from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType, TextPrompt
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -54,9 +47,16 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     cached_encode,
     replace_token_matches,
 )
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.models.gemma3n import Gemma3nForCausalLM
+from vllm.model_executor.models.gemma3n_audio_utils import (
+    adjust_audio_features_to_expected_length,
+)
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
-from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
 from .utils import (

@@ -6,11 +6,14 @@ from typing import TYPE_CHECKING, Literal, Union
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import envs
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import get_current_vllm_config
 from vllm.foundation.config.kernel import MoEBackend
 from vllm.foundation.config.quantization import QuantizationConfigArgs
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
+from vllm.foundation.utilities.import_utils import has_triton_kernels
+from vllm.foundation.utilities.math_utils import round_up
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     RoutedExperts,
@@ -44,9 +47,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import all_close_1d
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.import_utils import has_triton_kernels
-from vllm.foundation.utilities.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe import RoutedExperts

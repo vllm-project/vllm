@@ -5,9 +5,9 @@ from typing import Any
 
 import torch
 
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.compilation import CUDAGraphMode
-from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 

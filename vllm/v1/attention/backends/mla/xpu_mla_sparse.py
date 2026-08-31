@@ -10,10 +10,13 @@ import torch
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.cache import CacheDType
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import (
+    is_quantized_kv_cache,
+    np_to_pinned_tensor,
+)
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
-from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

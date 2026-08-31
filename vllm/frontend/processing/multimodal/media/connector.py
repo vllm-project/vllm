@@ -22,15 +22,20 @@ from PIL import Image, UnidentifiedImageError
 from urllib3.util import Url, parse_url
 
 import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.system.connections import (
     HTTPConnection,
     MediaDownloadSizeExceededError,
     global_http_connection,
 )
-from vllm.foundation.system.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
-from vllm.foundation.observability.logger import init_logger
-from vllm.frontend.processing.multimodal.video import get_video_loader_backend_for_processor
+from vllm.foundation.system.exceptions import (
+    VLLMUnprocessableEntityError,
+    VLLMValidationError,
+)
 from vllm.foundation.utilities.registry import ExtensionManager
+from vllm.frontend.processing.multimodal.video import (
+    get_video_loader_backend_for_processor,
+)
 
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
 from .base import MediaIO, MediaWithBytes

@@ -79,7 +79,9 @@ def record_tool_parser_invocation(
     if _tool_call_parser_invocations is None:
         return
 
-    from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
     from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 
     match request:

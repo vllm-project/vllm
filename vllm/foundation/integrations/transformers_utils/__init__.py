@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm import envs
+from vllm.foundation.system import envs
 
 if envs.VLLM_USE_MODELSCOPE:
     try:

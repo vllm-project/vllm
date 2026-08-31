@@ -12,13 +12,13 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.backends.compute.ir.ops
-from vllm.foundation.config import VllmConfig
-from vllm.foundation.config.utils import Range
 from vllm.backends.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.backends.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.utils import Range
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
@@ -164,7 +164,9 @@ class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
-            rmsnorm = vllm.backends.compute.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
+            rmsnorm = vllm.backends.compute.ir.ops.rms_norm(
+                all_reduce, weight, self.epsilon
+            )
 
             return rmsnorm, all_reduce
 
@@ -174,7 +176,9 @@ class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
 
-            rmsnorm = vllm.backends.compute.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
+            rmsnorm = vllm.backends.compute.ir.ops.rms_norm(
+                reduce_scatter, weight, self.epsilon
+            )
             all_gather = self._all_gather(rmsnorm)
             return all_gather, reduce_scatter
 
@@ -280,7 +284,9 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
-            rms = vllm.backends.compute.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
+            rms = vllm.backends.compute.ir.ops.rms_norm(
+                all_reduce, weight, self.epsilon
+            )
             quant, _ = self.quant_matcher(rms, scale)
             return quant, all_reduce
 
@@ -290,7 +296,9 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
-            rms = vllm.backends.compute.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
+            rms = vllm.backends.compute.ir.ops.rms_norm(
+                reduce_scatter, weight, self.epsilon
+            )
             quant, _ = self.quant_matcher(rms, scale)
             all_gather = self._all_gather(quant)
 
@@ -390,7 +398,9 @@ class FirstAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
             output_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
-            rms = vllm.backends.compute.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
+            rms = vllm.backends.compute.ir.ops.rms_norm(
+                all_reduce, weight, self.epsilon
+            )
             quant = auto_functionalized(
                 SCALED_FP4_QUANT_OUT_OVERLOAD,
                 input=rms,
@@ -409,7 +419,9 @@ class FirstAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
             output_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
-            rms = vllm.backends.compute.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
+            rms = vllm.backends.compute.ir.ops.rms_norm(
+                reduce_scatter, weight, self.epsilon
+            )
             rms = torch.ops.aten.view.default(rms, [-1, rms.shape[-1]])
             quant = SCALED_FP4_QUANT_DEFAULT_OVERLOAD(
                 rms,

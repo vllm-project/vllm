@@ -6,6 +6,7 @@ from typing import TypeAlias
 import torch
 
 from vllm.foundation.config import PoolerConfig, get_current_vllm_config
+from vllm.frontend.processing.tasks import POOLING_TASKS, PoolingTask
 from vllm.model_executor.layers.pooler import ClassifierFn, PoolingParamsUpdate
 from vllm.model_executor.layers.pooler.abstract import Pooler
 from vllm.model_executor.layers.pooler.activations import (
@@ -14,7 +15,6 @@ from vllm.model_executor.layers.pooler.activations import (
     resolve_classifier_act_fn,
 )
 from vllm.model_executor.models.adapters import _load_st_projector
-from vllm.frontend.processing.tasks import POOLING_TASKS, PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .heads import (

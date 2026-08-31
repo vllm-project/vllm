@@ -7,11 +7,11 @@ from typing import Any, ClassVar
 
 import torch
 
-from vllm.foundation.config import VllmConfig
-from vllm.foundation.config.cache import CacheDType
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.backends.platform import current_platform
 from vllm.backends.platform.interface import DeviceCapability
-from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.cache import CacheDType
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,

@@ -8,7 +8,9 @@ from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.frontend.processing.parser.engine.registered_adapters import Gemma4ParserToolAdapter
+from vllm.frontend.processing.parser.engine.registered_adapters import (
+    Gemma4ParserToolAdapter,
+)
 
 
 class Gemma4EngineToolParser(Gemma4ParserToolAdapter):  # type: ignore[valid-type, misc]

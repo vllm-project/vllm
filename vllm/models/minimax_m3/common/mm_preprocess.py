@@ -15,6 +15,16 @@ from vllm.foundation.config.multimodal import (
     ImageDummyOptions,
     VideoDummyOptions,
 )
+from vllm.foundation.integrations.transformers_utils.configs.minimax_m3 import (
+    MiniMaxM3Config,
+)
+from vllm.foundation.integrations.transformers_utils.processors.minimax_m3 import (
+    MIN_SHORT_SIDE_PIXEL,
+    MiniMaxM3VLImageProcessor,
+    MiniMaxM3VLVideoProcessor,
+    MiniMaxVLProcessor,
+    smart_resize,
+)
 from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -38,14 +48,6 @@ from vllm.frontend.processing.multimodal.video import (
     VideoDecoderBackend,
     VideoSourceMetadata,
     VideoTargetMetadata,
-)
-from vllm.foundation.integrations.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
-from vllm.foundation.integrations.transformers_utils.processors.minimax_m3 import (
-    MIN_SHORT_SIDE_PIXEL,
-    MiniMaxM3VLImageProcessor,
-    MiniMaxM3VLVideoProcessor,
-    MiniMaxVLProcessor,
-    smart_resize,
 )
 
 # Upper bound on the number of frames used to build the dummy video during

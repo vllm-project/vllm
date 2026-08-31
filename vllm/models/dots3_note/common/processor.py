@@ -18,8 +18,14 @@ from vllm.foundation.config.multimodal import (
     ImageDummyOptions,
     VideoDummyOptions,
 )
+from vllm.foundation.integrations.transformers_utils.repo_utils import (
+    get_hf_file_to_dict,
+)
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.frontend.processing.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.frontend.processing.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
 from vllm.frontend.processing.multimodal.media import MediaWithBytes
 from vllm.frontend.processing.multimodal.parse import (
     MultiModalDataItems,
@@ -34,7 +40,6 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from .video import preprocess_dots3_note_video
 

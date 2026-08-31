@@ -4,13 +4,13 @@
 import torch
 
 from vllm import _custom_ops as ops
-from vllm import envs
+from vllm.backends.compute.scalar_type import scalar_types
+from vllm.backends.platform import CpuArchEnum, current_platform
+from vllm.foundation.system import envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
     unpack_quantized_values_into_int32,
 )
-from vllm.backends.platform import CpuArchEnum, current_platform
-from vllm.backends.compute.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 

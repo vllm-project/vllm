@@ -4,8 +4,10 @@
 
 from PIL import Image
 
+from vllm.foundation.integrations.transformers_utils.processors.deepseek_ocr import (
+    DeepseekOCRProcessor,
+)
 from vllm.foundation.observability.logger import init_logger
-from vllm.foundation.integrations.transformers_utils.processors.deepseek_ocr import DeepseekOCRProcessor
 
 logger = init_logger(__name__)
 

@@ -14,7 +14,7 @@ from vllm.backends.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUWorkerMetadata,
     create_ec_shared_region,
 )
-from vllm.backends.distributed.ec_transfer.ec_connector.cpu.scheduler.embedding_cache import (
+from vllm.backends.distributed.ec_transfer.ec_connector.cpu.scheduler.embedding_cache import (  # noqa: E501
     EmbeddingCache,
 )
 from vllm.foundation.observability.logger import init_logger

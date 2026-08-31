@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from typing_extensions import assert_never
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.frontend.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -20,7 +21,6 @@ from vllm.frontend.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
-from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

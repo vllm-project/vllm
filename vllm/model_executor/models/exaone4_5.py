@@ -31,10 +31,11 @@ from vllm.backends.compiler.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import parallel_state
 from vllm.backends.distributed import utils as dist_utils
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
@@ -48,7 +49,6 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLForConditionalGeneration,
     Qwen2VLProcessingInfo,
 )
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
 from .qwen2_vl import Qwen2VLDummyInputsBuilder as Exaone4_5_DummyInputsBuilder
 from .qwen2_vl import Qwen2VLMultiModalProcessor as Exaone4_5_MultiModalProcessor

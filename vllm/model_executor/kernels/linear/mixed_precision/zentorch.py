@@ -9,10 +9,10 @@ falls through to the next kernel in ``_POSSIBLE_KERNELS[PlatformEnum.CPU]``.
 
 import torch
 
+from vllm.backends.compute.scalar_type import scalar_types
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.scalar_type import scalar_types
 
 from .cpu import CPUWNA16LinearKernel
 from .MPLinearKernel import MPLinearLayerConfig

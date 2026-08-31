@@ -10,10 +10,13 @@ import torch
 from torch import nn
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
+)
+from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.foundation.integrations.transformers_utils.configs.step3_vl import (
+    Step3TextConfig,
 )
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -37,7 +40,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.configs.step3_vl import Step3TextConfig
 
 from .interfaces import SupportsPP
 from .utils import (

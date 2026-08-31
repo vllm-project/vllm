@@ -4,12 +4,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.frontend.processing.tokenizers.registry import (
     cached_tokenizer_from_config,
     tokenizer_args_from_config,
 )
-from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 
 from .base import BaseRenderer
 

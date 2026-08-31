@@ -5,12 +5,12 @@
 from dataclasses import dataclass
 from typing import Any
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)

@@ -12,18 +12,18 @@ from openai.types.chat import (
 from openai.types.chat.chat_completion_content_part_image_param import ImageURL
 
 from vllm import PoolingParams
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.collection_utils import chunk_list
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 from vllm.frontend.entrypoints.chat_utils import (
     ChatCompletionContentPartParam,
     ChatCompletionMessageParam,
     CustomChatCompletionMessageParam,
 )
 from vllm.frontend.processing.inputs import tokens_input
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.frontend.processing.renderers import merge_kwargs
 from vllm.frontend.processing.renderers.hf import resolve_chat_template
-from vllm.foundation.utilities.collection_utils import chunk_list
-from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 
 from ..base.io_processor import PoolingIOProcessor
 from ..scoring.io_processor import JinaRankingIOProcessorMixin
@@ -354,7 +354,9 @@ class EmbedIOProcessor(PoolingIOProcessor):
         revision: str | None,
     ) -> dict[str, str] | None:
         """Load ``task_instructions`` from ``config_sentence_transformers.json``."""
-        from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
+        from vllm.foundation.integrations.transformers_utils.repo_utils import (
+            get_hf_file_to_dict,
+        )
 
         try:
             cfg = get_hf_file_to_dict(

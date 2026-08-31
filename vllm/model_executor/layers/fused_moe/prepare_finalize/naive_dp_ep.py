@@ -4,13 +4,13 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.backends.distributed import get_ep_group
+from vllm.foundation.utilities.flashinfer import nvfp4_block_scale_interleave
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.foundation.utilities.flashinfer import nvfp4_block_scale_interleave
 
 
 def _quantize_and_setup_dispatch(

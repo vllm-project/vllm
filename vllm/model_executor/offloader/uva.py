@@ -10,10 +10,10 @@ from torch.func import functional_call
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
 from vllm.foundation.utilities.mem_utils import format_gib
 from vllm.foundation.utilities.platform_utils import is_uva_available
 from vllm.foundation.utilities.torch_utils import get_accelerator_view_from_cpu_tensor
+from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
 
 logger = init_logger(__name__)
 

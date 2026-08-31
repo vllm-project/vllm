@@ -12,10 +12,10 @@ import torch
 import torch.distributed as dist
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import VllmConfig
-from vllm.backends.distributed import get_dcp_group
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.distributed import get_dcp_group
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.ops.cp_common import (
     DirectCPWorkspace,
     direct_cp_enabled,

@@ -11,12 +11,12 @@ import zmq
 from lmcache.integration.vllm.foundation.utilities import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
@@ -42,7 +42,7 @@ except ImportError:
         BlockAllocationRecord as RequestAllocationRecord,
     )
 
-    from vllm.backends.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
+    from vllm.backends.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (  # noqa: E501
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,

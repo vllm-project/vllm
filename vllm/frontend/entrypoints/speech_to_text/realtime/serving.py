@@ -8,14 +8,14 @@ from typing import Literal, cast
 
 import numpy as np
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.compat.engine.protocol import EngineClient, StreamingInput
 from vllm.frontend.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.frontend.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.frontend.processing.inputs import PromptType
-from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.models.interfaces import SupportsRealtime
 from vllm.frontend.processing.renderers.inputs.preprocess import parse_model_prompt
+from vllm.model_executor.models.interfaces import SupportsRealtime
 
 logger = init_logger(__name__)
 

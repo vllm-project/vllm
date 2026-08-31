@@ -10,7 +10,6 @@ import torch
 from torch import nn
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -18,6 +17,8 @@ from vllm.backends.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.fused_embed_norm import has_full_vocab_on_rank
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -51,7 +52,6 @@ from vllm.models.deepseek_v32.nvidia.model import (
     DeepseekV32ForCausalLM,
     DeepseekV32Model,
 )
-from vllm.backends.platform import current_platform
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from .attention import (

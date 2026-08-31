@@ -9,6 +9,7 @@ from typing import ClassVar, Final
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.cache import CacheDType
 from vllm.foundation.observability.logger import init_logger
@@ -20,7 +21,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,

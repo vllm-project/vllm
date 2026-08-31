@@ -5,11 +5,6 @@ from __future__ import annotations
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    _upcast_e8m0_to_fp32,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-from vllm.model_executor.utils import replace_parameter
 from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.b12x import B12xWarmupUnit, reuse_packed_weight_storage
 from vllm.foundation.utilities.b12x import (
@@ -19,6 +14,11 @@ from vllm.foundation.utilities.b12x import (
     get_b12x_tensor_fp8_linear as _import_b12x_tensor_fp8,
 )
 from vllm.foundation.utilities.torch_utils import current_stream
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    _upcast_e8m0_to_fp32,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.utils import replace_parameter
 
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,

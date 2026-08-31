@@ -5,7 +5,10 @@
 import torch
 
 import vllm._custom_ops as ops
+from vllm.backends.compute.scalar_type import scalar_types
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.math_utils import round_up
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
@@ -22,9 +25,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_unpad_output,
     should_use_atomic_add_reduce,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.scalar_type import scalar_types
-from vllm.foundation.utilities.math_utils import round_up
 
 FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16]
 

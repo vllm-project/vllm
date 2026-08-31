@@ -36,30 +36,33 @@ except ImportError:
         PluginLauncher as RuntimePluginLauncher,
     )
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (  # noqa: E501
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
     lmcache_get_or_create_config,
     mla_enabled,
 )
-from vllm.backends.distributed.parallel_state import get_tensor_model_parallel_rank, get_tp_group
-from vllm.frontend.processing.sampling_params import SamplingParams
+from vllm.backends.distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
+    get_tp_group,
+)
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.foundation.utilities.torch_utils import get_kv_cache_torch_dtype
+from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
-    from vllm.runtime.execution.forward_context import ForwardContext
     from vllm.frontend.processing.multimodal.inputs import PlaceholderRange
+    from vllm.runtime.execution.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.request import Request

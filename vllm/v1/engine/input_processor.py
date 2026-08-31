@@ -6,30 +6,37 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 import vllm.foundation.system.envs as envs
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.system.exceptions import VLLMValidationError
+from vllm.foundation.utilities import (
+    length_from_prompt_token_ids_or_embeds,
+    random_uuid,
+)
+from vllm.foundation.utilities.async_utils import make_async
+from vllm.foundation.utilities.jsontree import json_iter_leaves
 from vllm.frontend.processing.inputs import (
     EngineInput,
     PromptType,
     SingletonInput,
     split_enc_dec_input,
 )
-from vllm.foundation.observability.logger import init_logger
-from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.frontend.processing.multimodal.encoder_budget import MultiModalBudget
 from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
 from vllm.frontend.processing.multimodal.utils import argsort_mm_positions
-from vllm.backends.platform import current_platform
 from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.frontend.processing.renderers import BaseRenderer, renderer_from_config
 from vllm.frontend.processing.renderers.inputs.preprocess import parse_model_prompt
 from vllm.frontend.processing.sampling_params import SamplingParams
-from vllm.frontend.processing.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
+from vllm.frontend.processing.tasks import (
+    GENERATION_TASKS,
+    POOLING_TASKS,
+    SupportedTask,
+)
 from vllm.frontend.processing.tokenizers import TokenizerLike
-from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds, random_uuid
-from vllm.foundation.utilities.async_utils import make_async
-from vllm.foundation.utilities.jsontree import json_iter_leaves
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)

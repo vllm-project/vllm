@@ -6,10 +6,11 @@ from dataclasses import dataclass, field
 from itertools import chain, islice
 from typing import Any, NamedTuple
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.kv_events import KVCacheEvent
 from vllm.backends.distributed.kv_transfer.kv_connector.utils import yield_req_data
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+)
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
@@ -26,6 +27,7 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.metrics im
     _ConnectorMetricName,
     _TransferMetricName,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.math_utils import cdiv, round_down
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks

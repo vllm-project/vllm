@@ -9,7 +9,9 @@ from transformers.models.qwen3_vl.configuration_qwen3_vl import (
     Qwen3VLVisionConfig,
 )
 
-from vllm.foundation.integrations.transformers_utils.configs.qwen3_next import Qwen3NextConfig
+from vllm.foundation.integrations.transformers_utils.configs.qwen3_next import (
+    Qwen3NextConfig,
+)
 
 _QSA_CONFIG_FIELDS = (
     "indexer_n_heads",

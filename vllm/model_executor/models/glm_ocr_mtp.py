@@ -28,6 +28,7 @@ from collections.abc import Iterable
 import torch
 import torch.nn as nn
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -38,7 +39,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.backends.platform import current_platform
 from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .glm4 import Glm4DecoderLayer

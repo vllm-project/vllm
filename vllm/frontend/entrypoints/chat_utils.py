@@ -50,12 +50,17 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter
 # pydantic needs the TypedDict from typing_extensions
 from typing_extensions import Required, TypedDict, override
 
-from vllm import envs
 from vllm.foundation.config import ModelConfig
-from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.foundation.integrations.transformers_utils.processor import (
+    get_video_processor_cls_name,
+)
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.models import SupportsMultiModal
+from vllm.foundation.system import envs
+from vllm.foundation.system.exceptions import VLLMValidationError
+from vllm.foundation.utilities import random_uuid
+from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.foundation.utilities.import_utils import LazyLoader
+from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalBatchedField,
@@ -65,16 +70,16 @@ from vllm.frontend.processing.multimodal.inputs import (
     VisionChunkImage,
     VisionChunkVideo,
 )
-from vllm.frontend.processing.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
+from vllm.frontend.processing.multimodal.media import (
+    MEDIA_CONNECTOR_REGISTRY,
+    MediaConnector,
+)
 from vllm.frontend.processing.multimodal.processing import BaseMultiModalProcessor
 from vllm.frontend.processing.renderers.embed_utils import (
     safe_load_prompt_embeds,
     safe_load_prompt_embeds_async,
 )
-from vllm.foundation.integrations.transformers_utils.processor import get_video_processor_cls_name
-from vllm.foundation.utilities import random_uuid
-from vllm.foundation.utilities.collection_utils import is_list_of
-from vllm.foundation.utilities.import_utils import LazyLoader
+from vllm.model_executor.models import SupportsMultiModal
 
 if TYPE_CHECKING:
     import torch
@@ -1429,7 +1434,7 @@ def validate_chat_template(chat_template: Path | str | None):
             and not Path(chat_template).exists()
         ):
             # Try to find the template in the built-in templates directory
-            from vllm.foundation.integrations.transformers_utils.chat_templates.registry import (
+            from vllm.foundation.integrations.transformers_utils.chat_templates.registry import (  # noqa: E501
                 CHAT_TEMPLATES_DIR,
             )
 
@@ -1471,7 +1476,7 @@ def _load_chat_template(
         JINJA_CHARS = "{}\n"
         if not any(c in chat_template for c in JINJA_CHARS):
             # Try to load from the built-in templates directory
-            from vllm.foundation.integrations.transformers_utils.chat_templates.registry import (
+            from vllm.foundation.integrations.transformers_utils.chat_templates.registry import (  # noqa: E501
                 CHAT_TEMPLATES_DIR,
             )
 

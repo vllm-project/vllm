@@ -10,6 +10,10 @@ from collections.abc import Sequence as GenericSequence
 import msgspec
 from fastapi import Request
 
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system.exceptions import GenerationError
+from vllm.foundation.utilities.collection_utils import as_list
+from vllm.foundation.utilities.serial_utils import numpy2base64
 from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.frontend.entrypoints.chat_utils import AsyncMultiModalItemTracker
 from vllm.frontend.entrypoints.generate.base.protocol import RequestResponseMetadata
@@ -28,12 +32,12 @@ from vllm.frontend.entrypoints.serve.engine.protocol import (
     PromptTokenUsageInfo,
     UsageInfo,
 )
-from vllm.frontend.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.frontend.entrypoints.serve.utils.api_utils import (
+    get_max_tokens,
+    should_include_usage,
+)
 from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.foundation.system.exceptions import GenerationError
 from vllm.frontend.processing.inputs import EngineInput, TokensPrompt, mm_input
-from vllm.foundation.observability.logger import init_logger
-from vllm.runtime.generation.logprobs import Logprob
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -42,8 +46,7 @@ from vllm.frontend.processing.multimodal.inputs import (
 from vllm.frontend.processing.outputs import RequestOutput
 from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
 from vllm.frontend.processing.sampling_params import RequestOutputKind, SamplingParams
-from vllm.foundation.utilities.collection_utils import as_list
-from vllm.foundation.utilities.serial_utils import numpy2base64
+from vllm.runtime.generation.logprobs import Logprob
 
 from .mm_serde import decode_mm_kwargs_item
 from .protocol import (

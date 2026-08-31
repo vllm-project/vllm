@@ -20,8 +20,9 @@ from msgspec import msgpack
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
 
-from vllm import envs
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.frontend.processing.multimodal.inputs import (
     BaseMultiModalField,
     MultiModalBatchedField,
@@ -33,7 +34,6 @@ from vllm.frontend.processing.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
-from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.v1.utils import tensor_data
 
 logger = init_logger(__name__)

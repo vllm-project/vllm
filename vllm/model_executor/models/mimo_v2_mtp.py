@@ -24,11 +24,11 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor

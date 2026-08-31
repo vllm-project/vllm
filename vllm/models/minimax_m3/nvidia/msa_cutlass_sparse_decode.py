@@ -9,9 +9,9 @@ from typing import Any
 
 import torch
 
-from vllm.foundation.config.attention import MiniMaxM3MSADecodeBackend
-from vllm.backends.platform import current_platform
 from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform import current_platform
+from vllm.foundation.config.attention import MiniMaxM3MSADecodeBackend
 
 _MAX_NUM_Q_HEADS = 64
 _MAX_NUM_KV_HEADS = 4

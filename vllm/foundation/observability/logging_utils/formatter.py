@@ -4,7 +4,7 @@
 import logging
 from pathlib import Path
 
-from vllm import envs
+from vllm.foundation.system import envs
 
 
 class NewLineFormatter(logging.Formatter):

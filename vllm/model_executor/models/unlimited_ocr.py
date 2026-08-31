@@ -64,6 +64,12 @@ import math
 from collections.abc import Mapping, Sequence
 
 from vllm.foundation.config import VllmConfig
+from vllm.foundation.integrations.transformers_utils.processors.deepseek_ocr import (
+    BASE_SIZE,
+    CROP_MODE,
+    IMAGE_SIZE,
+    count_tiles,
+)
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsItems
 from vllm.frontend.processing.multimodal.parse import (
@@ -72,15 +78,14 @@ from vllm.frontend.processing.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
 )
-from vllm.frontend.processing.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.frontend.processing.multimodal.processing import (
+    PromptReplacement,
+    PromptUpdate,
+)
 from vllm.frontend.processing.multimodal.processing.context import TimingContext
 from vllm.frontend.processing.multimodal.processing.inputs import ProcessorInputs
-from vllm.frontend.processing.multimodal.processing.processor import MultiModalProcessingInfo
-from vllm.foundation.integrations.transformers_utils.processors.deepseek_ocr import (
-    BASE_SIZE,
-    CROP_MODE,
-    IMAGE_SIZE,
-    count_tiles,
+from vllm.frontend.processing.multimodal.processing.processor import (
+    MultiModalProcessingInfo,
 )
 
 from .deepseek_ocr import (
@@ -107,12 +112,14 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
     """
 
     def get_hf_config(self):
-        from vllm.foundation.integrations.transformers_utils.configs.unlimited_ocr import UnlimitedOCRConfig
+        from vllm.foundation.integrations.transformers_utils.configs.unlimited_ocr import (  # noqa: E501
+            UnlimitedOCRConfig,
+        )
 
         return self.ctx.get_hf_config(UnlimitedOCRConfig)
 
     def get_hf_processor(self, **kwargs: object):
-        from vllm.foundation.integrations.transformers_utils.processors.unlimited_ocr import (
+        from vllm.foundation.integrations.transformers_utils.processors.unlimited_ocr import (  # noqa: E501
             UnlimitedOCRProcessor,
         )
 

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.frontend.processing.parser.engine.registered_adapters import InklingParserToolAdapter
+from vllm.frontend.processing.parser.engine.registered_adapters import (
+    InklingParserToolAdapter,
+)
 
 
 class InklingEngineToolParser(InklingParserToolAdapter):  # type: ignore[valid-type, misc]

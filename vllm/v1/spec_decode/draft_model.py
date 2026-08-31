@@ -8,8 +8,8 @@ from typing_extensions import override
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.utils import replace
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.model_loader import get_model
 from vllm.frontend.processing.tokenizers.registry import get_tokenizer
+from vllm.model_executor.model_loader import get_model
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.vocab_mapping import VocabMapping
 

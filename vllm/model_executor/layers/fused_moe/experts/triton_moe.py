@@ -6,6 +6,9 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.backends.compute.dsl.triton_utils import tl
+from vllm.backends.platform import current_platform
+from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation_supported,
@@ -57,9 +60,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticChannelSym,
     kInt8StaticTensorSym,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.dsl.triton_utils import tl
-from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
 
 
 class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):

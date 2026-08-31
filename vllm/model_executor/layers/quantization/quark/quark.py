@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 from transformers import PretrainedConfig
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -41,7 +42,6 @@ from vllm.model_executor.layers.quantization.quark.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.backends.platform import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper

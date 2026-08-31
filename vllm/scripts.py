@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.frontend.entrypoints.cli.main import main as vllm_main
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.entrypoints.cli.main import main as vllm_main
 
 logger = init_logger(__name__)
 

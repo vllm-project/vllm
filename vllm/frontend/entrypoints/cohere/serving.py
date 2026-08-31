@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E501
 # Adapted from
 # https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/anthropic/serving.py
 """Cohere Chat v2 API serving handler.

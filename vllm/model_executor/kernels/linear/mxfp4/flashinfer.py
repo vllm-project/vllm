@@ -4,14 +4,14 @@
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.backends.platform import current_platform
+from vllm.foundation.utilities.flashinfer import has_flashinfer_cutedsl
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     swizzle_mxfp4_scales,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.flashinfer import has_flashinfer_cutedsl
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 

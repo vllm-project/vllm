@@ -12,13 +12,22 @@ from pydantic import ConfigDict
 from starlette.datastructures import Headers
 
 from vllm import RequestOutput
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.observability.tracing import (
+    contains_trace_headers,
+    extract_trace_headers,
+    log_tracing_disabled_warning,
+)
+from vllm.foundation.system.exceptions import GenerationError
 from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.frontend.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     SpeculativeDecodingMetrics,
 )
 from vllm.frontend.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
-from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.frontend.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.frontend.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
@@ -26,17 +35,10 @@ from vllm.frontend.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.frontend.entrypoints.serve.engine.serving import BaseServing
 from vllm.frontend.entrypoints.serve.engine.typing import AnyRequest
 from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.foundation.system.exceptions import GenerationError
 from vllm.frontend.processing.inputs import EngineInput
-from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.runtime.generation.logprobs import Logprob, PromptLogprobs
 from vllm.runtime.modeling.lora.request import LoRARequest
-from vllm.frontend.processing.tokenizers import TokenizerLike
-from vllm.foundation.observability.tracing import (
-    contains_trace_headers,
-    extract_trace_headers,
-    log_tracing_disabled_warning,
-)
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
@@ -161,7 +163,9 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         # Computed once at startup (cached by ``vllm_config`` identity) and
         # stamped on non-streaming responses. Streaming chunks deliberately
         # omit it to avoid per-chunk overhead.
-        from vllm.frontend.entrypoints.serve.utils.fingerprint import get_system_fingerprint
+        from vllm.frontend.entrypoints.serve.utils.fingerprint import (
+            get_system_fingerprint,
+        )
 
         try:
             self.system_fingerprint: str | None = get_system_fingerprint(

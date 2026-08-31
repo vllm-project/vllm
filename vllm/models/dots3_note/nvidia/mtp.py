@@ -7,11 +7,11 @@ from collections.abc import Iterable, Iterator
 import torch
 import torch.nn as nn
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.fused_embed_norm import (
     fused_embed_eh_norm,
     has_full_vocab_on_rank,

@@ -5,9 +5,9 @@ from typing import cast
 import torch
 import torch.nn as nn
 
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.config import ModelConfig
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsXDRoPE
-from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
 

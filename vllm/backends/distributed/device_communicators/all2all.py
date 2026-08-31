@@ -8,10 +8,9 @@ import torch
 import torch.distributed as dist
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import get_current_vllm_config
 from vllm.backends.distributed import get_dp_group, get_ep_group, get_pcp_group
 from vllm.backends.distributed.utils import StatelessProcessGroup
-from vllm.runtime.execution.forward_context import get_forward_context
+from vllm.foundation.config import get_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.flashinfer import (
     has_flashinfer_nvlink_one_sided,
@@ -19,6 +18,7 @@ from vllm.foundation.utilities.flashinfer import (
 )
 from vllm.foundation.utilities.func_utils import supports_kw
 from vllm.foundation.utilities.import_utils import has_deep_ep, has_deep_ep_v2, has_mori
+from vllm.runtime.execution.forward_context import get_forward_context
 
 from .base_device_communicator import All2AllManagerBase, Cache
 

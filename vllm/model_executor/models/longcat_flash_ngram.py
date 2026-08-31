@@ -17,8 +17,8 @@ import torch
 from torch import nn
 
 from vllm import _custom_ops as ops
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import get_pp_group
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,

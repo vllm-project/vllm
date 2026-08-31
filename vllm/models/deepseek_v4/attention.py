@@ -33,25 +33,25 @@ if TYPE_CHECKING:
         DeepseekSparseSWAMetadata,
     )
 
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.foundation.config import (
     CacheConfig,
     VllmConfig,
     get_current_vllm_config,
 )
-from vllm.backends.distributed import get_tensor_model_parallel_world_size
-from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.multi_stream_utils import (
+    execute_in_parallel,
+    maybe_execute_in_parallel,
+)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4.compressor import DeepseekCompressor
-from vllm.backends.compute.dsl.triton_utils import tl, triton
-from vllm.foundation.utilities.multi_stream_utils import (
-    execute_in_parallel,
-    maybe_execute_in_parallel,
-)
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV4IndexerBackend,

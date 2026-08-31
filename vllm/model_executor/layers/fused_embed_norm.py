@@ -19,12 +19,12 @@ Self-contained (no model-local imports) so it can live under ``layers/``.
 import torch
 
 import vllm.foundation.system.envs as envs
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
-from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 
 @triton.jit

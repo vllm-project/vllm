@@ -11,8 +11,6 @@ import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from typing_extensions import Self
 
-from vllm import envs
-from vllm.foundation.config.weight_transfer import WeightTransferConfig
 from vllm.backends.distributed.weight_transfer.base import (
     TrainerInitInfo,
     TrainerWeightTransferEngine,
@@ -22,6 +20,8 @@ from vllm.backends.distributed.weight_transfer.base import (
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
+from vllm.foundation.config.weight_transfer import WeightTransferConfig
+from vllm.foundation.system import envs
 
 if TYPE_CHECKING:
     from vllm.foundation.config import VllmConfig

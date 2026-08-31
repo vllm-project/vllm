@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import torch.distributed
 
-from vllm.foundation.config import ParallelConfig
 from vllm.backends.distributed import (
     stateless_destroy_torch_distributed_process_group,
 )
 from vllm.backends.distributed.utils import get_cached_tcp_store_client
+from vllm.foundation.config import ParallelConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.engine import (
     EEPNotificationType,

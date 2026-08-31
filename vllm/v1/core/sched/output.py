@@ -13,12 +13,16 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
-    from vllm.backends.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
-    from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
-    from vllm.runtime.modeling.lora.request import LoRARequest
+    from vllm.backends.distributed.ec_transfer.ec_connector.base import (
+        ECConnectorMetadata,
+    )
+    from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorMetadata,
+    )
     from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
     from vllm.frontend.processing.pooling_params import PoolingParams
     from vllm.frontend.processing.sampling_params import SamplingParams
+    from vllm.runtime.modeling.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
     from vllm.v1.request import Request
 else:

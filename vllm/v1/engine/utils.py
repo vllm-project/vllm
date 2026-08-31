@@ -16,11 +16,11 @@ from typing import TYPE_CHECKING, cast
 import msgspec
 import zmq
 
-from vllm import envs
+from vllm.backends.distributed.ray.ray_env import get_env_vars_to_copy
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
-from vllm.backends.distributed.ray.ray_env import get_env_vars_to_copy
+from vllm.foundation.system import envs
 from vllm.foundation.utilities import numa_utils
 from vllm.foundation.utilities.network_utils import (
     get_open_port,

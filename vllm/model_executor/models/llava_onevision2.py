@@ -50,12 +50,50 @@ from vllm.backends.compiler.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
-from vllm.foundation.config import VllmConfig
-from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.backends.distributed import parallel_state
 from vllm.backends.distributed import utils as dist_utils
-from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.integrations.transformers_utils.processor import _merge_mm_kwargs
+from vllm.foundation.integrations.transformers_utils.repo_utils import (
+    get_hf_file_to_dict,
+)
+from vllm.foundation.integrations.transformers_utils.utils import (
+    convert_model_repo_to_path,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
+    ImageItem,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.frontend.processing.multimodal.parse import (
+    DictEmbeddingItems,
+    ImageSize,
+    ModalityDataItems,
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
+from vllm.frontend.processing.multimodal.processing import (
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+    cached_encode,
+)
+from vllm.frontend.processing.multimodal.processing.dummy_inputs import (
+    BaseDummyInputsBuilder,
+)
+from vllm.frontend.processing.multimodal.video import (
+    VIDEO_LOADER_REGISTRY,
+    VideoBackend,
+    VideoSourceMetadata,
+    VideoTargetMetadata,
+)
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -79,39 +117,7 @@ from vllm.model_executor.models.utils import (
     _merge_multimodal_embeddings as merge_multimodal_embeddings,
 )
 from vllm.model_executor.models.vision import get_vit_attn_backend
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import (
-    ImageItem,
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
-from vllm.frontend.processing.multimodal.parse import (
-    DictEmbeddingItems,
-    ImageSize,
-    ModalityDataItems,
-    MultiModalDataItems,
-    MultiModalDataParser,
-)
-from vllm.frontend.processing.multimodal.processing import (
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-    cached_encode,
-)
-from vllm.frontend.processing.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
-from vllm.frontend.processing.multimodal.video import (
-    VIDEO_LOADER_REGISTRY,
-    VideoBackend,
-    VideoSourceMetadata,
-    VideoTargetMetadata,
-)
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.processor import _merge_mm_kwargs
-from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
-from vllm.foundation.integrations.transformers_utils.utils import convert_model_repo_to_path
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 logger = init_logger(__name__)
 

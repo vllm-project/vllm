@@ -9,6 +9,8 @@ import torch
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.backends.compute.scalar_type import ScalarType, scalar_types
+from vllm.backends.platform import current_platform
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
     MoEActivation,
@@ -52,8 +54,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Static,
     kNvfp4Static,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.scalar_type import ScalarType, scalar_types
 
 
 def _fused_marlin_moe(

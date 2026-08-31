@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.nn as nn
 
-from vllm.foundation.config.kernel import FLASHINFER_MOE_EP_BACKENDS
 from vllm.backends.distributed import get_ep_group
 from vllm.backends.platform import current_platform
+from vllm.foundation.config.kernel import FLASHINFER_MOE_EP_BACKENDS
 
 if TYPE_CHECKING:
     from flashinfer.moe_ep import BootstrapConfig, MoEEpMegaLayer

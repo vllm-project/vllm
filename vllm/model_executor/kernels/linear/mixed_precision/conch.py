@@ -6,8 +6,8 @@ from typing import Final
 
 import torch
 
-from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
 from vllm.backends.compute.scalar_type import scalar_types
+from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 

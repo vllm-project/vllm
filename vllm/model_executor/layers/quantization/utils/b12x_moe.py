@@ -5,13 +5,13 @@
 import torch
 import torch.nn.functional as F
 
+from vllm.foundation.utilities.math_utils import round_up
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
-from vllm.foundation.utilities.math_utils import round_up
 
 
 def _pad_gated_weights(

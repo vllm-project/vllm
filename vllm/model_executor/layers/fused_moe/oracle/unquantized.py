@@ -9,6 +9,7 @@ import torch
 import vllm.foundation.system.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.backends.platform import current_platform
 from vllm.foundation.config.kernel import MoEBackend
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -25,7 +26,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
     swap_w13_to_w31,
 )
-from vllm.backends.platform import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey

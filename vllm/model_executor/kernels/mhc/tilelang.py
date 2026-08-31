@@ -126,13 +126,13 @@ def mhc_pre_tilelang(
         comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
         layer_input: shape (..., hidden_size), dtype torch.bfloat16
     """
+    from vllm.foundation.utilities.deep_gemm import tf32_hc_prenorm_gemm
+    from vllm.foundation.utilities.math_utils import cdiv
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
         mhc_pre_big_fuse_tilelang,
         mhc_pre_big_fuse_with_norm_tilelang,
     )
-    from vllm.foundation.utilities.deep_gemm import tf32_hc_prenorm_gemm
-    from vllm.foundation.utilities.math_utils import cdiv
 
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
@@ -316,11 +316,11 @@ def mhc_pre_broadcast_tilelang(
     fn_broadcast: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """First-layer mHC pre for a residual broadcast from ``(T, H)``."""
+    from vllm.foundation.utilities.math_utils import cdiv
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
         mhc_pre_big_fuse_broadcast_with_norm_tilelang,
     )
-    from vllm.foundation.utilities.math_utils import cdiv
 
     assert norm_weight is not None, "broadcast mHC pre currently requires fused RMSNorm"
     assert residual.dtype == torch.bfloat16
@@ -462,6 +462,7 @@ def mhc_fused_post_pre_tilelang(
         layer_input_cur: shape (..., hidden_size)
     """
 
+    from vllm.foundation.utilities.math_utils import cdiv
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
         mhc_fused_tilelang,
@@ -469,7 +470,6 @@ def mhc_fused_post_pre_tilelang(
         mhc_pre_big_fuse_tilelang,
         mhc_pre_big_fuse_with_norm_tilelang,
     )
-    from vllm.foundation.utilities.math_utils import cdiv
 
     assert residual.dtype == torch.bfloat16
     assert x.dtype == torch.bfloat16

@@ -29,8 +29,8 @@ from typing import Any
 
 import torch
 
-from vllm.backends.platform import current_platform
 from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform import current_platform
 
 # reduce_segments is KV-format-agnostic: by the time it runs, K/V have been
 # consumed and only (max, expsum, partial_output) triples remain. Reuse the

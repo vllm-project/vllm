@@ -10,8 +10,8 @@ from einops import rearrange, repeat
 from torch import nn
 from torch.nn import functional as F
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import get_tensor_model_parallel_world_size
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer

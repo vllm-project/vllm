@@ -8,20 +8,20 @@ from functools import cache
 import torch
 import torch.nn.functional as F
 
-from vllm.foundation.config import get_current_vllm_config
 from vllm.backends.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import get_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.flashinfer import has_flashinfer
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.flashinfer import has_flashinfer
 
 logger = init_logger(__name__)
 

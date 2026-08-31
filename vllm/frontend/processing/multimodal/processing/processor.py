@@ -17,6 +17,8 @@ from typing import (
 import torch
 from typing_extensions import TypeVar, assert_never
 
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.collection_utils import flatten_2d_lists, full_groupby
 from vllm.frontend.processing.inputs import (
     MultiModalEncDecInput,
     MultiModalHashes,
@@ -24,9 +26,7 @@ from vllm.frontend.processing.inputs import (
     mm_enc_dec_input,
     mm_input,
 )
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.tokenizers import TokenizerLike
-from vllm.foundation.utilities.collection_utils import flatten_2d_lists, full_groupby
 
 from ..inputs import (
     MultiModalFieldConfig,
@@ -181,7 +181,7 @@ class PromptUpdateDetails:
 
     is_embed: Callable[[list[int]], torch.Tensor] | None = None
     """
-    Given [`full`][vllm.frontend.processing.multimodal.processing.PromptUpdateDetails.full],
+    Given `full`,
     return a boolean mask of shape `(len(full),)` indicating which positions
     of `full` to assign embeddings to.
 
@@ -224,7 +224,7 @@ PromptUpdateInfo: TypeAlias = list[int] | PromptUpdateDetails
 The token sequence that is part of the update.
 
 If only part of the content corresponds to feature placeholders, you can
-use [`PromptUpdateDetails`][vllm.frontend.processing.multimodal.processing.PromptUpdateDetails] to
+use [`PromptUpdateDetails`][] to
 specify which part.
 """
 
@@ -462,7 +462,7 @@ class PromptTargetMatch(NamedTuple):
 @dataclass(frozen=True)
 class ResolvedPromptUpdate:
     """
-    A [`PromptUpdate`][vllm.frontend.processing.multimodal.processing.PromptUpdate] with its
+    A [`PromptUpdate`][] with its
     lazy attributes resolved.
     """
 

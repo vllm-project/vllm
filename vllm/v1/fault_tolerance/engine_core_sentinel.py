@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING
 
 import msgspec
 
-from vllm.foundation.config import set_current_vllm_config
 from vllm.backends.distributed import stateless_destroy_torch_distributed_process_group
-from vllm.backends.distributed.utils import stateless_init_torch_distributed_process_group
+from vllm.backends.distributed.utils import (
+    stateless_init_torch_distributed_process_group,
+)
+from vllm.foundation.config import set_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.network_utils import get_open_port
 from vllm.v1.engine import (

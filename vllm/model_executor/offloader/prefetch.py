@@ -20,8 +20,8 @@ import torch.nn as nn
 # Import prefetch_ops to register custom ops at module load time
 import vllm.model_executor.offloader.prefetch_ops  # noqa: F401
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
 from vllm.foundation.utilities.torch_utils import get_dtype_size
+from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
 
 logger = init_logger(__name__)
 

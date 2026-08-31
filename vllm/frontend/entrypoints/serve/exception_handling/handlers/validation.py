@@ -8,9 +8,9 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from starlette.responses import JSONResponse
 
-from vllm.frontend.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
-from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system.exceptions import VLLMValidationError
+from vllm.frontend.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 
 from ..utils import sanitize_message
 

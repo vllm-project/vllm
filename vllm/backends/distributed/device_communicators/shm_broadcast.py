@@ -32,8 +32,8 @@ from zmq import (  # type: ignore
 
 import vllm.foundation.system.envs as envs
 from vllm.backends.distributed.utils import StatelessProcessGroup, sched_yield
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.network_utils import (
     get_ip,
     get_open_zmq_inproc_path,

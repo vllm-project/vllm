@@ -21,9 +21,10 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config, PretrainedConfig
 
 from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.foundation.config.cache import CacheDType
-from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.hpc import hpc_gated_mla_gemm, hpc_gated_mla_supported
@@ -41,7 +42,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
-from vllm.backends.platform import current_platform
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.selector import get_attn_backend
 

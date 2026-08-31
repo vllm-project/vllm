@@ -24,7 +24,7 @@ from vllm.v1.kv_offload.base import (
 )
 
 if TYPE_CHECKING:
-    from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (  # noqa: E501
         OffloadingConnectorStats,
     )
     from vllm.v1.kv_offload.base import OffloadingSpec

@@ -26,6 +26,7 @@ from xgrammar.structural_tag import (
     TriggeredTagsFormat,
 )
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.chat_utils import make_tool_call_id
 from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -42,9 +43,10 @@ from vllm.frontend.entrypoints.openai.parser.harmony_utils import (
     is_function_recipient,
 )
 from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.parser.abstract_parser import DelegatingParser
-from vllm.frontend.processing.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
+from vllm.frontend.processing.reasoning.gptoss_reasoning_parser import (
+    GptOssReasoningParser,
+)
 from vllm.frontend.processing.sampling_params import StructuredOutputsParams
 from vllm.frontend.processing.tool_parsers.gptoss_tool_parser import GptOssToolParser
 from vllm.frontend.processing.tool_parsers.structural_tag_registry import (

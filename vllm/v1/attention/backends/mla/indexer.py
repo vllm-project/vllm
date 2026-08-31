@@ -5,9 +5,17 @@ from dataclasses import dataclass
 import torch
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import VllmConfig
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.backends.distributed import get_dcp_group, get_pcp_group
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.deep_gemm import (
+    get_paged_mqa_logits_metadata,
+    has_deep_gemm,
+    native_next_n_supported,
+)
+from vllm.foundation.utilities.platform_utils import num_compute_units
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
     WarmupIntRange,
@@ -16,14 +24,6 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.dsl.triton_utils import tl, triton
-from vllm.foundation.utilities.deep_gemm import (
-    get_paged_mqa_logits_metadata,
-    has_deep_gemm,
-    native_next_n_supported,
-)
-from vllm.foundation.utilities.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

@@ -15,8 +15,8 @@ from vllm.backends.distributed.device_communicators.all_reduce_utils import (
     gpu_p2p_access_check,
 )
 from vllm.backends.distributed.parallel_state import in_the_same_node_as
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 
 try:
     ops.meta_size()

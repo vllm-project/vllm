@@ -27,15 +27,19 @@ from safetensors.torch import load, load_file, safe_open, save_file
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm import envs
+from vllm.backends.distributed import get_tensor_model_parallel_rank, get_world_group
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import ModelConfig
 from vllm.foundation.config.load import (
     DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
     DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     LoadConfig,
 )
-from vllm.backends.distributed import get_tensor_model_parallel_rank, get_world_group
+from vllm.foundation.integrations.transformers_utils.repo_utils import hf_api, hf_fs
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.observability.tracing import instrument
+from vllm.foundation.system import envs
+from vllm.foundation.utilities.import_utils import PlaceholderModule
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     get_quantization_config,
@@ -43,10 +47,6 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.observability.tracing import instrument
-from vllm.foundation.integrations.transformers_utils.repo_utils import hf_api, hf_fs
-from vllm.foundation.utilities.import_utils import PlaceholderModule
 
 try:
     from runai_model_streamer import SafetensorsStreamer

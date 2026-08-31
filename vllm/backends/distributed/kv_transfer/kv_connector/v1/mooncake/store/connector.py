@@ -16,7 +16,6 @@ from typing import Any
 
 import torch
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.kv_events import (
     KVCacheEvent,
     KVConnectorKVEvents,
@@ -35,8 +34,9 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
-from vllm.runtime.execution.forward_context import ForwardContext
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.runtime.execution.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks

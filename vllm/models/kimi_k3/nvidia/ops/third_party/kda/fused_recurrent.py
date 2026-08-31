@@ -9,10 +9,10 @@
 
 import torch
 
-from vllm.backends.platform import current_platform
-from vllm.third_party.flash_linear_attention.ops.op import exp, log
 from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.math_utils import cdiv, next_power_of_2
+from vllm.third_party.flash_linear_attention.ops.op import exp, log
 
 
 @triton.heuristics(
@@ -483,9 +483,7 @@ def fused_recurrent_kda(
     )
 
 
-@triton.jit(
-    do_not_specialize=["stride_beta_token", "stride_state_indices"]
-)
+@triton.jit(do_not_specialize=["stride_beta_token", "stride_state_indices"])
 def fused_recurrent_kda_packed_decode_kernel(
     mixed_qkv,
     raw_g,

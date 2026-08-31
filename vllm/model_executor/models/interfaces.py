@@ -32,10 +32,10 @@ from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.foundation.utilities.collection_utils import common_prefix
 from vllm.foundation.utilities.func_utils import supports_kw
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.interfaces_base import VllmModel
 
 if TYPE_CHECKING:
     from vllm.foundation.config import (
@@ -46,7 +46,12 @@ if TYPE_CHECKING:
     )
     from vllm.foundation.config.multimodal import VideoPruningMethod
     from vllm.frontend.processing.inputs import PromptType, TokensPrompt
-    from vllm.runtime.modeling.lora.model_manager import LoRAModelManager
+    from vllm.frontend.processing.multimodal.inputs import (
+        MultiModalFeatureSpec,
+        MultiModalKwargsItem,
+    )
+    from vllm.frontend.processing.multimodal.registry import _ProcessorFactories
+    from vllm.frontend.processing.tasks import ScoreType
     from vllm.model_executor.layers.fused_moe import MoERunner
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -55,10 +60,8 @@ if TYPE_CHECKING:
     )
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.models.utils import WeightsMapper
-    from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
-    from vllm.frontend.processing.multimodal.registry import _ProcessorFactories
+    from vllm.runtime.modeling.lora.model_manager import LoRAModelManager
     from vllm.runtime.modeling.sequence import IntermediateTensors
-    from vllm.frontend.processing.tasks import ScoreType
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
@@ -796,10 +799,10 @@ class SupportsPP(Protocol):
         intermediate_tensors: "IntermediateTensors | None",
     ) -> "Tensor | IntermediateTensors | tuple[Tensor, list[Tensor]]":
         """
-        Accept [`IntermediateTensors`][vllm.runtime.modeling.sequence.IntermediateTensors] when
+        Accept [`IntermediateTensors`][] when
         PP rank > 0.
 
-        Return [`IntermediateTensors`][vllm.runtime.modeling.sequence.IntermediateTensors] only
+        Return [`IntermediateTensors`][] only
         for the last PP rank.
         """
         ...

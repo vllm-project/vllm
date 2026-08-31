@@ -11,6 +11,11 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import overload
 
+from vllm.backends.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightTransferUpdateRequest,
+)
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import (
     AttentionConfig,
     CompilationConfig,
@@ -28,34 +33,31 @@ from vllm.foundation.config.model import (
     TokenizerMode,
 )
 from vllm.foundation.config.quantization import QuantizationConfigArgs
-from vllm.backends.distributed.weight_transfer.base import (
-    WeightTransferInitRequest,
-    WeightTransferUpdateRequest,
-)
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.observability.usage.usage_lib import UsageContext
+from vllm.foundation.utilities.counter import Counter
 from vllm.frontend.compat.engine.arg_utils import EngineArgs
 from vllm.frontend.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     load_chat_template,
 )
-from vllm.frontend.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
+from vllm.frontend.entrypoints.generate.beam_search.offline import (
+    BeamSearchOfflineMixin,
+)
 from vllm.frontend.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.frontend.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.frontend.processing.inputs import PromptType
-from vllm.foundation.observability.logger import init_logger
-from vllm.runtime.modeling.lora.request import LoRARequest
-from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.frontend.processing.outputs import PoolingRequestOutput, RequestOutput
-from vllm.backends.platform import current_platform
+from vllm.frontend.processing.renderers import ChatParams
 from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.frontend.processing.tokenizers import TokenizerLike
-from vllm.foundation.observability.usage.usage_lib import UsageContext
-from vllm.foundation.utilities.counter import Counter
+from vllm.model_executor.layers.quantization import QuantizationMethods
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
-from vllm.frontend.processing.renderers import ChatParams
 from .offline_utils import _O, _R, OfflineInferenceMixin
 
 if TYPE_CHECKING:
@@ -434,7 +436,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See [PromptType][vllm.frontend.processing.inputs.PromptType]
+                for batch inference. See
+                [PromptType][vllm.frontend.processing.inputs.PromptType]
                 for more details about the format of each prompt.
             sampling_params: The sampling parameters for text generation. If
                 None, we use the default sampling parameters.

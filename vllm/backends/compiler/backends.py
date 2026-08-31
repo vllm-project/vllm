@@ -27,12 +27,12 @@ from vllm.backends.compiler.codegen import (
     compile_execution_fn,
     generate_execution_code,
 )
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.foundation.config.compilation import DynamicShapesType
 from vllm.foundation.config.utils import Range, hash_factors
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.logging_utils import lazy
-from vllm.backends.platform import current_platform
 from vllm.foundation.observability.tracing import instrument, instrument_manual
 from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer

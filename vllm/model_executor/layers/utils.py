@@ -9,10 +9,10 @@ from dataclasses import dataclass
 import torch
 
 from vllm import _custom_ops as ops
-from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import CpuArchEnum, current_platform
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.flashinfer import (
     flashinfer_bf16_mm,
     is_flashinfer_cutedsl_bf16_gemm_supported,

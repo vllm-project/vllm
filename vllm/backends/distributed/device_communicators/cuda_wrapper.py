@@ -13,8 +13,8 @@ from typing import Any
 import torch  # noqa
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.system_utils import find_loaded_library
 
 logger = init_logger(__name__)

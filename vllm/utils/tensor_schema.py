@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E501
 # COMPAT SHIM (auto-generated): old path -> canonical new path
 
 """Compatibility shim: vllm.utils/tensor_schema -> vllm.foundation.utilities.tensor_schema (sys.modules alias)."""
+
 import importlib
 import sys
 

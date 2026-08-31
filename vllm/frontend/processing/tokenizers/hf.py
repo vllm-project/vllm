@@ -8,7 +8,9 @@ from typing import TypeAlias, TypeVar
 
 from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 
-from vllm.foundation.integrations.transformers_utils.config import get_sentence_transformer_tokenizer_config
+from vllm.foundation.integrations.transformers_utils.config import (
+    get_sentence_transformer_tokenizer_config,
+)
 
 from .protocol import TokenizerLike
 
@@ -123,7 +125,9 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     # MistralCommonBackend is tekken-backed and needs byte-fallback-aware tokenization.
     mistral_tekkenizer = None
     if getattr(getattr(tokenizer, "tokenizer", None), "instruct_tokenizer", None):
-        from vllm.frontend.processing.tokenizers.mistral import mistral_common_tekkenizer
+        from vllm.frontend.processing.tokenizers.mistral import (
+            mistral_common_tekkenizer,
+        )
 
         mistral_tekkenizer = mistral_common_tekkenizer(tokenizer)
 
@@ -161,7 +165,9 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 
         def convert_ids_to_tokens(self, ids, skip_special_tokens: bool = False):
             if mistral_tekkenizer is not None:
-                from vllm.frontend.processing.tokenizers.mistral import tekken_convert_ids_to_tokens
+                from vllm.frontend.processing.tokenizers.mistral import (
+                    tekken_convert_ids_to_tokens,
+                )
 
                 return tekken_convert_ids_to_tokens(mistral_tekkenizer, ids)
             return super().convert_ids_to_tokens(
@@ -170,7 +176,9 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 
         def convert_tokens_to_string(self, tokens: list[str]) -> str:
             if mistral_tekkenizer is not None:
-                from vllm.frontend.processing.tokenizers.mistral import tekken_convert_tokens_to_string
+                from vllm.frontend.processing.tokenizers.mistral import (
+                    tekken_convert_tokens_to_string,
+                )
 
                 return tekken_convert_tokens_to_string(mistral_tekkenizer, tokens)
             try:

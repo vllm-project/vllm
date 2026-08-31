@@ -32,13 +32,14 @@ import torch
 from torch import nn
 from transformers import AutoProcessor, PretrainedConfig
 
-from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.backends.distributed import (
     get_ep_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -58,7 +59,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
 from .interfaces import MixtureOfExperts
 from .qwen3_moe import (

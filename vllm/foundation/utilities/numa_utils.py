@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import psutil
 
-from vllm import envs
+from vllm.foundation.system import envs
 
 if TYPE_CHECKING:
     from vllm.foundation.config import VllmConfig

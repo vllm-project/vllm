@@ -10,6 +10,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
 import vllm.backends.compute.ir.ops
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -25,7 +26,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kStaticTensorScale,
 )
-from vllm.backends.platform import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
@@ -180,7 +180,9 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
         def pattern(
             input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor
         ) -> torch.Tensor:
-            result_rms = vllm.backends.compute.ir.ops.rms_norm(input, weight, self.epsilon)
+            result_rms = vllm.backends.compute.ir.ops.rms_norm(
+                input, weight, self.epsilon
+            )
             return self.quant_matcher(result_rms, scale)[0]
 
         def replacement(
@@ -423,7 +425,9 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
         def pattern(
             input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            result_rms = vllm.backends.compute.ir.ops.rms_norm(input, weight, self.epsilon)
+            result_rms = vllm.backends.compute.ir.ops.rms_norm(
+                input, weight, self.epsilon
+            )
             result = torch.empty(
                 result_rms.shape,
                 device=result_rms.device,
@@ -505,7 +509,9 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
         def pattern(
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            result_rms = vllm.backends.compute.ir.ops.rms_norm(input, weight, self.epsilon)
+            result_rms = vllm.backends.compute.ir.ops.rms_norm(
+                input, weight, self.epsilon
+            )
             # result, scale
             return self.quant_matcher(result_rms)  # type: ignore[no-any-return]
 

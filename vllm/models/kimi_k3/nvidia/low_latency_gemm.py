@@ -25,6 +25,7 @@ from torch import nn
 
 import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
+from vllm.backends.platform import current_platform
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
     shape_dynamic_skinny_gemm,
@@ -34,7 +35,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
 )
-from vllm.backends.platform import current_platform
 
 Backend = Literal["cute", "dsv3_fused_a"]
 # A resolved per-token-count call: the backend plus its CuTe config (None for

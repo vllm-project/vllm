@@ -10,7 +10,12 @@ from typing_extensions import NotRequired, TypedDict
 if TYPE_CHECKING:
     import torch
 
-    from vllm.frontend.processing.multimodal.inputs import AudioItem, ImageItem, VideoItem, VisionChunk
+    from vllm.frontend.processing.multimodal.inputs import (
+        AudioItem,
+        ImageItem,
+        VideoItem,
+        VisionChunk,
+    )
 
 
 _T = TypeVar("_T")
@@ -149,10 +154,12 @@ DecoderOnlyPrompt: TypeAlias = (
 """
 Schema of a prompt for a decoder-only model:
 
-- A text prompt (string or [`TextPrompt`][vllm.frontend.processing.inputs.llm.TextPrompt])
+- A text prompt (string or
+  [`TextPrompt`][vllm.frontend.processing.inputs.llm.TextPrompt])
 - A tokenized prompt (list of token IDs, or
   [`TokensPrompt`][vllm.frontend.processing.inputs.llm.TokensPrompt])
-- An embeddings prompt ([`EmbedsPrompt`][vllm.frontend.processing.inputs.llm.EmbedsPrompt])
+- An embeddings prompt
+  ([`EmbedsPrompt`][vllm.frontend.processing.inputs.llm.EmbedsPrompt])
 
 For encoder-decoder models, passing a singleton prompt is shorthand for passing
 `ExplicitEncoderDecoderPrompt(encoder_prompt=prompt, decoder_prompt=None)`.
@@ -163,7 +170,8 @@ EncoderPrompt: TypeAlias = str | TextPrompt | list[int] | TokensPrompt
 """
 Schema of a prompt for the encoder part of a encoder-decoder model:
 
-- A text prompt (string or [`TextPrompt`][vllm.frontend.processing.inputs.llm.TextPrompt])
+- A text prompt (string or
+  [`TextPrompt`][vllm.frontend.processing.inputs.llm.TextPrompt])
 - A tokenized prompt (list of token IDs, or
   [`TokensPrompt`][vllm.frontend.processing.inputs.llm.TokensPrompt])
 """
@@ -173,7 +181,8 @@ DecoderPrompt: TypeAlias = str | TextPrompt | list[int] | TokensPrompt
 """
 Schema of a prompt for the decoder part of an encoder-decoder model:
 
-- A text prompt (string or [`TextPrompt`][vllm.frontend.processing.inputs.llm.TextPrompt])
+- A text prompt (string or
+  [`TextPrompt`][vllm.frontend.processing.inputs.llm.TextPrompt])
 - A tokenized prompt (list of token IDs, or
   [`TokensPrompt`][vllm.frontend.processing.inputs.llm.TokensPrompt])
 
@@ -222,14 +231,16 @@ PromptType: TypeAlias = DecoderOnlyPrompt | EncoderDecoderPrompt
 """
 Schema for any prompt, regardless of model type.
 
-This is the input format accepted by most [`LLM`][vllm.frontend.entrypoints.llm.LLM] APIs.
+This is the input format accepted by most
+[`LLM`][vllm.frontend.entrypoints.llm.LLM] APIs.
 """
 
 
 class DataPrompt(_PromptOptions):
     """
     Represents generic inputs that are converted to
-    [`PromptType`][vllm.frontend.processing.inputs.llm.PromptType] by IO processor plugins.
+    [`PromptType`][vllm.frontend.processing.inputs.llm.PromptType] by IO
+    processor plugins.
     """
 
     data: Any

@@ -27,15 +27,17 @@ from packaging.version import Version
 
 from vllm.backends.compiler.decorators import should_torch_compile_mm_encoder
 from vllm.foundation.config.utils import getattr_iter
-from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalInput, mm_input
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.models.interfaces import (
-    MultiModalEmbeddings,
-    SupportsMRoPE,
-    SupportsMultiModal,
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.frontend.processing.inputs import (
+    MultiModalDataDict,
+    MultiModalInput,
+    mm_input,
 )
-from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
+from vllm.frontend.processing.multimodal import (
+    MULTIMODAL_REGISTRY,
+    MultiModalKwargsItems,
+)
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
@@ -58,8 +60,13 @@ from vllm.frontend.processing.multimodal.processing import (
     TimingContext,
     cached_encode,
 )
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMRoPE,
+    SupportsMultiModal,
+)
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 
 if TYPE_CHECKING:
     from transformers import BatchFeature, PreTrainedModel

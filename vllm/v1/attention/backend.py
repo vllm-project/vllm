@@ -18,11 +18,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.backends.platform.interface import DeviceCapability
     from vllm.foundation.config import VllmConfig
     from vllm.foundation.config.cache import CacheDType
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-    from vllm.backends.platform.interface import DeviceCapability
     from vllm.v1.kv_cache_interface import (
         AttentionSpec,
         KVCacheLayout,

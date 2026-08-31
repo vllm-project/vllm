@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 import torch
 
+from vllm.backends.compute.scalar_type import scalar_types
 from vllm.backends.distributed.utils import verify_group_size_divides_partition
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -19,7 +20,6 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
 )
-from vllm.backends.compute.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 

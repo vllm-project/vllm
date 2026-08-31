@@ -44,7 +44,6 @@ if typing.TYPE_CHECKING:
     from vllm.frontend.compat.engine.llm_engine import LLMEngine
     from vllm.frontend.entrypoints.llm import LLM
     from vllm.frontend.processing.inputs import PromptType, TextPrompt, TokensPrompt
-    from vllm.model_executor.models import ModelRegistry
     from vllm.frontend.processing.outputs import (
         ClassificationOutput,
         ClassificationRequestOutput,
@@ -59,6 +58,7 @@ if typing.TYPE_CHECKING:
     )
     from vllm.frontend.processing.pooling_params import PoolingParams
     from vllm.frontend.processing.sampling_params import SamplingParams
+    from vllm.model_executor.models import ModelRegistry
     from vllm.v1.executor.ray_utils import initialize_ray_cluster
 else:
 

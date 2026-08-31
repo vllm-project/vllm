@@ -6,7 +6,9 @@ from collections.abc import Iterable, Sequence
 from openai.types.responses import ResponseFunctionToolCall
 
 from vllm.frontend.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.frontend.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,

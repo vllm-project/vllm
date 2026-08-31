@@ -13,8 +13,8 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-from vllm.frontend.processing.inputs import MultiModalPlaceholders
 from vllm.foundation.utilities.import_utils import LazyLoader
+from vllm.frontend.processing.inputs import MultiModalPlaceholders
 
 from .inputs import (
     BatchedTensorInputs,

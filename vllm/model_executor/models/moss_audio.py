@@ -16,23 +16,18 @@ from transformers import BatchFeature, PretrainedConfig, Qwen3Config
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import VllmConfig
-from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict
-from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY, SiluAndMul
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    MergedColumnParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.integrations.transformers_utils.repo_utils import (
+    get_hf_file_to_dict,
 )
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     AudioItem,
@@ -55,10 +50,17 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
+from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY, SiluAndMul
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
-from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

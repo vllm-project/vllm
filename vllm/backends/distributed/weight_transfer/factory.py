@@ -15,13 +15,13 @@ from vllm.foundation.observability.logger import init_logger
 if TYPE_CHECKING:
     import torch
 
-    from vllm.foundation.config import VllmConfig
-    from vllm.foundation.config.weight_transfer import WeightTransferConfig
     from vllm.backends.distributed.weight_transfer.base import (
         TrainerInitInfo,
         VLLMWeightSyncClient,
         WeightSource,
     )
+    from vllm.foundation.config import VllmConfig
+    from vllm.foundation.config.weight_transfer import WeightTransferConfig
 
 logger = init_logger(__name__)
 

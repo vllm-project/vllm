@@ -17,6 +17,14 @@ from typing import Literal
 from fastapi import Request
 from pydantic import Field
 
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.observability.tracing import (
+    contains_trace_headers,
+    extract_trace_headers,
+    log_tracing_disabled_warning,
+)
+from vllm.foundation.utilities import random_uuid
+from vllm.foundation.utilities.async_utils import merge_async_iterators
 from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.frontend.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.frontend.entrypoints.serve.engine.protocol import (
@@ -27,17 +35,9 @@ from vllm.frontend.entrypoints.serve.engine.protocol import (
 from vllm.frontend.entrypoints.serve.engine.serving import BaseServing
 from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.frontend.processing.inputs import EngineInput, tokens_input
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.outputs import RequestOutput
 from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.frontend.processing.tokenizers import TokenizerLike
-from vllm.foundation.observability.tracing import (
-    contains_trace_headers,
-    extract_trace_headers,
-    log_tracing_disabled_warning,
-)
-from vllm.foundation.utilities import random_uuid
-from vllm.foundation.utilities.async_utils import merge_async_iterators
 
 logger = init_logger(__name__)
 

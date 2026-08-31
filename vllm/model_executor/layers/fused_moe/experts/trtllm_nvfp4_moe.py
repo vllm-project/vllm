@@ -5,7 +5,9 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -33,8 +35,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
 

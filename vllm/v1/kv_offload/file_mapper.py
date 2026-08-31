@@ -4,7 +4,7 @@
 import hashlib
 import json
 
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (  # noqa: E501
     canonical_format_id,
 )
 from vllm.v1.kv_offload.base import (

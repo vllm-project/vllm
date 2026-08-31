@@ -13,7 +13,6 @@ import torch
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.attention import MiniMaxM3MSADecodeBackend
-from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import (
     SPARSE_BLOCK_SIZE,
@@ -34,6 +33,7 @@ from vllm.models.minimax_m3.nvidia.msa_cutlass_sparse_decode import (
     should_prepare_decode_metadata,
     supports_cutlass_sparse_decode,
 )
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.v1.attention.backend import (
     AttentionLayer,
     CommonAttentionMetadata,

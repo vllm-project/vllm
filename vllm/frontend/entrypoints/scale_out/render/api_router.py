@@ -5,12 +5,14 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.anthropic.protocol import AnthropicMessagesRequest
-from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.frontend.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.frontend.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.frontend.entrypoints.serve.utils.api_utils import validate_json_request
-from vllm.foundation.observability.logger import init_logger
 
 from ..token_in_token_out.protocol import GenerateRequest
 from .serving import ServingRender

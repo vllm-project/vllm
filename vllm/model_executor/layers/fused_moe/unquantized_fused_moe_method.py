@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm.foundation.system.envs as envs
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
@@ -28,7 +29,6 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.backends.platform import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts

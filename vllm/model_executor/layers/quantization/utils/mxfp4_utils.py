@@ -4,11 +4,14 @@ from typing import Any
 
 import torch
 
-from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
 from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.import_utils import has_triton_kernels
-from vllm.foundation.utilities.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.foundation.utilities.torch_utils import (
+    direct_register_custom_op,
+    is_torch_equal_or_newer,
+)
 
 logger = init_logger(__name__)
 

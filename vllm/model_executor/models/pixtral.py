@@ -22,24 +22,20 @@ from transformers.models.pixtral.modeling_pixtral import (
     position_ids_in_meshgrid,
 )
 
+from vllm.backends.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.backends.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.activation import SiluAndMul, get_act_and_mul_fn
-from vllm.model_executor.layers.attention import MMEncoderAttention
-from vllm.model_executor.layers.conv import Conv2dLayer
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
+from vllm.foundation.integrations.transformers_utils.processors.pixtral import (
+    MistralCommonImageProcessor,
+    MistralCommonPixtralProcessor,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import WeightsMapper
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
+from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import MultiModalDataDict
+from vllm.frontend.processing.multimodal import (
+    MULTIMODAL_REGISTRY,
+    MultiModalKwargsItems,
+)
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsOptionalItems,
@@ -61,15 +57,22 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.frontend.processing.tokenizers.mistral import MistralTokenizer
-from vllm.foundation.integrations.transformers_utils.processors.pixtral import (
-    MistralCommonImageProcessor,
-    MistralCommonPixtralProcessor,
+from vllm.model_executor.layers.activation import SiluAndMul, get_act_and_mul_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
 )
-from vllm.foundation.utilities.collection_utils import is_list_of
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import WeightsMapper
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (

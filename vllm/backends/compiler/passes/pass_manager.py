@@ -6,12 +6,12 @@ from typing import Any, ParamSpec, TypeVar
 
 from torch import fx as fx
 
-from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.backends.compiler.passes.utility.post_cleanup import PostCleanupPass
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig, set_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.system_utils import set_env_var
 
 from .ir.clone_elimination import UnsafeCloneEliminationPass

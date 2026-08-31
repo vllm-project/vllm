@@ -6,6 +6,7 @@ from collections.abc import Sequence
 import torch
 
 import vllm.foundation.system.envs as envs
+from vllm.backends.platform import current_platform
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
 )
@@ -18,7 +19,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.backends.platform import current_platform
 
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,

@@ -320,7 +320,7 @@ A dictionary containing nested tensors which have been batched via
 def batched_tensors_equal(a: BatchedTensorInputs, b: BatchedTensorInputs) -> bool:
     """
     Equality check between
-    [`BatchedTensorInputs`][vllm.frontend.processing.multimodal.inputs.BatchedTensorInputs] objects.
+    [`BatchedTensorInputs`][] objects.
     """
     return all(k in b and nested_tensors_equal(a[k], b[k]) for k in a)
 

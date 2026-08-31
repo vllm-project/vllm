@@ -6,11 +6,18 @@ from typing import Any
 
 import torch
 
-from vllm.foundation.config import get_current_vllm_config
 from vllm.backends.distributed import (
     get_ep_group,
 )
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import get_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import (
+    has_deep_ep,
+    has_deep_ep_v2,
+    has_mori,
+    has_nixl_ep,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -29,13 +36,6 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
     FlashInferNVLinkTwoSidedPrepareAndFinalize,
-)
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.import_utils import (
-    has_deep_ep,
-    has_deep_ep_v2,
-    has_mori,
-    has_nixl_ep,
 )
 
 
@@ -106,7 +106,9 @@ if current_platform.is_cuda_alike():
 
 def get_ep_all2all_manager(eep_stage: bool = False) -> Any:
     if eep_stage:
-        from vllm.backends.distributed.elastic_ep.standby_state import get_standby_ep_group
+        from vllm.backends.distributed.elastic_ep.standby_state import (
+            get_standby_ep_group,
+        )
 
         ep_group = get_standby_ep_group()
         assert ep_group is not None

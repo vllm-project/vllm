@@ -6,11 +6,11 @@ from torch.nn.parameter import Parameter
 
 import vllm.foundation.system.envs as envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
 )
-from vllm.backends.platform import current_platform
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 

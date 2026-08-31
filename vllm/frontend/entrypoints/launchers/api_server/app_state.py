@@ -6,6 +6,9 @@ from typing import cast
 
 from starlette.datastructures import State
 
+from vllm.foundation.extensibility.plugins.endpoint_plugins.interface import (
+    init_endpoint_plugins_state,
+)
 from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.frontend.entrypoints.chat_utils import load_chat_template
 from vllm.frontend.entrypoints.openai.models.protocol import BaseModelPath
@@ -13,10 +16,13 @@ from vllm.frontend.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.frontend.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.frontend.entrypoints.serve.utils.api_utils import process_lora_modules
 from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.foundation.extensibility.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
 from vllm.frontend.processing.renderers.online_derenderer import OnlineDerenderer
 from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
-from vllm.frontend.processing.tasks import FALLBACK_SUPPORTED_TASKS, POOLING_TASKS, SupportedTask
+from vllm.frontend.processing.tasks import (
+    FALLBACK_SUPPORTED_TASKS,
+    POOLING_TASKS,
+    SupportedTask,
+)
 
 
 async def init_app_state(
@@ -132,7 +138,9 @@ async def init_app_state(
         init_scale_out_state(state, args, engine_client, request_logger)
 
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
-        from vllm.frontend.entrypoints.speech_to_text.factories import init_speech_to_text_state
+        from vllm.frontend.entrypoints.speech_to_text.factories import (
+            init_speech_to_text_state,
+        )
 
         init_speech_to_text_state(
             engine_client, state, args, request_logger, supported_tasks

@@ -10,13 +10,15 @@ import pybase64
 import torch
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
-from vllm.frontend.processing.multimodal.audio import resample_audio_pyav
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.utilities.import_utils import PlaceholderModule
 from vllm.foundation.utilities.mem_constants import MiB_bytes
 from vllm.foundation.utilities.serial_utils import tensor2base64
-from vllm.foundation.utilities.sparse_utils import check_sparse_tensor_invariants_threadsafe
+from vllm.foundation.utilities.sparse_utils import (
+    check_sparse_tensor_invariants_threadsafe,
+)
+from vllm.frontend.processing.multimodal.audio import resample_audio_pyav
 
 from .base import MediaIO
 

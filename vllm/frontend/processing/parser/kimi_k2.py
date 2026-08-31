@@ -21,7 +21,10 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
-from vllm.frontend.entrypoints.generate.base.protocol import DeltaFunctionCall, DeltaToolCall
+from vllm.frontend.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaToolCall,
+)
 from vllm.frontend.processing.parser.engine.events import EventType
 from vllm.frontend.processing.parser.engine.parser_engine import ParserEngine
 from vllm.frontend.processing.parser.engine.parser_engine_config import (

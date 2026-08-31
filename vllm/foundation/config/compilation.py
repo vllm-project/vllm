@@ -11,7 +11,11 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.foundation.system.envs as envs
-from vllm.backends.compiler.passes.inductor_pass import CallableInductorPass, InductorPass
+from vllm.backends.compiler.passes.inductor_pass import (
+    CallableInductorPass,
+    InductorPass,
+)
+from vllm.backends.platform import current_platform
 from vllm.foundation.config.utils import (
     Range,
     config,
@@ -19,7 +23,6 @@ from vllm.foundation.config.utils import (
     hash_factors,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 from vllm.foundation.utilities.math_utils import round_up
 from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
@@ -412,7 +415,7 @@ class CompilationConfig:
         - [`backend`][vllm.foundation.config.CompilationConfig.backend]
         - [`custom_ops`][vllm.foundation.config.CompilationConfig.custom_ops]
         - [`splitting_ops`][vllm.foundation.config.CompilationConfig.splitting_ops]
-        - [`compile_mm_encoder`][vllm.foundation.config.CompilationConfig.compile_mm_encoder]
+        - [`compile_mm_encoder`][]
     - CudaGraph capture:
         - [`cudagraph_mode`][vllm.foundation.config.CompilationConfig.cudagraph_mode]
         - [`cudagraph_capture_sizes`]

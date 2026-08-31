@@ -36,7 +36,6 @@ import vllm._custom_ops as ops
 import vllm.foundation.system.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.backends.distributed import (
     get_ep_group,
     get_pp_group,
@@ -45,7 +44,15 @@ from vllm.backends.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import (
+    CacheConfig,
+    ParallelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -99,9 +106,7 @@ from vllm.model_executor.models.utils import (
     extract_layer_index,
     sequence_parallel_chunk,
 )
-from vllm.backends.platform import current_platform
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,

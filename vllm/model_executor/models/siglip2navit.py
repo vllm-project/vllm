@@ -12,6 +12,7 @@ from transformers import Siglip2VisionConfig
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.backends.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.backends.platform import current_platform
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
@@ -26,7 +27,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
-from vllm.backends.platform import current_platform
 
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 from .vision import is_vit_use_data_parallel

@@ -9,20 +9,10 @@ from typing import ClassVar, cast
 import torch
 from torch import nn
 
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.cache import CacheDType
-from vllm.backends.distributed import get_tensor_model_parallel_world_size
-from vllm.runtime.execution.forward_context import get_forward_context
-from vllm.model_executor.layers.attention.attention import (
-    set_default_quant_scales,
-)
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm
-from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
-from vllm.backends.platform import current_platform
 from vllm.foundation.integrations.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -34,6 +24,16 @@ from vllm.foundation.utilities.torch_utils import (
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
+from vllm.model_executor.layers.attention.attention import (
+    set_default_quant_scales,
+)
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

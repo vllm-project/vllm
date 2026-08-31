@@ -5,8 +5,8 @@
 import torch
 from transformers import PretrainedConfig
 
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.model_executor.layers.quantization import QuantizationConfig
 
 from .granite_speech import (
     GraniteSpeechCTCEncoder,

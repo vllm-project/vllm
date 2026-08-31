@@ -4,10 +4,10 @@ from collections.abc import Mapping
 
 from vllm.foundation.config import ModelConfig, VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import set_default_torch_num_threads
 from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsItem
 from vllm.frontend.processing.multimodal.processing import BaseMultiModalProcessor
 from vllm.frontend.processing.multimodal.registry import MultiModalRegistry
-from vllm.foundation.utilities.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 
 logger = init_logger(__name__)

@@ -7,6 +7,7 @@ from typing import Any
 
 import regex as re
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.chat_utils import make_tool_call_id
 from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -20,7 +21,6 @@ from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.frontend.processing.tool_parsers.abstract_tool_parser import (
     Tool,

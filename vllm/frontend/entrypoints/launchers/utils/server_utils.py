@@ -7,10 +7,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from vllm import envs
-from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.gc_utils import freeze_gc_heap
+from vllm.frontend.compat.engine.protocol import EngineClient
 
 logger = init_logger(__name__)
 
@@ -45,7 +45,9 @@ def get_uvicorn_log_config(args: Namespace) -> dict | None:
 
     # If endpoints to filter are specified, create a config with the filter
     if args.disable_access_log_for_endpoints:
-        from vllm.foundation.observability.logging_utils import create_uvicorn_log_config
+        from vllm.foundation.observability.logging_utils import (
+            create_uvicorn_log_config,
+        )
 
         # Parse comma-separated string into list
         excluded_paths = [

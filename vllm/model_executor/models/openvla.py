@@ -10,21 +10,18 @@ from transformers import BatchFeature
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.integrations.transformers_utils.configs import OpenVLAConfig
+from vllm.foundation.integrations.transformers_utils.processors.openvla import (
+    OpenVLAImageProcessor,
+    OpenVLAProcessor,
+)
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
-)
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.interfaces import (
-    MultiModalEmbeddings,
-    SupportsMultiModal,
-    SupportsPP,
-)
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.frontend.processing.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
 from vllm.frontend.processing.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
@@ -41,13 +38,19 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.configs import OpenVLAConfig
-from vllm.foundation.integrations.transformers_utils.processors.openvla import (
-    OpenVLAImageProcessor,
-    OpenVLAProcessor,
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
 )
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    SupportsPP,
+)
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .module_mapping import MultiModelKeys
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix

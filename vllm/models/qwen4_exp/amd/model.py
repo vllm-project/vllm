@@ -9,8 +9,14 @@ import torch
 from torch import nn
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import get_pp_group
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.integrations.transformers_utils.configs.qwen4_exp import (
+    Qwen4ExpTextConfig,
+)
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
+from vllm.frontend.processing.tokenizers.registry import cached_tokenizer_from_config
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
@@ -66,13 +72,7 @@ from vllm.model_executor.models.utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.frontend.processing.tokenizers.registry import cached_tokenizer_from_config
-from vllm.foundation.integrations.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 

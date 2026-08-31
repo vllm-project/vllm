@@ -12,8 +12,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature
 
-from vllm.foundation.config import VllmConfig
-from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -21,8 +19,33 @@ from vllm.backends.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
-from vllm.frontend.processing.inputs import MultiModalDataDict
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.integrations.transformers_utils.configs.moondream3 import (
+    Moondream3Config,
+    Moondream3TextConfig,
+    Moondream3VisionConfig,
+)
+from vllm.foundation.integrations.transformers_utils.processors.moondream3 import (
+    Moondream3Processor,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.inputs import MultiModalDataDict
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.frontend.processing.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.frontend.processing.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+    cached_encode,
+)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
@@ -44,28 +67,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import (
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
-from vllm.frontend.processing.multimodal.parse import ImageSize, MultiModalDataItems
-from vllm.frontend.processing.multimodal.processing import (
-    BaseDummyInputsBuilder,
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-    cached_encode,
-)
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.configs.moondream3 import (
-    Moondream3Config,
-    Moondream3TextConfig,
-    Moondream3VisionConfig,
-)
-from vllm.foundation.integrations.transformers_utils.processors.moondream3 import Moondream3Processor
 
 from .interfaces import (
     MultiModalEmbeddings,

@@ -5,14 +5,15 @@ from typing import Any
 
 import torch
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.kv_events import KVCacheEvent
 from vllm.backends.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+)
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -36,6 +37,7 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.scheduler 
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.runtime.execution.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks

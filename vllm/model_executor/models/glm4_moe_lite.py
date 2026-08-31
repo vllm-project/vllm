@@ -35,10 +35,11 @@ if TYPE_CHECKING:
     from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import (
     get_pp_group,
 )
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -65,7 +66,6 @@ from vllm.model_executor.models.glm4_moe import (
     Glm4MoE,
     Glm4MoeMLP,
 )
-from vllm.backends.platform import current_platform
 from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP

@@ -7,6 +7,7 @@ from typing import Any, cast
 import torch
 from torch.nn import Parameter
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import get_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
@@ -34,7 +35,6 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
-from vllm.backends.platform import current_platform
 
 __all__ = ["QuarkW8A8Fp8", "QuarkW8A8Fp8PerBlock"]
 

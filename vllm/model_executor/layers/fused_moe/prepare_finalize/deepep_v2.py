@@ -6,7 +6,8 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.runtime.execution.forward_context import get_forward_context
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.foundation.utilities.math_utils import round_up
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -17,8 +18,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     swizzle_mxfp8_scale,
 )
-from vllm.backends.compute.dsl.triton_utils import tl, triton
-from vllm.foundation.utilities.math_utils import round_up
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
 )

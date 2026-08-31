@@ -13,7 +13,11 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.foundation.config import ModelConfig
 from vllm.foundation.config.load import LoadConfig
+from vllm.foundation.integrations.transformers_utils.repo_utils import (
+    list_filtered_repo_files,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.observability.tracing import instrument
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
@@ -34,8 +38,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     pt_weights_iterator,
     safetensors_weights_iterator,
 )
-from vllm.foundation.observability.tracing import instrument
-from vllm.foundation.integrations.transformers_utils.repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
 

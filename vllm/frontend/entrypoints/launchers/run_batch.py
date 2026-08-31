@@ -28,7 +28,15 @@ from urllib3.util import parse_url
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import config
-from vllm.foundation.system.connections import HTTPResponseSizeExceededError, global_http_connection
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system.connections import (
+    HTTPResponseSizeExceededError,
+    global_http_connection,
+)
+from vllm.foundation.system.exceptions import VLLMValidationError
+from vllm.foundation.utilities import random_uuid
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.mem_constants import MiB_bytes
 from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs
 from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
@@ -61,12 +69,7 @@ from vllm.frontend.entrypoints.speech_to_text.translation.protocol import (
     TranslationResponse,
     TranslationResponseVerbose,
 )
-from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.reasoning import ReasoningParserManager
-from vllm.foundation.utilities import random_uuid
-from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
-from vllm.foundation.utilities.mem_constants import MiB_bytes
 from vllm.version import __version__ as VLLM_VERSION
 
 from .api_server.entry import init_app_state
@@ -882,8 +885,10 @@ async def run_batch(
 
 
 async def main(args: Namespace):
-    from vllm.frontend.entrypoints.launchers.api_server.entry import build_async_engine_client
     from vllm.foundation.observability.usage.usage_lib import UsageContext
+    from vllm.frontend.entrypoints.launchers.api_server.entry import (
+        build_async_engine_client,
+    )
 
     validate_run_batch_args(args)
 

@@ -5,6 +5,8 @@
 import torch
 
 import vllm._custom_ops as ops
+from vllm.backends.compute.scalar_type import scalar_types
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
@@ -22,8 +24,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     should_use_atomic_add_reduce,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 

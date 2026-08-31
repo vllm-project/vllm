@@ -960,9 +960,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        return (
-            "vllm.backends.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
-        )
+        return "vllm.backends.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
 
     @classmethod
     def supports_mx(cls) -> bool:

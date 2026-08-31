@@ -12,22 +12,23 @@ from fastapi import Request
 from fastapi.responses import Response
 from starlette.datastructures import Headers
 
-from vllm import PoolingRequestOutput, envs
 from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.tracing import (
+    contains_trace_headers,
+    extract_trace_headers,
+    log_tracing_disabled_warning,
+)
+from vllm.foundation.system import envs
+from vllm.foundation.utilities.async_utils import make_async, merge_async_iterators
 from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.frontend.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.frontend.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.frontend.entrypoints.serve.engine.serving import BaseServing
 from vllm.frontend.entrypoints.serve.engine.typing import AnyRequest
 from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.runtime.modeling.lora.request import LoRARequest
+from vllm.frontend.processing.outputs import PoolingRequestOutput
 from vllm.frontend.processing.renderers.base import BaseRenderer
-from vllm.foundation.observability.tracing import (
-    contains_trace_headers,
-    extract_trace_headers,
-    log_tracing_disabled_warning,
-)
-from vllm.foundation.utilities.async_utils import make_async, merge_async_iterators
+from vllm.runtime.modeling.lora.request import LoRARequest
 
 from ...serve.engine.protocol import ErrorResponse
 from ..typing import AnyPoolingRequest, PoolingServeContext

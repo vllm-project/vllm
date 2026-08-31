@@ -9,8 +9,8 @@ INT32-packed UE8M0 on SM100) so fp8_einsum skips transform_sf_into_required_layo
 
 import torch
 
-from vllm.backends.platform import current_platform
 from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 

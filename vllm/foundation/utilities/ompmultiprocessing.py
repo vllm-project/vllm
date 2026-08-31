@@ -11,9 +11,9 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import vllm.foundation.utilities.cpu_resource_utils as cr_utils
-from vllm import envs
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import CpuArchEnum, current_platform
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.cpu_resource_utils import LogicalCPUInfo
 
 if TYPE_CHECKING:

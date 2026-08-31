@@ -7,13 +7,13 @@ from typing import Any
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.foundation.config import ParallelConfig, get_current_vllm_config
 from vllm.backends.distributed import (
     get_dp_group,
     get_pcp_group,
     get_tensor_model_parallel_world_size,
 )
 from vllm.backends.distributed.eplb.eplb_state import EplbLayerState
+from vllm.foundation.config import ParallelConfig, get_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (

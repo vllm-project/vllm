@@ -10,8 +10,6 @@ import torch
 import torch.nn as nn
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import VllmConfig
-from vllm.foundation.config.kernel import MEGA_MOE_BACKENDS
 from vllm.backends.distributed import (
     get_ep_group,
     get_pp_group,
@@ -19,8 +17,15 @@ from vllm.backends.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.backends.distributed.eplb.eplb_state import EplbLayerState
-from vllm.runtime.execution.forward_context import get_forward_context, is_forward_context_available
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.kernel import MEGA_MOE_BACKENDS
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.flashinfer_moe_ep import (
+    is_fi_moe_ep_backend,
+    validate_fi_moe_ep_config,
+)
+from vllm.foundation.utilities.math_utils import cdiv
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_fused_post_pre_tilelang,
@@ -82,13 +87,11 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
 )
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
-from vllm.backends.platform import current_platform
-from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.flashinfer_moe_ep import (
-    is_fi_moe_ep_backend,
-    validate_fi_moe_ep_config,
+from vllm.runtime.execution.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
 )
-from vllm.foundation.utilities.math_utils import cdiv
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 

@@ -6,13 +6,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.config.lora import LoRAConfig
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.backends.platform import current_platform
 
 from .base import BaseLayerWithLoRA
 

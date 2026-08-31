@@ -11,26 +11,24 @@ from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
+from vllm.foundation.config import (
+    CacheConfig,
+    ModelConfig,
+    SpeechToTextConfig,
+    VllmConfig,
+)
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.backends.distributed import get_tensor_model_parallel_world_size
-from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType, TokensPrompt
+from vllm.foundation.integrations.transformers_utils.processors.cohere_asr import (
+    INF_VAL,
+    CohereASRFeatureExtractor,
+    CohereASRProcessor,
+)
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import (
-    Attention,
-    CrossAttention,
-)
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -50,16 +48,25 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     TimingContext,
 )
-from vllm.frontend.processing.multimodal.processing.processor import MultiModalProcessingInfo
+from vllm.frontend.processing.multimodal.processing.processor import (
+    MultiModalProcessingInfo,
+)
 from vllm.frontend.processing.renderers import TokenizeParams
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
-from vllm.foundation.integrations.transformers_utils.processors.cohere_asr import (
-    INF_VAL,
-    CohereASRFeatureExtractor,
-    CohereASRProcessor,
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import (
+    Attention,
+    CrossAttention,
 )
-from vllm.foundation.utilities.collection_utils import is_list_of
-from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.v1.attention.backend import (
     AttentionType,
 )

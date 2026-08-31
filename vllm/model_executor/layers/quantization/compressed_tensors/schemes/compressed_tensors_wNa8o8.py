@@ -13,6 +13,7 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.compressors.pack_quantized.helpers import pack_to_int32
 
+from vllm.backends.compute.scalar_type import scalar_types
 from vllm.backends.distributed.utils import verify_group_size_divides_partition
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
@@ -31,7 +32,6 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PackedvLLMParameter,
 )
-from vllm.backends.compute.scalar_type import scalar_types
 
 __all__ = ["CompressedTensorsWNA8O8Int", "fake_quant_static_int8"]
 

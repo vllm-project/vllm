@@ -29,8 +29,11 @@ from torch import nn
 from transformers import Exaone4Config
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.backends.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.foundation.config import CacheConfig, VllmConfig
+from vllm.foundation.integrations.transformers_utils.config import (
+    set_default_rope_theta,
+)
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -47,7 +50,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.config import set_default_rope_theta
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (

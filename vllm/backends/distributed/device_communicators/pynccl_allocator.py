@@ -10,11 +10,14 @@ from packaging import version
 from torch.cuda.memory import CUDAPluggableAllocator
 from torch.utils.cpp_extension import load_inline
 
-from vllm import envs
 from vllm.backends.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.nccl import find_nccl_include_paths, find_nccl_library_paths
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
+from vllm.foundation.utilities.nccl import (
+    find_nccl_include_paths,
+    find_nccl_library_paths,
+)
 
 logger = init_logger(__name__)
 

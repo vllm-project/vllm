@@ -8,9 +8,9 @@ import torch
 import torch.nn as nn
 
 from vllm.foundation.config.pooler import SequencePoolingType
-from vllm.model_executor.layers.pooler import PoolingParamsUpdate
-from vllm.frontend.processing.tasks import PoolingTask
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d
+from vllm.frontend.processing.tasks import PoolingTask
+from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.v1.pool.metadata import PoolingMetadata
 
 SequencePoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor]

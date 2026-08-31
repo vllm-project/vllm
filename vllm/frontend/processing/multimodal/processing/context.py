@@ -10,9 +10,15 @@ from typing import TYPE_CHECKING, Any, overload
 import torch
 from typing_extensions import TypeVar
 
-from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.frontend.processing.inputs import MultiModalDataDict
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_processor_from_config,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system.exceptions import VLLMValidationError
+from vllm.foundation.utilities.func_utils import get_allowed_kwarg_only_overrides
+from vllm.foundation.utilities.jsontree import JSONTree, json_map_leaves
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.frontend.processing.multimodal.parse import (
     DictEmbeddingItems,
     EmbeddingItems,
@@ -20,10 +26,6 @@ from vllm.frontend.processing.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.frontend.processing.tokenizers import TokenizerLike
-from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
-from vllm.foundation.utilities.func_utils import get_allowed_kwarg_only_overrides
-from vllm.foundation.utilities.jsontree import JSONTree, json_map_leaves
-from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
     from transformers.configuration_utils import PretrainedConfig
@@ -436,7 +438,7 @@ class BaseProcessingInfo:
         [`_get_hf_mm_data`][vllm.frontend.processing.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
 
         You can support additional modalities by creating a subclass
-        of [`MultiModalDataParser`][vllm.frontend.processing.multimodal.parse.MultiModalDataParser]
+        of [`MultiModalDataParser`][]
         that has additional subparsers.
         """
         return MultiModalDataParser(
@@ -513,8 +515,9 @@ class BaseProcessingInfo:
         validate: bool = True,
     ) -> MultiModalDataItems:
         """
-        Normalize [`MultiModalDataDict`][vllm.frontend.processing.inputs.MultiModalDataDict]
-        to [`MultiModalDataItems`][vllm.frontend.processing.multimodal.parse.MultiModalDataItems]
+        Normalize
+        [`MultiModalDataDict`][vllm.frontend.processing.inputs.MultiModalDataDict]
+        to [`MultiModalDataItems`][]
         before passing them to
         [`_get_hf_mm_data`][vllm.frontend.processing.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
         """

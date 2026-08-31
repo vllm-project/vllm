@@ -26,9 +26,14 @@ import cloudpickle
 import torch
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import VllmConfig
-from vllm.backends.distributed import destroy_distributed_environment, destroy_model_parallel
-from vllm.backends.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+from vllm.backends.distributed import (
+    destroy_distributed_environment,
+    destroy_model_parallel,
+)
+from vllm.backends.distributed.device_communicators.shm_broadcast import (
+    Handle,
+    MessageQueue,
+)
 from vllm.backends.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.backends.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.backends.distributed.parallel_state import (
@@ -41,10 +46,11 @@ from vllm.backends.distributed.parallel_state import (
     get_tp_group,
     model_parallel_is_initialized,
 )
-from vllm.foundation.system.envs import enable_envs_cache
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.tracing import instrument, maybe_init_worker_tracer
+from vllm.foundation.system.envs import enable_envs_cache
 from vllm.foundation.utilities import numa_utils
 from vllm.foundation.utilities.network_utils import (
     aiter_requires_tcp_store,

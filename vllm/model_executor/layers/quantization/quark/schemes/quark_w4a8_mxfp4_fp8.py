@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -18,7 +19,6 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     PerTensorScaleParameter,
 )
-from vllm.backends.platform import current_platform
 
 from .quark_scheme import QuarkScheme
 

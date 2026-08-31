@@ -6,6 +6,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.tokenizers.detokenizer_utils import (
+    TokenizerLike,
+    convert_ids_list_to_tokens,
+)
 from vllm.runtime.generation.logprobs import (
     FlatLogprobs,
     PromptLogprobs,
@@ -13,10 +17,6 @@ from vllm.runtime.generation.logprobs import (
     append_logprobs_for_next_position,
     create_prompt_logprobs,
     create_sample_logprobs,
-)
-from vllm.frontend.processing.tokenizers.detokenizer_utils import (
-    TokenizerLike,
-    convert_ids_list_to_tokens,
 )
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors

@@ -13,13 +13,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import vllm.foundation.system.envs as envs
-from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs
-from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.foundation.observability.logger import init_logger
-from vllm.frontend.processing.reasoning import ReasoningParserManager
-from vllm.frontend.processing.tool_parsers import ToolParserManager
 from vllm.foundation.observability.usage.usage_lib import UsageContext
 from vllm.foundation.utilities.system_utils import decorate_logs
+from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs
+from vllm.frontend.compat.engine.protocol import EngineClient
+from vllm.frontend.processing.reasoning import ReasoningParserManager
+from vllm.frontend.processing.tool_parsers import ToolParserManager
 
 from ..app import build_app
 from ..launcher import serve_http, setup_server
@@ -204,8 +204,8 @@ async def run_server_worker(
 def main():
     import uvloop
 
-    from vllm.frontend.entrypoints.serve.utils.api_utils import cli_env_setup
     from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+    from vllm.frontend.entrypoints.serve.utils.api_utils import cli_env_setup
 
     from ..cli_args import (
         make_arg_parser,

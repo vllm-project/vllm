@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
-from vllm.runtime.execution.forward_context import get_forward_context
+from vllm.foundation.utilities.math_utils import round_up
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
@@ -20,7 +20,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
 )
-from vllm.foundation.utilities.math_utils import round_up
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWABackend,

@@ -12,7 +12,10 @@
 import torch
 from transformers import PretrainedConfig
 
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.foundation.integrations.transformers_utils.processors.h2ovl import (
+    H2OVLImageProcessor,
+    H2OVLProcessor,
+)
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import BatchedTensorInputs
 from vllm.frontend.processing.multimodal.parse import (
@@ -27,7 +30,7 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     TimingContext,
     cached_encode,
 )
-from vllm.foundation.integrations.transformers_utils.processors.h2ovl import H2OVLImageProcessor, H2OVLProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 
 from .intern_vit import InternVisionModel
 from .internvl import (

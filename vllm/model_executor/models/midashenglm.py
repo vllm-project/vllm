@@ -35,24 +35,23 @@ import torchaudio.functional as F
 from torch.nn.functional import scaled_dot_product_attention
 from transformers import BatchFeature
 
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.backends.distributed import get_tensor_model_parallel_world_size
-from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.conv import Conv2dLayer
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
+from vllm.foundation.integrations.transformers_utils.configs.midashenglm import (
+    DashengConfig,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.frontend.processing.multimodal.parse import MultiModalDataItems, MultiModalDataParser
+from vllm.frontend.processing.multimodal.parse import (
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
 from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -61,9 +60,15 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.configs.midashenglm import DashengConfig
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix

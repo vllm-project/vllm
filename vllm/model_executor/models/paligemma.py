@@ -9,8 +9,9 @@ from transformers import BatchFeature, PaliGemmaConfig
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalInput
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalInput
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -34,7 +35,6 @@ from vllm.frontend.processing.multimodal.processing import (
 )
 from vllm.frontend.processing.renderers import TokenizeParams
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

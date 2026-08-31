@@ -9,8 +9,8 @@ import vllm.foundation.system.envs as envs
 from vllm.backends.distributed.device_communicators.all_reduce_utils import (
     SYMM_MEM_ALL_REDUCE_MAX_SIZES,
 )
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 
 try:
     import torch.distributed._symmetric_memory as torch_symm_mem

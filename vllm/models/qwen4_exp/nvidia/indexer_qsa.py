@@ -10,14 +10,14 @@ import torch
 from torch import nn
 
 from vllm.foundation.config import VllmConfig
-from vllm.runtime.execution.forward_context import get_forward_context
+from vllm.foundation.integrations.transformers_utils.configs.qwen4_exp import (
+    Qwen4ExpTextConfig,
+)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
-from vllm.foundation.integrations.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
+from vllm.runtime.execution.forward_context import get_forward_context
 
 from ..common.qsa_cache import (
     QSACompressedKeyCache,

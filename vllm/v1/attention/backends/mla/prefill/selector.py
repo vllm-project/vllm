@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform.interface import DeviceCapability
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 

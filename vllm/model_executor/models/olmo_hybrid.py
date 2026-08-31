@@ -29,9 +29,6 @@ import torch
 from torch import nn
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import (
-    VllmConfig,
-)
 from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -39,6 +36,9 @@ from vllm.backends.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.backends.distributed.utils import split_tensor_along_last_dim
+from vllm.foundation.config import (
+    VllmConfig,
+)
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention

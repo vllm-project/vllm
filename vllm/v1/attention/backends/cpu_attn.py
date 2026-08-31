@@ -10,15 +10,15 @@ if TYPE_CHECKING:
 import torch
 
 from vllm import _custom_ops as ops
-from vllm import envs
+from vllm.backends.platform import CpuArchEnum, current_platform
 from vllm.foundation.config import (
     VllmConfig,
     get_layers_from_vllm_config,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
-from vllm.backends.platform import CpuArchEnum, current_platform
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
+from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,

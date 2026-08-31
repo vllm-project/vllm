@@ -6,10 +6,18 @@ from argparse import Namespace
 from fastapi import FastAPI
 
 from vllm.foundation.config import ModelConfig
-from vllm.frontend.entrypoints.serve.exception_handling.register import init_exception_handler
-from vllm.frontend.entrypoints.serve.middleware.register import init_entrypoints_middleware
-from vllm.frontend.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
-from vllm.foundation.extensibility.plugins.endpoint_plugins.interface import attach_endpoint_plugins
+from vllm.foundation.extensibility.plugins.endpoint_plugins.interface import (
+    attach_endpoint_plugins,
+)
+from vllm.frontend.entrypoints.serve.exception_handling.register import (
+    init_exception_handler,
+)
+from vllm.frontend.entrypoints.serve.middleware.register import (
+    init_entrypoints_middleware,
+)
+from vllm.frontend.entrypoints.serve.sagemaker.api_router import (
+    sagemaker_standards_bootstrap,
+)
 from vllm.frontend.processing.tasks import FALLBACK_SUPPORTED_TASKS, SupportedTask
 
 from .api_server.routers import register_api_routers

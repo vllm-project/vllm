@@ -8,7 +8,9 @@ import torch
 
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.utilities.async_utils import make_async
-from vllm.foundation.utilities.sparse_utils import check_sparse_tensor_invariants_threadsafe
+from vllm.foundation.utilities.sparse_utils import (
+    check_sparse_tensor_invariants_threadsafe,
+)
 
 if TYPE_CHECKING:
     from vllm.foundation.config import ModelConfig

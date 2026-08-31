@@ -6,15 +6,15 @@ import torch
 import torch.nn.functional as F
 from transformers.configuration_utils import PretrainedConfig
 
-from vllm.foundation.config import (
-    VllmConfig,
-    get_current_vllm_config,
-)
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.runtime.execution.forward_context import get_forward_context
+from vllm.foundation.config import (
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -29,11 +29,11 @@ from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
     linear_attention_decode,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
     RMSNormGated,
     layernorm_fn,
 )
-from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 

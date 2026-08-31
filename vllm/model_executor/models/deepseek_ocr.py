@@ -12,21 +12,18 @@ from transformers import BatchFeature, CLIPVisionConfig
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.integrations.transformers_utils.configs.deepseek_vl2 import (
+    DeepseekVLV2Config,
+)
+from vllm.foundation.integrations.transformers_utils.processors.deepseek_ocr import (
+    BASE_SIZE,
+    CROP_MODE,
+    IMAGE_SIZE,
+    DeepseekOCRProcessor,
+    count_tiles,
+)
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.models.interfaces import (
-    MultiModalEmbeddings,
-    SupportsEncoderCudaGraph,
-    SupportsLoRA,
-    SupportsMultiModal,
-    SupportsPP,
-)
-from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    init_vllm_registered_model,
-    maybe_prefix,
-)
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -47,18 +44,23 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.frontend.processing.sampling_params import SamplingParams
-from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.frontend.processing.tokenizers.hf import HfTokenizer
-from vllm.foundation.integrations.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
-from vllm.foundation.integrations.transformers_utils.processors.deepseek_ocr import (
-    BASE_SIZE,
-    CROP_MODE,
-    IMAGE_SIZE,
-    DeepseekOCRProcessor,
-    count_tiles,
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
 )
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.v1.sample.logits_processor import (
     AdapterLogitsProcessor,
     RequestLogitsProcessor,

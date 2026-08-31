@@ -5,11 +5,11 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.compilation import CUDAGraphMode
-from vllm.runtime.execution.forward_context import BatchDescriptor, set_forward_context
 from vllm.foundation.observability.logger import init_logger
-from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.runtime.execution.forward_context import BatchDescriptor, set_forward_context
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables

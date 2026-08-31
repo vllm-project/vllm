@@ -6,9 +6,10 @@ import signal
 import socket
 from argparse import Namespace
 
-from vllm import AsyncEngineArgs, envs
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
+from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs
 
 from ..app import build_app
 from ..launcher import serve_http, setup_server
@@ -101,8 +102,8 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     import uvloop
 
-    from vllm.frontend.entrypoints.serve.utils.api_utils import cli_env_setup
     from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+    from vllm.frontend.entrypoints.serve.utils.api_utils import cli_env_setup
 
     from ..cli_args import (
         make_arg_parser,

@@ -21,8 +21,10 @@ if TYPE_CHECKING:
 
 from vllm.backends.distributed.eplb.eplb_state import EplbState
 from vllm.backends.distributed.parallel_state import get_pp_group
-from vllm.runtime.execution.forward_context import set_forward_context
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY, async_tensor_h2d
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import (
@@ -35,9 +37,7 @@ from vllm.model_executor.models.laguna_dflash import DFlashLagunaForCausalLM
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.torch_utils import PIN_MEMORY, async_tensor_h2d
+from vllm.runtime.execution.forward_context import set_forward_context
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata

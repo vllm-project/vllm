@@ -18,7 +18,9 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
-from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.frontend.processing.parser.engine.events import EventType
 from vllm.frontend.processing.parser.engine.parser_engine import ParserEngine

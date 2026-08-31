@@ -5,8 +5,7 @@ from dataclasses import replace
 
 import torch
 
-from vllm.foundation.config import VllmConfig
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (  # noqa: E501
     derive_canonical_mappings,
 )
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.common import (
@@ -14,6 +13,7 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.common imp
     OffloadingWorkerMetadata,
     ReqId,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,

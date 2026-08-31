@@ -15,9 +15,8 @@ from transformers import (
 
 from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions, ImageDummyOptions
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -32,8 +31,9 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptInsertion,
     PromptUpdate,
 )
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .blip import BlipVisionModel, get_blip_num_patches
 from .interfaces import (

@@ -10,13 +10,13 @@ import torch
 import torch.nn as nn
 
 from vllm.foundation.config import VllmConfig
-from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.models.config import VerifyAndUpdateConfig
 from vllm.foundation.integrations.transformers_utils.config import (
     try_get_dense_modules,
 )
 from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_bytes
+from vllm.foundation.observability.logger import init_logger
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.models.config import VerifyAndUpdateConfig
 
 from .interfaces import supports_multimodal
 from .interfaces_base import VllmModelForPooling, is_pooling_model

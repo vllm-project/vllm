@@ -25,9 +25,15 @@ from collections.abc import Sequence
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.frontend.processing.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
-from vllm.frontend.processing.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
-from vllm.frontend.processing.reasoning.identity_reasoning_parser import IdentityReasoningParser
+from vllm.frontend.processing.reasoning.deepseek_r1_reasoning_parser import (
+    DeepSeekR1ReasoningParser,
+)
+from vllm.frontend.processing.reasoning.deepseek_v3_reasoning_parser import (
+    DeepSeekV3ReasoningParser,
+)
+from vllm.frontend.processing.reasoning.identity_reasoning_parser import (
+    IdentityReasoningParser,
+)
 
 
 class PoolsideV1ReasoningParser(DeepSeekV3ReasoningParser):

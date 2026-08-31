@@ -32,14 +32,14 @@ from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
 )
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import get_pp_group
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.tokenizers.registry import cached_tokenizer_from_config
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.frontend.processing.tokenizers.registry import cached_tokenizer_from_config
 
 from .interfaces import MixtureOfExperts
 from .qwen3_moe import (

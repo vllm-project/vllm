@@ -15,8 +15,9 @@ from transformers import BatchFeature, PretrainedConfig, Siglip2VisionConfig
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -37,7 +38,6 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     cached_encode,
 )
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .lfm2_siglip2 import Siglip2Model

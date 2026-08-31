@@ -7,6 +7,7 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.anthropic.protocol import (
     AnthropicCountTokensRequest,
     AnthropicCountTokensResponse,
@@ -25,7 +26,6 @@ from vllm.frontend.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
-from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

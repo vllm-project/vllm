@@ -16,9 +16,9 @@ from torch import fx
 from torch._dynamo.utils import lazy_format_graph_code
 from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
 
 from .fx_utils import is_func
 from .inductor_pass import InductorPass, enable_fake_mode

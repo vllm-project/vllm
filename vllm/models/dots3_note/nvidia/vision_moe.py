@@ -5,6 +5,7 @@
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.backends.compute.dsl.triton_utils import tl
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -17,7 +18,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
-from vllm.backends.compute.dsl.triton_utils import tl
 
 _BLOCK_SHAPE = [128, 128]
 

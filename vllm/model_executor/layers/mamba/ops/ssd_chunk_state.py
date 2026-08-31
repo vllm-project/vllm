@@ -8,8 +8,8 @@
 
 import torch
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 
 from .mamba_ssm import softplus
 

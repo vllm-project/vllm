@@ -7,7 +7,7 @@ import regex as re
 import torch
 
 import vllm.foundation.utilities.humming as _hm
-from vllm import envs
+from vllm.foundation.system import envs
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
@@ -51,13 +51,13 @@ from vllm.model_executor.parameter import (
 from vllm.model_executor.utils import set_weight_attrs
 
 if TYPE_CHECKING:
-    from vllm.model_executor.models.utils import WeightsMapper
     from vllm.foundation.utilities.humming import (
         BaseInputSchema,
         BaseWeightSchema,
         HummingInputSchema,
         HummingWeightSchema,
     )
+    from vllm.model_executor.models.utils import WeightsMapper
 
 
 def prepare_param(tensor, name, extra_attrs):

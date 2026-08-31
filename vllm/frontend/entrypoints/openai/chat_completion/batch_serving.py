@@ -8,6 +8,9 @@ from http import HTTPStatus
 
 from fastapi import Request
 
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.async_utils import merge_async_iterators
+from vllm.foundation.utilities.collection_utils import as_list
 from vllm.frontend.entrypoints.chat_utils import ConversationMessage
 from vllm.frontend.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
@@ -20,12 +23,9 @@ from vllm.frontend.entrypoints.openai.chat_completion.serving import OpenAIServi
 from vllm.frontend.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.frontend.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.frontend.processing.inputs import EngineInput
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.outputs import RequestOutput
 from vllm.frontend.processing.parser.abstract_parser import Parser
 from vllm.frontend.processing.tokenizers import TokenizerLike
-from vllm.foundation.utilities.async_utils import merge_async_iterators
-from vllm.foundation.utilities.collection_utils import as_list
 
 logger = init_logger(__name__)
 

@@ -6,11 +6,10 @@ from typing import Any
 
 from tqdm.auto import tqdm
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.frontend.entrypoints.offline_utils import OfflineInferenceMixin
 from vllm.frontend.processing.inputs import DataPrompt, PromptType
-from vllm.foundation.observability.logger import init_logger
-from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.outputs import (
     ClassificationRequestOutput,
     EmbeddingRequestOutput,
@@ -19,6 +18,7 @@ from vllm.frontend.processing.outputs import (
 )
 from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.frontend.processing.tasks import SCORE_TYPE_MAP, PoolingTask, SupportedTask
+from vllm.runtime.modeling.lora.request import LoRARequest
 
 from .base.io_processor import PoolingIOProcessor
 from .factories import init_pooling_io_processors
@@ -78,7 +78,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See [PromptType][vllm.frontend.processing.inputs.PromptType]
+                for batch inference. See
+                [PromptType][vllm.frontend.processing.inputs.PromptType]
                 for more details about the format of each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
@@ -212,7 +213,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See [PromptType][vllm.frontend.processing.inputs.PromptType]
+                for batch inference. See
+                [PromptType][vllm.frontend.processing.inputs.PromptType]
                 for more details about the format of each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
@@ -257,7 +259,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See [PromptType][vllm.frontend.processing.inputs.PromptType]
+                for batch inference. See
+                [PromptType][vllm.frontend.processing.inputs.PromptType]
                 for more details about the format of each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
@@ -318,7 +321,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 the `data_2` list.
             data_2: The data to pair with the query to form the input to
                 the LLM. Can be text or multi-modal data. See [PromptType]
-                [vllm.frontend.processing.inputs.PromptType] for more details about the format of
+                [vllm.frontend.processing.inputs.PromptType] for more details
+                about the format of
                 each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.

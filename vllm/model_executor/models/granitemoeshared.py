@@ -18,8 +18,8 @@ from torch import nn
 from transformers.models.granitemoeshared import GraniteMoeSharedConfig
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.backends.distributed import get_pp_group
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (

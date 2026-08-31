@@ -8,8 +8,8 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.compat.engine.protocol import EngineClient
 
 logger = init_logger(__name__)
 

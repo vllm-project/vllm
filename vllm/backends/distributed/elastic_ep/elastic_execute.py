@@ -15,10 +15,6 @@ from torch.distributed import P2POp
 from vllm.backends.compiler.counter import compilation_counter
 from vllm.backends.compiler.cuda_graph import CUDAGraphWrapper
 from vllm.backends.compiler.wrapper import reset_compile_wrapper
-from vllm.foundation.config import (
-    CompilationMode,
-    set_current_vllm_config,
-)
 from vllm.backends.distributed import (
     get_dp_group,
     get_ep_group,
@@ -40,13 +36,17 @@ from vllm.backends.distributed.parallel_state import (
     _replace_active_groups,
 )
 from vllm.backends.distributed.stateless_coordinator import StatelessGroupCoordinator
+from vllm.foundation.config import (
+    CompilationMode,
+    set_current_vllm_config,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities import is_moe_layer
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.eep_reconfigure import (
     make_eep_staged_quant_method,
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
-from vllm.foundation.utilities import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace

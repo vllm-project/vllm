@@ -3,7 +3,9 @@
 from typing import TYPE_CHECKING
 
 from vllm.backends.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
-from vllm.backends.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.backends.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory,
+)
 from vllm.backends.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,

@@ -6,9 +6,6 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 import vllm._custom_ops as ops
 from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.attention import MLAAttention
-from vllm.model_executor.layers.attention.attention import get_attention_context
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.foundation.utilities.torch_utils import (
     _USE_LAYERNAME,
     LayerNameType,
@@ -16,6 +13,9 @@ from vllm.foundation.utilities.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
+from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.attention.attention import get_attention_context
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 from ..vllm_inductor_pass import VllmFusionPatternMatcherPass, VllmPatternReplacement
 from .matcher_utils import MatcherDeepseekScalingRotaryEmbedding, MatcherRotaryEmbedding

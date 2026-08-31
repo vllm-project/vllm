@@ -21,9 +21,9 @@ import torch
 from pydantic import ConfigDict, Field, model_validator
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.observability.logger import enable_trace_function_call, init_logger
-from vllm.foundation.integrations.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.backends.compute.dsl.triton_utils import HAS_TRITON
+from vllm.foundation.integrations.transformers_utils.runai_utils import is_runai_obj_uri
+from vllm.foundation.observability.logger import enable_trace_function_call, init_logger
 from vllm.foundation.utilities import random_uuid
 from vllm.foundation.utilities.hashing import safe_hash
 
@@ -1203,7 +1203,9 @@ class VllmConfig:
             and hasattr(self.quant_config, "use_deep_gemm")
             and self.quant_config.use_deep_gemm is None
         ):
-            from vllm.foundation.utilities.deep_gemm import should_auto_disable_deep_gemm
+            from vllm.foundation.utilities.deep_gemm import (
+                should_auto_disable_deep_gemm,
+            )
 
             model_type = getattr(self.model_config.hf_text_config, "model_type", None)
             if should_auto_disable_deep_gemm(model_type):
@@ -1490,7 +1492,7 @@ class VllmConfig:
                 pass_config.fuse_gemm_comms = False
             else:
                 if pass_config.sp_min_token_num is None:
-                    from vllm.backends.compiler.passes.fusion.sequence_parallelism import (
+                    from vllm.backends.compiler.passes.fusion.sequence_parallelism import (  # noqa: E501
                         get_sequence_parallelism_threshold,
                     )
 

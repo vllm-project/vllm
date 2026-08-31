@@ -22,7 +22,7 @@ from vllm.backends.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUWorkerMetadata,
     create_ec_shared_region,
 )
-from vllm.backends.distributed.ec_transfer.ec_connector.cpu.worker.descriptor_buffers import (
+from vllm.backends.distributed.ec_transfer.ec_connector.cpu.worker.descriptor_buffers import (  # noqa: E501
     DescriptorBufferPool,
     DescriptorBuffers,
 )
@@ -30,8 +30,8 @@ from vllm.backends.distributed.parallel_state import (
     get_pcp_group,
     get_tensor_model_parallel_rank,
 )
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:

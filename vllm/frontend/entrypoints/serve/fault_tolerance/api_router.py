@@ -7,10 +7,10 @@ from http import HTTPStatus
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.frontend.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.frontend.entrypoints.serve.utils.api_utils import validate_json_request
-from vllm.foundation.observability.logger import init_logger
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 
 logger = init_logger(__name__)

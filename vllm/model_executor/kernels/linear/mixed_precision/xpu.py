@@ -5,10 +5,10 @@
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.backends.compute.scalar_type import scalar_types
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils import replace_parameter
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 

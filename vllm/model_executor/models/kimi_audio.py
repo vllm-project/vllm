@@ -15,21 +15,13 @@ from transformers import WhisperConfig as HFWhisperConfig
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_feature_extractor_from_config,
+)
+from vllm.foundation.integrations.transformers_utils.processors.kimi_audio import (
+    KimiAudioProcessor,
+)
 from vllm.frontend.processing.inputs import PromptType, TokensPrompt
-from vllm.model_executor.model_loader import DefaultModelLoader
-from vllm.model_executor.models.interfaces import (
-    SupportsMultiModal,
-    SupportsPP,
-    SupportsTranscription,
-)
-from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    init_vllm_registered_model,
-    maybe_prefix,
-)
-from vllm.model_executor.models.whisper import WhisperEncoder
-from vllm.model_executor.models.whisper_utils import ISO639_1_SUPPORTED_LANGS
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import MultiModalFieldConfig
 from vllm.frontend.processing.multimodal.parse import (
@@ -49,11 +41,23 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     ProcessorInputs,
 )
-from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers import cached_get_tokenizer
 from vllm.frontend.processing.tokenizers.kimi_audio import KimiAudioTokenizer
-from vllm.foundation.integrations.transformers_utils.processor import cached_feature_extractor_from_config
-from vllm.foundation.integrations.transformers_utils.processors.kimi_audio import KimiAudioProcessor
+from vllm.model_executor.model_loader import DefaultModelLoader
+from vllm.model_executor.models.interfaces import (
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsTranscription,
+)
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
+from vllm.model_executor.models.whisper import WhisperEncoder
+from vllm.model_executor.models.whisper_utils import ISO639_1_SUPPORTED_LANGS
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 # Kimi-Audio constants
 KIMIA_WHISPER_SUBFOLDER = "whisper-large-v3"

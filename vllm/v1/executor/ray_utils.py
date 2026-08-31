@@ -10,13 +10,13 @@ from typing import TYPE_CHECKING, Union
 import numpy as np
 
 import vllm.backends.platform
-from vllm.foundation.config import ParallelConfig
 from vllm.backends.distributed import get_pp_group
 from vllm.backends.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
-from vllm.runtime.modeling.sequence import IntermediateTensors
+from vllm.foundation.config import ParallelConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.network_utils import get_ip
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import WorkerWrapperBase

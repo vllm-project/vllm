@@ -5,6 +5,7 @@ from typing import Any, Final
 
 from fastapi import Request
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.frontend.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
@@ -22,7 +23,6 @@ from vllm.frontend.entrypoints.serve.tokenize.protocol import (
 )
 from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.frontend.processing.inputs import TokensPrompt, tokens_input
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
 from vllm.frontend.processing.tokenizers import TokenizerLike
 

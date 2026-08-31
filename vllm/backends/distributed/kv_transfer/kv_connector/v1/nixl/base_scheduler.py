@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 import zmq
 
-from vllm import envs
 from vllm.backends.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
@@ -27,8 +26,9 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.metadata import 
     ReqId,
 )
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.foundation.utilities.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput

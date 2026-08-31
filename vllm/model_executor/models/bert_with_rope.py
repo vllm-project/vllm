@@ -7,13 +7,14 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.backends.distributed import (
     divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.activation import get_act_and_mul_fn, get_act_fn
 from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
@@ -37,7 +38,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.backends.platform import current_platform
 from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .bert import BertPooler

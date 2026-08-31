@@ -27,7 +27,6 @@ from typing import ClassVar
 import torch
 
 from vllm.foundation.config import VllmConfig
-from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerBackend,
     MiniMaxM3IndexerDecodeMetadata,
@@ -39,6 +38,7 @@ from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_decode_score,
 )
 from vllm.models.minimax_m3.nvidia.ops import minimax_m3_index_decode_score_cutedsl
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

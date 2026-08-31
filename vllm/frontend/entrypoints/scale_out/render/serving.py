@@ -2,15 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import cast
 
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities import random_uuid
 from vllm.frontend.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.frontend.entrypoints.anthropic.serving import AnthropicServingMessages
-from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.frontend.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.frontend.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.frontend.entrypoints.scale_out.token_in_token_out.mm_serde import encode_mm_kwargs_item
+from vllm.frontend.entrypoints.scale_out.token_in_token_out.mm_serde import (
+    encode_mm_kwargs_item,
+)
 from vllm.frontend.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     MultiModalFeatures,
@@ -26,13 +32,11 @@ from vllm.frontend.processing.inputs import (
     MultiModalInput,
     MultiModalPlaceholders,
 )
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.renderers.inputs.preprocess import (
     extract_prompt_components,
     extract_prompt_len,
 )
 from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
-from vllm.foundation.utilities import random_uuid
 
 logger = init_logger(__name__)
 

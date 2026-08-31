@@ -16,8 +16,10 @@ from transformers import BatchFeature
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.integrations.transformers_utils.configs.colmodernvbert import (
+    ColModernVBertConfig,
+)
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -32,9 +34,9 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers.hf import HfTokenizer
-from vllm.foundation.integrations.transformers_utils.configs.colmodernvbert import ColModernVBertConfig
+from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .interfaces import (
     MultiModalEmbeddings,

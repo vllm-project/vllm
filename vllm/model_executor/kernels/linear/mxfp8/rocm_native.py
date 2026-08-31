@@ -12,14 +12,14 @@ matrix cores. Falls back (via the kernel selector) to the BF16
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform import current_platform
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     dequant_mxfp8_to_bf16,
     mxfp8_e4m3_quantize,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 

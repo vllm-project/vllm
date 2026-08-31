@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E501
 """vLLM chat-protocol extensions for grounded (citation-carrying) models.
 
 This module keeps the OpenAI chat completion protocol classes

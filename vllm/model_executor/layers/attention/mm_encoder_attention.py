@@ -7,11 +7,17 @@ import json
 import numpy as np
 import torch
 
-from vllm.foundation.config import MultiModalConfig
 from vllm.backends.compute.kernels.triton.qkv_padded_fp8_quant import (
     quantize_fp8_maybe_pad_head_dim,
 )
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import MultiModalConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.flashinfer import (
+    is_flashinfer_cudnn_fp8_prefill_attn_supported,
+)
+from vllm.foundation.utilities.math_utils import round_up
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.model_executor.custom_op import CustomOp, maybe_get_oot_by_class
 from vllm.model_executor.layers.quantization.input_quant_fp8 import (
     QuantFP8,
@@ -24,12 +30,6 @@ from vllm.model_executor.models.vision import (
     get_multimodal_config,
     get_vit_attn_backend,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.flashinfer import (
-    is_flashinfer_cudnn_fp8_prefill_attn_supported,
-)
-from vllm.foundation.utilities.math_utils import round_up
-from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.vit_attn_wrappers import (

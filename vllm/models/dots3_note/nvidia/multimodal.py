@@ -9,6 +9,10 @@ import torch
 from torch import nn
 
 from vllm.foundation.config import VllmConfig
+from vllm.foundation.integrations.transformers_utils.repo_utils import (
+    get_hf_file_to_dict,
+)
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
@@ -21,8 +25,6 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     maybe_prefix,
 )
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from ..common.processor import (
     AUDIO_END,

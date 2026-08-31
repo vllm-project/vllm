@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from vllm.frontend.processing.parser.engine.registered_adapters import Glm47MoeParserToolAdapter
+from vllm.frontend.processing.parser.engine.registered_adapters import (
+    Glm47MoeParserToolAdapter,
+)
 
 
 class Glm47MoeModelToolParser(Glm47MoeParserToolAdapter):  # type: ignore[valid-type, misc]

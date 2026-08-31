@@ -15,12 +15,12 @@ from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import torch
-from torch.distributed import PrefixStore, ProcessGroup
-from torch.distributed.distributed_c10d import is_nccl_available
-from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C_stable_libtorch  # noqa
+from torch.distributed import PrefixStore, ProcessGroup
+from torch.distributed.distributed_c10d import is_nccl_available
+from typing_extensions import ParamSpec
 
 with contextlib.suppress(ImportError):
     import vllm._qutlass_C  # noqa
@@ -563,9 +563,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        return (
-            "vllm.backends.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
-        )
+        return "vllm.backends.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
 
     @classmethod
     def supports_fp8(cls) -> bool:

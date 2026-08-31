@@ -15,6 +15,12 @@ from fastapi import Request
 from transformers import PreTrainedTokenizerBase
 
 import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system.exceptions import VLLMValidationError
+from vllm.foundation.utilities.async_utils import (
+    make_async_with_semaphore,
+    merge_async_iterators,
+)
 from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaMessage,
@@ -26,19 +32,22 @@ from vllm.frontend.entrypoints.serve.engine.protocol import ErrorResponse, Usage
 from vllm.frontend.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.frontend.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.frontend.processing.inputs import EncoderDecoderInput, EngineInput
-from vllm.foundation.observability.logger import init_logger
-from vllm.runtime.generation.logprobs import FlatLogprobs, Logprob
-from vllm.model_executor.models import SupportsTranscription
 from vllm.frontend.processing.multimodal.audio import get_audio_duration, split_audio
 from vllm.frontend.processing.multimodal.media.audio import load_audio
 from vllm.frontend.processing.outputs import RequestOutput
-from vllm.frontend.processing.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
-from vllm.frontend.processing.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
+from vllm.frontend.processing.renderers.inputs import (
+    DictPrompt,
+    EncoderDecoderDictPrompt,
+)
+from vllm.frontend.processing.renderers.inputs.preprocess import (
+    parse_enc_dec_prompt,
+    parse_model_prompt,
+)
 from vllm.frontend.processing.sampling_params import BeamSearchParams, SamplingParams
 from vllm.frontend.processing.tokenizers import get_tokenizer
-from vllm.foundation.utilities.async_utils import make_async_with_semaphore, merge_async_iterators
+from vllm.model_executor.models import SupportsTranscription
+from vllm.runtime.generation.logprobs import FlatLogprobs, Logprob
 
 from ..transcription.protocol import (
     TranscriptionResponse,

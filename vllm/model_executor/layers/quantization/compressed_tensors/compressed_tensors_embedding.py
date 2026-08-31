@@ -10,6 +10,7 @@ unpacked and dequantized, so the packed weight is never densified.
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -17,7 +18,6 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
-from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 __all__ = ["CompressedTensorsEmbeddingWNA16Int"]
 

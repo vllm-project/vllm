@@ -9,8 +9,10 @@ from typing import Any
 import numpy as np
 import torch
 
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.backends.distributed import get_dcp_group, get_pcp_group
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.math_utils import cdiv
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
 )
@@ -18,8 +20,6 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     triton_scalar_specialization_rep,
 )
-from vllm.backends.compute.dsl.triton_utils import tl, triton
-from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer
 

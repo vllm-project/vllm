@@ -14,11 +14,11 @@ from typing import Any
 import torch
 
 from vllm.foundation.config import get_current_vllm_config_or_none
-from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.hpc.hpc_module import HpcModule
-from vllm.foundation.utilities.torch_utils import direct_register_custom_op
+from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backends.hpc_attn import HpcAttnMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID

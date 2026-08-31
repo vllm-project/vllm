@@ -8,11 +8,11 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.frontend.entrypoints.serve.elastic_ep.middleware import get_scaling_elastic_ep
 from vllm.frontend.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.frontend.entrypoints.serve.utils.api_utils import validate_json_request
-from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

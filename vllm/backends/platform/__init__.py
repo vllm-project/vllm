@@ -6,8 +6,11 @@ import traceback
 from itertools import chain
 from typing import TYPE_CHECKING
 
-from vllm import envs
-from vllm.foundation.extensibility.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
+from vllm.foundation.extensibility.plugins import (
+    PLATFORM_PLUGINS_GROUP,
+    load_plugins_by_group,
+)
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 
 from .interface import CpuArchEnum, Platform, PlatformEnum, in_wsl

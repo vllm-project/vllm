@@ -7,8 +7,8 @@ from dataclasses import dataclass, replace
 import torch
 import torch.distributed as dist
 
-from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.backends.distributed.parallel_state import get_dp_group
+from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,

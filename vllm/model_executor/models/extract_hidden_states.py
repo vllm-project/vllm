@@ -17,14 +17,17 @@ import torch.nn as nn
 
 from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.foundation.config.cache import CacheDType
-from vllm.runtime.execution.forward_context import get_forward_context
+from vllm.foundation.utilities.torch_utils import (
+    is_quantized_kv_cache,
+    kv_cache_dtype_str_to_dtype,
+)
 from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache, kv_cache_dtype_str_to_dtype
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,

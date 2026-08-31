@@ -4,6 +4,12 @@
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.backends.platform import current_platform
+from vllm.foundation.utilities.flashinfer import (
+    flashinfer_scaled_fp4_mm,
+    has_flashinfer,
+    has_flashinfer_b12x_gemm,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
@@ -17,12 +23,6 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
-)
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.flashinfer import (
-    flashinfer_scaled_fp4_mm,
-    has_flashinfer,
-    has_flashinfer_b12x_gemm,
 )
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig

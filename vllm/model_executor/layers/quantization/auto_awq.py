@@ -10,8 +10,13 @@ from transformers import PretrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
-from vllm import envs
+from vllm.backends.compute.scalar_type import scalar_types
+from vllm.backends.platform import current_platform
+from vllm.foundation.integrations.transformers_utils.config import (
+    get_safetensors_params_metadata,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
@@ -60,9 +65,6 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.scalar_type import scalar_types
-from vllm.foundation.integrations.transformers_utils.config import get_safetensors_params_metadata
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods

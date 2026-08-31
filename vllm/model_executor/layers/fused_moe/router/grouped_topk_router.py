@@ -5,9 +5,10 @@ from functools import partial
 import torch
 
 from vllm import _custom_ops as ops
-from vllm import envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.backends.distributed.eplb.eplb_state import EplbLayerState
+from vllm.backends.platform import current_platform
+from vllm.foundation.system import envs
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
@@ -22,7 +23,6 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.utils import maybe_disable_graph_partition
-from vllm.backends.platform import current_platform
 
 
 def fused_grouped_topk(

@@ -6,8 +6,8 @@ from contextlib import nullcontext
 import torch
 import torch.distributed as dist
 
-from vllm.foundation.config import ParallelConfig
 from vllm.backends.distributed.parallel_state import get_dp_group
+from vllm.foundation.config import ParallelConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.worker.ubatch_utils import (

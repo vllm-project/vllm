@@ -11,7 +11,9 @@ from vllm.frontend.entrypoints.generate.base.protocol import (
     FunctionCall,
 )
 from vllm.frontend.processing.parser.abstract_parser import DelegatingParser
-from vllm.frontend.processing.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
+from vllm.frontend.processing.reasoning.kimi_k3_reasoning_parser import (
+    KimiK3ReasoningParser,
+)
 
 if TYPE_CHECKING:
     from vllm.frontend.entrypoints.openai.chat_completion.protocol import (

@@ -30,11 +30,21 @@ import torch
 from torch import nn
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import (
     get_pp_group,
 )
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.integrations.transformers_utils.configs.qwen3_5 import (
+    Qwen3_5Config,
+    Qwen3_5TextConfig,
+)
+from vllm.foundation.integrations.transformers_utils.configs.qwen3_5_moe import (
+    Qwen3_5MoeConfig,
+    Qwen3_5MoeTextConfig,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.tokenizers.registry import cached_tokenizer_from_config
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
@@ -53,14 +63,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.frontend.processing.tokenizers.registry import cached_tokenizer_from_config
-from vllm.foundation.integrations.transformers_utils.configs.qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig
-from vllm.foundation.integrations.transformers_utils.configs.qwen3_5_moe import (
-    Qwen3_5MoeConfig,
-    Qwen3_5MoeTextConfig,
-)
 
 from .interfaces import (
     HasInnerState,

@@ -7,8 +7,8 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.backends.compute.scalar_type import ScalarType
+from vllm.model_executor.layers.quantization.utils import replace_parameter
 
 
 @dataclass

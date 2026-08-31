@@ -12,13 +12,13 @@ from dataclasses import dataclass
 from statistics import fmean
 from typing import Any
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
     PromMetric,
     PromMetricT,
 )
+from vllm.foundation.config import VllmConfig
 
 
 def _nearest_rank_percentile(values: list[float], percentile: float) -> float:

@@ -12,11 +12,11 @@ from vllm.v1.attention.backends.mla.prefill.base import (
 )
 
 if TYPE_CHECKING:
+    from vllm.backends.platform.interface import DeviceCapability
     from vllm.foundation.config import VllmConfig
     from vllm.model_executor.layers.attention.mla_attention import (
         MLACommonPrefillMetadata,
     )
-    from vllm.backends.platform.interface import DeviceCapability
 
 
 class TokenspeedMLAPrefillBackend(MLAPrefillBackend):

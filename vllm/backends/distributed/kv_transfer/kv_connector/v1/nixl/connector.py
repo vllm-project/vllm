@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
 )
@@ -53,14 +52,15 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
     NixlPromMetrics,
 )
-from vllm.runtime.execution.forward_context import ForwardContext
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.runtime.execution.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
+    from vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (  # noqa: E501
         NixlBaseConnectorScheduler,
     )
     from vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (

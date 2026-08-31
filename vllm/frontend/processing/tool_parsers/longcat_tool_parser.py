@@ -5,7 +5,9 @@ import regex as re
 
 from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.frontend.processing.tool_parsers.abstract_tool_parser import Tool
-from vllm.frontend.processing.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
+from vllm.frontend.processing.tool_parsers.hermes_tool_parser import (
+    Hermes2ProToolParser,
+)
 
 
 class LongcatFlashToolParser(Hermes2ProToolParser):

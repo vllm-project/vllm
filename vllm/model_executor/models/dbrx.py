@@ -9,12 +9,12 @@ import torch
 import torch.nn as nn
 from transformers import DbrxConfig
 
-from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,

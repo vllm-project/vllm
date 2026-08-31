@@ -16,16 +16,10 @@ from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
 from vllm.frontend.compat.engine.protocol import StreamingInput
 from vllm.frontend.processing.inputs import PromptType, TokensPrompt
-from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
-from vllm.model_executor.models.voxtral import (
-    VoxtralDummyInputsBuilder,
-    VoxtralForConditionalGeneration,
-    VoxtralMultiModalProcessor,
-    VoxtralProcessingInfo,
-)
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.cache import _I, BaseMultiModalProcessorCache
 from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsOptionalItems
@@ -35,9 +29,15 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
 )
-from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
-from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
+from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
+from vllm.model_executor.models.voxtral import (
+    VoxtralDummyInputsBuilder,
+    VoxtralForConditionalGeneration,
+    VoxtralMultiModalProcessor,
+    VoxtralProcessingInfo,
+)
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .utils import (
     _flatten_embeddings,

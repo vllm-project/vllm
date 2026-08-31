@@ -3,15 +3,15 @@
 
 import torch
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import has_humming
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
     apply_humming_linear,
     convert_linear_layer_to_humming_standard,
     get_humming_linear_compute_config,
     prepare_humming_linear_layer_config,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.import_utils import has_humming
 
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,

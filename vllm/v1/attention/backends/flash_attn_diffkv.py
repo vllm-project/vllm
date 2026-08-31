@@ -4,8 +4,8 @@
 
 import torch
 
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.torch_utils import (
     canonicalize_singleton_dim_strides,
     is_quantized_kv_cache,

@@ -14,10 +14,7 @@ import torch
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.foundation.config import ModelConfig
-from vllm.frontend.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.foundation.observability.logger import init_logger
-from vllm.frontend.processing.outputs import PoolingRequestOutput
-from vllm.frontend.processing.tasks import SupportedTask
 from vllm.foundation.utilities.serial_utils import (
     EMBED_DTYPES,
     EmbedDType,
@@ -25,6 +22,9 @@ from vllm.foundation.utilities.serial_utils import (
     binary2tensor,
     tensor2binary,
 )
+from vllm.frontend.entrypoints.serve.engine.protocol import UsageInfo
+from vllm.frontend.processing.outputs import PoolingRequestOutput
+from vllm.frontend.processing.tasks import SupportedTask
 
 logger = init_logger(__name__)
 

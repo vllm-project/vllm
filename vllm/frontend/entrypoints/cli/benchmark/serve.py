@@ -3,8 +3,8 @@
 import argparse
 
 from vllm.benchmarks.serve import add_cli_args, main
-from vllm.frontend.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.frontend.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 
 
 class BenchmarkServingSubcommand(BenchmarkSubcommandBase):

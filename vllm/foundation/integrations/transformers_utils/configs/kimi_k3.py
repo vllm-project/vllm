@@ -4,8 +4,10 @@
 
 from transformers.configuration_utils import PretrainedConfig
 
+from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import (
+    KimiLinearConfig,
+)
 from vllm.foundation.observability.logger import init_logger
-from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 logger = init_logger(__name__)
 

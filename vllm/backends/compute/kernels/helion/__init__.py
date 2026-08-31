@@ -16,7 +16,10 @@ from vllm.backends.compute.kernels.helion.register import (
     register_kernel,
     vllm_helion_lib,
 )
-from vllm.backends.compute.kernels.helion.utils import canonicalize_gpu_name, get_canonical_gpu_name
+from vllm.backends.compute.kernels.helion.utils import (
+    canonicalize_gpu_name,
+    get_canonical_gpu_name,
+)
 
 __all__ = [
     # Config management

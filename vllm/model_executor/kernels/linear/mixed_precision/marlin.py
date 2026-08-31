@@ -5,6 +5,8 @@
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.backends.compute.scalar_type import scalar_types
+from vllm.backends.platform import current_platform
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MARLIN_SUPPORTED_GROUP_SIZES,
     apply_gptq_marlin_linear,
@@ -26,8 +28,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
 from vllm.model_executor.utils import replace_parameter
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 

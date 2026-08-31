@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm import envs
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.cpu_resource_utils import (
     DEVICE_CONTROL_ENV_VAR,
     get_memory_node_info,
@@ -594,7 +594,8 @@ class CpuPlatform(Platform):
         Rewrite the kv cache shape for the current platform.
         """
         # Import lazily: cpu_attn pulls in _custom_ops, which needs a fully
-        # initialized vllm.backends.platform (avoid circular import while CpuPlatform loads).
+        # initialized vllm.backends.platform (avoid circular import while
+        # CpuPlatform loads).
         from vllm._custom_ops import cpu_attn_reshape_and_cache
         from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 

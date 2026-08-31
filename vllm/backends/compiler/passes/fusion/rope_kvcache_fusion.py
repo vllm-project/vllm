@@ -8,20 +8,20 @@ from torch._higher_order_ops import auto_functionalized
 from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config
 from vllm.foundation.config.utils import Range
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.attention.attention import (
-    Attention,
-    get_attention_context,
-)
-from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.torch_utils import (
     _USE_LAYERNAME,
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+)
+from vllm.model_executor.layers.attention.attention import (
+    Attention,
+    get_attention_context,
 )
 
 from ..inductor_pass import enable_fake_mode

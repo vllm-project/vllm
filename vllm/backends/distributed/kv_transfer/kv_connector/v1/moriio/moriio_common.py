@@ -13,7 +13,6 @@ import regex as re
 import torch
 import zmq
 
-from vllm.foundation.config import KVTransferConfig, VllmConfig
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
@@ -21,6 +20,7 @@ from vllm.backends.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.foundation.config import KVTransferConfig, VllmConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.network_utils import (
     get_ip,

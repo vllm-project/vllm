@@ -29,22 +29,25 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai.types.responses.tool import Tool
 
-from vllm import envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
+from vllm.foundation.utilities import random_uuid
 from vllm.frontend.entrypoints.chat_utils import make_tool_call_id
-from vllm.frontend.entrypoints.generate.base.protocol import FunctionCall, FunctionDefinition
+from vllm.frontend.entrypoints.generate.base.protocol import (
+    FunctionCall,
+    FunctionDefinition,
+)
 from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionMessageParam,
     ChatCompletionToolsParam,
 )
 from vllm.frontend.entrypoints.openai.responses.protocol import ResponseInputOutputItem
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.tool_parsers.utils import (
     build_responses_tool_call_name_map,
     flat_namespace_tool_name,
     iter_response_function_tool_dicts,
     resolve_responses_tool_call_name,
 )
-from vllm.foundation.utilities import random_uuid
 
 logger = init_logger(__name__)
 

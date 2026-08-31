@@ -15,12 +15,12 @@ from typing import cast
 
 import torch
 
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform.rocm import on_gfx950
 from vllm.models.inkling.amd.ops.rel_attention_decode import (
     inkling_rel_attention_split_kv_decode,
     use_split_kv_decode,
 )
-from vllm.backends.platform.rocm import on_gfx950
-from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 
 def bucket_max_seqlen_q(max_seqlen_q: int) -> int:

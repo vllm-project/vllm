@@ -7,17 +7,19 @@ import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import PretrainedConfig
 
-from vllm import envs
 from vllm.foundation.config.model_arch import (
     ModelArchitectureConfig,
 )
 from vllm.foundation.config.utils import getattr_iter
-from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.integrations.transformers_utils.config import (
     ConfigFormat,
     get_safetensors_params_metadata,
 )
-from vllm.foundation.integrations.transformers_utils.configs.gemma4 import gemma4_layer_config
+from vllm.foundation.integrations.transformers_utils.configs.gemma4 import (
+    gemma4_layer_config,
+)
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
@@ -123,7 +125,9 @@ class ModelArchConfigConvertorBase:
             return qk_rope_head_dim  # not corrupted
 
         # Read the correct value from raw config.json.
-        from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
+        from vllm.foundation.integrations.transformers_utils.repo_utils import (
+            get_hf_file_to_dict,
+        )
 
         model_path = self.hf_config.name_or_path
         if not model_path:

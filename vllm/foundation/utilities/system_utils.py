@@ -15,10 +15,10 @@ from typing import TextIO
 import psutil
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.observability.logger import init_logger
+from vllm.backends.distributed.ray.lazy_utils import is_in_ray_actor
 from vllm.backends.platform import current_platform
 from vllm.backends.platform.interface import in_wsl
-from vllm.backends.distributed.ray.lazy_utils import is_in_ray_actor
+from vllm.foundation.observability.logger import init_logger
 
 from .platform_utils import cuda_is_initialized, xpu_is_initialized
 

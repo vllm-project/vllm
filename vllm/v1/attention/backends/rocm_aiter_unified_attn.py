@@ -10,11 +10,11 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.foundation.config.cache import CacheDType
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
-from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, AttentionType, MultipleOf
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,

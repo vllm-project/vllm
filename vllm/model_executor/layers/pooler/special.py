@@ -7,8 +7,8 @@ from itertools import groupby
 import torch
 
 from vllm.foundation.config import PoolerConfig
-from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.frontend.processing.tasks import PoolingTask
+from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .abstract import Pooler, PoolerOutput

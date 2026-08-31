@@ -13,7 +13,11 @@ from abc import ABC, abstractmethod
 
 import torch
 
-from vllm.foundation.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
+from vllm.foundation.config.mamba import (
+    MambaBackendEnum,
+    MambaConfig,
+    MambaSSUAlgorithm,
+)
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID

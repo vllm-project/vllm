@@ -59,7 +59,9 @@ from vllm.foundation.utilities.torch_utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.backends.distributed.stateless_coordinator import StatelessGroupCoordinator
+    from vllm.backends.distributed.stateless_coordinator import (
+        StatelessGroupCoordinator,
+    )
 
 
 @dataclass
@@ -543,7 +545,9 @@ class GroupCoordinator:
                 use_all2all=use_all2all,
             )
 
-        from vllm.backends.distributed.device_communicators.shm_broadcast import MessageQueue
+        from vllm.backends.distributed.device_communicators.shm_broadcast import (
+            MessageQueue,
+        )
 
         self.mq_broadcaster: MessageQueue | None = None
         if use_message_queue_broadcaster and self.world_size > 1:
@@ -597,7 +601,9 @@ class GroupCoordinator:
     def create_mq_broadcaster(
         self, writer_rank=0, external_writer_handle=None, blocking=True
     ):
-        from vllm.backends.distributed.device_communicators.shm_broadcast import MessageQueue
+        from vllm.backends.distributed.device_communicators.shm_broadcast import (
+            MessageQueue,
+        )
 
         return MessageQueue.create_from_process_group(
             self.cpu_group,
@@ -611,7 +617,9 @@ class GroupCoordinator:
     def create_single_reader_mq_broadcasters(
         self, reader_rank_in_group=0, blocking=False
     ):
-        from vllm.backends.distributed.device_communicators.shm_broadcast import MessageQueue
+        from vllm.backends.distributed.device_communicators.shm_broadcast import (
+            MessageQueue,
+        )
 
         return MessageQueue.create_from_process_group_single_reader(
             self.cpu_group,
@@ -1479,7 +1487,9 @@ def _init_stateless_group(
     use_all2all: bool = False,
 ) -> "StatelessGroupCoordinator":
     """Create a StatelessGroupCoordinator with the given parameters."""
-    from vllm.backends.distributed.stateless_coordinator import StatelessGroupCoordinator
+    from vllm.backends.distributed.stateless_coordinator import (
+        StatelessGroupCoordinator,
+    )
 
     world = get_world_group()
     return StatelessGroupCoordinator(
@@ -1688,7 +1698,9 @@ def _validate_default_pg_for_split_group() -> None:
 def _init_elastic_ep_world(
     config, local_rank: int, backend: str, rank: int, world_size: int
 ) -> None:
-    from vllm.backends.distributed.stateless_coordinator import StatelessGroupCoordinator
+    from vllm.backends.distributed.stateless_coordinator import (
+        StatelessGroupCoordinator,
+    )
 
     global _WORLD, _NODE_COUNT
     assert _WORLD is None, "world group already initialized"

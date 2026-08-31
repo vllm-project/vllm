@@ -87,7 +87,10 @@ _maybe_set_cuda_compatibility_path()
 import torch
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.foundation.utilities.torch_utils import is_torch_equal, is_torch_equal_or_newer
+from vllm.foundation.utilities.torch_utils import (
+    is_torch_equal,
+    is_torch_equal_or_newer,
+)
 
 logger = init_logger(__name__)
 

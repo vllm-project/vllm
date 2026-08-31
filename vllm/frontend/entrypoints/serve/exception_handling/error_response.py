@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from http import HTTPStatus
 
-from vllm.foundation.system.exceptions import GenerationError
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system.exceptions import GenerationError
 
 from ..engine.protocol import ErrorInfo, ErrorResponse
 from .utils import sanitize_message

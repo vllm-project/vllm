@@ -8,8 +8,8 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 

@@ -18,6 +18,7 @@ from typing import TypeVar
 import torch
 
 import vllm.foundation.system.envs as envs
+from vllm.backends.platform import PlatformEnum, current_platform
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear.base import (
     MMLinearKernel,
@@ -222,7 +223,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
     ZentorchInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-from vllm.backends.platform import PlatformEnum, current_platform
 
 logger = init_logger(__name__)
 

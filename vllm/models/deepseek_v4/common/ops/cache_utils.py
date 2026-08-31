@@ -19,6 +19,10 @@ from typing import Any
 
 import torch
 
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform import current_platform
+from vllm.foundation.utilities.import_utils import has_cutedsl
+from vllm.foundation.utilities.math_utils import next_power_of_2
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -27,10 +31,6 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.dsl.triton_utils import tl, triton
-from vllm.foundation.utilities.import_utils import has_cutedsl
-from vllm.foundation.utilities.math_utils import next_power_of_2
 
 
 @triton.jit

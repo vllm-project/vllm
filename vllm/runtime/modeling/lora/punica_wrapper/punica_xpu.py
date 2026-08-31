@@ -12,11 +12,15 @@ from typing import final
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.runtime.modeling.lora.layers import LoRAMapping
-from vllm.runtime.modeling.lora.ops.xpu_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
-from vllm.runtime.modeling.lora.utils import get_captured_lora_counts
 from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, triton
 from vllm.foundation.utilities.math_utils import round_up
+from vllm.runtime.modeling.lora.layers import LoRAMapping
+from vllm.runtime.modeling.lora.ops.xpu_ops import (
+    bgmv_expand,
+    bgmv_expand_slice,
+    bgmv_shrink,
+)
+from vllm.runtime.modeling.lora.utils import get_captured_lora_counts
 
 if HAS_TRITON:
     from vllm.runtime.modeling.lora.ops.triton_ops import (
@@ -533,12 +537,14 @@ class PunicaWrapperXPU(PunicaWrapperBase):
     ]:
         import functools
 
-        from vllm.runtime.modeling.lora.layers.utils import try_get_optimal_moe_lora_config
+        from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
+        from vllm.runtime.modeling.lora.layers.utils import (
+            try_get_optimal_moe_lora_config,
+        )
         from vllm.runtime.modeling.lora.ops.triton_ops.utils import (
             _normalize_lora_config_keys,
             get_lora_op_configs,
         )
-        from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
 
         config_dtype = _get_config_dtype_str(
             dtype=x.dtype,
@@ -664,12 +670,14 @@ class PunicaWrapperXPU(PunicaWrapperBase):
     ) -> None:
         import functools
 
-        from vllm.runtime.modeling.lora.layers.utils import try_get_optimal_moe_lora_config
+        from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
+        from vllm.runtime.modeling.lora.layers.utils import (
+            try_get_optimal_moe_lora_config,
+        )
         from vllm.runtime.modeling.lora.ops.triton_ops.utils import (
             _normalize_lora_config_keys,
             get_lora_op_configs,
         )
-        from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
 
         config_dtype = _get_config_dtype_str(
             dtype=x.dtype,

@@ -23,10 +23,11 @@ from transformers.models.internvl.video_processing_internvl import (
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_video_processor_from_config,
+)
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.interns1_vit import InternS1VisionModel
-from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -47,9 +48,10 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.interns1_vit import InternS1VisionModel
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.processor import cached_video_processor_from_config
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

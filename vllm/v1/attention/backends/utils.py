@@ -19,7 +19,11 @@ from vllm.foundation.config import CacheConfig, VllmConfig, get_layers_from_vllm
 from vllm.foundation.config.cache import _layout_from_name
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.foundation.utilities.math_utils import cdiv
-from vllm.foundation.utilities.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
+from vllm.foundation.utilities.torch_utils import (
+    PIN_MEMORY,
+    async_tensor_h2d,
+    np_to_pinned_tensor,
+)
 from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
 
 if TYPE_CHECKING:

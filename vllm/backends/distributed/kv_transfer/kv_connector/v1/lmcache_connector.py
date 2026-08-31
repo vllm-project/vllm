@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.kv_events import (
     BlockStored,
     KVCacheEvent,
@@ -17,6 +16,7 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -96,7 +96,9 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         if use_native:
             logger.info("Initializing native LMCache connector")
             # lazy import
-            from vllm.backends.distributed.kv_transfer.kv_connector.v1 import lmcache_integration
+            from vllm.backends.distributed.kv_transfer.kv_connector.v1 import (
+                lmcache_integration,
+            )
 
             _adapter = lmcache_integration.vllm_v1_adapter
 

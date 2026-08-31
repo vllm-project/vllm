@@ -5,9 +5,9 @@ from enum import Enum
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import envs
 from vllm.foundation.config.kernel import MoEBackend
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )

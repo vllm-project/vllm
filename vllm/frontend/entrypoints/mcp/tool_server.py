@@ -6,8 +6,12 @@ from typing import TYPE_CHECKING, Any
 
 from openai_harmony import ToolDescription, ToolNamespaceConfig
 
-from vllm.frontend.entrypoints.mcp.tool import HarmonyBrowserTool, HarmonyPythonTool, Tool
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.entrypoints.mcp.tool import (
+    HarmonyBrowserTool,
+    HarmonyPythonTool,
+    Tool,
+)
 
 logger = init_logger(__name__)
 

@@ -11,8 +11,8 @@
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.backends.platform import current_platform
 from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform import current_platform
 
 
 # Consumed by kimi_k3_triton_warmup.py during kernel_warmup().

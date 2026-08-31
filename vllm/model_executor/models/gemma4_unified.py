@@ -29,6 +29,7 @@ from transformers.models.gemma4_unified.processing_gemma4_unified import (
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import VideoDummyOptions
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
@@ -48,7 +49,6 @@ from vllm.model_executor.models.gemma4_mm import (
     _get_max_soft_tokens,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
 from .utils import (
     AutoWeightsLoader,

@@ -11,6 +11,9 @@ import torch.nn as nn
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.foundation.config.parallel import ParallelConfig
+from vllm.foundation.integrations.transformers_utils.configs.nemotron_h import (
+    NemotronHConfig,
+)
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -28,7 +31,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 from .interfaces import SupportsPP
 from .nemotron_h import (

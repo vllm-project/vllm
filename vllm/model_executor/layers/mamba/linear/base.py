@@ -3,12 +3,12 @@
 import torch
 from transformers import PretrainedConfig
 
-from vllm.foundation.config import (
-    VllmConfig,
-)
 from vllm.backends.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+)
+from vllm.foundation.config import (
+    VllmConfig,
 )
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.mamba.abstract import MambaBase

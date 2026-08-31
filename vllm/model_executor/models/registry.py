@@ -23,17 +23,19 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import torch.nn as nn
 import transformers
 
-from vllm import envs
 from vllm.foundation.config import (
     ModelConfig,
     iter_architecture_defaults,
     try_match_architecture_defaults,
 )
+from vllm.foundation.integrations.transformers_utils.dynamic_module import (
+    try_get_class_from_dynamic_module,
+)
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.logging_utils import logtime
-from vllm.frontend.processing.tasks import ScoreType
-from vllm.foundation.integrations.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.hashing import safe_hash
+from vllm.frontend.processing.tasks import ScoreType
 
 if TYPE_CHECKING:
     from vllm.foundation.config.model import AttnTypeStr

@@ -23,11 +23,14 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.backends.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+)
+from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.foundation.integrations.transformers_utils.config import (
+    set_default_rope_theta,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
@@ -45,7 +48,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.config import set_default_rope_theta
 
 from .exaone4 import Exaone4GatedMLP as ExaoneMoeGatedMLP
 from .interfaces import SupportsLoRA, SupportsPP

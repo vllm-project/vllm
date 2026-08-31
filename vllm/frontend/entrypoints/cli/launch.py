@@ -6,6 +6,8 @@ import inspect
 
 import uvloop
 
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 from vllm.frontend.entrypoints.cli.types import CLISubcommand
 from vllm.frontend.entrypoints.launchers.cli_args import (
     make_arg_parser,
@@ -13,8 +15,6 @@ from vllm.frontend.entrypoints.launchers.cli_args import (
 )
 from vllm.frontend.entrypoints.launchers.render.entry import run_launch_fastapi
 from vllm.frontend.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
-from vllm.foundation.observability.logger import init_logger
-from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 

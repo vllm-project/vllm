@@ -29,7 +29,9 @@ class AddRMSNormPattern(VllmPatternReplacement):
             residual_out = (
                 residual + branch if self.residual_first else branch + residual
             )
-            rms = vllm.backends.compute.ir.ops.rms_norm(residual_out, weight, self.epsilon)
+            rms = vllm.backends.compute.ir.ops.rms_norm(
+                residual_out, weight, self.epsilon
+            )
             return rms, residual_out
 
         return _pattern

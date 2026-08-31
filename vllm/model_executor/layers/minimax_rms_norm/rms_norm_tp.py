@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, tl, triton
 from vllm.backends.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.backends.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -14,9 +15,8 @@ from vllm.backends.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
-from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, tl, triton
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
+from vllm.model_executor.custom_op import CustomOp
 
 logger = init_logger(__name__)
 

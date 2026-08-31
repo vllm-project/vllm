@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import LazyLoader
 from vllm.frontend.processing.reasoning import ReasoningParserManager
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
-from vllm.foundation.utilities.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,

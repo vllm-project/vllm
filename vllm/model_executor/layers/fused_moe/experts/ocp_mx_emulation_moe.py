@@ -14,7 +14,9 @@ is applied on activations via `moe_kernel_quantize_input`.
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import has_quark
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -29,8 +31,6 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.import_utils import has_quark
 
 logger = init_logger(__name__)
 

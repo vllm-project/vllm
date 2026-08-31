@@ -32,12 +32,12 @@ from torch import nn
 from transformers import MixtralConfig
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.backends.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
+from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm

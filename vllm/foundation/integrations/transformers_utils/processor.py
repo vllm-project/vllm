@@ -20,10 +20,14 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
-from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.integrations.transformers_utils import processors
-from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
-from vllm.foundation.integrations.transformers_utils.utils import convert_model_repo_to_path
+from vllm.foundation.integrations.transformers_utils.repo_utils import (
+    get_hf_file_to_dict,
+)
+from vllm.foundation.integrations.transformers_utils.utils import (
+    convert_model_repo_to_path,
+)
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.func_utils import get_allowed_kwarg_only_overrides
 
 logger = init_logger(__name__)

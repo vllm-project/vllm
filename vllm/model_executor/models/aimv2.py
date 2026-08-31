@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.backends.distributed.utils import divide
+from vllm.foundation.integrations.transformers_utils.configs.ovis import AIMv2Config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
@@ -21,7 +22,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
-from vllm.foundation.integrations.transformers_utils.configs.ovis import AIMv2Config
 
 
 class AIMv2SwiGLUFFN(nn.Module):

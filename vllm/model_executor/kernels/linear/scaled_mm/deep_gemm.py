@@ -4,16 +4,8 @@
 import torch
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import get_current_vllm_config
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    deepgemm_post_process_fp8_weight_block,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-)
-from vllm.model_executor.utils import replace_parameter
 from vllm.backends.platform import current_platform
+from vllm.foundation.config import get_current_vllm_config
 from vllm.foundation.utilities.deep_gemm import (
     fp8_gemm_nt,
     is_deep_gemm_e8m0_used,
@@ -22,6 +14,14 @@ from vllm.foundation.utilities.deep_gemm import (
     should_use_deepgemm_for_fp8_linear,
 )
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    deepgemm_post_process_fp8_weight_block,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+)
+from vllm.model_executor.utils import replace_parameter
 
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,

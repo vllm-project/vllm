@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
-from vllm.foundation.config import VllmConfig
-from vllm.foundation.config.kv_transfer import KVTransferConfig
 from vllm.backends.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
-from vllm.backends.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.backends.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory,
+)
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorBase_V1,
@@ -26,6 +26,8 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.kv_transfer import KVTransferConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput

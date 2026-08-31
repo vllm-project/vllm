@@ -11,16 +11,16 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.foundation.config import VllmConfig
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.siglip import SiglipVisionModel
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.processors.internvl import (
     InternVLImageProcessor,
     InternVLProcessor,
 )
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.siglip import SiglipVisionModel
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .interfaces import (
     MultiModalEmbeddings,

@@ -13,11 +13,33 @@ import torch.nn.functional as F
 from transformers import BatchFeature, PretrainedConfig
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
-from vllm.foundation.config import VllmConfig
-from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.backends.distributed import parallel_state
 from vllm.backends.distributed import utils as dist_utils
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.integrations.transformers_utils.configs.mimo_v2_omni import (
+    Mimo_VLVisionConfig,
+)
+from vllm.foundation.integrations.transformers_utils.processors.mimo_v2_omni import (
+    MiMoOmniProcessor,
+    VideoAudioInput,
+    _format_timestamp,
+)
 from vllm.frontend.processing.inputs import MultiModalDataDict
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.frontend.processing.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.frontend.processing.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -30,23 +52,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.frontend.processing.multimodal.parse import ImageSize, MultiModalDataItems
-from vllm.frontend.processing.multimodal.processing import (
-    BaseDummyInputsBuilder,
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-)
-from vllm.foundation.integrations.transformers_utils.configs.mimo_v2_omni import Mimo_VLVisionConfig
-from vllm.foundation.integrations.transformers_utils.processors.mimo_v2_omni import (
-    MiMoOmniProcessor,
-    VideoAudioInput,
-    _format_timestamp,
-)
 
 from .interfaces import (
     MultiModalEmbeddings,

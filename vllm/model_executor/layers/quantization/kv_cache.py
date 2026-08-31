@@ -3,13 +3,13 @@
 
 import torch
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.kv_cache_interface import kv_cache_uses_per_token_head_scales
 
 logger = init_logger(__name__)

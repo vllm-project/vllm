@@ -28,8 +28,8 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm.backends.distributed import get_tensor_model_parallel_rank
-from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.runtime.execution.forward_context import get_forward_context
 
 from .ops import fused_sconv
 from .sconv_swa_attn import InklingConvState, InklingSconvMetadata

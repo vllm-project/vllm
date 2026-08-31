@@ -5,8 +5,8 @@
 import regex as re
 import torch
 
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

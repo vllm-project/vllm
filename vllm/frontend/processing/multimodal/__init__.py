@@ -6,7 +6,7 @@ from .registry import MultiModalRegistry
 
 MULTIMODAL_REGISTRY = MultiModalRegistry()
 """
-The global [`MultiModalRegistry`][vllm.frontend.processing.multimodal.registry.MultiModalRegistry]
+The global [`MultiModalRegistry`][]
 is used by model runners to dispatch data processing according to the target
 model.
 

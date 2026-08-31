@@ -1474,7 +1474,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Comma-separated *additional* prefixes of env vars to copy from the
     # driver to Ray workers.  These are merged with the built-in defaults
-    # defined in ``vllm.backends.distributed.ray.ray_env`` (VLLM_, etc.).  Example: "MYLIB_,OTHER_"
+    # defined in ``vllm.backends.distributed.ray.ray_env`` (VLLM_, etc.).
+    # Example: "MYLIB_,OTHER_"
     "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY": lambda: os.getenv(
         "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY", ""
     ),

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
+from vllm.backends.platform import current_platform
 from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
@@ -31,7 +32,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.backends.platform import current_platform
 
 
 class Mxfp8OnlineLinearMethod(_Fp8OnlineLinearBase):

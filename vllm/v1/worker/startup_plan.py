@@ -26,9 +26,9 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.foundation.system.envs as envs
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker

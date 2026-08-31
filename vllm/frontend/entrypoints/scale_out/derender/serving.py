@@ -4,6 +4,7 @@ import time
 from typing import cast
 
 import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
@@ -25,7 +26,6 @@ from vllm.frontend.processing.inputs import (
     MultiModalInput,
     MultiModalPlaceholders,
 )
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.renderers.online_derenderer import OnlineDerenderer
 
 from ..token_in_token_out.mm_serde import encode_mm_kwargs_item

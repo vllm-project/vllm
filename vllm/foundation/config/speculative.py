@@ -15,8 +15,8 @@ from vllm.foundation.config.kernel import MoEBackend
 from vllm.foundation.config.model import HfOverrides, ModelConfig
 from vllm.foundation.config.parallel import ParallelConfig
 from vllm.foundation.config.utils import config
-from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.integrations.transformers_utils.config import get_hf_text_config
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.hashing import safe_hash
 from vllm.foundation.utilities.import_utils import LazyLoader, has_arctic_inference
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -1189,7 +1189,7 @@ class SpeculativeConfig:
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "extract_hidden_states":
-            from vllm.foundation.integrations.transformers_utils.configs.extract_hidden_states import (
+            from vllm.foundation.integrations.transformers_utils.configs.extract_hidden_states import (  # noqa: E501
                 ExtractHiddenStatesConfig,
             )
 
@@ -1338,8 +1338,10 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3", "dflash"):
-                    from vllm.foundation.integrations.transformers_utils.configs.eagle import EAGLEConfig
-                    from vllm.foundation.integrations.transformers_utils.configs.speculators import (
+                    from vllm.foundation.integrations.transformers_utils.configs.eagle import (  # noqa: E501
+                        EAGLEConfig,
+                    )
+                    from vllm.foundation.integrations.transformers_utils.configs.speculators import (  # noqa: E501
                         SpeculatorsConfig,
                     )
 

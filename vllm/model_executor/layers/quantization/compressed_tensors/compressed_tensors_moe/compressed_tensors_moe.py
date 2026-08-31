@@ -9,6 +9,7 @@ from compressed_tensors.quantization import (
     QuantizationType,
 )
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import get_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -18,7 +19,6 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
 )
-from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

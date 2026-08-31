@@ -14,12 +14,17 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from transformers import BatchFeature
 
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.backends.distributed import get_tensor_model_parallel_world_size
+from vllm.foundation.integrations.transformers_utils.configs.deepseek_vl2 import (
+    DeepseekVLV2Config,
+    MlpProjectorConfig,
+    VisionEncoderConfig,
+)
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import set_default_torch_dtype
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.transformers.utils import replace_linear_class
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -41,15 +46,10 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     PromptUpdate,
     TimingContext,
 )
-from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
-from vllm.foundation.integrations.transformers_utils.configs.deepseek_vl2 import (
-    DeepseekVLV2Config,
-    MlpProjectorConfig,
-    VisionEncoderConfig,
-)
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
-from vllm.foundation.utilities.torch_utils import set_default_torch_dtype
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.transformers.utils import replace_linear_class
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (

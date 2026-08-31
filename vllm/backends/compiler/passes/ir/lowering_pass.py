@@ -11,8 +11,8 @@ from torch._inductor.pattern_matcher import (
     register_graph_pattern,
 )
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.compute.ir.op import IrOp
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.logging_utils import lazy
 

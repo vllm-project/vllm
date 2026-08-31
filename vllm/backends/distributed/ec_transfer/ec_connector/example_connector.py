@@ -7,12 +7,12 @@ from typing import TYPE_CHECKING, Any
 import safetensors
 import torch
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
     ECConnectorRole,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.collection_utils import is_list_of
 from vllm.v1.core.sched.output import SchedulerOutput

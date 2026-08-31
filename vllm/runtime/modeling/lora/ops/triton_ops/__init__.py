@@ -14,7 +14,9 @@ from vllm.runtime.modeling.lora.ops.triton_ops.fused_moe_lora_op import (
 )
 from vllm.runtime.modeling.lora.ops.triton_ops.lora_expand_fp8_op import lora_expand_fp8
 from vllm.runtime.modeling.lora.ops.triton_ops.lora_expand_op import lora_expand
-from vllm.runtime.modeling.lora.ops.triton_ops.lora_kernel_metadata import LoRAKernelMeta
+from vllm.runtime.modeling.lora.ops.triton_ops.lora_kernel_metadata import (
+    LoRAKernelMeta,
+)
 from vllm.runtime.modeling.lora.ops.triton_ops.lora_shrink_fp8_op import lora_shrink_fp8
 from vllm.runtime.modeling.lora.ops.triton_ops.lora_shrink_op import lora_shrink
 

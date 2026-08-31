@@ -7,6 +7,7 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
@@ -20,7 +21,6 @@ from vllm.frontend.entrypoints.serve.utils.api_utils import (
     with_cancellation,
 )
 from vllm.frontend.entrypoints.serve.utils.orca_metrics import metrics_header
-from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

@@ -6,6 +6,7 @@ from functools import partial
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.backends.platform import current_platform
 from vllm.model_executor.layers.quantization.utils.machete_utils import (
     check_machete_supports_shape,
     query_machete_supported_group_sizes,
@@ -16,7 +17,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     unpack_quantized_values_into_int32,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
-from vllm.backends.platform import current_platform
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 

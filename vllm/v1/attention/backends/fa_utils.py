@@ -4,8 +4,8 @@
 from typing import Any
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 
 logger = init_logger(__name__)

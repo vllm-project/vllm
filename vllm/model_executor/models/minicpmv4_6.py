@@ -11,8 +11,25 @@ from PIL import Image as PILImage
 from torch import nn
 from transformers import MiniCPMV4_6Config
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import get_tensor_model_parallel_world_size
+from vllm.foundation.config import VllmConfig
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalFieldConfig,
+    NestedTensors,
+)
+from vllm.frontend.processing.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    VideoProcessorItems,
+)
+from vllm.frontend.processing.multimodal.processing.processor import (
+    PromptReplacement,
+    PromptUpdateDetails,
+    ResolvedPromptUpdate,
+    cached_encode,
+)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
@@ -25,19 +42,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import (
-    MultiModalFeatureSpec,
-    MultiModalFieldConfig,
-    NestedTensors,
-)
-from vllm.frontend.processing.multimodal.parse import ImageProcessorItems, ImageSize, VideoProcessorItems
-from vllm.frontend.processing.multimodal.processing.processor import (
-    PromptReplacement,
-    PromptUpdateDetails,
-    ResolvedPromptUpdate,
-    cached_encode,
-)
 from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .idefics2_vision_model import Idefics2VisionTransformer

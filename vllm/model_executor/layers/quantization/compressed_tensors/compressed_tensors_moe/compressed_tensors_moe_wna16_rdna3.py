@@ -14,6 +14,7 @@ Weight format (per expert, same as dense RDNA3 W4A16):
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.backends.compute.scalar_type import scalar_types
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
@@ -32,7 +33,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
 )
-from vllm.backends.compute.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 

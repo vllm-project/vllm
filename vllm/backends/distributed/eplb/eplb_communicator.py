@@ -31,8 +31,8 @@ from vllm.backends.distributed.parallel_state import (
 )
 from vllm.backends.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.backends.distributed.utils import is_weak_contiguous
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)

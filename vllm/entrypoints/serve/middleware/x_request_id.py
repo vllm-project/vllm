@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E501
 # COMPAT SHIM (auto-generated): old path -> canonical new path
 
 """Compatibility shim: vllm.entrypoints/serve/middleware/x_request_id -> vllm.frontend.entrypoints.serve.middleware.x_request_id (sys.modules alias)."""
+
 import importlib
 import sys
 
-_real = importlib.import_module("vllm.frontend.entrypoints.serve.middleware.x_request_id")
+_real = importlib.import_module(
+    "vllm.frontend.entrypoints.serve.middleware.x_request_id"
+)
 sys.modules[__name__] = _real

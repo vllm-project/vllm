@@ -27,13 +27,17 @@ import torch
 from torch import nn
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, VllmConfig
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.runtime.execution.forward_context import get_forward_context
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import CacheConfig, VllmConfig
+from vllm.foundation.integrations.transformers_utils.configs.gemma4 import (
+    gemma4_layer_config,
+)
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import Attention
@@ -61,10 +65,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.backends.platform import current_platform
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.configs.gemma4 import gemma4_layer_config
-from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 
 from .interfaces import (

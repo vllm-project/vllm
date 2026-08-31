@@ -33,13 +33,21 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 
-from vllm.foundation.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.foundation.config import (
+    CacheConfig,
+    ModelConfig,
+    SpeechToTextConfig,
+    VllmConfig,
+)
 from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_processor_from_config,
+)
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType, TokensPrompt
-from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -57,12 +65,11 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
-from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
-from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
-from vllm.foundation.utilities.torch_utils import PIN_MEMORY
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .blip2 import Blip2QFormerModel
 from .interfaces import (

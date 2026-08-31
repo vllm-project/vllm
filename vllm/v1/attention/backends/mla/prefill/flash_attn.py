@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 import vllm.foundation.system.envs as envs
+from vllm.backends.platform import current_platform
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
-from vllm.backends.platform import current_platform
 from vllm.v1.attention.backends.fa_utils import (
     compile_flash_attn_varlen_func_from_specs,
     get_flash_attn_version,

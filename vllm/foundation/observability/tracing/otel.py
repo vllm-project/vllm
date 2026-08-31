@@ -11,7 +11,10 @@ from contextlib import contextmanager
 from typing import Any
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.foundation.observability.tracing.utils import TRACE_HEADERS, LoadingSpanAttributes
+from vllm.foundation.observability.tracing.utils import (
+    TRACE_HEADERS,
+    LoadingSpanAttributes,
+)
 
 logger = init_logger(__name__)
 

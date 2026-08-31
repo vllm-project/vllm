@@ -24,13 +24,15 @@ from transformers.models.auto.modeling_auto import (
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
-from vllm import envs
-from vllm.foundation.observability.logger import init_logger
-from vllm.foundation.integrations.transformers_utils.repo_utils import is_mistral_model_repo
+from vllm.foundation.integrations.transformers_utils.repo_utils import (
+    is_mistral_model_repo,
+)
 from vllm.foundation.integrations.transformers_utils.utils import (
     parse_safetensors_file_metadata,
     without_trust_remote_code,
 )
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.torch_utils import common_broadcastable_dtype
 
 from .config_parser_base import ConfigParserBase
@@ -361,7 +363,9 @@ class MistralConfigParser(ConfigParserBase):
             )
             config_dict["max_position_embeddings"] = max_position_embeddings
 
-        from vllm.foundation.integrations.transformers_utils.configs.mistral import adapt_config_dict
+        from vllm.foundation.integrations.transformers_utils.configs.mistral import (
+            adapt_config_dict,
+        )
 
         # Get missing fields from HF config if available
         try:
@@ -427,7 +431,9 @@ def register_config_parser(config_format: str):
 
          >>> from vllm.foundation.integrations.transformers_utils.config import (get_config_parser,
                                                          register_config_parser)
-         >>> from vllm.foundation.integrations.transformers_utils.config_parser_base import ConfigParserBase
+         >>> from vllm.foundation.integrations.transformers_utils.config_parser_base import (
+         ...     ConfigParserBase,
+         ... )
          >>>
          >>> @register_config_parser("custom_config_parser")
          ... class CustomConfigParser(ConfigParserBase):
@@ -665,7 +671,9 @@ def maybe_override_with_speculators(
         return model, tokenizer, vllm_speculative_config
 
     # Speculators format detected - process overrides
-    from vllm.foundation.integrations.transformers_utils.configs.speculators.base import SpeculatorsConfig
+    from vllm.foundation.integrations.transformers_utils.configs.speculators.base import (  # noqa: E501
+        SpeculatorsConfig,
+    )
 
     speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
         config_dict=config_dict

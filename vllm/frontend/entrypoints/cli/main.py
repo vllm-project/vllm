@@ -21,11 +21,11 @@ def main():
     import vllm.frontend.entrypoints.cli.openai
     import vllm.frontend.entrypoints.cli.run_batch
     import vllm.frontend.entrypoints.cli.serve
+    from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
     from vllm.frontend.entrypoints.serve.utils.api_utils import (
         VLLM_SUBCMD_PARSER_EPILOG,
         cli_env_setup,
     )
-    from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
     CMD_MODULES = [
         vllm.frontend.entrypoints.cli.openai,

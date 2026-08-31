@@ -10,6 +10,7 @@ from torch import nn
 from vllm.foundation.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.foundation.config.load import LoadConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
@@ -23,7 +24,6 @@ from vllm.model_executor.model_loader.utils import (
     get_model_architecture,
     initialize_model,
 )
-from vllm.foundation.utilities.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 

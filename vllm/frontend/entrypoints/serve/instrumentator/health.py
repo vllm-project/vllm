@@ -5,8 +5,8 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
-from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.v1.engine.exceptions import EngineDeadError
 
 logger = init_logger(__name__)

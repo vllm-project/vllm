@@ -32,10 +32,10 @@ here. TODO: add it once the decoder dataflow is restructured for it.
 
 import torch
 
-from vllm import envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.hpc.hpc_module import HpcModule
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.hpc import has_hpc
+from vllm.model_executor.layers.hpc.hpc_module import HpcModule
 
 logger = init_logger(__name__)
 

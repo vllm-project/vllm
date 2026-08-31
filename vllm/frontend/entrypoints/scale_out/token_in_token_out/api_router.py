@@ -9,6 +9,7 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.frontend.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.frontend.entrypoints.serve.utils.api_utils import (
@@ -16,7 +17,6 @@ from vllm.frontend.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
-from vllm.foundation.observability.logger import init_logger
 
 from ...serve.engine.protocol import ErrorResponse
 from .protocol import (

@@ -12,8 +12,8 @@
 
 import torch
 
-from vllm.third_party.flash_linear_attention.ops.op import exp2
 from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.third_party.flash_linear_attention.ops.op import exp2
 
 
 @triton.heuristics(

@@ -15,6 +15,9 @@ from openai.types.responses import (
 from openai.types.responses.function_tool import FunctionTool
 
 import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.foundation.utilities.import_utils import import_from_path
 from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
@@ -26,14 +29,11 @@ from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
 from vllm.frontend.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.frontend.processing.tool_parsers.utils import Tool, get_json_schema_from_tools
-from vllm.foundation.utilities.collection_utils import is_list_of
-from vllm.foundation.utilities.import_utils import import_from_path
 
 __all__ = ["Tool"]
 
@@ -175,7 +175,9 @@ class ToolParser:
             return None
         if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
             return None
-        from vllm.frontend.processing.tool_parsers.structural_tag_registry import get_model_structural_tag
+        from vllm.frontend.processing.tool_parsers.structural_tag_registry import (
+            get_model_structural_tag,
+        )
 
         return get_model_structural_tag(
             model=self.structural_tag_model,

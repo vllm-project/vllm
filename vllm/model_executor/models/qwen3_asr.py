@@ -34,8 +34,47 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
+from vllm.foundation.integrations.transformers_utils.configs.qwen3_asr import (
+    Qwen3ASRConfig,
+    Qwen3ASRThinkerConfig,
+)
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_processor_from_config,
+)
+from vllm.foundation.integrations.transformers_utils.processors.qwen3_asr import (
+    Qwen3ASRProcessor,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
+from vllm.frontend.processing.inputs import (
+    ModalityData,
+    MultiModalDataDict,
+    PromptType,
+    TokensPrompt,
+)
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
+    AudioItem,
+    MultiModalFeatureSpec,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.frontend.processing.multimodal.parse import (
+    AudioProcessorItems,
+    DictEmbeddingItems,
+    ModalityDataItems,
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
+from vllm.frontend.processing.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+    cached_encode,
+)
+from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     StreamingTranscriptionPostProcessor,
@@ -62,39 +101,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import (
-    AudioItem,
-    MultiModalFeatureSpec,
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
-from vllm.frontend.processing.multimodal.parse import (
-    AudioProcessorItems,
-    DictEmbeddingItems,
-    ModalityDataItems,
-    MultiModalDataItems,
-    MultiModalDataParser,
-)
-from vllm.frontend.processing.multimodal.processing import (
-    BaseDummyInputsBuilder,
-    BaseProcessingInfo,
-    PromptReplacement,
-    PromptUpdate,
-    cached_encode,
-)
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
-from vllm.foundation.integrations.transformers_utils.configs.qwen3_asr import (
-    Qwen3ASRConfig,
-    Qwen3ASRThinkerConfig,
-)
-from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
-from vllm.foundation.integrations.transformers_utils.processors.qwen3_asr import (
-    Qwen3ASRProcessor,
-)
-from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
-from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"

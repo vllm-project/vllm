@@ -14,8 +14,13 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.integrations.transformers_utils.processors.internvl import (
+    InternVLImageProcessor,
+)
+from vllm.foundation.integrations.transformers_utils.processors.nvlm_d import (
+    NVLMProcessor,
+)
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import BatchedTensorInputs
 from vllm.frontend.processing.multimodal.parse import (
@@ -28,8 +33,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
-from vllm.foundation.integrations.transformers_utils.processors.internvl import InternVLImageProcessor
-from vllm.foundation.integrations.transformers_utils.processors.nvlm_d import NVLMProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 
 from .intern_vit import InternVisionModel
 from .internvl import (

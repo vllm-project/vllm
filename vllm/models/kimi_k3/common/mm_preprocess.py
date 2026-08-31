@@ -10,13 +10,24 @@ import torch
 from transformers import BatchFeature
 
 from vllm.foundation.config.multimodal import BaseDummyOptions, ImageDummyOptions
-from vllm.frontend.processing.inputs import MultiModalDataDict
+from vllm.foundation.integrations.transformers_utils.configs.kimi_k3 import KimiK3Config
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_get_image_processor,
+)
+from vllm.foundation.integrations.transformers_utils.processors.kimi_k3 import (
+    KimiK3Processor,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.frontend.processing.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.frontend.processing.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
 from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -27,9 +38,6 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
-from vllm.foundation.integrations.transformers_utils.configs.kimi_k3 import KimiK3Config
-from vllm.foundation.integrations.transformers_utils.processor import cached_get_image_processor
-from vllm.foundation.integrations.transformers_utils.processors.kimi_k3 import KimiK3Processor
 
 logger = init_logger(__name__)
 

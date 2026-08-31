@@ -6,6 +6,7 @@ from enum import Enum
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.backends.platform import current_platform
 from vllm.foundation.config.kernel import MoEBackend
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -20,7 +21,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
 )
-from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

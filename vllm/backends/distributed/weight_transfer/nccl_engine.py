@@ -11,10 +11,9 @@ import torch
 from typing_extensions import Self
 
 if TYPE_CHECKING:
-    from vllm.foundation.config import VllmConfig
     from vllm.backends.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.foundation.config import VllmConfig
 
-from vllm.foundation.config.weight_transfer import WeightTransferConfig
 from vllm.backends.distributed.weight_transfer.base import (
     ParamMeta,
     TrainerInitInfo,
@@ -37,6 +36,7 @@ from vllm.backends.distributed.weight_transfer.packed_tensor import (
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
 )
+from vllm.foundation.config.weight_transfer import WeightTransferConfig
 
 # NCCLWeightTransferInitInfo is re-exported here for convenience; its canonical
 # home is nccl_common, shared with the sparse backend.

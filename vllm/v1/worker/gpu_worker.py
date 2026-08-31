@@ -17,9 +17,6 @@ import torch
 import torch.nn as nn
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
-from vllm.foundation.config.compilation import CompilationMode
-from vllm.backends.platform.device_allocator import get_mem_allocator_instance
 from vllm.backends.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -50,21 +47,25 @@ from vllm.backends.distributed.weight_transfer import (
     WeightTransferEngine,
     WeightTransferEngineFactory,
 )
-from vllm.foundation.observability.logger import init_logger
-from vllm.runtime.modeling.lora.request import LoRARequest
-from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
-from vllm.frontend.processing.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.backends.platform import current_platform
+from vllm.backends.platform.device_allocator import get_mem_allocator_instance
+from vllm.foundation.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.foundation.config.compilation import CompilationMode
 from vllm.foundation.devtools.profiler.wrapper import (
     CudaProfilerWrapper,
     ProtonProfilerWrapper,
     TorchProfilerWrapper,
 )
-from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.frontend.processing.tasks import SupportedTask
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.tracing import instrument
-from vllm.foundation.utilities.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
-from vllm.foundation.utilities.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
+from vllm.foundation.utilities.gc_utils import (
+    freeze_gc_heap,
+    maybe_attach_gc_debug_callback,
+)
+from vllm.foundation.utilities.gpu_sync_debug import (
+    enable_gpu_sync_check,
+    with_gpu_sync_check,
+)
 from vllm.foundation.utilities.mem_constants import GiB_bytes
 from vllm.foundation.utilities.mem_utils import (
     MemoryProfilingResult,
@@ -72,7 +73,15 @@ from vllm.foundation.utilities.mem_utils import (
     format_gib,
     memory_profiling,
 )
-from vllm.foundation.utilities.torch_utils import set_random_seed, set_torch_threads_for_runtime
+from vllm.foundation.utilities.torch_utils import (
+    set_random_seed,
+    set_torch_threads_for_runtime,
+)
+from vllm.frontend.processing.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
+from vllm.frontend.processing.tasks import SupportedTask
+from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
+from vllm.runtime.modeling.lora.request import LoRARequest
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -135,7 +144,9 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 
 
 if TYPE_CHECKING:
-    from vllm.backends.platform.device_allocator.sleep_mode_backend import SleepModeBackend
+    from vllm.backends.platform.device_allocator.sleep_mode_backend import (
+        SleepModeBackend,
+    )
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -193,7 +204,9 @@ class Worker(WorkerBase):
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
         torch.set_float32_matmul_precision(precision)
 
-        from vllm.backends.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
+        from vllm.backends.distributed.elastic_ep.elastic_execute import (
+            ElasticEPScalingExecutor,
+        )
 
         self.elastic_ep_executor = ElasticEPScalingExecutor(self)
         self.worker_sentinel: WorkerSentinel | None = None
@@ -370,7 +383,9 @@ class Worker(WorkerBase):
             # such as NIC affinity and P2P checks.
             assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
             if assigned_physical_gpu_ids is not None:
-                from vllm.backends.platform.interface import set_assigned_physical_gpu_ids
+                from vllm.backends.platform.interface import (
+                    set_assigned_physical_gpu_ids,
+                )
 
                 set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
                 assert self.local_rank < len(assigned_physical_gpu_ids), (
@@ -899,7 +914,9 @@ class Worker(WorkerBase):
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
-        from vllm.foundation.utilities.jit_monitor import activate as activate_jit_monitor
+        from vllm.foundation.utilities.jit_monitor import (
+            activate as activate_jit_monitor,
+        )
 
         activate_jit_monitor(
             mode=self.observability_config.jit_monitor_mode,

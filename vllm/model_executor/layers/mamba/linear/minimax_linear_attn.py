@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from vllm.foundation.config import get_current_vllm_config
-from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.lightning_attn import (
     lightning_attention,
@@ -18,7 +18,7 @@ from vllm.model_executor.layers.lightning_attn import (
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.mamba.linear.base import LinearAttention
 from vllm.model_executor.layers.minimax_rms_norm import MiniMaxText01RMSNormTP
-from vllm.foundation.utilities.torch_utils import direct_register_custom_op
+from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 

@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
     PromMetric,
     PromMetricT,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.v1.metrics.utils import create_metric_per_engine
 
 if TYPE_CHECKING:

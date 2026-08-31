@@ -11,12 +11,17 @@ from transformers import Qwen3Config
 
 from vllm import _custom_ops as ops
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.foundation.integrations.transformers_utils.config import (
+    set_default_rope_theta,
+)
+from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.multimodal.inputs import NestedTensors
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -31,9 +36,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.frontend.processing.multimodal.inputs import NestedTensors
-from vllm.foundation.integrations.transformers_utils.config import set_default_rope_theta
-from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,

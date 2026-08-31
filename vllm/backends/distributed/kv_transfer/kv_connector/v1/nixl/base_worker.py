@@ -31,7 +31,9 @@ from vllm.backends.distributed.kv_transfer.kv_connector.utils import (
     kv_postprocess_layout_on_receive,
 )
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import CopyBlocksOp
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorStats,
+)
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     NixlAgentMetadata,
@@ -56,7 +58,7 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_representative_spec_type,
     zmq_ctx,
 )
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (  # noqa: E501
     MambaConvSplitInfo,
     derive_mamba_conv_split,
 )
@@ -66,8 +68,8 @@ from vllm.backends.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.foundation.utilities.network_utils import make_zmq_path
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d

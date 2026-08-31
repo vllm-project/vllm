@@ -6,14 +6,14 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.foundation.config.lora import LoRAConfig
 from vllm.backends.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_reduce,
 )
+from vllm.backends.platform import current_platform
+from vllm.foundation.config.lora import LoRAConfig
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm.backends.platform import current_platform
 
 from .base_linear import BaseLinearLayerWithLoRA
 from .utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace

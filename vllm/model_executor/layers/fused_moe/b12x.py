@@ -8,7 +8,13 @@ from typing import Any
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.b12x import (
+    B12xWarmupUnit,
+    get_b12x_fused_moe,
+    reuse_packed_weight_storage,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
@@ -25,12 +31,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.b12x import (
-    B12xWarmupUnit,
-    get_b12x_fused_moe,
-    reuse_packed_weight_storage,
-)
 
 logger = init_logger(__name__)
 

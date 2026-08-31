@@ -8,6 +8,9 @@ import safetensors
 import torch
 
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.runtime.modeling.lora.lora_weights import LoRALayerWeights
 from vllm.runtime.modeling.lora.peft_helper import PEFTHelper
 from vllm.runtime.modeling.lora.utils import (
@@ -15,9 +18,6 @@ from vllm.runtime.modeling.lora.utils import (
     is_base_embedding_weights,
     parse_fine_tuned_lora_name,
 )
-from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.model_executor.models.utils import WeightsMapper
-from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 

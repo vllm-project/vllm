@@ -9,7 +9,9 @@ from vllm.frontend.processing.reasoning.basic_parsers import BaseThinkingReasoni
 from vllm.frontend.processing.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
-    from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
     from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 
 

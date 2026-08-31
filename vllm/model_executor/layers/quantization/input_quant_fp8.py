@@ -6,18 +6,18 @@ import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.backends.platform import current_platform
+from vllm.foundation.utilities.deep_gemm import (
+    DeepGemmQuantScaleFMT,
+    is_deep_gemm_e8m0_used,
+    is_deep_gemm_supported,
+)
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     get_fp8_min_max,
     group_broadcast,
     prep_scale_for_group_broadcast,
-)
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.deep_gemm import (
-    DeepGemmQuantScaleFMT,
-    is_deep_gemm_e8m0_used,
-    is_deep_gemm_supported,
 )
 
 _FP8_DTYPE = current_platform.fp8_dtype()

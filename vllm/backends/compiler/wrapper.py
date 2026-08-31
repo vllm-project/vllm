@@ -12,7 +12,11 @@ from typing import Any, ParamSpec, TypeVar
 import torch
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
+from vllm.foundation.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    get_current_vllm_config,
+)
 from vllm.foundation.config.compilation import DynamicShapesType
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.nvtx_pytorch_hooks import layerwise_nvtx_marker_context
@@ -130,7 +134,9 @@ class TorchCompileWithNoGuardsWrapper:
         # Apply the constrain_to_fx_strides patch before first compilation.
         # This covers STOCK_TORCH_COMPILE and DYNAMO_ONCE paths. The VLLM
         # compile paths call this from their own compile() methods too.
-        from vllm.foundation.system.env_override import _apply_constrain_to_fx_strides_patch
+        from vllm.foundation.system.env_override import (
+            _apply_constrain_to_fx_strides_patch,
+        )
 
         _apply_constrain_to_fx_strides_patch()
 

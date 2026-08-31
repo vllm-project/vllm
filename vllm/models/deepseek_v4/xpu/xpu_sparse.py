@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
@@ -25,6 +24,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
 from vllm.models.deepseek_v4.xpu.xpu_sparse_decode_fp8 import (
     xpu_sparse_decode_fp8,
 )
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.v1.attention.ops.xpu_mla_sparse import triton_bf16_mla_sparse_interface
 from vllm.v1.worker.workspace import current_workspace_manager
 

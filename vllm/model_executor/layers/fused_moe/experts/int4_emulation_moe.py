@@ -9,6 +9,7 @@ the forward pass then runs plain TritonExperts in BF16.
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -23,7 +24,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static32Asym,
     kInt4StaticAsym,
 )
-from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

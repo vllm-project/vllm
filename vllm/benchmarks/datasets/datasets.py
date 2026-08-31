@@ -39,17 +39,17 @@ from vllm.benchmarks.datasets.utils import (
     _resolve_range_ratios,
     get_sampling_params,
 )
-from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.runtime.modeling.lora.request import LoRARequest
-from vllm.runtime.modeling.lora.utils import get_adapter_absolute_path
-from vllm.frontend.processing.multimodal.audio import get_audio_duration
-from vllm.frontend.processing.multimodal.image import convert_image_mode
-from vllm.frontend.processing.multimodal.utils import encode_image_url, fetch_image
-from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.integrations.transformers_utils.repo_utils import hf_api
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 from vllm.foundation.utilities.import_utils import PlaceholderModule
 from vllm.foundation.utilities.mistral import is_mistral_tokenizer
+from vllm.frontend.processing.inputs import MultiModalDataDict
+from vllm.frontend.processing.multimodal.audio import get_audio_duration
+from vllm.frontend.processing.multimodal.image import convert_image_mode
+from vllm.frontend.processing.multimodal.utils import encode_image_url, fetch_image
+from vllm.frontend.processing.tokenizers import TokenizerLike
+from vllm.runtime.modeling.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.utils import get_adapter_absolute_path
 
 try:
     from datasets import load_dataset

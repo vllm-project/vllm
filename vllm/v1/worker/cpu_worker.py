@@ -12,10 +12,10 @@ from typing import Any
 import psutil
 import torch
 
-from vllm.foundation.config import VllmConfig
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import CpuArchEnum, current_platform
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.devtools.profiler.wrapper import TorchProfilerWrapper
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.cpu_resource_utils import (
     get_allowed_cpu_list,
     get_memory_node_info,

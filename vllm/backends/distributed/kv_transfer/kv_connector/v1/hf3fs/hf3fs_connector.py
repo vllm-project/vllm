@@ -31,13 +31,12 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_metadata_server import (
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_metadata_server import (  # noqa: E501
     Hf3fsGlobalMetadataClient as Hf3fsMetadataClient,
 )
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.hf3fs.utils import (
@@ -60,8 +59,9 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.backends.distributed.parallel_state import get_tensor_model_parallel_rank
-from vllm.runtime.execution.forward_context import ForwardContext
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.runtime.execution.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -74,7 +74,7 @@ Hf3fsClient = None
 try:
     from hf3fs_fuse.io import deregister_fd  # noqa: F401
 
-    from vllm.backends.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_client import (
+    from vllm.backends.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_client import (  # noqa: E501
         Hf3fsClient as _RealClient,
     )
 

@@ -15,8 +15,8 @@ import torch.nn as nn
 from typing_extensions import TypeIs, TypeVar
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.frontend.processing.tasks import ScoreType
 from vllm.foundation.utilities.func_utils import supports_kw
+from vllm.frontend.processing.tasks import ScoreType
 
 if TYPE_CHECKING:
     from vllm.foundation.config import VllmConfig

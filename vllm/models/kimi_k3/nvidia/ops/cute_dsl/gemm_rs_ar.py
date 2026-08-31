@@ -20,7 +20,12 @@ from cutlass.cute.runtime import make_fake_stream, make_fake_tensor, make_ptr, n
 from cutlass.cutlass_dsl import dsl_user_op
 from cutlass.utils import get_smem_capacity_in_bytes
 
-from vllm.backends.compute.dsl.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
+from vllm.backends.compute.dsl.cute_utils import (
+    _tcgen05,
+    mbarrier,
+    simple_tma_copy,
+    to_cta0_smem,
+)
 from vllm.backends.distributed import get_tp_group
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 

@@ -11,7 +11,6 @@ import regex as re
 import torch
 from torch import nn
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -19,6 +18,8 @@ from vllm.backends.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.foundation.config import VllmConfig
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import (
@@ -42,7 +43,6 @@ from vllm.models.inkling.common.mm_preprocess import (
     inkling_vision_enabled,
 )
 from vllm.models.inkling.common.towers import InklingAudio, InklingVision
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from ..configs import InklingMMConfig, InklingModelConfig

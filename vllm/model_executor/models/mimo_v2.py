@@ -7,18 +7,18 @@ import torch
 from torch import nn
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import (
-    CacheConfig,
-    VllmConfig,
-    get_current_vllm_config,
-    str_dtype_to_torch_dtype,
-)
 from vllm.backends.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+)
+from vllm.foundation.config import (
+    CacheConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    str_dtype_to_torch_dtype,
 )
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul

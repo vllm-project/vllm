@@ -12,7 +12,10 @@ from vllm.runtime.modeling.lora.layers.column_parallel_linear import (
     QKVParallelLinearWithLoRA,
     QKVParallelLinearWithShardedLoRA,
 )
-from vllm.runtime.modeling.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
+from vllm.runtime.modeling.lora.layers.fused_moe import (
+    FusedMoE3DWithLoRA,
+    FusedMoEWithLoRA,
+)
 from vllm.runtime.modeling.lora.layers.logits_processor import LogitsProcessorWithLoRA
 from vllm.runtime.modeling.lora.layers.replicated_linear import ReplicatedLinearWithLoRA
 from vllm.runtime.modeling.lora.layers.row_parallel_linear import (
@@ -20,7 +23,9 @@ from vllm.runtime.modeling.lora.layers.row_parallel_linear import (
     RowParallelLinearWithShardedLoRA,
 )
 from vllm.runtime.modeling.lora.layers.utils import LoRAMapping, LoRAMappingType
-from vllm.runtime.modeling.lora.layers.vocab_parallel_embedding import VocabParallelEmbeddingWithLoRA
+from vllm.runtime.modeling.lora.layers.vocab_parallel_embedding import (
+    VocabParallelEmbeddingWithLoRA,
+)
 
 __all__ = [
     "BaseLayerWithLoRA",

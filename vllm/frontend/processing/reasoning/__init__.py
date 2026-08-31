@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.frontend.processing.reasoning.abs_reasoning_parsers import ReasoningParser, ReasoningParserManager
+from vllm.frontend.processing.reasoning.abs_reasoning_parsers import (
+    ReasoningParser,
+    ReasoningParserManager,
+)
 
 __all__ = [
     "ReasoningParser",

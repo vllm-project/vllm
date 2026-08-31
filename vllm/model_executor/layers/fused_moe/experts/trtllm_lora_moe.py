@@ -24,6 +24,9 @@ from abc import abstractmethod
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform import current_platform
+from vllm.foundation.utilities.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -41,9 +44,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     trtllm_moe_pack_topk_ids_weights,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.dsl.triton_utils import tl, triton
-from vllm.foundation.utilities.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
 @triton.jit

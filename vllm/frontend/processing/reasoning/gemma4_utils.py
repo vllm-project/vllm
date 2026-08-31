@@ -70,7 +70,9 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
 
     Example::
 
-        >>> from vllm.frontend.processing.reasoning.gemma4_utils import parse_thinking_output
+        >>> from vllm.frontend.processing.reasoning.gemma4_utils import (
+        ...     parse_thinking_output,
+        ... )
         >>> output_text = tokenizer.decode(outputs[0], skip_special_tokens=False)
         >>> result = parse_thinking_output(output_text)
         >>> print(result["thinking"])  # chain-of-thought reasoning or None

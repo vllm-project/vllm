@@ -34,11 +34,14 @@ from transformers import BatchFeature
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict, MultiModalInput, mm_input
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.pooler import IdentityPooler
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.frontend.processing.inputs import (
+    ModalityData,
+    MultiModalDataDict,
+    MultiModalInput,
+    mm_input,
+)
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     ImageItem,
@@ -60,8 +63,10 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     TimingContext,
 )
+from vllm.model_executor.layers.pooler import IdentityPooler
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 
 from .interfaces import IsAttentionFree, MultiModalEmbeddings, SupportsMultiModal
 from .interfaces_base import attn_type

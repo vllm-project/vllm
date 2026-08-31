@@ -4,9 +4,10 @@
 
 import torch
 
-from vllm.foundation.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.backends.distributed import get_tensor_model_parallel_world_size
-from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -24,8 +25,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.torch_utils import direct_register_custom_op
+from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
@@ -99,6 +99,7 @@ class ShortConv(MambaBase, PluggableLayer):
     ):
         # Reference torch causal conv1d; runs on all CPU platforms. AMX kernels
         # for causal conv can be plugged in here later.
+        from vllm.backends.platform import CpuArchEnum, current_platform
         from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
             causal_conv1d_fn_cpu as causal_conv1d_torch,
         )
@@ -106,7 +107,6 @@ class ShortConv(MambaBase, PluggableLayer):
             causal_conv1d_update_cpu,
             causal_conv1d_update_torch,
         )
-        from vllm.backends.platform import CpuArchEnum, current_platform
 
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata

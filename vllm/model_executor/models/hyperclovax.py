@@ -33,8 +33,11 @@ import torch
 from torch import nn
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.backends.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.foundation.config import CacheConfig, VllmConfig
+from vllm.foundation.integrations.transformers_utils.configs.hyperclovax import (
+    HyperCLOVAXConfig,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -51,7 +54,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.configs.hyperclovax import HyperCLOVAXConfig
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (

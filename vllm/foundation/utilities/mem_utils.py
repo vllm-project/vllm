@@ -11,8 +11,8 @@ import psutil
 import torch
 import torch.types
 
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 
 from .mem_constants import GiB_bytes, KiB_bytes, MiB_bytes
 

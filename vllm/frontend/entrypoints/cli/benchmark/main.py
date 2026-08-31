@@ -6,11 +6,11 @@ import os
 import sys
 import typing
 
-from vllm import envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.frontend.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 from vllm.frontend.entrypoints.cli.types import CLISubcommand
 from vllm.frontend.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
-from vllm.foundation.observability.logger import init_logger
 
 if typing.TYPE_CHECKING:
     from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser

@@ -4,9 +4,9 @@
 from fastapi import Request
 from starlette.responses import JSONResponse
 
-from vllm.frontend.entrypoints.launchers.launcher import terminate_if_errored
-from vllm.foundation.system.exceptions import GenerationError, VLLMError
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system.exceptions import GenerationError, VLLMError
+from vllm.frontend.entrypoints.launchers.launcher import terminate_if_errored
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 from ..error_response import create_error_response

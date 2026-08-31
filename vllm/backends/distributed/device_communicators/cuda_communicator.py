@@ -12,12 +12,14 @@ from vllm.backends.distributed.device_communicators.all_reduce_utils import (
     should_nccl_symm_mem_ag_rs,
     should_nccl_symm_mem_allreduce,
 )
-from vllm.backends.distributed.device_communicators.pynccl import register_nccl_symmetric_ops
+from vllm.backends.distributed.device_communicators.pynccl import (
+    register_nccl_symmetric_ops,
+)
 from vllm.backends.distributed.device_communicators.pynccl_allocator import (
     is_symmetric_memory_enabled,
 )
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 
 from ..utils import StatelessProcessGroup
 from .aiter_custom_all_reduce import AiterCustomAllreduce
@@ -54,7 +56,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_flashinfer_allreduce = False
             use_aiter_allreduce = False
         else:
-            from vllm.backends.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
+            from vllm.backends.distributed.parallel_state import (
+                _ENABLE_CUSTOM_ALL_REDUCE,
+            )
 
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
@@ -75,14 +79,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.backends.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce,
         )
-        from vllm.backends.distributed.device_communicators.flashinfer_all_reduce import (
+        from vllm.backends.distributed.device_communicators.flashinfer_all_reduce import (  # noqa: E501
             FlashInferAllReduce,
         )
-        from vllm.backends.distributed.device_communicators.pynccl import PyNcclCommunicator
+        from vllm.backends.distributed.device_communicators.pynccl import (
+            PyNcclCommunicator,
+        )
         from vllm.backends.distributed.device_communicators.quick_all_reduce import (
             QuickAllReduce,
         )
-        from vllm.backends.distributed.device_communicators.symm_mem import SymmMemCommunicator
+        from vllm.backends.distributed.device_communicators.symm_mem import (
+            SymmMemCommunicator,
+        )
 
         self.pynccl_comm: PyNcclCommunicator | None = None
         if self.world_size > 1:

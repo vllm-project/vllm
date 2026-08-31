@@ -25,11 +25,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (

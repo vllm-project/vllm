@@ -4,10 +4,13 @@
 import logging
 
 from vllm.foundation.config import VllmConfig
-from vllm.foundation.extensibility.plugins import IO_PROCESSOR_PLUGINS_GROUP, load_plugins_by_group
+from vllm.foundation.extensibility.plugins import (
+    IO_PROCESSOR_PLUGINS_GROUP,
+    load_plugins_by_group,
+)
 from vllm.foundation.extensibility.plugins.io_processors.interface import IOProcessor
-from vllm.frontend.processing.renderers import BaseRenderer
 from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
+from vllm.frontend.processing.renderers import BaseRenderer
 
 logger = logging.getLogger(__name__)
 

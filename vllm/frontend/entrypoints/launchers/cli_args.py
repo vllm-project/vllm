@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import config
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.frontend.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -21,7 +22,6 @@ from vllm.frontend.entrypoints.chat_utils import (
 )
 from vllm.frontend.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.frontend.processing.tool_parsers import ToolParserManager
-from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
 from .utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,

@@ -187,7 +187,7 @@ def reserve_mm_ipc_gpu_memory(
     if mm_config is None:
         return available_kv_cache_memory_bytes
 
-    from vllm import envs
+    from vllm.foundation.system import envs
     from vllm.frontend.processing.multimodal.video_decoders import (
         PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
         PYNVVIDEOCODEC_VIDEO_BACKEND,

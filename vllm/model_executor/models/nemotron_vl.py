@@ -8,6 +8,19 @@ import torch.nn as nn
 from transformers import AutoModel, PretrainedConfig
 
 from vllm.foundation.config import VllmConfig
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_image_processor_from_config,
+)
+from vllm.foundation.integrations.transformers_utils.processors.nemotron_vl import (
+    LlamaNemotronNanoVLImageProcessor,
+    LlamaNemotronNanoVLProcessor,
+    LlamaNemotronVLEmbedImageProcessor,
+    LlamaNemotronVLEmbedProcessor,
+)
+from vllm.foundation.integrations.transformers_utils.repo_utils import (
+    get_hf_file_to_dict,
+)
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -22,16 +35,7 @@ from vllm.model_executor.models.internvl import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.siglip import SiglipVisionModel
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.processor import cached_image_processor_from_config
-from vllm.foundation.integrations.transformers_utils.processors.nemotron_vl import (
-    LlamaNemotronNanoVLImageProcessor,
-    LlamaNemotronNanoVLProcessor,
-    LlamaNemotronVLEmbedImageProcessor,
-    LlamaNemotronVLEmbedProcessor,
-)
-from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from .interfaces import (
     MultiModalEmbeddings,

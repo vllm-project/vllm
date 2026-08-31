@@ -416,8 +416,9 @@ def _has_module(module_name: str) -> bool:
 def _has_module_spec(module_name: str) -> bool:
     """Return True if *module_name* is installed, without importing it.
 
-    Unlike [`_has_module`][vllm.foundation.utilities.import_utils._has_module], this only
-    resolves the import spec. It therefore does not pay the import cost of
+    Unlike
+    [`_has_module`][vllm.foundation.utilities.import_utils._has_module], this
+    only resolves the import spec. It therefore does not pay the import cost of
     heavyweight modules, at the price of not verifying that native
     dependencies (shared libraries, etc.) are satisfied. The result is cached.
     """

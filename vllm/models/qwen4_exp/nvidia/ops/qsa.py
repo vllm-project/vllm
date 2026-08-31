@@ -8,8 +8,8 @@ import math
 
 import torch
 
-from vllm.backends.platform import current_platform
 from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, tl, triton
+from vllm.backends.platform import current_platform
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024

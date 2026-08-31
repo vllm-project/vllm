@@ -22,29 +22,16 @@ from transformers import BatchFeature
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict, PromptType, TextPrompt
-from vllm.model_executor.models.interfaces import (
-    DiarizedTranscriptionSegment,
-    MultiModalEmbeddings,
-    SupportsMultiModal,
-    SupportsPP,
-    SupportsTranscription,
-    _require_is_multimodal,
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_processor_from_config,
 )
-from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    _merge_multimodal_embeddings,
-    init_vllm_registered_model,
-    maybe_prefix,
-    parse_diarized_speaker,
-    parse_diarized_timestamp,
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import (
+    ModalityData,
+    MultiModalDataDict,
+    PromptType,
+    TextPrompt,
 )
-from vllm.model_executor.models.whisper import (
-    WhisperEncoder,
-    _create_fake_bias_for_k_proj,
-)
-from vllm.model_executor.models.whisper_utils import ISO639_1_SUPPORTED_LANGS
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     AudioItem,
@@ -67,9 +54,29 @@ from vllm.frontend.processing.multimodal.processing import (
     cached_encode,
 )
 from vllm.frontend.processing.multimodal.processing.processor import ProcessorInputs
+from vllm.model_executor.models.interfaces import (
+    DiarizedTranscriptionSegment,
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsTranscription,
+    _require_is_multimodal,
+)
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    _merge_multimodal_embeddings,
+    init_vllm_registered_model,
+    maybe_prefix,
+    parse_diarized_speaker,
+    parse_diarized_timestamp,
+)
+from vllm.model_executor.models.whisper import (
+    WhisperEncoder,
+    _create_fake_bias_for_k_proj,
+)
+from vllm.model_executor.models.whisper_utils import ISO639_1_SUPPORTED_LANGS
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 WHISPER_ENCODER_STRIDE = 2
 MAX_AUDIO_DURATION_S = 90 * 60

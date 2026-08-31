@@ -8,13 +8,13 @@ head_dim to a multiple of 16 for cuDNN compatibility.
 
 import torch
 
+from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, tl, triton
+from vllm.backends.platform import current_platform
+from vllm.foundation.utilities.math_utils import round_up
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, tl, triton
-from vllm.foundation.utilities.math_utils import round_up
 
 _FP8_MIN, _FP8_MAX = get_fp8_min_max()
 

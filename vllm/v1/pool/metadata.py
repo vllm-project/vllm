@@ -5,9 +5,9 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.frontend.processing.tasks import PoolingTask
-from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 
 
 @dataclass

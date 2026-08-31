@@ -12,7 +12,9 @@ from compressed_tensors.transform import (
 from torch import Tensor
 
 import vllm._custom_ops as ops
-from vllm.backends.distributed.parallel_state import get_tensor_model_parallel_world_size
+from vllm.backends.distributed.parallel_state import (
+    get_tensor_model_parallel_world_size,
+)
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils import (  # noqa: E501
     TransformTuple,

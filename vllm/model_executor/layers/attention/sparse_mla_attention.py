@@ -10,11 +10,18 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.backends.distributed import (
     get_dcp_group,
     get_tensor_model_parallel_world_size,
 )
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.flashinfer import has_flashinfer
+from vllm.foundation.utilities.torch_utils import (
+    is_quantized_kv_cache,
+    np_to_pinned_tensor,
+)
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
     MLACommonMetadata,
@@ -25,10 +32,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
     init_mla_context_partial,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.dsl.triton_utils import tl, triton
-from vllm.foundation.utilities.flashinfer import has_flashinfer
-from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
 from vllm.v1.attention.backend import AttentionMetadata, AttentionMetadataBuilder
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills

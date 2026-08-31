@@ -7,9 +7,8 @@ from itertools import islice
 import torch
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import get_pp_group
-from vllm.runtime.execution.forward_context import get_forward_context, is_forward_context_available
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.fused_embed_norm import (
     fused_embed_norm,
     has_full_vocab_on_rank,
@@ -45,6 +44,10 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
+from vllm.runtime.execution.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm

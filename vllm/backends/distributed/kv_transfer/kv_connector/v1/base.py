@@ -53,7 +53,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.foundation.config import VllmConfig
     from vllm.backends.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
     from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
@@ -61,6 +60,7 @@ if TYPE_CHECKING:
         PromMetric,
         PromMetricT,
     )
+    from vllm.foundation.config import VllmConfig
     from vllm.runtime.execution.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks

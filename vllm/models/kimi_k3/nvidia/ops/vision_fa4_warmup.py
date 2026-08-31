@@ -11,11 +11,11 @@ from functools import partial
 
 import torch
 
+from vllm.backends.platform import current_platform
 from vllm.model_executor.warmup.cutedsl_warmup import (
     CuTeDSLCompileUnit,
     register_cutedsl_warmup_provider,
 )
-from vllm.backends.platform import current_platform
 
 _FA4_TILE_SIZE = 128
 _FA4_MAX_SPLITS = 128

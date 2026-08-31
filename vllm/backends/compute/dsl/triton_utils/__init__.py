@@ -23,7 +23,9 @@ else:
     gl = TritonLanguagePlaceholder()
     aggregate = TritonLanguagePlaceholder()
 
-from vllm.backends.compute.dsl.triton_utils.tensor_descriptor import use_tensor_descriptor
+from vllm.backends.compute.dsl.triton_utils.tensor_descriptor import (
+    use_tensor_descriptor,
+)
 
 LOG2E = 1.4426950408889634
 LOGE2 = 0.6931471805599453

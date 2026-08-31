@@ -20,6 +20,8 @@ from vllm._custom_ops import (
     cpu_prepack_moe_weight_int8,
     fused_experts_cpu,
 )
+from vllm.backends.platform import CpuArchEnum, current_platform
+from vllm.foundation.utilities.math_utils import round_up
 from vllm.model_executor.kernels.linear.zentorch_utils import (
     is_zentorch_moe_config_supported,
     is_zentorch_moe_supported,
@@ -41,8 +43,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.backends.platform import CpuArchEnum, current_platform
-from vllm.foundation.utilities.math_utils import round_up
 
 # ===========================================================================
 # Routing

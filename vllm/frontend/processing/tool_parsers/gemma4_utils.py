@@ -90,7 +90,9 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
 
     Example::
 
-        >>> from vllm.frontend.processing.tool_parsers.gemma4_utils import parse_tool_calls
+        >>> from vllm.frontend.processing.tool_parsers.gemma4_utils import (
+        ...     parse_tool_calls,
+        ... )
         >>> output = tokenizer.decode(outputs[0], skip_special_tokens=False)
         >>> tool_calls = parse_tool_calls(output)
         >>> for tc in tool_calls:
@@ -146,7 +148,9 @@ def has_tool_response_tag(text: str) -> bool:
 
     Example::
 
-        >>> from vllm.frontend.processing.tool_parsers.gemma4_utils import has_tool_response_tag
+        >>> from vllm.frontend.processing.tool_parsers.gemma4_utils import (
+        ...     has_tool_response_tag,
+        ... )
         >>> if not has_tool_response_tag(model_output):
         ...     # Model used <eos> instead — inject <|tool_response> manually
         ...     next_prompt = "<|tool_response>" + tool_result

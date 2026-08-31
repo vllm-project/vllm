@@ -7,10 +7,10 @@ from pydantic import BeforeValidator, Field
 
 from vllm import PoolingParams
 from vllm.foundation.config import ModelConfig
+from vllm.foundation.utilities import random_uuid
 from vllm.frontend.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.frontend.processing.renderers import TokenizeParams
 from vllm.frontend.processing.tasks import PoolingTask
-from vllm.foundation.utilities import random_uuid
 
 from ..base.protocol import (
     ChatRequestMixin,

@@ -3,15 +3,18 @@
 
 import torch
 
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils.allocation import set_triton_allocator
 from vllm.backends.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
 from vllm.backends.platform import current_platform
-from vllm.backends.compute.dsl.triton_utils import tl, triton
-from vllm.backends.compute.dsl.triton_utils.allocation import set_triton_allocator
 from vllm.foundation.utilities.mem_utils import get_max_shared_memory_bytes
-from vllm.foundation.utilities.torch_utils import async_tensor_h2d, direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import (
+    async_tensor_h2d,
+    direct_register_custom_op,
+)
 
 from .utils import supports_pdl, supports_tma
 

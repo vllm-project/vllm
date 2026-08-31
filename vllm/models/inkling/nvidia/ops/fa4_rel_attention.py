@@ -10,13 +10,13 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.backends.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.platform import current_platform
+from vllm.foundation.utilities.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
     WarmupIntRange,
     zip_inputs,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.torch_utils import kv_cache_dtype_str_to_dtype
 
 if TYPE_CHECKING:
     from vllm.foundation.config import VllmConfig

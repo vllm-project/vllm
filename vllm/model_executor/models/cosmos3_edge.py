@@ -8,6 +8,11 @@ import torch.nn as nn
 from transformers import ProcessorMixin
 
 from vllm.foundation.config import VllmConfig
+from vllm.foundation.integrations.transformers_utils.configs.nemotron_h import (
+    NemotronHConfig,
+)
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -17,10 +22,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 from .interfaces import (
     MultiModalEmbeddings,

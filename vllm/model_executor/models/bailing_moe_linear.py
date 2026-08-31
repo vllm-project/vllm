@@ -9,13 +9,12 @@ import torch.nn.functional as F
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.backends.compiler.decorators import support_torch_compile
-from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.runtime.execution.forward_context import get_forward_context
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -50,6 +49,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.bailing_moe import BailingMLP
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionMetadata
 

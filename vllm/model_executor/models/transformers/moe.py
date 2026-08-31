@@ -24,10 +24,13 @@ import torch
 import torch.nn as nn
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.foundation.config.utils import getattr_iter
 from vllm.backends.distributed import get_dp_group, get_ep_group
-from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
+from vllm.foundation.config.utils import getattr_iter
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    direct_register_custom_op,
+)
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -38,7 +41,7 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.transformers.fuser import get_fuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
-from vllm.foundation.utilities.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
+from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 
 from .utils import log_replacement, maybe_per_layer
 

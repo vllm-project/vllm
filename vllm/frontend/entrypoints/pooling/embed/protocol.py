@@ -17,9 +17,9 @@ import pybase64 as base64
 from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 from vllm import PoolingParams
+from vllm.foundation.utilities import random_uuid
 from vllm.frontend.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.frontend.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.foundation.utilities import random_uuid
 
 from ..base.protocol import (
     ChatRequestMixin,

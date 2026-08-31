@@ -10,6 +10,7 @@ from transformers import LlamaConfig
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.processing.multimodal.inputs import NestedTensors
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -19,7 +20,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
-from vllm.frontend.processing.multimodal.inputs import NestedTensors
 
 from .utils import (
     AutoWeightsLoader,

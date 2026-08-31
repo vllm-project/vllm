@@ -10,21 +10,21 @@ from vllm.frontend.processing.inputs import EmbedsPrompt, TokensPrompt
 
 DecoderOnlyTokPrompt: TypeAlias = TokensPrompt | EmbedsPrompt
 """
-A [`DecoderOnlyDictPrompt`][vllm.frontend.processing.renderers.inputs.preprocess.DecoderOnlyDictPrompt]
+A [`DecoderOnlyDictPrompt`][]
 that has been tokenized.
 """
 
 
 EncoderTokPrompt: TypeAlias = TokensPrompt
 """
-A [`EncoderDictPrompt`][vllm.frontend.processing.renderers.inputs.preprocess.EncoderDictPrompt]
+A [`EncoderDictPrompt`][]
 that has been tokenized.
 """
 
 
 DecoderTokPrompt: TypeAlias = TokensPrompt
 """
-A [`DecoderDictPrompt`][vllm.frontend.processing.renderers.inputs.preprocess.DecoderDictPrompt]
+A [`DecoderDictPrompt`][]
 that has been tokenized.
 """
 
@@ -45,7 +45,7 @@ SingletonTokPrompt: TypeAlias = (
     DecoderOnlyTokPrompt | EncoderTokPrompt | DecoderTokPrompt
 )
 """
-A [`SingletonDictPrompt`][vllm.frontend.processing.renderers.inputs.preprocess.SingletonDictPrompt]
+A [`SingletonDictPrompt`][]
 that has been tokenized.
 """
 

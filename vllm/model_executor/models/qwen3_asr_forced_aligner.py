@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from vllm.foundation.config import VllmConfig
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
 from vllm.model_executor.models.interfaces_base import default_pooling_type
 from vllm.model_executor.models.qwen3_asr import (
@@ -17,7 +18,6 @@ from vllm.model_executor.models.qwen3_asr import (
     Qwen3ASRProcessingInfo,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.runtime.modeling.sequence import IntermediateTensors
 
 

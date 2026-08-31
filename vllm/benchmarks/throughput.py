@@ -15,6 +15,7 @@ import uvloop
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
+from vllm.backends.platform import current_platform
 from vllm.benchmarks.datasets import (
     BenchmarkDataset,
     SampleRequest,
@@ -23,15 +24,14 @@ from vllm.benchmarks.datasets import (
     get_samples,
 )
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
-from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs, EngineArgs
-from vllm.frontend.processing.inputs import TextPrompt, TokensPrompt
-from vllm.runtime.modeling.lora.request import LoRARequest
-from vllm.frontend.processing.outputs import RequestOutput
-from vllm.backends.platform import current_platform
-from vllm.frontend.processing.sampling_params import BeamSearchParams
-from vllm.frontend.processing.tokenizers import TokenizerLike, get_tokenizer
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 from vllm.foundation.utilities.async_utils import merge_async_iterators
+from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs, EngineArgs
+from vllm.frontend.processing.inputs import TextPrompt, TokensPrompt
+from vllm.frontend.processing.outputs import RequestOutput
+from vllm.frontend.processing.sampling_params import BeamSearchParams
+from vllm.frontend.processing.tokenizers import TokenizerLike, get_tokenizer
+from vllm.runtime.modeling.lora.request import LoRARequest
 
 
 def run_vllm(

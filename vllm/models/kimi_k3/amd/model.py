@@ -8,7 +8,11 @@ from typing import cast
 import torch
 from torch import nn
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig
+from vllm.foundation.integrations.transformers_utils.configs.kimi_k3 import KimiK3Config
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import NestedTensors
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors,
@@ -34,11 +38,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import NestedTensors
-from vllm.backends.platform import current_platform
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.configs.kimi_k3 import KimiK3Config
 
 from ..common.mm_preprocess import (
     KimiK3DummyInputsBuilder,

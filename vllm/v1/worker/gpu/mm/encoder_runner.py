@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.frontend.processing.multimodal.encoder_budget import MultiModalBudget
 from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsItem
 from vllm.frontend.processing.multimodal.utils import (
@@ -18,7 +18,7 @@ from vllm.frontend.processing.multimodal.utils import (
     group_and_batch_mm_kwargs,
     set_mm_embedding_modality,
 )
-from vllm.foundation.utilities.torch_utils import PIN_MEMORY, async_tensor_h2d
+from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
     EncoderTimingStats,

@@ -49,7 +49,8 @@ __all__ = [
 
 if __name__ == "__main__":
     warnings.warn(
-        "The `python -m vllm.frontend.entrypoints.openai.api_server` command is deprecated "
+        "The `python -m vllm.frontend.entrypoints.openai.api_server` command "
+        "is deprecated "
         "and may be removed in a future release. Please use `vllm server` instead.",
         DeprecationWarning,
         stacklevel=1,

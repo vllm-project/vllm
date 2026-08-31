@@ -20,7 +20,9 @@ from collections.abc import Iterable, Sequence
 import regex as re
 
 from vllm.frontend.entrypoints.generate.base.protocol import DeltaMessage
-from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.frontend.processing.reasoning.abs_reasoning_parsers import ReasoningParser
 

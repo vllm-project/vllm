@@ -16,8 +16,8 @@ import torch
 from tqdm import tqdm
 
 from vllm.backends.distributed import is_global_first_rank
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.tracing import instrument
 
 logger = init_logger(__name__)

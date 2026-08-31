@@ -13,8 +13,8 @@ import requests
 from urllib3.util import parse_url
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.utilities.mem_constants import KiB_bytes, MiB_bytes
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -524,6 +524,7 @@ class HTTPConnection:
 
 global_http_connection = HTTPConnection()
 """
-The global [`HTTPConnection`][vllm.foundation.system.connections.HTTPConnection] instance used
-by vLLM.
+The global
+[`HTTPConnection`][vllm.foundation.system.connections.HTTPConnection]
+instance used by vLLM.
 """

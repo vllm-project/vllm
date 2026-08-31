@@ -5,7 +5,9 @@
 from transformers import DeepseekV2Config
 from transformers.configuration_utils import PretrainedConfig
 
-from vllm.foundation.integrations.transformers_utils.configs.moonvit import MoonViTConfig
+from vllm.foundation.integrations.transformers_utils.configs.moonvit import (
+    MoonViTConfig,
+)
 
 
 class KimiVLConfig(PretrainedConfig):

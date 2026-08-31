@@ -5,12 +5,12 @@
 import torch
 import torch.nn as nn
 
-from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.backends.compute.dsl.triton_utils import HAS_TRITON
+from vllm.backends.platform import CpuArchEnum, current_platform
 from vllm.foundation.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import CpuArchEnum, current_platform
-from vllm.backends.compute.dsl.triton_utils import HAS_TRITON
+from vllm.foundation.system import envs
 
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton

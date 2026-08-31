@@ -38,7 +38,7 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common 
 )
 
 if TYPE_CHECKING:
-    from vllm.backends.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+    from vllm.backends.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (  # noqa: E501
         MoRIIOConnectorWorker,
     )
 

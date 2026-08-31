@@ -8,14 +8,16 @@ import torch
 import torch.nn as nn
 
 import vllm.backends.compute.ir
+from vllm.backends.distributed.kv_transfer.kv_connector.utils import (
+    get_current_attn_backends,
+)
 from vllm.foundation.config import VllmConfig, set_current_vllm_config
-from vllm.backends.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.foundation.observability.logger import init_logger
-from vllm.runtime.modeling.lora.request import LoRARequest
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.foundation.observability.tracing import instrument
 from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 from vllm.foundation.utilities.system_utils import update_environment_variables
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
     record_kv_cache_layout,

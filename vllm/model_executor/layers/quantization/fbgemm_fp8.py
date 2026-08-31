@@ -7,6 +7,7 @@ import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import get_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -37,7 +38,6 @@ from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
     ModelWeightParameter,
 )
-from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

@@ -28,20 +28,12 @@ from vllm.backends.compiler.breakable_cudagraph import (
 from vllm.backends.compiler.counter import compilation_counter
 from vllm.backends.compiler.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.backends.compiler.monitor import set_cudagraph_capturing_enabled
-from vllm.foundation.config import (
-    CompilationMode,
-    CUDAGraphMode,
-    VllmConfig,
-    get_layers_from_vllm_config,
-    set_current_vllm_config,
-    update_config,
-)
-from vllm.foundation.config.cache import CacheConfig
-from vllm.foundation.config.ec_manager_config import EncoderCacheManagerMetadata
-from vllm.foundation.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.backends.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.backends.distributed.eplb.eplb_state import EplbState
-from vllm.backends.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.backends.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
 from vllm.backends.distributed.kv_transfer.kv_connector.utils import (
     copy_kv_blocks,
 )
@@ -53,12 +45,48 @@ from vllm.backends.distributed.parallel_state import (
     graph_capture,
     is_global_first_rank,
 )
-from vllm.runtime.execution.forward_context import (
-    BatchDescriptor,
-    set_forward_context,
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    VllmConfig,
+    get_layers_from_vllm_config,
+    set_current_vllm_config,
+    update_config,
 )
+from vllm.foundation.config.cache import CacheConfig
+from vllm.foundation.config.ec_manager_config import EncoderCacheManagerMetadata
+from vllm.foundation.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.foundation.observability.logger import init_logger
-from vllm.runtime.modeling.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
+from vllm.foundation.observability.tracing import instrument
+from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.math_utils import cdiv, round_up
+from vllm.foundation.utilities.mem_utils import DeviceMemoryProfiler, format_gib
+from vllm.foundation.utilities.nvtx_pytorch_hooks import PytHooks
+from vllm.foundation.utilities.platform_utils import num_compute_units
+from vllm.foundation.utilities.torch_utils import (
+    PIN_MEMORY,
+    async_tensor_h2d,
+    current_stream,
+    kv_cache_dtype_str_to_dtype,
+)
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.encoder_budget import MultiModalBudget
+from vllm.frontend.processing.multimodal.inputs import (
+    BatchedTensorInputs,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
+from vllm.frontend.processing.multimodal.utils import (
+    copy_mm_embedding_modality,
+    get_mm_features_in_window,
+    group_and_batch_mm_kwargs,
+    set_mm_embedding_modality,
+)
+from vllm.frontend.processing.pooling_params import PoolingParams
+from vllm.frontend.processing.sampling_params import SamplingType
+from vllm.frontend.processing.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -104,37 +132,16 @@ from vllm.model_executor.offloader import (
     set_offloader,
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.encoder_budget import MultiModalBudget
-from vllm.frontend.processing.multimodal.inputs import (
-    BatchedTensorInputs,
-    MultiModalKwargsItem,
-    PlaceholderRange,
+from vllm.runtime.execution.forward_context import (
+    BatchDescriptor,
+    set_forward_context,
 )
-from vllm.frontend.processing.multimodal.utils import (
-    copy_mm_embedding_modality,
-    get_mm_features_in_window,
-    group_and_batch_mm_kwargs,
-    set_mm_embedding_modality,
+from vllm.runtime.modeling.lora.layers import (
+    BaseLayerWithLoRA,
+    LoRAMapping,
+    LoRAMappingType,
 )
-from vllm.backends.platform import current_platform
-from vllm.frontend.processing.pooling_params import PoolingParams
-from vllm.frontend.processing.sampling_params import SamplingType
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.frontend.processing.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.foundation.observability.tracing import instrument
-from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
-from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
-from vllm.foundation.utilities.math_utils import cdiv, round_up
-from vllm.foundation.utilities.mem_utils import DeviceMemoryProfiler, format_gib
-from vllm.foundation.utilities.nvtx_pytorch_hooks import PytHooks
-from vllm.foundation.utilities.platform_utils import num_compute_units
-from vllm.foundation.utilities.torch_utils import (
-    PIN_MEMORY,
-    async_tensor_h2d,
-    current_stream,
-    kv_cache_dtype_str_to_dtype,
-)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -5497,7 +5504,9 @@ class GPUModelRunner(
             self.vllm_config.compilation_config.mode
             == CompilationMode.STOCK_TORCH_COMPILE
         ):
-            from vllm.foundation.system.env_override import _apply_constrain_to_fx_strides_patch
+            from vllm.foundation.system.env_override import (
+                _apply_constrain_to_fx_strides_patch,
+            )
 
             _apply_constrain_to_fx_strides_patch()
             backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)

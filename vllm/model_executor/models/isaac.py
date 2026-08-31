@@ -12,11 +12,39 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers.image_processing_utils import BatchFeature
 
-from vllm.foundation.config import ModelConfig, VllmConfig
-from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.backends.distributed import parallel_state
 from vllm.backends.distributed import utils as dist_utils
+from vllm.foundation.config import ModelConfig, VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.integrations.transformers_utils.config import patch_rope_parameters
+from vllm.foundation.integrations.transformers_utils.configs.isaac import (
+    IsaacConfig,
+    PixelShuffleSiglip2VisionConfig,
+)
+from vllm.foundation.integrations.transformers_utils.processors.isaac import (
+    IsaacImageProcessor,
+    IsaacProcessor,
+    get_image_size_for_max_num_patches,
+)
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.frontend.processing.inputs import MultiModalDataDict
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.frontend.processing.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.frontend.processing.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+    cached_encode,
+)
+from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -40,35 +68,7 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import (
-    MultiModalFeatureSpec,
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-)
-from vllm.frontend.processing.multimodal.parse import ImageSize, MultiModalDataItems
-from vllm.frontend.processing.multimodal.processing import (
-    BaseDummyInputsBuilder,
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-    cached_encode,
-)
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
-from vllm.foundation.integrations.transformers_utils.config import patch_rope_parameters
-from vllm.foundation.integrations.transformers_utils.configs.isaac import (
-    IsaacConfig,
-    PixelShuffleSiglip2VisionConfig,
-)
-from vllm.foundation.integrations.transformers_utils.processors.isaac import (
-    IsaacImageProcessor,
-    IsaacProcessor,
-    get_image_size_for_max_num_patches,
-)
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .vision import is_vit_use_data_parallel
 

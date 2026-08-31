@@ -21,12 +21,12 @@ from typing import ClassVar
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.cache import CacheDType
-from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
-from vllm.backends.platform import current_platform
+from vllm.runtime.execution.forward_context import get_forward_context
 
 # AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops;
 # every other platform uses the generic common.ops implementation.

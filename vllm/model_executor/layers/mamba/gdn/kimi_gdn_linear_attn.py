@@ -10,9 +10,12 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import divide, get_tensor_model_parallel_rank
-from vllm.runtime.execution.forward_context import get_forward_context
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import (
+    KimiLinearConfig,
+)
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.model_loader.weight_utils import (
@@ -21,9 +24,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.backends.platform import current_platform
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
-from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from ...linear import (

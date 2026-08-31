@@ -262,9 +262,13 @@ class XPUPlatform(Platform):
     def get_punica_wrapper(cls) -> str:
         xpu_use_triton_kernel = os.getenv("XPU_USE_TRITON_KERNEL", "0") == "1"
         if not xpu_use_triton_kernel:
-            return "vllm.runtime.modeling.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
+            return (
+                "vllm.runtime.modeling.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
+            )
         else:
-            return "vllm.runtime.modeling.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
+            return (
+                "vllm.runtime.modeling.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
+            )
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -387,10 +391,10 @@ class XPUPlatform(Platform):
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         super().update_block_size_for_backend(vllm_config)
         from vllm.foundation.config.vllm import get_layers_from_vllm_config
+        from vllm.foundation.utilities.math_utils import cdiv
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
         )
-        from vllm.foundation.utilities.math_utils import cdiv
 
         cache_config = vllm_config.cache_config
         # special fix for GDN since kernel only supports block size dividable by 64

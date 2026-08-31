@@ -32,7 +32,9 @@ def get_generate_invocation_types(
             completion,
             create_completion,
         )
-        from vllm.frontend.entrypoints.openai.completion.protocol import CompletionRequest
+        from vllm.frontend.entrypoints.openai.completion.protocol import (
+            CompletionRequest,
+        )
 
         invocation_types += [
             (ChatCompletionRequest, (chat, create_chat_completion)),

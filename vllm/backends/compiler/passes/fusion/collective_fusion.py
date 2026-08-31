@@ -11,14 +11,14 @@ import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
-from vllm.foundation.config import VllmConfig
-from vllm.foundation.config.utils import Range
 from vllm.backends.distributed import get_tp_group
 from vllm.backends.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
-from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.utils import Range
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 from ..inductor_pass import enable_fake_mode

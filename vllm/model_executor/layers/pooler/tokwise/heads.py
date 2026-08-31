@@ -7,9 +7,9 @@ from typing import TypeAlias
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.layers.pooler import ActivationFn, ClassifierFn, ProjectorFn
 from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.frontend.processing.tasks import PoolingTask
+from vllm.model_executor.layers.pooler import ActivationFn, ClassifierFn, ProjectorFn
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .methods import TokenPoolingMethodOutputItem

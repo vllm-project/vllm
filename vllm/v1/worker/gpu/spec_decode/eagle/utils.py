@@ -3,10 +3,10 @@
 import torch
 import torch.nn as nn
 
-from vllm.foundation.config import VllmConfig, replace
 from vllm.backends.distributed.parallel_state import get_pp_group
-from vllm.runtime.modeling.lora.layers.base import BaseLayerWithLoRA
+from vllm.foundation.config import VllmConfig, replace
 from vllm.model_executor.model_loader import get_model
+from vllm.runtime.modeling.lora.layers.base import BaseLayerWithLoRA
 
 
 def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:

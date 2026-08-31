@@ -53,12 +53,44 @@ from transformers.models.glm4v.video_processing_glm4v import Glm4vVideoProcessor
 from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import VideoMetadata
 
+from vllm.backends.distributed import (
+    get_tensor_model_parallel_world_size,
+    parallel_state,
+)
+from vllm.backends.distributed import utils as dist_utils
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions, VideoDummyOptions
-from vllm.backends.distributed import get_tensor_model_parallel_world_size, parallel_state
-from vllm.backends.distributed import utils as dist_utils
-from vllm.frontend.processing.inputs import MultiModalDataDict
+from vllm.foundation.integrations.transformers_utils.processor import (
+    get_processor_cls_name_from_config,
+)
+from vllm.foundation.integrations.transformers_utils.utils import (
+    convert_model_repo_to_path,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
+from vllm.frontend.processing.inputs import MultiModalDataDict
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+    VideoItem,
+)
+from vllm.frontend.processing.multimodal.parse import (
+    ImageSize,
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
+from vllm.frontend.processing.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+    cached_encode,
+)
 from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
@@ -79,28 +111,7 @@ from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import (
-    MultiModalFeatureSpec,
-    MultiModalFieldConfig,
-    MultiModalKwargsItems,
-    VideoItem,
-)
-from vllm.frontend.processing.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
-from vllm.frontend.processing.multimodal.processing import (
-    BaseDummyInputsBuilder,
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-    cached_encode,
-)
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.processor import get_processor_cls_name_from_config
-from vllm.foundation.integrations.transformers_utils.utils import convert_model_repo_to_path
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
-from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 

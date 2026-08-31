@@ -10,14 +10,23 @@ import torch
 from torch import nn
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.runtime.execution.forward_context import get_forward_context, is_forward_context_available
+from vllm.backends.platform import current_platform
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.integrations.transformers_utils.configs.kimi_k3 import KimiK3Config
+from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import (
+    KimiLinearConfig,
+)
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
+from vllm.foundation.utilities.torch_utils import aux_stream
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import NestedTensors
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -107,15 +116,11 @@ from vllm.models.kimi_k3.nvidia.low_latency_gemm import (
 )
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.ops import attn_res
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import NestedTensors
-from vllm.backends.platform import current_platform
+from vllm.runtime.execution.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.runtime.modeling.sequence import IntermediateTensors
-from vllm.foundation.integrations.transformers_utils.configs.kimi_k3 import KimiK3Config
-from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.foundation.utilities.math_utils import cdiv
-from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
-from vllm.foundation.utilities.torch_utils import aux_stream
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.mm_preprocess import (

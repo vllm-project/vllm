@@ -5,6 +5,8 @@
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.backends.compute.scalar_type import scalar_types
+from vllm.backends.platform import current_platform
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -12,8 +14,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_packed_uint4b8_to_signed_int4_inplace,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 

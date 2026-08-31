@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E501
 # COMPAT SHIM (auto-generated): old path -> canonical new path
 
 """Compatibility shim: vllm.lora/ops/torch_ops/lora_ops -> vllm.runtime.modeling.lora.ops.torch_ops.lora_ops (sys.modules alias)."""
+
 import importlib
 import sys
 

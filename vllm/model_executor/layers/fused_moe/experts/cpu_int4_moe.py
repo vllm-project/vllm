@@ -5,6 +5,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.backends.platform import CpuArchEnum, current_platform
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -20,7 +21,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4W4A8StaticGroup128Sym,
     kInt4W4A8StaticGroupSym,
 )
-from vllm.backends.platform import CpuArchEnum, current_platform
 
 
 class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):

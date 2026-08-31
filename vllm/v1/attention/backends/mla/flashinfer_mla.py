@@ -10,9 +10,11 @@ from flashinfer.utils import (
     get_trtllm_gen_multi_ctas_kv_counter_bytes,
 )
 
+from vllm.backends.platform.interface import DeviceCapability
 from vllm.foundation.config import get_current_vllm_config
 from vllm.foundation.config.cache import CacheDType
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
@@ -20,8 +22,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.backends.platform.interface import DeviceCapability
-from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,

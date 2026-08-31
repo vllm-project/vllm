@@ -11,9 +11,9 @@ import numpy
 import torch
 from torch import fx
 
+from vllm.backends.compute.scalar_type import ScalarType, scalar_types
 from vllm.backends.distributed.parallel_state import get_ep_group, get_tp_group
 from vllm.backends.platform import current_platform
-from vllm.backends.compute.scalar_type import ScalarType, scalar_types
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import LinearBase

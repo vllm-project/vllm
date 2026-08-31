@@ -8,13 +8,15 @@ from typing import TYPE_CHECKING, TypedDict
 
 import regex as re
 
-from vllm.frontend.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.frontend.processing.reasoning import ReasoningParser
 from vllm.frontend.processing.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
-    from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
     from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 
 logger = init_logger(__name__)
@@ -30,7 +32,8 @@ class ReasoningDelta(TypedDict):
     content: str | None
 
 
-# NOTE: mirrored in ``vllm.frontend.processing.tool_parsers.hy_v4_tool_parser`` (same pattern as
+# NOTE: mirrored in
+# ``vllm.frontend.processing.tool_parsers.hy_v4_tool_parser`` (same pattern as
 # ``gemma4_utils``) so neither package depends on the other.
 def detect_token_suffix(tokenizer: TokenizerLike) -> str:
     """Detect the per-checkpoint suffix used by Hunyuan structural tokens.

@@ -7,7 +7,10 @@ from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
 from typing import TYPE_CHECKING, Any, cast
 
-from vllm.frontend.processing.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.frontend.processing.sampling_params import (
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputGrammar,
     StructuredOutputKey,

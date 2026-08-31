@@ -16,12 +16,11 @@ import torch
 import torch.nn as nn
 
 import vllm.foundation.system.envs as envs
-from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.runtime.execution.forward_context import get_forward_context, is_forward_context_available
+from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
@@ -47,6 +46,10 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
     sp_shard,
+)
+from vllm.runtime.execution.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
 )
 
 from .model import (

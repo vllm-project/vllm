@@ -8,15 +8,15 @@ from typing import Any
 import torch
 
 import vllm.foundation.system.envs as envs
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.platform import current_platform
+from vllm.foundation.utilities.mem_utils import get_max_shared_memory_bytes
+from vllm.foundation.utilities.platform_utils import num_compute_units
+from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _get_matmul_config,
     resolve_tuned_matmul_configs,
 )
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.dsl.triton_utils import tl, triton
-from vllm.foundation.utilities.mem_utils import get_max_shared_memory_bytes
-from vllm.foundation.utilities.platform_utils import num_compute_units
-from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
 
 
 def _matmul_launch_metadata(

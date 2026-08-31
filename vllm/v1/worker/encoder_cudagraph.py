@@ -7,20 +7,20 @@ from typing import Any
 
 import torch
 
-from vllm.foundation.config import VllmConfig
 from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.torch_utils import current_stream
 from vllm.model_executor.models.interfaces import (
     SupportsEncoderCudaGraph,
 )
 from vllm.model_executor.models.utils import scatter_output_slices
 from vllm.model_executor.models.vision import get_load_balance_assignment
-from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
-from vllm.foundation.utilities.torch_utils import current_stream
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphConfig,
     EncoderItemSpec,

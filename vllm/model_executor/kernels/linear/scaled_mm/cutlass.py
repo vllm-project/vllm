@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.backends.platform import current_platform
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -19,7 +20,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.backends.platform import current_platform
 
 from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 from .ScaledMMLinearKernel import (

@@ -9,6 +9,7 @@ from compressed_tensors.quantization import (
 )
 
 from vllm.backends.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
@@ -43,7 +44,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

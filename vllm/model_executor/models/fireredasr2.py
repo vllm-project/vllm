@@ -14,22 +14,24 @@ from transformers import (
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType
+from vllm.foundation.integrations.transformers_utils.processor import (
+    cached_processor_from_config,
+)
+from vllm.foundation.integrations.transformers_utils.processors.fireredasr2 import (
+    FireRedASR2FeatureExtractor,
+)
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
-from vllm.model_executor.layers.linear import (
-    ReplicatedLinear,
-)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.models.whisper_utils import (
-    ISO639_1_SUPPORTED_LANGS,
-)
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.frontend.processing.multimodal.parse import MultiModalDataItems, MultiModalDataParser
+from vllm.frontend.processing.multimodal.parse import (
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
 from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -38,11 +40,14 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
-from vllm.foundation.integrations.transformers_utils.processors.fireredasr2 import (
-    FireRedASR2FeatureExtractor,
+from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
+from vllm.model_executor.layers.linear import (
+    ReplicatedLinear,
 )
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.models.whisper_utils import (
+    ISO639_1_SUPPORTED_LANGS,
+)
 
 from .conformer_encoder import ConformerEncoder
 from .interfaces import (

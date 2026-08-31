@@ -19,10 +19,10 @@ if TYPE_CHECKING:
 
     from vllm.foundation.config import VllmConfig
     from vllm.foundation.config.kernel import IrOpPriorityConfig
+    from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
     from vllm.frontend.processing.inputs import EngineInput
     from vllm.frontend.processing.pooling_params import PoolingParams
     from vllm.frontend.processing.sampling_params import SamplingParams
-    from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
@@ -254,8 +254,9 @@ class Platform:
     @classmethod
     def import_ir_kernels(cls) -> None:
         """
-        The default implementation imports ``vllm.backends.compute.kernels``, which registers
-        the built-in IR op implementations. Out-of-tree (OOT) platforms should
+        The default implementation imports ``vllm.backends.compute.kernels``,
+        which registers the built-in IR op implementations. Out-of-tree (OOT)
+        platforms should
         override this method to import their own kernel modules.
         """
         import vllm.backends.compute.kernels  # noqa: F401
@@ -776,9 +777,9 @@ class Platform:
         from math import lcm
 
         from vllm.foundation.config.vllm import set_current_vllm_config
-        from vllm.model_executor.models import ModelRegistry
         from vllm.foundation.utilities.math_utils import cdiv
         from vllm.foundation.utilities.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+        from vllm.model_executor.models import ModelRegistry
         from vllm.v1.attention.backend import MultipleOf
         from vllm.v1.kv_cache_interface import (
             FullAttentionSpec,

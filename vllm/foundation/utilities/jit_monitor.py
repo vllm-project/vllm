@@ -29,9 +29,9 @@ from collections.abc import Iterator, Mapping
 from contextlib import suppress
 from typing import Any, Literal, cast
 
-from vllm.foundation.observability.logger import init_logger
-from vllm.backends.platform import current_platform
 from vllm.backends.compute.dsl.triton_utils.importing import HAS_TRITON
+from vllm.backends.platform import current_platform
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 JitMonitorMode = Literal["warn", "error"]

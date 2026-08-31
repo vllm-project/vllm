@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 import regex as re
 
 import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.entrypoints.chat_utils import make_tool_call_id
 from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -20,9 +21,10 @@ from vllm.frontend.entrypoints.generate.base.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.frontend.processing.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.frontend.processing.tool_parsers.utils import partial_tag_overlap
@@ -85,8 +87,9 @@ class StreamDelta(TypedDict):
     tool_calls: list[StreamToolCall]
 
 
-# NOTE: mirrored in ``vllm.frontend.processing.reasoning.hy_v4_reasoning_parser`` (same pattern as
-# ``gemma4_utils``) so neither package depends on the other.
+# NOTE: mirrored in
+# ``vllm.frontend.processing.reasoning.hy_v4_reasoning_parser`` (same pattern
+# as ``gemma4_utils``) so neither package depends on the other.
 def detect_token_suffix(tokenizer: TokenizerLike) -> str:
     """Detect the per-checkpoint suffix used by Hunyuan structural tokens.
 
@@ -1030,7 +1033,9 @@ class HYV4ToolParser(ToolParser):
         ):
             return None
 
-        from vllm.frontend.processing.tool_parsers.structural_tag_registry import get_model_structural_tag
+        from vllm.frontend.processing.tool_parsers.structural_tag_registry import (
+            get_model_structural_tag,
+        )
 
         try:
             return get_model_structural_tag(

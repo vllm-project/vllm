@@ -14,10 +14,9 @@ from transformers.activations import GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
 
 from vllm.foundation.config import VllmConfig
-from vllm.frontend.processing.inputs import ModalityData
 from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.frontend.processing.inputs import ModalityData
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import (
     ImageItem,
@@ -37,7 +36,8 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.quantization import QuantizationConfig
 
 from .interfaces import SupportsLoRA, SupportsMRoPE, SupportsMultiModal, SupportsPP
 from .keye import (

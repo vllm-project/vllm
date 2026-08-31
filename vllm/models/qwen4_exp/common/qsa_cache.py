@@ -21,12 +21,12 @@ from typing import ClassVar
 import torch
 from torch import nn
 
+from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, tl, triton
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.foundation.config.cache import CacheDType
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.backends.platform import current_platform
-from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, tl, triton
 from vllm.foundation.utilities.math_utils import cdiv
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

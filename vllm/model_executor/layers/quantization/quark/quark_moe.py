@@ -8,6 +8,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import get_current_vllm_config
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -80,7 +81,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

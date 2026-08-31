@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypeGuard
 
-from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.utilities.import_utils import LazyLoader
+from vllm.frontend.processing.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
     # if type checking, eagerly import the module

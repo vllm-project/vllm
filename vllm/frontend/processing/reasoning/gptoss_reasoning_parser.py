@@ -9,7 +9,9 @@ from vllm.frontend.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.frontend.processing.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
-    from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
     from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 
 

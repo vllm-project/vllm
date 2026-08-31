@@ -12,9 +12,9 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, NamedTuple, NewType, TypeAlias, overload
 
-from vllm import envs
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.hashing import xxhash, xxhash_cbor
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.foundation.utilities.mem_utils import format_gib

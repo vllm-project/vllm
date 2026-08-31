@@ -32,9 +32,11 @@ from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 from pydantic import ValidationError
 from transformers.tokenization_mistral_common import MistralCommonBackend
 
-from vllm.frontend.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.foundation.observability.logger import init_logger
+from vllm.frontend.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.frontend.processing.tokenizers.protocol import TokenizerLike
 
 if TYPE_CHECKING:

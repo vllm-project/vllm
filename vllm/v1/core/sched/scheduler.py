@@ -8,29 +8,37 @@ from dataclasses import replace
 from typing import Any
 
 from vllm.backends.compiler.cuda_graph import CUDAGraphStat
-from vllm.foundation.config import KVEventsConfig, VllmConfig
 from vllm.backends.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
     ECConnectorRole,
 )
-from vllm.backends.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
+from vllm.backends.distributed.ec_transfer.ec_connector.factory import (
+    ECConnectorFactory,
+)
 from vllm.backends.distributed.kv_events import EventPublisherFactory, KVEventBatch
-from vllm.backends.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.backends.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory,
+)
 from vllm.backends.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
-from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsManager,
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
 )
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorStats,
+)
+from vllm.foundation.config import KVEventsConfig, VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.frontend.processing.multimodal.encoder_budget import MultiModalBudget
 from vllm.frontend.processing.multimodal.utils import get_mm_features_in_window
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsManager,
+)
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,

@@ -8,19 +8,19 @@ import torch
 from torch import nn
 
 from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
-from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.backends.distributed import get_tensor_model_parallel_world_size
-from vllm.runtime.execution.forward_context import get_forward_context
+from vllm.foundation.config import VllmConfig, get_current_vllm_config
+from vllm.foundation.utilities.torch_utils import (
+    canonicalize_singleton_dim_strides,
+    kv_cache_dtype_str_to_dtype,
+)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.foundation.utilities.torch_utils import (
-    canonicalize_singleton_dim_strides,
-    kv_cache_dtype_str_to_dtype,
-)
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,

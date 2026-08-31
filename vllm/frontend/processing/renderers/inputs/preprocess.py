@@ -7,6 +7,8 @@ Schemas and utilities for preprocessing inputs.
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict, overload
 
+from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
+from vllm.foundation.utilities.collection_utils import is_list_of
 from vllm.frontend.processing.inputs import (
     EmbedsPrompt,
     EngineInput,
@@ -16,8 +18,6 @@ from vllm.frontend.processing.inputs import (
     TextPrompt,
     TokensPrompt,
 )
-from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
-from vllm.foundation.utilities.collection_utils import is_list_of
 
 if TYPE_CHECKING:
     import torch

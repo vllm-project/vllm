@@ -9,15 +9,15 @@ https://arxiv.org/abs/2310.18547
 
 import torch
 
-from vllm import envs
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.foundation.system import envs
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.runtime.modeling.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.runtime.modeling.lora.ops.triton_ops.utils import (
     _get_lora_a_ptr,
     get_lora_op_configs,
     supports_pdl,
 )
-from vllm.backends.compute.dsl.triton_utils import tl, triton
-from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 
 @triton.jit

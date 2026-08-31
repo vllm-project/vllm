@@ -20,7 +20,8 @@ from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, TextContent
 
-from vllm import envs
+from vllm.foundation.system import envs
+from vllm.foundation.utilities import random_uuid
 from vllm.frontend.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
@@ -40,7 +41,6 @@ from vllm.frontend.entrypoints.openai.responses.utils import (
 from vllm.frontend.processing.outputs import RequestOutput
 from vllm.frontend.processing.parser.abstract_parser import Parser
 from vllm.frontend.processing.tokenizers import TokenizerLike
-from vllm.foundation.utilities import random_uuid
 
 if TYPE_CHECKING:
     from mcp.client import ClientSession

@@ -26,10 +26,13 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import AutoModel
 
+from vllm.backends.distributed.parallel_state import get_tp_group
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.compilation import CUDAGraphMode
-from vllm.backends.distributed.parallel_state import get_tp_group
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -47,9 +50,6 @@ from vllm.model_executor.models.gemma4_mm import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata

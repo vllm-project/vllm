@@ -8,7 +8,9 @@
 # multi-head attention (``use_mla=False``) instead of the dense MLA backbone.
 # We therefore reuse ``DeepseekVLV2Config`` for parsing the nested config.
 
-from vllm.foundation.integrations.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
+from vllm.foundation.integrations.transformers_utils.configs.deepseek_vl2 import (
+    DeepseekVLV2Config,
+)
 
 
 class UnlimitedOCRConfig(DeepseekVLV2Config):

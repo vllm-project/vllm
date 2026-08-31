@@ -6,9 +6,9 @@ import os
 import shutil
 import signal
 
-from vllm import envs
 from vllm.assets.base import get_cache_dir
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system import envs
 from vllm.foundation.utilities.import_utils import PlaceholderModule
 
 logger = init_logger(__name__)

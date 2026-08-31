@@ -5,11 +5,11 @@ from typing import cast
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
-from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.system.exceptions import VLLMValidationError
+from vllm.foundation.utilities.serial_utils import EmbedDType, Endianness
 from vllm.frontend.processing.outputs import PoolingRequestOutput
 from vllm.frontend.processing.tasks import SupportedTask
-from vllm.foundation.utilities.serial_utils import EmbedDType, Endianness
 
 from ..base.io_processor import PoolingIOProcessor
 from ..base.serving import PoolingBaseServing

@@ -4,7 +4,9 @@ import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
-from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+)
 from vllm.v1.request import Request
 
 

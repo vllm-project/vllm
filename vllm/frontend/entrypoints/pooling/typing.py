@@ -11,11 +11,11 @@ from pydantic import ConfigDict
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.frontend.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.frontend.processing.inputs import DataPrompt, EngineInput
-from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.renderers import ChatParams, TokenizeParams
 from vllm.frontend.processing.renderers.inputs import DictPrompt
-
 from vllm.frontend.processing.tasks import PoolingTask
+from vllm.runtime.modeling.lora.request import LoRARequest
+
 from .classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,

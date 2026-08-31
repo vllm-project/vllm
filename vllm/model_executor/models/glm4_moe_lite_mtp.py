@@ -30,6 +30,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     MoERunner,
@@ -49,7 +50,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.backends.platform import current_platform
 from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .glm4_moe_lite import (

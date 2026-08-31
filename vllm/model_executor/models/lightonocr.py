@@ -11,6 +11,21 @@ from transformers import (
 )
 
 from vllm.foundation.config import VllmConfig
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.frontend.processing.multimodal.parse import (
+    ImageProcessorItems,
+    MultiModalDataItems,
+)
+from vllm.frontend.processing.multimodal.processing import (
+    BaseMultiModalProcessor,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
 from vllm.model_executor.models.mistral3 import (
     Mistral3DummyInputsBuilder,
     Mistral3ForConditionalGeneration,
@@ -24,15 +39,6 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
-)
-from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.frontend.processing.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.frontend.processing.multimodal.parse import ImageProcessorItems, MultiModalDataItems
-from vllm.frontend.processing.multimodal.processing import (
-    BaseMultiModalProcessor,
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
 )
 
 _I = TypeVar("_I", bound=Mistral3ProcessingInfo)

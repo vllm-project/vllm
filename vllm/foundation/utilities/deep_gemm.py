@@ -16,13 +16,13 @@ from typing import Any, NoReturn
 import torch
 
 import vllm.foundation.system.envs as envs
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.logger import logger
+from vllm.foundation.utilities.import_utils import has_deep_gemm
+from vllm.foundation.utilities.math_utils import cdiv
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.import_utils import has_deep_gemm
-from vllm.foundation.utilities.math_utils import cdiv
 
 _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
     "qwen3_5_text",

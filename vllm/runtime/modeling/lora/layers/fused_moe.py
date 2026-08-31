@@ -5,10 +5,10 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm import envs
-from vllm.foundation.config.lora import LoRAConfig
 from vllm.backends.distributed.utils import divide
-from vllm.runtime.modeling.lora.layers.base import BaseLayerWithLoRA
+from vllm.backends.platform import current_platform
+from vllm.foundation.config.lora import LoRAConfig
+from vllm.foundation.system import envs
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
@@ -21,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEKernelModularImpl,
 )
-from vllm.backends.platform import current_platform
+from vllm.runtime.modeling.lora.layers.base import BaseLayerWithLoRA
 
 from .utils import _get_lora_aux_cuda_stream, _get_lora_device
 

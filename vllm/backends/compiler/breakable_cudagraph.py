@@ -34,17 +34,19 @@ import torch
 
 import vllm.foundation.system.envs as envs
 from vllm.backends.compiler.monitor import validate_cudagraph_capturing_enabled
+from vllm.backends.distributed.device_communicators.pynccl_allocator import (
+    set_graph_pool_id,
+)
+from vllm.backends.platform import current_platform
 from vllm.foundation.config import CUDAGraphMode, VllmConfig
-from vllm.backends.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import weak_ref_tensor, weak_ref_tensors
+from vllm.model_executor.offloader.base import get_offloader
 from vllm.runtime.execution.forward_context import (
     BatchDescriptor,
     get_forward_context,
     is_forward_context_available,
 )
-from vllm.foundation.observability.logger import init_logger
-from vllm.model_executor.offloader.base import get_offloader
-from vllm.backends.platform import current_platform
-from vllm.foundation.utilities.torch_utils import weak_ref_tensor, weak_ref_tensors
 
 logger = init_logger(__name__)
 
