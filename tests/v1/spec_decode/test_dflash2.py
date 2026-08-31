@@ -71,6 +71,62 @@ def test_selector_edges_match_sequential_reference():
     torch.testing.assert_close(actual, expected)
 
 
+def test_dflash2_moe_builds_sparse_ffn_from_draft_config(monkeypatch):
+    from vllm.model_executor.models import qwen3_dflash2
+
+    captured: dict[str, object] = {}
+
+    class FakeSparseMoe(torch.nn.Module):
+        def __init__(
+            self,
+            vllm_config,
+            config,
+            quant_config,
+            prefix,
+        ):
+            super().__init__()
+            captured.update(
+                vllm_config=vllm_config,
+                config=config,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
+
+    monkeypatch.setattr(qwen3_dflash2, "Qwen3NextSparseMoeBlock", FakeSparseMoe)
+    vllm_config = object()
+    quant_config = object()
+    config = SimpleNamespace(draft_ffn_type="moe")
+
+    mlp = qwen3_dflash2.DFlash2Qwen3DecoderLayer.build_mlp(
+        None,
+        vllm_config=vllm_config,
+        config=config,
+        quant_config=quant_config,
+        prefix="model.layers.0.mlp",
+    )
+
+    assert isinstance(mlp, FakeSparseMoe)
+    assert captured == {
+        "vllm_config": vllm_config,
+        "config": config,
+        "quant_config": quant_config,
+        "prefix": "model.layers.0.mlp",
+    }
+
+
+def test_dflash2_fused_expert_names_bypass_dense_mapper():
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+
+    weights = [
+        ("layers.0.mlp.experts.gate_up_proj", torch.empty(4, 16, 8)),
+        ("layers.0.mlp.experts.down_proj", torch.empty(4, 8, 8)),
+    ]
+
+    mapped = list(DFlashQwen3Model.hf_to_vllm_mapper.apply(weights))
+
+    assert [name for name, _ in mapped] == [name for name, _ in weights]
+
+
 def _stub_base(monkeypatch, draft_logits):
     """A DFlashSpeculator.__init__ that allocates only what the base class would.
 
@@ -123,6 +179,7 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
     from types import SimpleNamespace
 
     from vllm.config import set_current_vllm_config
+    from vllm.model_executor.models.qwen2 import Qwen2MLP
     from vllm.model_executor.models.qwen3_dflash2 import (
         DFlash2Qwen3DecoderLayer,
         DFlash2Qwen3Model,
@@ -231,3 +288,4 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
     # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)
     assert len(model.layers) == 2
     assert isinstance(model.layers[0], DFlash2Qwen3DecoderLayer)
+    assert isinstance(model.layers[0].mlp, Qwen2MLP)

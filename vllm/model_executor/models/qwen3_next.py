@@ -4,9 +4,13 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
+
+if TYPE_CHECKING:
+    from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -91,12 +95,21 @@ def _should_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        *,
+        config: "PretrainedConfig | None" = None,
+        quant_config: QuantizationConfig | None = None,
+    ):
         super().__init__()
 
-        config = vllm_config.model_config.hf_text_config
+        if config is None:
+            config = vllm_config.model_config.hf_text_config
+            if quant_config is None:
+                quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
-        quant_config = vllm_config.quant_config
 
         self.tp_size = get_tensor_model_parallel_world_size()
 

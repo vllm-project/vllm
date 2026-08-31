@@ -289,6 +289,22 @@ class DFlashQwen3Attention(nn.Module):
 
 
 class DFlashQwen3DecoderLayer(nn.Module):
+    def build_mlp(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        config: Qwen3Config,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> nn.Module:
+        return Qwen3MLP(
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -341,10 +357,9 @@ class DFlashQwen3DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
         )
-        self.mlp = Qwen3MLP(
-            hidden_size=self.hidden_size,
-            intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
+        self.mlp = self.build_mlp(
+            vllm_config=vllm_config,
+            config=config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
