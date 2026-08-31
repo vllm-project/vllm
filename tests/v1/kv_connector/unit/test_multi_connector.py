@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
+    MultiKVConnectorPromMetrics,
     MultiKVConnectorStats,
     MultiKVConnectorWorkerMetadata,
 )
@@ -545,14 +546,12 @@ class TestMultiConnectorStats:
         correct data."""
         serialized_data = {
             "NixlConnector": {
-                "data": {
-                    "transfer_duration": [1.5, 2.3],
-                    "post_duration": [0.1, 0.2],
-                    "bytes_transferred": [1024, 2048],
-                    "num_descriptors": [10, 20],
-                    "num_failed_transfers": [],
-                    "num_failed_notifications": [],
-                }
+                "transfer_duration": [1.5, 2.3],
+                "post_duration": [0.1, 0.2],
+                "bytes_transferred": [1024, 2048],
+                "num_descriptors": [10, 20],
+                "num_failed_transfers": [],
+                "num_failed_notifications": [],
             }
         }
 
@@ -570,16 +569,14 @@ class TestMultiConnectorStats:
         """Test reconstruction with multiple connector types that have custom stats."""
         serialized_data = {
             "NixlConnector": {
-                "data": {
-                    "transfer_duration": [1.5],
-                    "post_duration": [0.1],
-                    "bytes_transferred": [1024],
-                    "num_descriptors": [10],
-                    "num_failed_transfers": [],
-                    "num_failed_notifications": [],
-                }
+                "transfer_duration": [1.5],
+                "post_duration": [0.1],
+                "bytes_transferred": [1024],
+                "num_descriptors": [10],
+                "num_failed_transfers": [],
+                "num_failed_notifications": [],
             },
-            "MockConnector": {"data": {"mock_field": [1, 2, 3]}},
+            "MockConnector": {"mock_field": [1, 2, 3]},
         }
 
         stats = MultiConnector.build_kv_connector_stats(data=serialized_data)
@@ -594,20 +591,19 @@ class TestMultiConnectorStats:
         assert isinstance(stats.data["MockConnector"], MockConnectorStats)
         # Verify data is preserved
         assert stats.data["MockConnector"].data == {"mock_field": [1, 2, 3]}
+        assert stats.to_dict() == serialized_data
 
     def test_build_kv_connector_stats_raises_error_for_unknown_connector(self):
         """Test that unknown connectors raise an error."""
         serialized_data = {
-            "UnknownConnector": {"data": {"some_field": [1, 2, 3]}},
+            "UnknownConnector": {"some_field": [1, 2, 3]},
             "NixlConnector": {
-                "data": {
-                    "transfer_duration": [1.5],
-                    "post_duration": [0.1],
-                    "bytes_transferred": [1024],
-                    "num_descriptors": [10],
-                    "num_failed_transfers": [],
-                    "num_failed_notifications": [],
-                }
+                "transfer_duration": [1.5],
+                "post_duration": [0.1],
+                "bytes_transferred": [1024],
+                "num_descriptors": [10],
+                "num_failed_transfers": [],
+                "num_failed_notifications": [],
             },
         }
 
@@ -661,7 +657,7 @@ class TestMultiConnectorStats:
 
         mixed_data = {
             "NixlConnector": nixl_stats,  # Already instantiated
-            "MockConnector": {"data": {"mock_field": [1, 2, 3]}},  # Serialized
+            "MockConnector": {"mock_field": [1, 2, 3]},  # Serialized
         }
 
         stats = MultiConnector.build_kv_connector_stats(data=mixed_data)
@@ -681,16 +677,14 @@ class TestMultiConnectorStats:
         # so it returns None and should be skipped
         serialized_data = {
             "NixlConnector": {
-                "data": {
-                    "transfer_duration": [1.5],
-                    "post_duration": [0.1],
-                    "bytes_transferred": [1024],
-                    "num_descriptors": [10],
-                    "num_failed_transfers": [],
-                    "num_failed_notifications": [],
-                }
+                "transfer_duration": [1.5],
+                "post_duration": [0.1],
+                "bytes_transferred": [1024],
+                "num_descriptors": [10],
+                "num_failed_transfers": [],
+                "num_failed_notifications": [],
             },
-            "ExampleConnector": {"data": {"some_field": [1, 2, 3]}},
+            "ExampleConnector": {"some_field": [1, 2, 3]},
         }
 
         stats = MultiConnector.build_kv_connector_stats(data=serialized_data)
@@ -704,14 +698,15 @@ class TestMultiConnectorStats:
         # ExampleConnector should be skipped (returns None)
         assert "ExampleConnector" not in stats.data
 
-    def test_build_kv_connector_stats_handles_malformed_data(self):
-        """Test that malformed data raises appropriate errors."""
-        serialized_data = {
-            "NixlConnector": {"wrong_field": {"transfer_duration": [1.5]}}
-        }
+    def test_prom_metrics_passes_flat_data_to_children(self):
+        child_metrics = MagicMock()
+        metrics = object.__new__(MultiKVConnectorPromMetrics)
+        metrics._prom_metrics = {"NixlConnector": child_metrics}
+        payload = {"NixlConnector": {"transfer_duration": [1.5]}}
 
-        with pytest.raises(AssertionError, match="Expected a dict with a 'data' field"):
-            MultiConnector.build_kv_connector_stats(data=serialized_data)
+        metrics.observe(payload, engine_idx=2)
+
+        child_metrics.observe.assert_called_once_with({"transfer_duration": [1.5]}, 2)
 
     def test_aggregate_same_connector(self):
         """Test aggregating stats from the same connector type."""

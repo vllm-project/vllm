@@ -75,6 +75,11 @@ class MultiKVConnectorStats(KVConnectorStats):
     This is used to aggregate the stats from all connectors separately.
     """
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            connector_id: stats.to_dict() for connector_id, stats in self.data.items()
+        }
+
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         for connector_id, stats in other.data.items():
             if connector_id not in self.data:
@@ -122,7 +127,7 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
                 f"{connector_id} is not contained in the list of registered connectors "
                 f"with Prometheus metrics support: {self._prom_metrics.keys()}"
             )
-            self._prom_metrics[connector_id].observe(stats_data["data"], engine_idx)
+            self._prom_metrics[connector_id].observe(stats_data, engine_idx)
 
 
 class MultiConnector(KVConnectorBase_V1, SupportsHMA):
@@ -609,16 +614,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 connector_name
             )
 
-            # stats_value is the serialized dataclass which contains {'data': {...}}
-            # We need to extract the inner 'data' field to avoid double-nesting
-            assert isinstance(stats_value, dict) and "data" in stats_value, (
-                f"Expected a dict with a 'data' field, got {stats_value}"
-            )
-            inner_data = stats_value["data"]
-
             # Use the connector's build_kv_connector_stats to reconstruct
             if reconstructed_stats := connector_cls.build_kv_connector_stats(
-                data=inner_data
+                data=stats_value
             ):
                 reconstructed_data[connector_name] = reconstructed_stats
 

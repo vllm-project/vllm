@@ -2602,7 +2602,7 @@ class Scheduler(SchedulerInterface):
         )
         spec_stats = spec_decoding_stats
         connector_stats_payload = (
-            kv_connector_stats.data if kv_connector_stats else None
+            kv_connector_stats.to_dict() if kv_connector_stats else None
         )
         return SchedulerStats(
             num_running_reqs=len(self.running),

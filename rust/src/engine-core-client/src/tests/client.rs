@@ -31,7 +31,7 @@ use crate::protocol::output::{
 };
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
-use crate::protocol::stats::SchedulerStats;
+use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats};
 use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
@@ -2505,6 +2505,10 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let inline_prompt_frames = lines.next().expect("missing inline prompt logprobs fixture line");
     let multipart_prompt_frames =
         lines.next().expect("missing multipart prompt logprobs fixture line");
+    let nixl_stats_hex = lines.next().expect("missing NIXL stats fixture line");
+    let mooncake_stats_hex = lines.next().expect("missing Mooncake stats fixture line");
+    let multi_connector_stats_hex =
+        lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
@@ -2666,6 +2670,28 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             .as_ref()
             .expect("multipart prompt logprobs decoded"),
     );
+
+    let nixl_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(nixl_stats_hex).unwrap()).unwrap();
+    assert!(matches!(nixl_stats, KvConnectorStats::Nixl(_)));
+
+    let mooncake_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(mooncake_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        mooncake_stats,
+        KvConnectorStats::Mooncake(stats)
+            if stats.0.contains_key(&MooncakeOperation::LoadGet)
+    ));
+
+    let multi_connector_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(multi_connector_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        multi_connector_stats,
+        KvConnectorStats::Multi(stats)
+            if stats.nixl.is_some()
+                && stats.mooncake.is_some()
+                && stats.other.contains_key("UnsupportedConnector")
+    ));
 
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
         match decode_value(bytes) {

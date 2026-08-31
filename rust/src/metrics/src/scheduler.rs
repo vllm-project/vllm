@@ -254,16 +254,14 @@ pub struct SchedulerMetrics {
     pub kv_block_idle_before_evict_seconds: HistogramFamily,
     pub kv_block_reuse_gap_seconds: HistogramFamily,
 
-    // Mooncake store connector telemetry, decoded from the otherwise-opaque
-    // `kv_connector_stats` payload. Mirrors `MooncakeStorePromMetrics`.
+    // Mooncake store connector telemetry. Mirrors `MooncakeStorePromMetrics`.
     pub mooncake_operation_time_seconds: MooncakeOperationHistogramFamily,
     pub mooncake_operation_total: MooncakeOperationCounterFamily,
     pub mooncake_operation_keys_total: MooncakeOperationCounterFamily,
     pub mooncake_operation_bytes_total: MooncakeOperationCounterFamily,
     pub mooncake_operation_failed_keys_total: MooncakeOperationCounterFamily,
 
-    // NIXL connector telemetry, decoded from the otherwise-opaque
-    // `kv_connector_stats` payload. Mirrors `NixlPromMetrics`.
+    // NIXL connector telemetry. Mirrors `NixlPromMetrics`.
     pub nixl_xfer_time_seconds: HistogramFamily,
     pub nixl_post_time_seconds: HistogramFamily,
     pub nixl_bytes_transferred: HistogramFamily,
@@ -424,8 +422,7 @@ impl SchedulerMetrics {
             kv_block_reuse_gap_seconds.clone(),
         );
 
-        // Mooncake store connector telemetry, decoded from the
-        // otherwise-opaque `kv_connector_stats` payload.
+        // Mooncake store connector telemetry.
         let mooncake_operation_time_seconds =
             Family::new_with_constructor(mooncake_operation_time_histogram as fn() -> Histogram);
         registry.register(
@@ -467,8 +464,7 @@ impl SchedulerMetrics {
             mooncake_operation_failed_keys_total.clone(),
         );
 
-        // NIXL connector telemetry, decoded from the otherwise-opaque
-        // `kv_connector_stats` payload.
+        // NIXL connector telemetry.
         let nixl_xfer_time_seconds =
             Family::new_with_constructor(nixl_xfer_time_histogram as fn() -> Histogram);
         registry.register(
