@@ -104,9 +104,6 @@ class MambaHybridModelState(DefaultModelState):
             and self.cache_config.use_replayssm is True
             and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
         )
-        self._use_flashinfer_replayssm_mtp = (
-            self._use_flashinfer_replayssm and vllm_config.num_speculative_tokens > 0
-        )
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
@@ -417,7 +414,13 @@ class MambaHybridModelState(DefaultModelState):
                 num_computed_tokens,
                 idx_mapping,
             )
-            if self._use_flashinfer_replayssm_mtp:
+            # Must match the condition that sets ``state_skip_postprocess``:
+            # the fused kernel skips the temporal copy for every FlashInfer
+            # ReplaySSM layer, so the materializer has to cover every one of
+            # them. Gating this on spec decode would drop the SSM state on any
+            # non-spec boundary where src_col != dst_col. Rows that need no
+            # work carry the -1 src_col sentinel and cost nothing.
+            if self._use_flashinfer_replayssm:
                 assert self._mamba_kv_cache_config is not None
                 assert self._mamba_block_tables is not None
                 materialize_replayssm_prefix_mtp_gpu(

@@ -861,6 +861,11 @@ class MambaSpecDecodeGPUContext:
 
     # Flag to track if metadata has been populated
     is_initialized: bool = False
+    # True when any temporal state is owned by the FlashInfer ReplaySSM
+    # materializer (i.e. some state_skip_postprocess entry is set). Cached at
+    # populate time so the per-step postprocess can skip the layer scan for
+    # Triton / non-ReplaySSM configs.
+    has_flashinfer_replayssm: bool = False
 
     @classmethod
     def create(
@@ -1085,6 +1090,7 @@ class MambaSpecDecodeGPUContext:
                             self.state_inner_sizes[idx] = state.stride(1)
                     else:
                         self.state_skip_postprocess[idx] = is_flashinfer_replayssm
+                        self.has_flashinfer_replayssm |= bool(is_flashinfer_replayssm)
                         # Temporal state: inner_size = natural elements per
                         # block (prod of inner dims).  The kernel uses this
                         # to compute copy_size = inner_size * elem_size,
@@ -1606,6 +1612,24 @@ def preprocess_mamba(
                 )
             input_batch.num_accepted_tokens_cpu[i] = 1
 
+    if _should_materialize_replayssm_prefix(
+        cache_config, forward_context, src_cols, num_reqs
+    ):
+        # Exact-ify the hashed source slot before conv/SSM memcpy seeds the new
+        # running column from it. Both the fused precopy and the scalar block
+        # copy read that slot, so this has to run ahead of either one (mirrors
+        # MambaHybridModelState.preprocess_state on V2).
+        materialize_replayssm_prefix(
+            kv_cache_config,
+            mamba_group_ids,
+            forward_context,
+            input_batch.req_ids,
+            requests,
+            src_cols,
+            dst_cols,
+            num_reqs,
+        )
+
     if fused is not None:
         fused.state_idx.copy_to_gpu(num_reqs)
         fused.src_col.copy_to_gpu(num_reqs)
@@ -1618,21 +1642,6 @@ def preprocess_mamba(
             idx_mapping=None,
         )
     else:
-        if _should_materialize_replayssm_prefix(
-            cache_config, forward_context, src_cols, num_reqs
-        ):
-            # Exact-ify the hashed source slot before conv/SSM memcpy seeds
-            # the new running column from it.
-            materialize_replayssm_prefix(
-                kv_cache_config,
-                mamba_group_ids,
-                forward_context,
-                input_batch.req_ids,
-                requests,
-                src_cols,
-                dst_cols,
-                num_reqs,
-            )
         do_mamba_copy_block(copy_bufs)
 
 
@@ -1729,19 +1738,20 @@ def postprocess_mamba_align_gpu(
         num_computed_tokens_gpu=ctx.num_computed_tokens_buf.gpu,
         num_draft_tokens_gpu=ctx.num_draft_tokens_buf.gpu,
     )
-    materialize_replayssm_prefix_mtp_gpu(
-        kv_cache_config,
-        ctx.mamba_group_ids,
-        forward_context,
-        [
-            input_batch.block_table[gid].get_device_tensor(num_reqs)
-            for gid in range(len(kv_cache_config.kv_cache_groups))
-        ],
-        ctx.materialize_src_cols,
-        ctx.materialize_dst_cols,
-        ctx.materialize_token_counts,
-        num_reqs,
-    )
+    if ctx.has_flashinfer_replayssm:
+        materialize_replayssm_prefix_mtp_gpu(
+            kv_cache_config,
+            ctx.mamba_group_ids,
+            forward_context,
+            [
+                input_batch.block_table[gid].get_device_tensor(num_reqs)
+                for gid in range(len(kv_cache_config.kv_cache_groups))
+            ],
+            ctx.materialize_src_cols,
+            ctx.materialize_dst_cols,
+            ctx.materialize_token_counts,
+            num_reqs,
+        )
 
     # ``num_accepted_tokens_out`` is pre-initialized from
     # ``num_accepted_tokens_gpu``; the kernel only overwrites entries to 1

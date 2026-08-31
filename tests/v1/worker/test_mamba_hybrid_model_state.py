@@ -215,7 +215,7 @@ def test_postprocess_state_materializes_mtp_after_fused_copy(monkeypatch):
 
     state = object.__new__(MambaHybridModelState)
     state._align_mode = True
-    state._use_flashinfer_replayssm_mtp = True
+    state._use_flashinfer_replayssm = True
     state._mamba_ctx = ctx
     state._mamba_group_ids = [0]
     state._mamba_state_idx_gpu = torch.zeros(1, dtype=torch.int32)

@@ -597,6 +597,27 @@ def _cuda_i64_slot_strides(tensors: list[torch.Tensor]) -> torch.Tensor:
     )
 
 
+def _drop_over_window_rows(
+    copied: torch.Tensor,
+    flush_count: torch.Tensor,
+    max_window: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Drop rows the materialize kernel would refuse to write.
+
+    ``replayssm_materialize`` returns without touching the destination when
+    ``flush_count > max_window``. Masking those rows out of ``copied`` (and
+    forcing their ``flush_count`` to the -1 no-op sentinel) keeps the
+    ring-tracker resets in sync with what the kernel actually wrote, so a slot
+    that was not materialized is never left marked as an exact checkpoint.
+    The mask is computed on device: this runs on the per-step postprocess path,
+    where a host-side check would cost a CPU-GPU sync.
+    """
+    over = copied & (flush_count > max_window)
+    return copied & ~over, torch.where(
+        over, torch.full_like(flush_count, -1), flush_count
+    )
+
+
 def _flashinfer_replayssm_mixers_by_group(
     kv_cache_config: KVCacheConfig,
     mamba_group_ids: Sequence[int],
@@ -715,6 +736,9 @@ def _materialize_replayssm_prefix_group(
         mixers[0]._replayssm_prev_num_accepted[src_clamped],
         torch.tensor(-1, dtype=torch.int32, device=device),
     )
+    copied, flush_count = _drop_over_window_rows(
+        copied, flush_count, int(mixers[0].replayssm_buffer_len)
+    )
     _launch_replayssm_materialize(
         mixers, src_row, src_row, flush_count, replayssm_materialize
     )
@@ -780,6 +804,9 @@ def materialize_replayssm_prefix_gpu(
             mixers[0]._replayssm_prev_num_accepted[src_clamped],
             torch.tensor(-1, dtype=torch.int32, device=src_row.device),
         )
+        copied, flush_count = _drop_over_window_rows(
+            copied, flush_count, int(mixers[0].replayssm_buffer_len)
+        )
         _launch_replayssm_materialize(
             mixers,
             src_row.to(dtype=torch.int32),
@@ -839,6 +866,9 @@ def materialize_replayssm_prefix_mtp_gpu(
             + token_counts[:num_reqs],
             torch.tensor(-1, dtype=torch.int32, device=src_row.device),
         )
+        copied, flush_count = _drop_over_window_rows(
+            copied, flush_count, int(mixers[0].replayssm_buffer_len)
+        )
         _launch_replayssm_materialize(
             mixers,
             src_row.to(dtype=torch.int32),
@@ -855,15 +885,34 @@ def materialize_replayssm_prefix_mtp_gpu(
 
 
 def _replayssm_materialize_ready(mixers: list[Any]) -> bool:
+    """False only before the caches are allocated; raises on a bad cache.
+
+    A skip here is not free: ``state_skip_postprocess`` has already told the
+    fused postprocess kernel not to copy this temporal state, so silently
+    doing nothing would leave the destination block holding stale SSM state.
+    The empty-cache case (profiling and other pre-allocation runs) is the one
+    legitimate no-op; anything else is a misconfiguration and must be loud.
+    """
     ssm = mixers[0].kv_cache[1]
     x_cache = mixers[0].kv_cache[2]
-    return (
-        ssm.numel() > 0
-        and ssm.is_cuda
-        and mixers[0]._replayssm_ring_start.numel() > 0
-        and x_cache.numel() > 0
-        and bool(mixers[0].replayssm_buffer_len)
-    )
+    if ssm.numel() == 0:
+        return False
+    if not ssm.is_cuda:
+        raise RuntimeError(
+            "FlashInfer ReplaySSM prefix materialization requires a CUDA SSM "
+            f"state cache; got device {ssm.device}"
+        )
+    if x_cache.numel() == 0 or mixers[0]._replayssm_ring_start.numel() == 0:
+        raise RuntimeError(
+            "FlashInfer ReplaySSM prefix materialization requires allocated "
+            "replay ring buffers and ring trackers"
+        )
+    if not mixers[0].replayssm_buffer_len:
+        raise RuntimeError(
+            "FlashInfer ReplaySSM prefix materialization requires "
+            "--replayssm-buffer-len >= 1"
+        )
+    return True
 
 
 def _launch_replayssm_materialize(
