@@ -25,14 +25,14 @@ from openai.types.responses.tool import (
 )
 
 import vllm.envs as envs
-from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ErrorResponse,
     RequestResponseMetadata,
 )
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseCreatedEvent,

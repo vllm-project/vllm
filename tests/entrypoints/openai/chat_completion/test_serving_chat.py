@@ -20,6 +20,11 @@ from tests.entrypoints.openai.utils import (
 from tests.utils import RemoteOpenAIServer
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import MultiModalConfig
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    ErrorResponse,
+    RequestResponseMetadata,
+)
 from vllm.entrypoints.generate.base.serving import build_per_request_timing_metrics
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -30,11 +35,6 @@ from vllm.entrypoints.openai.chat_completion.serving import (
     _get_mm_token_counts,
     _make_completion_tokens_details,
     _make_prompt_tokens_details,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    ErrorResponse,
-    RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.models.serving import (
     BaseModelPath,

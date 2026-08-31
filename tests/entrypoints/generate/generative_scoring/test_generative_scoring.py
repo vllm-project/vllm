@@ -18,13 +18,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.config.multimodal import MultiModalConfig
+from vllm.entrypoints.generate.base.protocol import ErrorResponse
 from vllm.entrypoints.generate.generative_scoring.serving import (
     GenerativeScoringItemResult,
     GenerativeScoringRequest,
     GenerativeScoringResponse,
     ServingGenerativeScoring,
 )
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.logprobs import Logprob

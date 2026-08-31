@@ -19,7 +19,7 @@ import pytest
 
 from vllm.config import ModelConfig
 from vllm.config.speech_to_text import SpeechToTextConfig
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
 )

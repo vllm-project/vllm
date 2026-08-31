@@ -8,12 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from vllm.config.multimodal import MultiModalConfig
+from vllm.entrypoints.generate.base.protocol import GenerationError
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender

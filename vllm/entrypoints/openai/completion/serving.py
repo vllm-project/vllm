@@ -10,6 +10,10 @@ from typing import cast
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    RequestResponseMetadata,
+)
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     GenerationError,
@@ -26,14 +30,12 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
-    PerRequestMetrics,
     PromptTokenUsageInfo,
-    RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError

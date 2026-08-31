@@ -9,7 +9,7 @@ import pytest
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     ErrorResponse,
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath

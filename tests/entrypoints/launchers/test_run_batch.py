@@ -14,6 +14,7 @@ import pytest
 import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
 from vllm.connections import HTTPConnection
+from vllm.entrypoints.generate.base.protocol import ErrorResponse
 from vllm.entrypoints.launchers.run_batch import (
     BatchRequestOutput,
     BatchTranscriptionRequest,
@@ -21,7 +22,6 @@ from vllm.entrypoints.launchers.run_batch import (
     make_transcription_wrapper,
     upload_data,
 )
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.mem_constants import MiB_bytes
 
