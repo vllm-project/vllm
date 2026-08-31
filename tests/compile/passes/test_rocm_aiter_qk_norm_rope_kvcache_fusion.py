@@ -105,7 +105,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         device: torch.device,
         rotary_dim: int | None = None,
         prefix: str = "model.layers.0.self_attn.attn",
-        expect_per_tensor_query_quant: bool = False,
+        expected_query_quant_group_shape: GroupShape | None = None,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -145,9 +145,9 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
             attn_backend=attn_backend.get_class(),
         )
         self.attn_backend: type[AttentionBackend] = self.attn.get_attn_backend()
-        if expect_per_tensor_query_quant:
+        if expected_query_quant_group_shape is not None:
             assert self.attn.query_quant is not None
-            assert self.attn.query_quant.group_shape == GroupShape.PER_TENSOR
+            assert self.attn.query_quant.group_shape == expected_query_quant_group_shape
         assert not self.attn_backend.forward_includes_kv_cache_update, (
             f"Attention backend {self.attn_backend} does not support "
             "fuse_qk_norm_rope_kvcache."
@@ -402,6 +402,14 @@ def _run_qk_norm_rope_kvcache_fusion_test(
                 lambda: True,
             )
 
+        expected_query_quant_group_shape = None
+        if use_quark_scalar_query_scale:
+            expected_query_quant_group_shape = (
+                GroupShape(-1, num_heads * head_size)
+                if num_kv_heads == 1
+                else GroupShape.PER_TENSOR
+            )
+
         model_kwargs = {
             "vllm_config": vllm_config,
             "attn_backend": attn_backend,
@@ -413,7 +421,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
             "rms_norm_eps": rms_norm_eps,
             "dtype": dtype,
             "device": torch.get_default_device(),
-            "expect_per_tensor_query_quant": use_quark_scalar_query_scale,
+            "expected_query_quant_group_shape": expected_query_quant_group_shape,
         }
         if mrope_section is None:
             model = QKNormRoPEKVCacheTestModel(**model_kwargs)
@@ -499,6 +507,16 @@ def _run_qk_norm_rope_kvcache_fusion_test(
             for op in model.ops_in_model_before():
                 assert backend.op_count(op, before=True) > 0
                 assert backend.op_count(op) > 0
+
+        if use_quark_scalar_query_scale:
+            expected_quant_op = (
+                torch.ops.vllm.rocm_aiter_per_tensor_quant.default
+                if num_kv_heads != 1
+                else torch.ops._C.static_scaled_fp8_quant.default
+            )
+            assert backend.op_count(expected_quant_op, before=True) > 0
+            # Query quantization remains separate after the prologue fusion.
+            assert backend.op_count(expected_quant_op) > 0
 
         # Sweep-backed (18.2k pts, PR #42749): native-rope ref worst 7.7e-3 -> 1e-2;
         # AITER-triton-rope ref is itself approximate (plateau 1.28e-2) -> 2e-2.
