@@ -452,7 +452,7 @@ class OnlineDerenderer:
 
         def _feed(token_ids: list[int], finished: bool) -> DeltaMessage | None:
             nonlocal detok_state
-            acc: DeltaMessage | None = None
+            accumulated: DeltaMessage | None = None
             last = len(token_ids) - 1
             for i, tok_id in enumerate(token_ids):
                 text, detok_state = self._detokenize_delta(
@@ -465,8 +465,8 @@ class OnlineDerenderer:
                     prompt_token_ids=prompt_token_ids,
                     finished=finished and i == last,
                 )
-                acc = _merge_delta_messages(acc, delta)
-            return acc
+                accumulated = _merge_delta_messages(accumulated, delta)
+            return accumulated
 
         # Replay history to reconstruct parser state. The result is thrown
         # away and only the current chunk's emission goes to the client.
@@ -723,7 +723,7 @@ class OnlineDerenderer:
 
 
 def _merge_delta_messages(
-    acc: DeltaMessage | None, new: DeltaMessage | None
+    accumulated: DeltaMessage | None, new: DeltaMessage | None
 ) -> DeltaMessage | None:
     """Merge one per-token `parse_delta` result into a per chunk accumulator.
 
@@ -733,14 +733,14 @@ def _merge_delta_messages(
     entry with the matching `index`.
     """
     if new is None:
-        return acc
-    if acc is None:
-        acc = DeltaMessage()
+        return accumulated
+    if accumulated is None:
+        accumulated = DeltaMessage()
 
     if new.content:
-        acc.content = (acc.content or "") + new.content
+        accumulated.content = (accumulated.content or "") + new.content
     if new.reasoning:
-        acc.reasoning = (acc.reasoning or "") + new.reasoning
+        accumulated.reasoning = (accumulated.reasoning or "") + new.reasoning
 
     for tc in new.tool_calls:
         starts_new_call = tc.id is not None or (
@@ -749,10 +749,10 @@ def _merge_delta_messages(
         existing = (
             None
             if starts_new_call
-            else next((t for t in acc.tool_calls if t.index == tc.index), None)
+            else next((t for t in accumulated.tool_calls if t.index == tc.index), None)
         )
         if existing is None:
-            acc.tool_calls.append(tc)
+            accumulated.tool_calls.append(tc)
             continue
         if existing.function is None:
             existing.function = DeltaFunctionCall()
@@ -761,7 +761,7 @@ def _merge_delta_messages(
                 existing.function.arguments or ""
             ) + tc.function.arguments
 
-    return acc
+    return accumulated
 
 
 def _parse_token_id_placeholder(token: str) -> int | None:
