@@ -156,6 +156,10 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         return FlashInferMLASparseSM120Impl
 
     @classmethod
+    def supports_sink(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major == 12
 
