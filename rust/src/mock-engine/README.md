@@ -34,21 +34,26 @@ Stop it with Ctrl-C.
 
 ## Docker
 
-Build the image from the repository root:
+The image includes both the Rust frontend and mock engine. Start the complete
+stack from the repository root:
+
+```bash
+docker compose --file rust/src/mock-engine/compose.yaml up --build
+```
+
+The frontend listens on <http://127.0.0.1:8000>. 
+
+To use the mock engine with a frontend running directly on a Linux host, build
+and run the image manually:
 
 ```bash
 docker build \
   --file rust/src/mock-engine/Dockerfile \
   --tag vllm-mock-engine .
-```
-
-On Linux, host networking lets the container reach a frontend listening on the
-mock engine's default address, `tcp://127.0.0.1:29550`:
-
-```bash
 docker run --rm --network host vllm-mock-engine
 ```
 
+The mock engine will be access via `tcp://$IP:29550`
 Pass `--handshake-address` when the frontend uses another address or port. For
 other network layouts, use an address reachable from the container, such as the
 frontend container's name on a shared Docker network.

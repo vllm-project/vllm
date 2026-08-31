@@ -15,17 +15,24 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     cargo build \
         --manifest-path rust/Cargo.toml \
+        --package vllm-cmd \
         --package vllm-mock-engine \
         --release \
         --locked
 
 FROM debian:bookworm-slim
 
-RUN useradd --uid 2000 --gid 0 --create-home vllm
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 2000 --gid 0 --create-home vllm
 
 COPY --from=builder \
     /workspace/rust/target/release/vllm-mock-engine \
     /usr/local/bin/vllm-mock-engine
+COPY --from=builder \
+    /workspace/rust/target/release/vllm-rs \
+    /usr/local/bin/vllm-rs
 
 ENV HOME=/home/vllm
 WORKDIR /home/vllm
