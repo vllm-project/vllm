@@ -280,7 +280,7 @@ def test_documented_format_is_extracted(fx: FormatFixture):
     calls."""
     try:
         parser_cls = ToolParserManager.get_tool_parser(fx.parser)
-    except Exception:
+    except KeyError:
         pytest.skip(f"parser {fx.parser!r} not registered in this vLLM build")
     parser = parser_cls(_MockTokenizer(fx.vocab))
     request = SimpleNamespace(tools=None, tool_choice=None)
@@ -304,7 +304,7 @@ def test_doc_ref_names_the_real_implementation_module(fx: FormatFixture):
     """
     try:
         parser_cls = ToolParserManager.get_tool_parser(fx.parser)
-    except Exception:
+    except KeyError:
         pytest.skip(f"parser {fx.parser!r} not registered in this vLLM build")
     module = Path(inspect.getfile(parser_cls)).name
     assert module in fx.doc_ref, (
