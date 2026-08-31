@@ -130,6 +130,30 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     )
 
 
+@register_speculator("dflash2")
+def update_dflash2(config_dict: dict, pre_trained_config: dict) -> None:
+    """
+    Apply DFlash2 specific configuration transformations to the `dict` used
+    to construct the Transformers PreTrainedConfig.
+
+    DFlash2 extends DFlash with a grouped convolution layer and a
+    low-rank candidate selector head. It reuses the same DFlash runtime
+    (method="dflash") but has its own architecture (DFlash2DraftModel)
+    and additional config fields for the convolution and selector.
+    """
+    update_dflash(config_dict, pre_trained_config)
+    pre_trained_config["architectures"] = ["DFlash2DraftModel"]
+
+    for key in (
+        "conv_kernel_size",
+        "conv_group_size",
+        "selector_rank",
+        "selector_top_k",
+    ):
+        if config_dict.get(key) is not None:
+            pre_trained_config["dflash_config"][key] = config_dict[key]
+
+
 @register_speculator("dspark")
 def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
     """
