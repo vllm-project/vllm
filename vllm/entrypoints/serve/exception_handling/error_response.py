@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from http import HTTPStatus
 
-from vllm.entrypoints.generate.base.protocol import GenerationError
+from vllm.exceptions import GenerationError
 from vllm.logger import init_logger
 
 from ..engine.protocol import ErrorInfo, ErrorResponse

@@ -4,7 +4,6 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
-from http import HTTPStatus
 from typing import Annotated, Any, Literal, TypeAlias
 
 import regex as re
@@ -19,7 +18,7 @@ import vllm.envs as envs
 from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.exceptions import VLLMServerError, VLLMValidationError
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -339,11 +338,3 @@ class DeltaMessage(OpenAIBaseModel):
         if len(data.get("tool_calls", [])) == 0:
             data.pop("tool_calls", None)
         return data
-
-
-class GenerationError(VLLMServerError):
-    """raised when finish_reason indicates internal server error (500)"""
-
-    def __init__(self, message: str = "Internal server error"):
-        super().__init__(message)
-        self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
