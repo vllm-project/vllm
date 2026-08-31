@@ -64,10 +64,8 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
-    region_strides: list[int] | None = None
     region_num_blocks: list[int] | None = None
     region_group_ids: list[int] | None = None
-    region_block_sizes: list[int] | None = None
     region_names: list[str] | None = None
     dcp_size: int = 1
     pcp_size: int = 1

@@ -170,9 +170,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_by_region = self._block_ids_by_region(
                 meta.remote.block_ids, remote_region_groups
             )
-            remote_by_region = self._split_block_ids_by_region(
-                remote_by_region, self.dst_region_split_ratios[engine_id]
-            )
             read_specs = [
                 ReadSpec(
                     remote_rank=plan.all_source_ranks[0],
