@@ -546,7 +546,6 @@ class SimpleCPUOffloadScheduler:
         if gpu_block_pool is None:
             return [], [], []
         cpu_block_pool = self.cpu_block_pool
-        num_free = cpu_block_pool.get_num_free_blocks()
         kv_cache_groups = self.cpu_kv_cache_config.kv_cache_groups
         num_groups = len(kv_cache_groups)
         # Dedup against blocks already scheduled.
@@ -574,63 +573,9 @@ class SimpleCPUOffloadScheduler:
             if not block_ids_by_group:
                 continue
 
-            # --- Phase 1: Scan blocks, classify as cached vs to-store ---
-            gpu_block_ids: list[int] = []
-            advanced_per_group: list[int] = [0] * num_groups
-            out_of_space = False
-            # Confirmed tokens: KV data written and visible to all streams.
-            req = state.request
-            confirmed_tokens = req.num_computed_tokens - req.num_output_placeholders
-            # Cap to blocks with confirmed KV data.
-            aligned_tokens = confirmed_tokens // self.block_size * self.block_size
-
-            for g in range(num_groups):
-                # FIXME (yifan): handle CPU cache eviction, where
-                # num_stored_blocks can be stale and omit evicted blocks in
-                # the middle of the request.
-                already_stored_g = state.num_stored_blocks[g]
-                group_gpu_ids = block_ids_by_group[g]
-
-                g_block_size = (
-                    kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
-                )
-                ready_blocks_g = aligned_tokens // g_block_size
-                scannable = group_gpu_ids[already_stored_g:ready_blocks_g]
-
-                for gpu_block_id in scannable:
-                    gpu_block = gpu_block_pool.blocks[gpu_block_id]
-                    if gpu_block.is_null:
-                        advanced_per_group[g] += 1
-                        continue
-
-                    bhash_with_group = gpu_block.block_hash
-                    if bhash_with_group is None:
-                        # Masked-out SWA position the coordinator chose not to
-                        # hash; it can never serve a prefix-cache hit, so skip.
-                        advanced_per_group[g] += 1
-                        continue
-
-                    # Skip if already scheduled for store or already cached in CPU.
-                    if (
-                        gpu_block_id in in_flight
-                        or cpu_block_pool.cached_block_hash_to_block.get_one_block(
-                            bhash_with_group
-                        )
-                        is not None
-                    ):
-                        advanced_per_group[g] += 1
-                        continue
-
-                    if num_free <= 0:
-                        out_of_space = True
-                        break
-                    num_free -= 1
-
-                    gpu_block_ids.append(gpu_block_id)
-                    advanced_per_group[g] += 1
-
-                if out_of_space:
-                    break
+            gpu_block_ids, advanced_per_group = self._select_eager_blocks_to_store(
+                state, block_ids_by_group
+            )
 
             # --- Phase 2: Batch allocate CPU blocks ---
             n_to_alloc = len(gpu_block_ids)
@@ -663,6 +608,53 @@ class SimpleCPUOffloadScheduler:
                 state.num_stored_blocks[g] += advanced_per_group[g]
 
         return merged_gpu_block_ids, merged_cpu_block_ids, req_ids
+
+    def _select_eager_blocks_to_store(
+        self,
+        state: StoreRequestState,
+        block_ids_by_group: tuple[list[int], ...],
+    ) -> tuple[list[int], list[int]]:
+        """Return confirmed, uncached eager blocks and per-group cursor advances."""
+        assert self._gpu_block_pool is not None
+        gpu_block_ids: list[int] = []
+        advanced_per_group = [0] * len(self.cpu_kv_cache_config.kv_cache_groups)
+        confirmed_tokens = (
+            state.request.num_computed_tokens - state.request.num_output_placeholders
+        )
+        aligned_tokens = confirmed_tokens // self.block_size * self.block_size
+        num_free = self.cpu_block_pool.get_num_free_blocks()
+
+        for g, group_gpu_ids in enumerate(block_ids_by_group):
+            if len(gpu_block_ids) >= num_free:
+                break
+            # FIXME (yifan): handle CPU cache eviction, where
+            # num_stored_blocks can be stale and omit evicted blocks in
+            # the middle of the request.
+            group_size = (
+                self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
+                * self.cp_world_size
+            )
+            ready = min(len(group_gpu_ids), aligned_tokens // group_size)
+            for gpu_block_id in group_gpu_ids[state.num_stored_blocks[g] : ready]:
+                gpu_block = self._gpu_block_pool.blocks[gpu_block_id]
+                if gpu_block.is_null or gpu_block.block_hash is None:
+                    advanced_per_group[g] += 1
+                    continue
+                if (
+                    gpu_block_id in self._in_flight_store_gpu_blocks
+                    or self.cpu_block_pool.cached_block_hash_to_block.get_one_block(
+                        gpu_block.block_hash
+                    )
+                    is not None
+                ):
+                    advanced_per_group[g] += 1
+                    continue
+                if len(gpu_block_ids) >= num_free:
+                    break
+                gpu_block_ids.append(gpu_block_id)
+                advanced_per_group[g] += 1
+
+        return gpu_block_ids, advanced_per_group
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Handle async transfer completions from worker.
@@ -817,34 +809,7 @@ class SimpleCPUOffloadScheduler:
         gpu_pool = self._gpu_block_pool
         if state is None or gpu_pool is None:
             return
-        confirmed = request.num_computed_tokens - request.num_output_placeholders
-        aligned = confirmed // self.block_size * self.block_size
-        gpu_ids: list[int] = []
-        num_free = self.cpu_block_pool.get_num_free_blocks()
-        for g, group_ids in enumerate(block_ids):
-            if len(gpu_ids) >= num_free:
-                break
-            group_size = (
-                self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
-                * self.cp_world_size
-            )
-            ready = min(len(group_ids), aligned // group_size)
-            for gpu_id in group_ids[state.num_stored_blocks[g] : ready]:
-                if len(gpu_ids) >= num_free:
-                    break
-                gpu_block = gpu_pool.blocks[gpu_id]
-                if gpu_block.is_null or gpu_block.block_hash is None:
-                    continue
-                if gpu_id in self._in_flight_store_gpu_blocks:
-                    continue
-                if (
-                    self.cpu_block_pool.cached_block_hash_to_block.get_one_block(
-                        gpu_block.block_hash
-                    )
-                    is not None
-                ):
-                    continue
-                gpu_ids.append(gpu_id)
+        gpu_ids, _ = self._select_eager_blocks_to_store(state, block_ids)
         if not gpu_ids:
             return
         cpu_blocks = self.cpu_block_pool.get_new_blocks(len(gpu_ids))
