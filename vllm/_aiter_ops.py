@@ -3979,37 +3979,12 @@ class rocm_aiter_ops:
 
     @staticmethod
     @if_aiter_supported
-    def is_blockscale_bpreshuffle_gemm_tuned(n: int, k: int) -> bool:
-        #TODO: Swap this to the proper AITER API for getting the gemm config
-        # rather then snapshot
-        gfx1250_tuned = {
-            (1536,4096),
-            (32768,1024),
-            (4096,2048),
-            (4096,4096),
-            (4096,81920),
-            (8192,1024),
-            (1536, 4096),
-            (1536, 7168),
-            (16384, 1536),
-            (2048, 7168),
-            (32768, 1024),
-            (4096, 2048),
-            (4096, 4096),
-            (4096, 8192),
-            (6144, 7168),
-            (65536, 1536),
-            (7168, 16384),
-            (7168, 3072),
-            (7168, 4096),
-            (7168, 768),
-            (8192, 1024),
-            (8192, 1536),
-        }
-        from vllm.platforms.rocm import on_gfx1250
-        if on_gfx1250():
-            return (n,k) in gfx1250_tuned
-        return False
+    def is_triton_blockscale_bpreshuffle_gemm_tuned(n: int, k: int) -> bool:
+        from aiter.ops.triton.utils.gemm_config_utils import (
+            get_gemm_config,
+        )
+        # Fake M value for now
+        return get_gemm_config("GEMM-A8W8_BLOCKSCALE_PRESHUFFLED", 128, N, K)
 
     @staticmethod
     @functools.cache
