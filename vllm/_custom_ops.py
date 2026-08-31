@@ -174,6 +174,31 @@ def mla_decode_kvcache_cpu(
     torch.ops._C.mla_decode_kvcache(out, query, kv_cache, scale, block_tables, seq_lens)
 
 
+def gather_mla_context_cache_cpu(
+    *,
+    src_cache: torch.Tensor,
+    dst: torch.Tensor,
+    block_table: torch.Tensor,
+    starts: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+) -> None:
+    page_size = src_cache.shape[1]
+    flat_cache = src_cache.view(-1, src_cache.shape[-1])
+    seq_lens = cu_seq_lens[1:] - cu_seq_lens[:-1]
+
+    out_start = 0
+    for req_idx, (start, seq_len) in enumerate(zip(starts.tolist(), seq_lens.tolist())):
+        if seq_len <= 0:
+            continue
+        positions = torch.arange(start, start + seq_len, device=block_table.device)
+        block_ids = block_table[req_idx, positions // page_size].to(torch.long)
+        offsets = positions % page_size
+        slots = block_ids * page_size + offsets
+        out_end = out_start + seq_len
+        dst[out_start:out_end].copy_(flat_cache[slots])
+        out_start = out_end
+
+
 # merge attn states ops
 def merge_attn_states(
     output: torch.Tensor,
@@ -2792,6 +2817,7 @@ def fused_gdn_decode_post_conv_mtp(
     out: torch.Tensor | None = None,
     scale: float = 128**-0.5,
     norm_eps: float = 1e-5,
+    output_gate_activation: str = "silu",
 ) -> torch.Tensor:
     if out is None:
         out = torch.empty_like(output_gate)
@@ -2810,6 +2836,7 @@ def fused_gdn_decode_post_conv_mtp(
         out,
         scale,
         norm_eps,
+        output_gate_activation,
     )
     return out
 
