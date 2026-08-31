@@ -877,6 +877,111 @@ def test_reload_weights_before_load_model(model_runner):
         model_runner.reload_weights()
 
 
+def test_reload_weights_checkpoint_format_preflights_before_any_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A model exposing `preflight_reload_weights` must be preflighted right
+    after `get_model()`, before the disk iterator is built, model_config is
+    repointed, or `initialize_layerwise_reload` moves params to meta."""
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.lora_config = None
+    runner.model_config = SimpleNamespace(
+        model="original/model", revision="orig-rev", quantization=None
+    )
+    runner.load_config = SimpleNamespace(load_format="auto")
+
+    model = Mock(spec=["named_parameters", "preflight_reload_weights", "load_weights"])
+    model.named_parameters.return_value = iter([("w", torch.zeros(1))])
+    model.preflight_reload_weights.side_effect = RuntimeError(
+        "PLE mmap: table already attached"
+    )
+    model.load_weights.return_value = set()
+    runner.get_model = Mock(return_value=model)
+
+    get_all_weights_calls = []
+
+    def _get_all_weights(model_config, model_arg):
+        get_all_weights_calls.append((model_config.model, model_config.revision))
+        return iter([])
+
+    mock_loader = Mock(spec=["get_all_weights"])
+    mock_loader.get_all_weights.side_effect = _get_all_weights
+    monkeypatch.setattr(
+        gpu_model_runner_module, "get_model_loader", lambda load_config: mock_loader
+    )
+    init_layerwise_calls = []
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "initialize_layerwise_reload",
+        lambda m: init_layerwise_calls.append(m),
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "finalize_layerwise_reload",
+        lambda m, model_config: None,
+    )
+
+    with pytest.raises(RuntimeError, match="PLE mmap"):
+        runner.reload_weights(weights_path="new/model/path")
+
+    model.preflight_reload_weights.assert_called_once()
+    model.named_parameters.assert_not_called()
+    model.load_weights.assert_not_called()
+    assert get_all_weights_calls == []
+    assert init_layerwise_calls == []
+    # model_config must not have been repointed at the new path/revision.
+    assert runner.model_config.model == "original/model"
+    assert runner.model_config.revision == "orig-rev"
+
+
+def test_reload_weights_kernel_format_preflights_before_first_parameter_copy(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Kernel-format reload bypasses `model.load_weights` and copies
+    parameters directly; preflight must still run before the iterator is
+    advanced or any parameter is copied."""
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.lora_config = None
+    runner.model_config = SimpleNamespace(
+        model="orig", revision=None, quantization=None
+    )
+
+    model = Mock(spec=["named_parameters", "preflight_reload_weights"])
+    model.named_parameters.return_value = iter([("w", torch.zeros(1))])
+    model.preflight_reload_weights.side_effect = RuntimeError(
+        "PLE mmap: table already attached"
+    )
+    runner.get_model = Mock(return_value=model)
+
+    advanced = []
+
+    def _weights_iterator():
+        advanced.append(True)
+        yield ("w", torch.zeros(1))
+
+    get_parameter_calls = []
+
+    def _get_parameter_for_reload(m, name):
+        get_parameter_calls.append(name)
+        return Mock()
+
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "_get_parameter_for_reload",
+        _get_parameter_for_reload,
+    )
+
+    with pytest.raises(RuntimeError, match="PLE mmap"):
+        runner.reload_weights(
+            weights_iterator=_weights_iterator(), is_checkpoint_format=False
+        )
+
+    model.preflight_reload_weights.assert_called_once()
+    model.named_parameters.assert_not_called()
+    assert advanced == []
+    assert get_parameter_calls == []
+
+
 def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
     runner = object.__new__(GPUModelRunner)
     runner.use_async_scheduling = False

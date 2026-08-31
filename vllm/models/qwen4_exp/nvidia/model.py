@@ -142,6 +142,13 @@ _QWEN4_EXP_IGNORED_MISSING_SUFFIXES = [
     "_input_scale",
 ]
 
+
+def _preflight_ple_mmap_reload() -> None:
+    """Reject reloads after any PLE mmap table is attached."""
+    if ple_mmap.enabled():
+        ple_mmap.preflight_reload_check(get_current_vllm_config().compilation_config)
+
+
 # The checkpoint keeps down and injection projections separate; runtime packs
 # them into adjacent logical shards of one MergedColumnParallelLinear.
 _HC_WEIGHTS_MAPPER = WeightsMapper(
@@ -840,6 +847,10 @@ class Qwen4ExpForCausalLM(
             ple_mmap.build_tables(self.model_config, compilation_config)
         return loaded
 
+    def preflight_reload_weights(self) -> None:
+        """Reject a reload before any model state mutates."""
+        _preflight_ple_mmap_reload()
+
 
 class Qwen4ExpProcessingInfo(Qwen3VLProcessingInfo):
     def get_hf_config(self) -> Qwen4ExpConfig:
@@ -1045,6 +1056,10 @@ class Qwen4ExpForConditionalGeneration(
         if compilation_config is not None:
             ple_mmap.build_tables(self.model_config, compilation_config)
         return loaded
+
+    def preflight_reload_weights(self) -> None:
+        """Reject a reload before any model state mutates."""
+        _preflight_ple_mmap_reload()
 
     @classmethod
     def get_mamba_state_dtype_from_config(

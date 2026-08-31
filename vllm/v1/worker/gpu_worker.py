@@ -87,7 +87,10 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import (
+    is_residual_scattered_for_sp,
+    maybe_preflight_reload_weights,
+)
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -1357,6 +1360,10 @@ class Worker(WorkerBase):
             )
 
         try:
+            # Guard the exact base or draft target before starting the engine.
+            target_model = self.get_draft_model() if is_draft else self.get_model()
+            if target_model is not None:
+                maybe_preflight_reload_weights(target_model)
             if is_draft:
                 self._set_draft_weight_update_target()
             self.weight_transfer_engine.start_weight_update()

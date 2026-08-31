@@ -3677,6 +3677,80 @@ def test_model_load_weights_preflight_and_build_tables_share_one_captured_config
     assert preflight_calls[0] is build_table_calls[0][1]  # same captured object
 
 
+# --------------------------------------------------------------------------- #
+# Top-level wrapper reload preflight capability.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "cls_name", ["Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"]
+)
+def test_preflight_reload_weights_delegates_to_ple_mmap_preflight_reload_check(
+    monkeypatch: pytest.MonkeyPatch, cls_name: str
+) -> None:
+    monkeypatch.setenv("VLLM_PLE_MMAP", "1")
+    preflight_calls: list[object] = []
+    monkeypatch.setattr(
+        ple_mmap, "preflight_reload_check", lambda cc: preflight_calls.append(cc)
+    )
+
+    cls = getattr(model_module, cls_name)
+    assert callable(getattr(cls, "preflight_reload_weights", None))
+
+    cc = SimpleNamespace(static_forward_context={})
+    vllm_config = SimpleNamespace(compilation_config=cc)
+    stub_self = SimpleNamespace()
+
+    with set_current_vllm_config(vllm_config):
+        cls.preflight_reload_weights(stub_self)
+
+    assert preflight_calls == [cc]
+
+
+@pytest.mark.parametrize(
+    "cls_name", ["Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"]
+)
+def test_preflight_reload_weights_is_a_noop_when_mmap_disabled(cls_name: str) -> None:
+    """When mmap is off (the default), the hook must not touch
+    `get_current_vllm_config()` or `ple_mmap.preflight_reload_check` at all --
+    it must be safe for a generic caller to invoke unconditionally without
+    knowing whether mmap is enabled or a compilation_config is even set up."""
+    assert ple_mmap.enabled() is False
+    cls = getattr(model_module, cls_name)
+    stub_self = SimpleNamespace()
+
+    cls.preflight_reload_weights(stub_self)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "cls_name", ["Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"]
+)
+def test_preflight_reload_weights_rejects_an_already_attached_table(
+    monkeypatch: pytest.MonkeyPatch, cls_name: str, tmp_path: Path
+) -> None:
+    """End-to-end, against the real (unmocked) `preflight_reload_check`: a
+    model whose PLE layer already has a table attached must reject through
+    this new capability hook exactly like the `load_weights` guard does."""
+    monkeypatch.setenv("VLLM_PLE_MMAP", "1")
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=8, parts=2, cols=2, scale=0.25)
+    embedding = _attached_embedding(
+        tmp_path, layer_idx=0, vocab=8, parts=2, cols=2, scale=0.25
+    )
+
+    cls = getattr(model_module, cls_name)
+    stub_self = SimpleNamespace()
+    cc = SimpleNamespace(
+        static_forward_context={"a.ple": _fake_ple_layer(0, embedding, 2)}
+    )
+    vllm_config = SimpleNamespace(compilation_config=cc)
+
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(RuntimeError, match="already has a table attached"),
+    ):
+        cls.preflight_reload_weights(stub_self)
+
+
 def test_preflight_reload_check_ignores_layers_without_a_ple_embedding() -> None:
     cc = SimpleNamespace(static_forward_context={"a": SimpleNamespace(layer_idx=0)})
     ple_mmap.preflight_reload_check(cc)  # must not raise

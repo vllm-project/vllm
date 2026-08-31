@@ -61,6 +61,23 @@ class _RecordingModelRunner:
     def reset_lora_state(self) -> None:
         self.reset_lora_calls += 1
 
+    def get_model(self) -> object:
+        return object()
+
+    def get_draft_model(self) -> object | None:
+        return None
+
+
+class _RaisingPreflightModel:
+    """Stand-in for a model exposing the optional preflight capability."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def preflight_reload_weights(self) -> None:
+        self.calls += 1
+        raise RuntimeError("PLE mmap: table already attached")
+
 
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker = object.__new__(Worker)
@@ -168,6 +185,47 @@ def test_finish_draft_session_keeps_lora_state():
     Worker.finish_weight_update(worker)
 
     assert worker.model_runner.reset_lora_calls == 0
+
+
+def test_start_weight_update_preflights_base_model_before_engine_start():
+    """A base model exposing `preflight_reload_weights` must be preflighted
+    before the engine starts; a rejection must never start the engine or
+    mark the session active, and must still run existing cleanup."""
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    model = _RaisingPreflightModel()
+    worker.get_model = lambda: model  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="PLE mmap"):
+        Worker.start_weight_update(worker)
+
+    assert model.calls == 1
+    assert engine.started is False
+    assert engine.reset_count == 1
+    assert worker._weight_update_active is False
+
+
+def test_start_draft_weight_update_preflights_draft_model_before_target_set():
+    """A draft model exposing `preflight_reload_weights` must be preflighted
+    before the draft target is set or the engine starts; a rejection must
+    never mutate the engine's target or mark the session active, and must
+    still run existing cleanup."""
+    engine = _RecordingEngine()
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+    draft_model = _RaisingPreflightModel()
+    worker.get_draft_model = lambda: draft_model  # type: ignore[method-assign]
+    target_set_calls = []
+    worker._set_draft_weight_update_target = lambda: target_set_calls.append(True)
+
+    with pytest.raises(RuntimeError, match="PLE mmap"):
+        Worker.start_draft_weight_update(worker)
+
+    assert draft_model.calls == 1
+    assert target_set_calls == []
+    assert engine.started is False
+    assert engine.reset_count == 1
+    assert worker._weight_update_active is False
 
 
 def test_double_start_raises():

@@ -42,6 +42,13 @@ from vllm.v1.worker.block_table import get_block_table_width
 logger = init_logger(__name__)
 
 
+def maybe_preflight_reload_weights(model: torch.nn.Module) -> None:
+    """Run the model's optional pre-mutation reload guard."""
+    preflight_reload_weights = getattr(model, "preflight_reload_weights", None)
+    if callable(preflight_reload_weights):
+        preflight_reload_weights()
+
+
 def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
     if not any(num_nans_in_logits.values()):
         return

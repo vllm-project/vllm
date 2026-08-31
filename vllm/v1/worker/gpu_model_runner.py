@@ -235,6 +235,7 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
     is_residual_scattered_for_sp,
+    maybe_preflight_reload_weights,
     raise_if_nan_logits,
 )
 from vllm.v1.worker.workspace import lock_workspace
@@ -5622,6 +5623,8 @@ class GPUModelRunner(
             )
 
         model = self.get_model()
+        # Reject unsupported reloads before inspecting or mutating model state.
+        maybe_preflight_reload_weights(model)
         weights_to_load = {
             name.replace(".base_layer.", ".") if self.lora_config else name
             for name, _ in model.named_parameters()
