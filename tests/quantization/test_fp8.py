@@ -32,8 +32,8 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
-from vllm.model_executor.layers.quantization.utils import flashinfer_utils
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.model_executor.layers.quantization.utils import flashinfer_moe
+from vllm.model_executor.layers.quantization.utils.flashinfer_moe import (
     prepare_fp8_moe_layer_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
