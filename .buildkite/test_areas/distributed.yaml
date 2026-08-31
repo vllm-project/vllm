@@ -6,6 +6,7 @@ steps:
   key: distributed-comm-ops
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed
@@ -19,6 +20,7 @@ steps:
 
 - label: ":nvidia: (L4) Sharded RDT Weight Transfer"
   key: sharded-rdt-weight-transfer
+  device: l4
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_devices: 1
@@ -36,6 +38,7 @@ steps:
   key: distributed-dp-tests-2-gpus
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/
@@ -78,6 +81,7 @@ steps:
   key: distributed-compile-rpc-tests-2-gpus
   timeout_in_minutes: 65
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/compilation/
@@ -100,6 +104,7 @@ steps:
   key: distributed-torchrun-shutdown-tests-2-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/
@@ -124,6 +129,7 @@ steps:
   key: distributed-torchrun-examples-4-gpus
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -166,6 +172,7 @@ steps:
   key: distributed-dp-tests-4-gpus
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -189,6 +196,7 @@ steps:
   key: distributed-compile-comm-4-gpus
   timeout_in_minutes: 70
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -307,6 +315,7 @@ steps:
   key: pipeline-context-parallelism-4-gpus
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -323,6 +332,7 @@ steps:
   key: rayexecutorv2-4-gpus
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/v1/executor/ray_executor_v2.py
