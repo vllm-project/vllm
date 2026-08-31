@@ -30,6 +30,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -93,6 +94,8 @@ class GroupOffloadConfig(NamedTuple):
     # None below means full attention
     sliding_window_size_in_chunks: int | None
     kv_cache_spec: KVCacheSpec
+    # Cached manager class for this group's KV cache spec, resolved at init time
+    manager_cls: type[SingleTypeKVCacheManager]
     # Partial-tail data for this group comes from the scheduler's CoW hand-off
     # rather than the request block table.
     requires_cow_source: bool = False
@@ -221,6 +224,10 @@ class SchedulerOffloadConfig(NamedTuple):
             sw = get_sliding_window_size_in_chunks(
                 kv_spec, tokens_per_block * spec.blocks_per_chunk
             )
+            manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
+            assert manager_cls is not None, (
+                f"No manager found for KV cache spec {type(kv_spec).__name__}"
+            )
             kv_group_configs_list.append(
                 GroupOffloadConfig(
                     group_idx=idx,
@@ -232,6 +239,7 @@ class SchedulerOffloadConfig(NamedTuple):
                     ),
                     sliding_window_size_in_chunks=sw,
                     kv_cache_spec=kv_spec,
+                    manager_cls=manager_cls,
                     kv_event_group_spec=get_offloading_event_group_spec(kv_cache_group),
                     is_eagle_group=idx in eagle_groups,
                     requires_cow_source=(
@@ -1302,11 +1310,7 @@ class OffloadingConnectorScheduler:
                 # (SWA/Mamba sparsity + retention interval).
                 # reachable_block_mask operates in KV-block coordinates,
                 # so convert chunk indices to block indices.
-                manager_cls = KVCacheSpecRegistry.get_manager_class(
-                    group_config.kv_cache_spec
-                )
-                assert manager_cls is not None
-                block_mask = manager_cls.reachable_block_mask(
+                block_mask = group_config.manager_cls.reachable_block_mask(
                     start_block=start_chunk_idx * blocks_per_chunk,
                     end_block=num_chunks * blocks_per_chunk,
                     alignment_tokens=self.config.alignment_tokens,
