@@ -13,7 +13,7 @@ from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from vllm import envs
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger

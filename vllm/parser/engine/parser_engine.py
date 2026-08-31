@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import regex as re
 
 from vllm.entrypoints.chat_utils import get_tool_call_id_type, make_tool_call_id
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,

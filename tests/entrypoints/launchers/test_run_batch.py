@@ -21,7 +21,7 @@ from vllm.entrypoints.launchers.run_batch import (
     make_transcription_wrapper,
     upload_data,
 )
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.mem_constants import MiB_bytes
 
