@@ -46,28 +46,3 @@ The actual tensor bytes are **offloaded** from the ZMQ hot path, eliminating ser
 1. Call `open_read(uuid_or_token)` to acquire a read lock and obtain block information. If the item is still being written, the call may wait (with timeout).
 2. Read the data from SHM into CPU or GPU memory.
 3. **Note**: The read lock is **not** released immediately after reading. Instead, the release of the read token (via `close_read`) is deferred to the `PagedShmTensorTracker`, which is invoked when the request is freed (e.g., after generation completes). This design avoids synchronizing the GPU stream, since the H2D transfer may still be in flight when `read()` returns. The tracker ensures the token is destroyed only after all workers have finished using the data.
-
-## Integration with Multimodal Tensor IPC
-
-The `PagedShmTensorIPC` class wraps the client to automatically handle large tensors in `mm_inputs` during request processing.
-
-- **`write()`**: Scans `mm_inputs` for tensors larger than `block_size`, batches `open_write` requests, submits asynchronous copies to SHM, and replaces the original tensor with a `PagedShmTensor` metadata object (containing the read token, shape, dtype, and block list). The metadata is small enough to be sent via ZMQ.
-- **`read()`**: On the worker side, extracts `PagedShmTensor` from the received metadata, waits for the write to complete (with timeout), reads the tensor data from SHM to the target device, and reconstructs the full tensor. It **does not** call `close_read`; the token is left active. The actual cleanup is handled later by `PagedShmTensorTracker.free_request()`.
-- **`PagedShmTensorTracker`**: A companion class that lives in the EncoderCacheManager. When a request finishes, free_request(request) iterates over its multimodal features and releases each SHM read token via close_read.
-
-This design ensures that only the metadata traverses the ZMQ path, while the heavy tensor data stays in SHM, drastically reducing latency and CPU overhead under load.
-
-## Thread Safety & Performance
-
-- The server uses a ZMQ ROUTER socket and handles concurrent requests; clients use a pool of REQ sockets for thread‑safe access.
-- Asynchronous writes overlap SHM copy with ZMQ round‑trip, further hiding latency.
-- LRU eviction on the server keeps memory usage bounded; frequently accessed items remain cached.
-
-## Configuration
-
-Key parameters:
-
-- `paged_shm_size`: Total size of the SHM pool (in bytes).
-- `paged_shm_block_size`: Page size (default 1MB). Must be large enough to amortize H2D transfer overhead.
-
-The server is started automatically when the `ModelConfig` indicates SHM is enabled.

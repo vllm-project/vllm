@@ -984,7 +984,7 @@ def _zmq_server(
 
             payload = payloads[0].decode() if payloads else ""
             try:
-                result = handler(payload, identity)
+                result: str | None = handler(payload, identity)
                 if result is not None:
                     server._send_response(socket, identity, OK, result)
                 # else: handler returned None (e.g., deferred request)

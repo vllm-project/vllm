@@ -11,7 +11,7 @@ import torch
 
 from vllm.multimodal.paged_shm.client import PagedShmClient
 from vllm.multimodal.paged_shm.server import PagedShmServerProc
-from vllm.multimodal.paged_shm.types import ShmWriteRequest
+from vllm.multimodal.paged_shm.types import ShmWriteRequest, ShmAllocation
 from vllm.utils import random_uuid
 
 # ---------------------------------------------------------------------------
@@ -1619,8 +1619,8 @@ class TestOpenWriteOrRead:
         assert elapsed < 0.1, "Should return immediately"
 
         assert len(allocs) == 2
-        pending_alloc = None
-        new_alloc = None
+        pending_alloc: ShmAllocation | None = None
+        new_alloc: ShmAllocation | None = None
         for alloc in allocs:
             if alloc.uuid == writing_uuid:
                 assert not alloc.is_new
@@ -1633,6 +1633,9 @@ class TestOpenWriteOrRead:
                 assert alloc.blocks
                 assert alloc.read_token is not None
                 new_alloc = alloc
+
+        assert pending_alloc is not None
+        assert new_alloc is not None
 
         # Write data to the new item and commit
         new_data = b"new".ljust(50, b"\x00")
@@ -1797,85 +1800,3 @@ class TestOpenWriteOrRead:
         finally:
             client.delete(filler_uuid)
             client.delete(existing_uuid)
-
-
-# ---------------------------------------------------------------------------
-# WriteOrReadContext tests
-# ---------------------------------------------------------------------------
-
-
-class TestWriteOrReadContext:
-    def test_context_new_items(self, client):
-        uuids = [_unique_uuid() for _ in range(2)]
-        items = [
-            ShmWriteRequest(uuid=u, size=100, use_cache=True, generate_read_token=True)
-            for u in uuids
-        ]
-        state_before = client.get_manager_states()
-
-        with client.write_or_read_context(items) as ctx:
-            for alloc in ctx.allocations:
-                data = b"data".ljust(100, b"\x00")
-                client._storage.write(data, alloc.blocks)
-
-        for alloc in ctx.allocations:
-            client.close_read(alloc.read_token)
-
-        state_after = client.get_manager_states()
-        assert (
-            state_after["cached_items_count"] == state_before["cached_items_count"] + 2
-        )
-
-        for u in uuids:
-            result = client.read(u)
-            assert result.tobytes().startswith(b"data")
-
-        for alloc in ctx.allocations:
-            client.delete(alloc.uuid)
-
-    def test_context_mixed_new_and_existing(self, client):
-        existing_uuid = _unique_uuid()
-        new_uuid = _unique_uuid()
-        client.write(existing_uuid, b"existing")
-
-        items = [
-            ShmWriteRequest(
-                uuid=existing_uuid, size=10, use_cache=True, generate_read_token=True
-            ),
-            ShmWriteRequest(
-                uuid=new_uuid, size=50, use_cache=True, generate_read_token=True
-            ),
-        ]
-        with client.write_or_read_context(items) as ctx:
-            new_alloc = [a for a in ctx.allocations if a.is_new][0]
-            data = b"newdata".ljust(50, b"\x00")
-            client._storage.write(data, new_alloc.blocks)
-
-        existing_alloc = [a for a in ctx.allocations if not a.is_new][0]
-        client.close_read(existing_alloc.read_token)
-
-        result = client.read(new_uuid)
-        assert result.tobytes().startswith(b"newdata")
-        client.close_read(new_alloc.read_token)
-        client.delete(new_uuid)
-        client.delete(existing_uuid)
-
-    def test_context_rollback_on_error(self, client):
-        uuids = [_unique_uuid() for _ in range(2)]
-        items = [ShmWriteRequest(uuid=u, size=100, use_cache=True) for u in uuids]
-        state_before = client.get_manager_states()
-
-        class TestException(Exception):
-            pass
-
-        with pytest.raises(TestException):  # noqa: SIM117
-            with client.write_or_read_context(items) as ctx:
-                for alloc in ctx.allocations:
-                    client._storage.write(b"data".ljust(100, b"\x00"), alloc.blocks)
-                raise TestException("rollback")
-
-        state_after = client.get_manager_states()
-        assert state_after["cached_items_count"] == state_before["cached_items_count"]
-        for u in uuids:
-            with pytest.raises(RuntimeError, match="Server error"):
-                client.read(u)

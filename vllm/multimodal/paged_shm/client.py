@@ -289,60 +289,6 @@ class _ReadContext:
             self._client.close_read(self._token_for_close)
 
 
-class _WriteOrReadContext:
-    """
-    Context manager for atomic write‑or‑read operations.
-
-    On enter, it calls `client.open_write_or_read()` with the given items.
-    The returned `ShmAllocation` list is stored and can be accessed via the
-    `allocations` attribute.  On exit, it automatically finalises any newly
-    created items via `close_write` (if successful) or deletes them on error.
-    Existing items that were opened for reading are **not** closed on exit
-    (the client is expected to manage those references separately, e.g., via
-    `close_read` on the tokens).  The `is_new` field in each allocation is used
-    to distinguish newly allocated items from existing ones.
-
-    This context manager is safe for mixed batches of new and existing items.
-    """
-
-    def __init__(
-        self,
-        client: "PagedShmClient",
-        items: list[ShmWriteRequest],
-        timeout: float = 0.0,
-    ):
-        self._client = client
-        self._items = items
-        self._timeout = timeout
-        self.allocations: list[ShmAllocation] = []
-
-    def __enter__(self) -> "_WriteOrReadContext":
-        self.allocations = self._client.open_write_or_read(
-            self._items, timeout=self._timeout
-        )
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type is None:
-            # Commit only newly allocated items
-            for alloc in self.allocations:
-                if alloc.is_new:
-                    try:
-                        self._client.close_write(alloc.uuid)
-                    except Exception as e:
-                        logger.error(
-                            "Failed to close_write for uuid %s: %s", alloc.uuid, e
-                        )
-        else:
-            # Rollback: delete only newly allocated items
-            for alloc in self.allocations:
-                if alloc.is_new:
-                    try:
-                        self._client.delete(alloc.uuid)
-                    except Exception as e:
-                        logger.error("Failed to rollback uuid %s: %s", alloc.uuid, e)
-
-
 # ---------------------------------------------------------------------------
 # Public client class
 # ---------------------------------------------------------------------------
@@ -619,24 +565,6 @@ class PagedShmClient(PagedShmClientWithoutStorage):
         For now, consider it a feature, not a bug.
         """
         return _ReadContext(self, uuid_or_token, size, blocks, timeout)
-
-    def write_or_read_context(
-        self, items: list[ShmWriteRequest], timeout: float = 0.0
-    ) -> _WriteOrReadContext:
-        """
-        Create a context manager for an atomic write‑or‑read operation.
-
-        This is a convenience wrapper around `open_write_or_read`.  On enter,
-        it calls the server and stores the resulting allocations.  On exit,
-        it commits (close_write) only those items that were newly allocated
-        (as indicated by the `is_new` field), and rolls them back on error.
-        Existing items that were opened for reading are left untouched and
-        must be closed manually via `close_read` on their tokens.
-
-        This context manager works correctly for mixed batches of new and
-        existing items.
-        """
-        return _WriteOrReadContext(self, items, timeout)
 
     # ------------------------------------------------------------------
     # High‑level convenience methods
