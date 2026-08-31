@@ -125,7 +125,7 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
             }
         }
 
-        if is_user_like_entry(message)
+        if (is_user_like_entry(message) || matches!(message, ChatMessage::System { .. }))
             && next_rendered_entry_is_assistant_or_end(request.messages.as_slice(), message_index)
         {
             write_assistant_transition(
@@ -427,7 +427,7 @@ fn write_tool_result(out: &mut String, content: &ChatContent) -> Result<()> {
     Ok(())
 }
 
-/// Append the assistant transition token after a user-like turn.
+/// Append the assistant transition token after a user-like or system turn.
 fn write_assistant_transition(
     out: &mut String,
     thinking_mode: ThinkingMode,

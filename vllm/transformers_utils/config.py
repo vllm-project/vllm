@@ -71,10 +71,8 @@ class LazyConfigDict(dict):
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
-    arctic="ArcticConfig",
     axk1="AXK1Config",
     bagel="BagelConfig",
-    umm="CheersConfig",
     chatglm="ChatGLMConfig",
     modernvbert="ColModernVBertConfig",
     colpali="ColPaliConfig",
@@ -89,14 +87,11 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_v4="DeepseekV4Config",
     dots3_note="Dots3NoteConfig",
     k3_dspark="K3DSparkConfig",
-    flex_olmo="FlexOlmoConfig",
-    fireredlid="FireRedLIDConfig",
     funaudiochat="FunAudioChatConfig",
     granite4_vision="Granite4VisionConfig",
     hyperclovax="HyperCLOVAXConfig",
-    hyperclovax_vlm="HCXVisionConfig",
-    hunyuan_vl="HunYuanVLConfig",
     hy_v3="HYV3Config",
+    hy_v4="HYV4Config",
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
@@ -130,6 +125,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
+    qwen4_exp="Qwen4ExpConfig",
+    qwen4_exp_text="Qwen4ExpTextConfig",
     qwen3_5="Qwen3_5Config",
     qwen3_5_text="Qwen3_5TextConfig",
     qwen3_5_moe="Qwen3_5MoeConfig",
@@ -673,8 +670,14 @@ def maybe_override_with_speculators(
     speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
         config_dict=config_dict
     )
+    speculators_method = speculative_config["method"]
 
-    # Set the draft model to the speculators model
+    # Apply user --speculative-config overrides (e.g. attention_backend).
+    if isinstance(vllm_speculative_config, dict):
+        speculative_config.update(vllm_speculative_config)
+
+    # Lock fields dictated by the speculators format
+    speculative_config["method"] = speculators_method
     speculative_config["model"] = model
 
     # Override model and tokenizer with the verifier model from config
