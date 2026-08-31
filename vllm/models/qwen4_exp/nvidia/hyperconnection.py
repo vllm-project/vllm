@@ -28,6 +28,7 @@ from torch import nn
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
@@ -42,6 +43,7 @@ from .ops.hc import (
     hc_gate_mix,
     hc_silu,
 )
+from .ops.hc_silu_up_gate_mix import HCSiluUpGateMixOp, hc_silu_up_gate_mix
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +125,30 @@ class GatedResidual(nn.Module):
             prefix=maybe_prefix(prefix, "input_mix_weight_up"),
             return_bias=False,
         )
+        self.use_fused_hc_up = (
+            config.hc_count == 4
+            and config.hidden_size == 2560
+            and config.hc_lowrank == 320
+            and type(self.input_mix_weight_up.quant_method) is UnquantizedLinearMethod
+            and HCSiluUpGateMixOp.is_supported(config.params_dtype)
+        )
+        if self.use_fused_hc_up:
+            HCSiluUpGateMixOp.initialize()
+
+    def _up_and_gate_mix(
+        self,
+        lora: torch.Tensor,
+        xn: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.use_fused_hc_up:
+            return hc_silu_up_gate_mix(
+                lora,
+                self.input_mix_weight_up.weight,
+                xn,
+            )
+        lora = hc_silu(lora, self.hc_count)
+        gate = self.input_mix_weight_up(lora)
+        return hc_gate_mix(xn, gate, self.hc_count)
 
     def mix(
         self, hidden_states: torch.Tensor
@@ -143,9 +169,7 @@ class GatedResidual(nn.Module):
             lora = self.input_mix_weight_down(xn)
             injection = None
 
-        lora = hc_silu(lora, self.hc_count)
-        gate = self.input_mix_weight_up(lora)  # [M, D]
-        block_input = hc_gate_mix(xn, gate, self.hc_count)
+        block_input = self._up_and_gate_mix(lora, xn)
 
         return hidden_states, block_input, injection
 
@@ -179,9 +203,7 @@ class GatedResidual(nn.Module):
             lora = self.input_mix_weight_down(xn)
             injection = None
 
-        lora = hc_silu(lora, self.hc_count)
-        gate = self.input_mix_weight_up(lora)  # [M, D]
-        block_input = hc_gate_mix(xn, gate, self.hc_count)
+        block_input = self._up_and_gate_mix(lora, xn)
 
         return hidden_states, block_input, injection
 

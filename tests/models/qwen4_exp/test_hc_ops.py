@@ -9,6 +9,11 @@ from vllm.models.qwen4_exp.nvidia.ops.hc import (
     hc_combine,
     hc_combine_norm,
     hc_gate_mix,
+    hc_silu,
+)
+from vllm.models.qwen4_exp.nvidia.ops.hc_silu_up_gate_mix import (
+    HCSiluUpGateMixOp,
+    hc_silu_up_gate_mix,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -50,6 +55,30 @@ def test_hc_gate_mix() -> None:
     ).mean(-2)
 
     torch.testing.assert_close(actual, expected.to(torch.bfloat16))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability((9, 0)),
+    reason="fused HC up-projection requires SM90",
+)
+@pytest.mark.parametrize("num_tokens", [1, 2])
+def test_hc_silu_up_gate_mix(num_tokens: int) -> None:
+    if not HCSiluUpGateMixOp.is_supported(torch.bfloat16):
+        pytest.skip("CuTeDSL is not available")
+
+    torch.manual_seed(0)
+    # The model obtains lora by splitting the padded down projection.
+    lora_storage = torch.randn(num_tokens, 336, dtype=torch.bfloat16, device="cuda")
+    lora = lora_storage[:, :320]
+    weight = torch.randn(HYPER_HIDDEN_SIZE, 320, dtype=torch.bfloat16, device="cuda")
+    weight /= 320**0.5
+    x = torch.randn(num_tokens, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+
+    actual = hc_silu_up_gate_mix(lora, weight, x)
+    gate = torch.nn.functional.linear(hc_silu(lora, HC), weight)
+    expected = hc_gate_mix(x, gate, HC)
+
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-3)
 
 
 def test_hc_combine() -> None:
