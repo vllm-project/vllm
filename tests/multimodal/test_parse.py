@@ -55,13 +55,14 @@ def test_frame_size_hwc_chw(frame):
     assert items.get_frame_size(0) == (W, H)
 
 
-def test_video_with_metadata_cpu_tensor_to_numpy():
-    """CPU tensor frames keep the existing conversion to numpy."""
+def test_video_with_metadata_tensor_passthrough():
+    """Tensor frames pass through unchanged regardless of device: HF video
+    processors accept tensors, and device-resident frames (e.g. NVDEC-decoded)
+    must not be copied back to host."""
     frames = torch.zeros((4, H, W, 3), dtype=torch.uint8)
     video, metadata = MultiModalDataParser()._get_video_with_metadata(frames)
 
-    assert isinstance(video, np.ndarray)
-    np.testing.assert_array_equal(video, frames.numpy())
+    assert video is frames
     assert metadata is None
 
 

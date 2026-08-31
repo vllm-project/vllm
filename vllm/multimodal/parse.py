@@ -36,6 +36,7 @@ from .inputs import (
     VideoItem,
 )
 from .media import MediaWithBytes
+from .video import DecodedFrames
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
@@ -648,10 +649,7 @@ class MultiModalDataParser:
     def _get_video_with_metadata(
         self,
         video: VideoItem,
-    ) -> tuple[
-        np.ndarray | torch.Tensor | MediaWithBytes[np.ndarray | torch.Tensor],
-        dict[str, Any] | None,
-    ]:
+    ) -> tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any] | None]:
         if isinstance(video, MediaWithBytes):
             new_video, metadata = self._get_video_with_metadata(video.media)
             return MediaWithBytes(new_video, video.original_bytes), metadata
@@ -659,14 +657,11 @@ class MultiModalDataParser:
             return video
         if isinstance(video, list):
             return np.array(video), None
-        if isinstance(video, np.ndarray):
+        if isinstance(video, (np.ndarray, torch.Tensor)):
+            # Tensors pass through untouched: HF video processors accept them
+            # directly, and device tensors (e.g. NVDEC-decoded frames) must
+            # stay on-device to avoid a D2H round-trip.
             return video, None
-        if isinstance(video, torch.Tensor):
-            # Device tensors (e.g. NVDEC-decoded frames) stay on-device so a
-            # device-side HF processor can consume them without a D2H copy.
-            if video.device.type != "cpu":
-                return video, None
-            return video.numpy(), None
 
         assert_never(video)
 
@@ -760,13 +755,9 @@ class MultiModalDataParser:
             data_items = data  # type: ignore[assignment]
 
         new_videos = list[
-            np.ndarray
-            | torch.Tensor
-            | MediaWithBytes[np.ndarray | torch.Tensor]
-            | tuple[
-                np.ndarray | torch.Tensor | MediaWithBytes[np.ndarray | torch.Tensor],
-                dict[str, Any],
-            ]
+            DecodedFrames
+            | MediaWithBytes[DecodedFrames]
+            | tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any]]
         ]()
         metadata_lst: list[dict[str, Any] | None] = []
         for data_item in data_items:

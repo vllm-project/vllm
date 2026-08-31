@@ -3,7 +3,7 @@
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -16,15 +16,11 @@ from vllm.logger import init_logger
 from vllm.utils.serial_utils import tensor2base64
 from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
 
-from ..video import VIDEO_LOADER_REGISTRY
+from ..video import VIDEO_LOADER_REGISTRY, DecodedFrames
 from .base import MediaIO, MediaWithBytes
 from .image import MAGIC_NUMPY_PREFIX, ImageMediaIO
 
 logger = init_logger(__name__)
-
-# Decoded frames are numpy on CPU backends, or a CUDA torch.Tensor when the
-# torchcodec backend decodes on-device (device="cuda").
-DecodedFrames: TypeAlias = npt.NDArray | torch.Tensor
 
 
 class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]):
