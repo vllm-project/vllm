@@ -13,7 +13,7 @@ from vllm.benchmarks.serve import TaskType, benchmark
 
 
 @pytest.mark.asyncio
-async def test_benchmark_reports_client_concurrency_queue_time():
+async def test_benchmark_reports_client_concurrency_queue_time(capsys):
     async def handler(request: web.Request) -> web.StreamResponse:
         await request.json()
         response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
@@ -36,33 +36,46 @@ async def test_benchmark_reports_client_concurrency_queue_time():
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
 
+    benchmark_kwargs = {
+        "task_type": TaskType.GENERATION,
+        "endpoint_type": "openai",
+        "api_url": f"http://127.0.0.1:{port}/v1/completions",
+        "base_url": f"http://127.0.0.1:{port}",
+        "model_id": "mock",
+        "model_name": "mock",
+        "tokenizer": None,
+        "input_requests": [
+            SampleRequest(prompt="hi", prompt_len=1, expected_output_len=1)
+            for _ in range(3)
+        ],
+        "logprobs": None,
+        "burstiness": float("inf"),
+        "disable_tqdm": True,
+        "num_warmups": 0,
+        "profile": False,
+        "selected_percentile_metrics": [
+            "ttft",
+            "e2el",
+            "client_queue_time",
+            "e2el_including_client_queue",
+        ],
+        "selected_percentiles": [99.0],
+        "ignore_eos": False,
+        "goodput_config_dict": {},
+        "lora_modules": None,
+        "extra_headers": None,
+        "extra_body": None,
+    }
+
     try:
         result = await benchmark(
-            task_type=TaskType.GENERATION,
-            endpoint_type="openai",
-            api_url=f"http://127.0.0.1:{port}/v1/completions",
-            base_url=f"http://127.0.0.1:{port}",
-            model_id="mock",
-            model_name="mock",
-            tokenizer=None,
-            input_requests=[
-                SampleRequest(prompt="hi", prompt_len=1, expected_output_len=1)
-                for _ in range(3)
-            ],
-            logprobs=None,
-            request_rate=float("inf"),
-            burstiness=float("inf"),
-            disable_tqdm=True,
-            num_warmups=0,
-            profile=False,
-            selected_percentile_metrics=["ttft", "e2el"],
-            selected_percentiles=[99.0],
-            ignore_eos=False,
-            goodput_config_dict={},
-            max_concurrency=1,
-            lora_modules=None,
-            extra_headers=None,
-            extra_body=None,
+            **benchmark_kwargs, request_rate=100.0, max_concurrency=1
+        )
+        control_result = await benchmark(
+            **benchmark_kwargs, request_rate=10.0, max_concurrency=1
+        )
+        infinite_rate_result = await benchmark(
+            **benchmark_kwargs, request_rate=float("inf"), max_concurrency=1
         )
     finally:
         await runner.cleanup()
@@ -88,3 +101,8 @@ async def test_benchmark_reports_client_concurrency_queue_time():
     assert result["p99_e2el_including_client_queue_ms"] == pytest.approx(
         np.percentile(e2els_including_queue, 99) * 1000
     )
+    assert max(control_result["queue_times"]) < 0.03
+    assert "mean_e2el_including_client_queue_ms" not in infinite_rate_result
+    output = capsys.readouterr().out
+    assert "P99 Client Queue Time (ms):" in output
+    assert "P99 E2EL incl. Client Queue (ms):" in output

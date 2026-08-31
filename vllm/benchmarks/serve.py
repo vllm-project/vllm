@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import math
 import os
 import random
 import shutil
@@ -1315,39 +1316,18 @@ async def benchmark(
             "errors": [output.error for output in outputs],
         }
 
+    queue_times: list[float] | None = None
+    e2els_including_queue: list[float] | None = None
     if max_concurrency is not None:
         queue_times = [
             output.benchmark_queue_time for output in outputs if output.success
         ]
-        e2els_including_queue = [
-            output.latency + output.benchmark_queue_time
-            for output in outputs
-            if output.success
-        ]
-        print("{s:{c}^{n}}".format(s=" Client-side Queueing ", n=50, c="-"))
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Mean client queue time (ms):", np.mean(queue_times or 0) * 1000
-            )
-        )
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Mean E2EL incl. client queue (ms):",
-                np.mean(e2els_including_queue or 0) * 1000,
-            )
-        )
-        result["mean_client_queue_time_ms"] = np.mean(queue_times or 0) * 1000
-        result["mean_e2el_including_client_queue_ms"] = (
-            np.mean(e2els_including_queue or 0) * 1000
-        )
-        for p in selected_percentiles:
-            p_word = str(int(p)) if int(p) == p else str(p)
-            result[f"p{p_word}_client_queue_time_ms"] = (
-                np.percentile(queue_times or 0, p) * 1000
-            )
-            result[f"p{p_word}_e2el_including_client_queue_ms"] = (
-                np.percentile(e2els_including_queue or 0, p) * 1000
-            )
+        if not math.isinf(request_rate):
+            e2els_including_queue = [
+                output.latency + output.benchmark_queue_time
+                for output in outputs
+                if output.success
+            ]
 
     if probe_stats is not None:
         result.update(probe_stats)
@@ -1384,34 +1364,38 @@ async def benchmark(
         metric_name: str,
         # E.g., "Time to First Token"
         metric_header: str,
+        values: list[float] | None = None,
     ):
         # This function prints and adds statistics of the specified
         # metric.
         if metric_attribute_name not in selected_percentile_metrics:
             return
+        if values is None:
+            mean = getattr(metrics, f"mean_{metric_attribute_name}_ms")
+            median = getattr(metrics, f"median_{metric_attribute_name}_ms")
+            std = getattr(metrics, f"std_{metric_attribute_name}_ms")
+            percentiles = getattr(
+                metrics, f"percentiles_{metric_attribute_name}_ms"
+            )
+        else:
+            mean = np.mean(values or 0) * 1000
+            median = np.median(values or 0) * 1000
+            std = np.std(values or 0) * 1000
+            percentiles = [
+                (p, np.percentile(values or 0, p) * 1000)
+                for p in selected_percentiles
+            ]
         print("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
         print(
-            "{:<40} {:<10.2f}".format(
-                f"Mean {metric_name} (ms):",
-                getattr(metrics, f"mean_{metric_attribute_name}_ms"),
-            )
+            "{:<40} {:<10.2f}".format(f"Mean {metric_name} (ms):", mean)
         )
         print(
-            "{:<40} {:<10.2f}".format(
-                f"Median {metric_name} (ms):",
-                getattr(metrics, f"median_{metric_attribute_name}_ms"),
-            )
+            "{:<40} {:<10.2f}".format(f"Median {metric_name} (ms):", median)
         )
-        result[f"mean_{metric_attribute_name}_ms"] = getattr(
-            metrics, f"mean_{metric_attribute_name}_ms"
-        )
-        result[f"median_{metric_attribute_name}_ms"] = getattr(
-            metrics, f"median_{metric_attribute_name}_ms"
-        )
-        result[f"std_{metric_attribute_name}_ms"] = getattr(
-            metrics, f"std_{metric_attribute_name}_ms"
-        )
-        for p, value in getattr(metrics, f"percentiles_{metric_attribute_name}_ms"):
+        result[f"mean_{metric_attribute_name}_ms"] = mean
+        result[f"median_{metric_attribute_name}_ms"] = median
+        result[f"std_{metric_attribute_name}_ms"] = std
+        for p, value in percentiles:
             p_word = str(int(p)) if int(p) == p else str(p)
             print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):", value))
             result[f"p{p_word}_{metric_attribute_name}_ms"] = value
@@ -1421,6 +1405,20 @@ async def benchmark(
         process_one_metric("tpot", "TPOT", "Time per Output Token (excl. 1st token)")
         process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
+    if queue_times is not None:
+        process_one_metric(
+            "client_queue_time",
+            "Client Queue Time",
+            "Client-side Queueing",
+            queue_times,
+        )
+    if e2els_including_queue is not None:
+        process_one_metric(
+            "e2el_including_client_queue",
+            "E2EL incl. Client Queue",
+            "Queue-inclusive End-to-end Latency",
+            e2els_including_queue,
+        )
 
     if diffusion_stats is not None:
         print("{s:{c}^{n}}".format(s="Diffusion Decoding", n=50, c="-"))
@@ -1821,7 +1819,8 @@ def add_cli_args(parser: FlexibleArgumentParser):
         default=None,
         help="Comma-separated list of selected metrics to report percentiles. "
         "This argument specifies the metrics to report percentiles. "
-        'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
+        'Allowed metric names are "ttft", "tpot", "itl", "e2el", '
+        '"client_queue_time", "e2el_including_client_queue". '
         'If not specified, defaults to "ttft,tpot,itl" for generative models '
         'and "e2el" for pooling models.',
     )
