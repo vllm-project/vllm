@@ -101,6 +101,7 @@ class NemotronHMLP(nn.Module):
         bias: bool = False,
         reduce_results: bool = True,
         is_sequence_parallel: bool = False,
+        enable_relu2_fp8_quant: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -125,8 +126,9 @@ class NemotronHMLP(nn.Module):
         self.act_fn = ReLUSquaredActivation()
         self.relu2_fp8_quant = (
             Bf16ReLUSquaredStaticFp8Quant()
-            if current_platform.is_cuda()
-            and self.down_proj.tp_size == 1
+            if enable_relu2_fp8_quant
+            and current_platform.is_cuda()
+            and get_tensor_model_parallel_world_size() == 1
             and getattr(self.down_proj, "input_quant_key", None) == kFp8StaticTensorSym
             and hasattr(self.down_proj, "input_scale")
             else None
@@ -206,6 +208,7 @@ class NemotronHMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 is_sequence_parallel=self.is_sequence_parallel,
+                enable_relu2_fp8_quant=True,
                 prefix=f"{prefix}.shared_experts",
             )
 
