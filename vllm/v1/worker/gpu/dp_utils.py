@@ -10,6 +10,7 @@ import torch.distributed as dist
 from vllm.config import ParallelConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_dp_group
+from vllm.v1.worker.dp_utils import is_uniform_dp_batch
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
@@ -71,7 +72,10 @@ def sync_cudagraph_and_dp_padding(
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
     tensor[4][dp_rank] = int(allow_ubatching)
     tensor[5][dp_rank] = num_reqs
-    dist.all_reduce(tensor, group=group)
+    if is_uniform_dp_batch():
+        tensor[:] = tensor[:, dp_rank, None].clone()
+    else:
+        dist.all_reduce(tensor, group=group)
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
