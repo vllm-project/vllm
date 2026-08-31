@@ -133,6 +133,8 @@ class PCPManager:
         if pcp_size <= 1:
             return
 
+        if parallel_config.data_parallel_size > 1:
+            raise ValueError("PCP does not support data parallelism yet.")
         if not model_config.use_mla:
             raise NotImplementedError("MRV2 PCP currently supports MLA models only.")
         if parallel_config.pipeline_parallel_size > 1:
