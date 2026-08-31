@@ -555,6 +555,16 @@ class Worker(WorkerBase):
                 getattr(self.parallel_config, "_api_process_count", 1),
             )
 
+        # When torch.compile is enabled, we run a compilation
+        # pass first to trigger JIT compilation and purge
+        # temporary compiler buffers (ASTs, Triton workspace, etc.)
+        if self.vllm_config.compilation_config.mode != CompilationMode.NONE:
+            self.model_runner.profile_run()
+            gc.collect()
+            torch.accelerator.empty_cache()
+            torch.accelerator.synchronize()
+            self.init_snapshot = MemorySnapshot(device=self.device)
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(
