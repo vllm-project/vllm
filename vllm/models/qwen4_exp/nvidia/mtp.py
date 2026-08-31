@@ -50,7 +50,6 @@ from vllm.transformers_utils.configs.qwen4_exp import (
 )
 
 from .hyperconnection import GatedResidual, HyperConnectionConfig
-from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .model import (
     _HC_WEIGHTS_MAPPER,
     _QWEN4_EXP_IGNORED_MISSING_SUFFIXES,
@@ -414,7 +413,6 @@ class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
             self.model.make_empty_intermediate_tensors
         )
         self.set_moe_parameters(self.model.layers)
-        enable_qwen4_exp_low_latency_gemm(self, vllm_config.model_config.dtype)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

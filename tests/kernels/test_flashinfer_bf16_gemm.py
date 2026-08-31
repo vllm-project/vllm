@@ -41,9 +41,7 @@ def test_flashinfer_bf16_cutedsl_correctness(
         torch.randn(n, device="cuda", dtype=torch.bfloat16) * 0.1 if use_bias else None
     )
 
-    actual = layer_utils.cuda_flashinfer_bf16_gemm_impl(
-        x, weight, bias, pdl, "flashinfer_cutedsl"
-    )
+    actual = layer_utils.cuda_flashinfer_bf16_gemm_impl(x, weight, bias, pdl)
     expected = F.linear(x, weight, bias)
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-1)

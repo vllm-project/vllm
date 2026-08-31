@@ -17,7 +17,7 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils import (  # noqa: E501
     TransformTuple,
 )
-from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+from vllm.model_executor.layers.utils import dispatch_configured_unquantized_gemm
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parameter import SharedWeightParameter
 
@@ -113,14 +113,14 @@ class HadamardTransform(torch.nn.Module):
 
             if self.transforms[part_id].scheme.head_dim is not None:
                 value = value.unflatten(-1, (-1, weight.size(0)))
-                value = dispatch_unquantized_gemm()(
+                value = dispatch_configured_unquantized_gemm()(
                     self, value.to(weight.dtype), weight, None
                 ).to(value.dtype)
                 value = value.flatten(-2, -1)
 
                 return value
 
-            return dispatch_unquantized_gemm()(
+            return dispatch_configured_unquantized_gemm()(
                 self, value.to(weight.dtype), weight, None
             ).to(value.dtype)
 

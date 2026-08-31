@@ -10,7 +10,7 @@ from torch.nn.parameter import Parameter
 from typing_extensions import TypeIs
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -29,7 +29,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.utils import (
-    dispatch_unquantized_gemm,
+    dispatch_configured_unquantized_gemm,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -167,11 +167,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
     def __init__(self) -> None:
-        config = get_current_vllm_config_or_none()
-        linear_backend = (
-            config.kernel_config.linear_backend if config is not None else "auto"
-        )
-        self._gemm_impl = dispatch_unquantized_gemm(linear_backend)
+        self._gemm_impl = dispatch_configured_unquantized_gemm()
 
     def create_weights(
         self,
