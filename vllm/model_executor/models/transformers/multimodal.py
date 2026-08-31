@@ -511,7 +511,7 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         ]
         return processor._get_num_multimodal_tokens(
             image_sizes=image_sizes,
-            **self.info.ctx.get_merged_mm_kwargs({}),
+            **self.info.ctx.get_merged_mm_kwargs({}, modality="image"),
         )
 
     def _apply_vision(
@@ -779,7 +779,8 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         try:
             sizes = [(image.height, image.width) for image in images]
             mm_tokens = self.info.get_hf_processor()._get_num_multimodal_tokens(
-                image_sizes=sizes, **self.info.ctx.get_merged_mm_kwargs({})
+                image_sizes=sizes,
+                **self.info.ctx.get_merged_mm_kwargs({}, modality="image"),
             )
             return list(mm_tokens["num_image_patches"])
         except (AttributeError, KeyError, TypeError):

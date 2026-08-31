@@ -119,7 +119,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         return image_processor.get_number_of_image_patches(
             image_height,
             image_width,
-            self.ctx.get_merged_mm_kwargs(mm_kwargs),
+            self.ctx.get_merged_mm_kwargs(mm_kwargs, modality="image"),
         )
 
     def get_num_patches(

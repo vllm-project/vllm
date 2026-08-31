@@ -913,6 +913,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         do_resize: bool = True,
         image_processor: BaseImageProcessor,
         mm_kwargs: Mapping[str, object],
+        modality: str | None = None,
     ) -> tuple[ImageSize, int]:
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
@@ -930,7 +931,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
             min_pixels_key = "shortest_edge"
             max_pixels_key = "longest_edge"
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs, modality=modality)
         size = image_processor.size
         if override_size := mm_kwargs.get("size"):
             size = size | override_size
@@ -973,6 +974,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
             image_height=image_height,
             image_processor=image_processor,
             mm_kwargs=mm_kwargs,
+            modality="image",
         )
         return num_image_tokens
 
@@ -991,6 +993,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
             num_frames=num_frames,
             image_processor=image_processor,
             mm_kwargs=mm_kwargs,
+            modality="video",
         )
         return num_video_tokens
 
@@ -1002,6 +1005,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
             image_height=9999999,
             image_processor=image_processor,
             mm_kwargs={},
+            modality="image",
         )
         return max_image_size
 
