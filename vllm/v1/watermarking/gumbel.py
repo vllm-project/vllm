@@ -4,6 +4,7 @@
 """Gumbel-max watermark generation and detection primitives."""
 
 import math
+import warnings
 
 import torch
 
@@ -11,7 +12,7 @@ from vllm.config.watermarking import WatermarkPRFName
 from vllm.v1.watermarking.detector import (
     WatermarkDetector,
 )
-from vllm.v1.watermarking.prfs import WatermarkPRF, create_prf
+from vllm.v1.watermarking.prfs import PhiloxPRF, WatermarkPRF, create_prf
 from vllm.v1.watermarking.watermarker import (
     RandomSampler,
     Watermarker,
@@ -37,6 +38,41 @@ def _gamma_survival_integer_shape(score: float, shape: int) -> float:
     return min(1.0, math.exp(min(0.0, -score + log_sum)))
 
 
+class GumbelWatermarker(Watermarker):
+    def __init__(
+        self,
+        key: int,
+        context_width: int = 4,
+        prf: WatermarkPRF | WatermarkPRFName = "philox",
+    ) -> None:
+        prf = create_prf(prf, key) if isinstance(prf, str) else prf
+        _validate_context_width(context_width)
+        self.prf = prf
+        self._context_width = context_width
+
+    @property
+    def context_width(self) -> int:
+        return self._context_width
+
+    def sample(
+        self,
+        logits: torch.Tensor,
+        contexts: torch.Tensor,
+        _random_sample: RandomSampler,
+    ) -> WatermarkSample:
+        if type(self.prf) is PhiloxPRF and logits.device.type == "cuda":
+            from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
+
+            return WatermarkSample(
+                philox_gumbel_sample(logits, contexts, self.prf.key), logits
+            )
+        vocabulary = torch.arange(logits.shape[-1], device=logits.device)
+        uniforms = self.prf.uniform(contexts, vocabulary)
+        uniforms = uniforms.clamp_min(torch.finfo(torch.float32).tiny)
+        noise = -torch.log(-torch.log(uniforms))
+        return WatermarkSample(torch.argmax(logits + noise, dim=-1), logits)
+
+
 class GumbelWatermarkDetector(WatermarkDetector):
     def __init__(
         self,
@@ -47,7 +83,7 @@ class GumbelWatermarkDetector(WatermarkDetector):
         deduplicate_contexts: bool = True,
     ) -> None:
         prf = create_prf(prf, key) if isinstance(prf, str) else prf
-        _validate_context_width(prf, context_width)
+        _validate_context_width(context_width)
         super().__init__(context_width, p_value_threshold, deduplicate_contexts)
         self.prf = prf
 
@@ -64,35 +100,12 @@ class GumbelWatermarkDetector(WatermarkDetector):
         return token_scores.sum().item()
 
 
-class GumbelWatermarker(Watermarker):
-    def __init__(
-        self,
-        key: int,
-        context_width: int = 4,
-        prf: WatermarkPRF | WatermarkPRFName = "philox",
-    ) -> None:
-        prf = create_prf(prf, key) if isinstance(prf, str) else prf
-        _validate_context_width(prf, context_width)
-        self.prf = prf
-        self._context_width = context_width
-
-    @property
-    def context_width(self) -> int:
-        return self._context_width
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        contexts: torch.Tensor,
-        _random_sample: RandomSampler,
-    ) -> WatermarkSample:
-        vocabulary = torch.arange(logits.shape[-1], device=logits.device)
-        uniforms = self.prf.uniform(contexts, vocabulary)
-        uniforms = uniforms.clamp_min(torch.finfo(torch.float32).tiny)
-        noise = -torch.log(-torch.log(uniforms))
-        return WatermarkSample(torch.argmax(logits + noise, dim=-1), logits)
-
-
-def _validate_context_width(prf: WatermarkPRF, context_width: int) -> None:
-    if not 1 <= context_width <= prf.max_context_width:
-        raise ValueError(f"context_width must be between 1 and {prf.max_context_width}")
+def _validate_context_width(context_width: int) -> None:
+    if context_width < 1:
+        raise ValueError("context_width must be positive")
+    if context_width > 16:
+        warnings.warn(
+            "context_width values greater than 16 reduce robustness to edits because "
+            "each changed token affects more subsequent watermark contexts",
+            stacklevel=3,
+        )

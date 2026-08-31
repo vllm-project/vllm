@@ -9,11 +9,6 @@ _UINT32_MASK = 2**32 - 1
 
 
 class WatermarkPRF(ABC):
-    @property
-    @abstractmethod
-    def max_context_width(self) -> int:
-        raise NotImplementedError
-
     @abstractmethod
     def uniform(self, contexts: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError

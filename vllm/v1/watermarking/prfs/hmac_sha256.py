@@ -15,12 +15,7 @@ _HMAC_DOMAIN = b"vllm-watermark-hmac-sha256-v1\0"
 
 
 class HMACSHA256PRF(WatermarkPRF):
-    """Reference HMAC-SHA-256 implementation of the watermark PRF.
-
-    The 256-bit little-endian key authenticates a domain separator, the
-    context length, signed 64-bit context tokens, and the signed 64-bit
-    candidate token. All integers in the message use little-endian encoding.
-    """
+    """Cryptographically secure reference watermark PRF."""
 
     version = "hmac-sha256-v1"
 
@@ -29,10 +24,6 @@ class HMACSHA256PRF(WatermarkPRF):
             raise ValueError("HMAC-SHA-256 keys must fit in 256 bits")
         self.key = key
         self._key_bytes = key.to_bytes(32, byteorder="little")
-
-    @property
-    def max_context_width(self) -> int:
-        return 16
 
     def uniform(self, contexts: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
         output_shape = torch.broadcast_shapes(
