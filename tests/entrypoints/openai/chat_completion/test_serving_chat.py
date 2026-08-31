@@ -22,7 +22,6 @@ from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
-    ErrorResponse,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.generate.base.serving import build_per_request_timing_metrics
@@ -42,6 +41,7 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensPrompt
 from vllm.multimodal.inputs import PlaceholderRange
