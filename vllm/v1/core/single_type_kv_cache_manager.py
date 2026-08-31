@@ -113,6 +113,9 @@ class SingleTypeKVCacheManager(ABC):
         # aligned segment (SWA). Initialized lazily by the coordinator after
         # determining the attention groups.
         self.use_eagle = False
+        # ``CacheConfig.enable_mamba_fine_grained_prefix_cache``, narrowed and set
+        # by ``KVCacheManager``; only an EAGLE Mamba "align" group ever gets it.
+        self.fine_grained_prefix_cache = False
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
@@ -1890,7 +1893,16 @@ class MambaManager(SingleTypeKVCacheManager):
             latest_prompt_hash_boundary = max(
                 latest_prompt_hash_boundary - hash_block_size, 0
             )
-        if num_tokens != latest_prompt_hash_boundary:
+        # The junction is the other position a sibling resumes at: where one was
+        # observed to stop, and where the scheduler already ends a chunk. Bounded
+        # to the prompt chunk being computed -- during decode the target is the
+        # running state block, mutated in place, which equals what its key
+        # promises only after that step's forward.
+        if num_tokens != latest_prompt_hash_boundary and not (
+            self.fine_grained_prefix_cache
+            and num_tokens == request.shared_prefix_boundary
+            and request.num_computed_tokens < num_tokens <= request.num_prompt_tokens
+        ):
             return None
 
         block_idx = num_tokens // self.block_size

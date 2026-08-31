@@ -94,6 +94,7 @@ def _split(
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         # `prefix_match_unit` finer than the block size (#46384).
         mamba_partial_cache_hit=partial_hit,
+        mamba_fine_grained_prefix_cache=False,
         hash_block_size=ATTN_BLOCK_SIZE,
         mamba_has_prefill_checkpoint_blocks=(
             num_prefill_checkpoint_blocks > 0 and not use_eagle
