@@ -895,6 +895,7 @@ def test_backing_file_unlinked_after_barrier(iid):
     try:
         assert seen_at_barrier == [True], "file must exist during rendezvous"
         assert not os.path.exists(path), "name must be dropped after the barrier"
+        assert region._creator is False, "nothing left for cleanup() to unlink"
         t = region.create_next_worker_view(PAGE_SIZE)
         t[:, :] = 7
         assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
@@ -964,6 +965,19 @@ def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch):
 
     barrier.assert_called_once_with()
     assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+
+
+def test_mmap_failure_unlinks_creator_before_releasing_peers(iid, monkeypatch):
+    """A creator that fails after sizing the file must drop it before arriving
+    at the barrier, so the next start does not land on a stale file."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    monkeypatch.setattr("mmap.mmap", MagicMock(side_effect=OSError("mmap")))
+    seen_at_barrier = []
+
+    with pytest.raises(OSError, match="mmap"):
+        _make_region(iid, barrier=lambda: seen_at_barrier.append(os.path.exists(path)))
+
+    assert seen_at_barrier == [False], "file must be gone before peers release"
 
 
 def test_barrier_release_failure_keeps_original_error(iid, monkeypatch):

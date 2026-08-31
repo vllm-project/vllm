@@ -144,6 +144,9 @@ class SharedOffloadRegion:
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
         except Exception:
+            if self._creator:
+                os.unlink(self.mmap_path)
+                self._creator = False
             # Peers block inside the barrier until the collective times out if
             # we die before reaching it.  Arrive anyway so every worker calls
             # barrier() exactly once and they fail on their own errors instead
@@ -165,13 +168,15 @@ class SharedOffloadRegion:
             try:
                 barrier()
             except Exception:
-                self.mmap_obj.close()
-                os.close(self.fd)
                 if self._creator:
                     os.unlink(self.mmap_path)
+                    self._creator = False
+                self.mmap_obj.close()
+                os.close(self.fd)
                 raise
             if self._creator:
                 os.unlink(self.mmap_path)
+                self._creator = False
                 logger.info("Unlinked mmap file %s", self.mmap_path)
 
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
@@ -337,8 +342,6 @@ class SharedOffloadRegion:
             try:
                 os.unlink(self.mmap_path)
                 logger.info("Removed mmap file %s", self.mmap_path)
-            except FileNotFoundError:
-                pass  # already unlinked after the all-mapped barrier
             except Exception:
                 logger.warning(
                     "Failed to unlink path %s", self.mmap_path, exc_info=True
