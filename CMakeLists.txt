@@ -594,6 +594,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       SRCS "${VLLM_STABLE_EXT_SRC}"
       CUDA_ARCHS "${CUDA_ARCHS}")
 
+    # Native FP8 Q x FP8 KV sparse MLA prefill for Hopper.
+    cuda_archs_loose_intersection(Q8KV8_SPARSE_PREFILL_ARCHS "9.0a"
+      "${CUDA_ARCHS}")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND
+       Q8KV8_SPARSE_PREFILL_ARCHS)
+      set(Q8KV8_SPARSE_PREFILL_SRC
+        "csrc/libtorch_stable/attention/sparse_mla_q8kv8_sm90/entry.cu")
+      set_gencode_flags_for_srcs(
+        SRCS "${Q8KV8_SPARSE_PREFILL_SRC}"
+        CUDA_ARCHS "${Q8KV8_SPARSE_PREFILL_ARCHS}")
+      set_property(SOURCE ${Q8KV8_SPARSE_PREFILL_SRC} APPEND PROPERTY
+        COMPILE_OPTIONS
+        "$<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math;-DCUTE_USE_PACKED_TUPLE=1;-DCUTLASS_ENABLE_TENSOR_CORE_MMA=1>")
+      list(APPEND VLLM_STABLE_EXT_SRC "${Q8KV8_SPARSE_PREFILL_SRC}")
+      message(STATUS "Building Q8KV8 sparse MLA prefill for SM90")
+    else()
+      message(STATUS "Not building Q8KV8 sparse MLA prefill "
+                     "(requires SM90 and CUDA >= 12.3)")
+    endif()
+
     if(COOPERATIVE_TOPK_ARCHS)
       list(APPEND VLLM_STABLE_EXT_SRC
         "csrc/libtorch_stable/cooperative_topk.cu")

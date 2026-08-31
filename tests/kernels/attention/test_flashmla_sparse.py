@@ -1,7 +1,150 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
+
 import pytest
 import torch
+
+
+def _require_sm90_q8kv8() -> None:
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("Q8KV8 sparse prefill requires an SM90 CUDA GPU")
+    if not hasattr(torch.ops._C, "sparse_mla_q8kv8_prefill_sm90"):
+        pytest.skip("vLLM was not built with the SM90 Q8KV8 prefill kernel")
+
+
+def _q8kv8_reference(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    topk_length: torch.Tensor,
+    attn_sink: torch.Tensor,
+    sm_scale: float,
+) -> torch.Tensor:
+    output = torch.empty(
+        (q.shape[0], q.shape[1], 512), dtype=torch.float32, device=q.device
+    )
+    q_float = q.float()
+    kv_float = kv.float()
+    for query_idx in range(q.shape[0]):
+        length = int(topk_length[query_idx].item())
+        token_ids = indices[query_idx, 0, :length].long()
+        keys = kv_float[token_ids, 0]
+        scores = q_float[query_idx] @ keys.T * sm_scale
+        max_logits = scores.max(dim=-1, keepdim=True).values
+        probabilities = torch.exp(scores - max_logits)
+        denominator = probabilities.sum(dim=-1, keepdim=True)
+        denominator += torch.exp(attn_sink[:, None] - max_logits)
+        output[query_idx] = probabilities @ keys / denominator
+    return output
+
+
+@pytest.mark.parametrize("h_q", [64, 128])
+def test_sparse_mla_q8kv8_prefill_matches_reference(h_q: int) -> None:
+    """Guard native Q8KV8 math, sink handling, and partial top-k rows."""
+    _require_sm90_q8kv8()
+    from vllm.models.deepseek_v4.nvidia.ops.q8kv8_sparse_prefill import (
+        sparse_mla_q8kv8_prefill,
+    )
+
+    generator = torch.Generator(device="cuda")
+    generator.manual_seed(20260831 + h_q)
+    s_q = 2
+    s_kv = 256
+    topk = 128
+    q = (torch.randn((s_q, h_q, 512), device="cuda", generator=generator) * 0.05).to(
+        torch.float8_e4m3fn
+    )
+    kv = torch.zeros((s_kv + 1, 1, 512), dtype=torch.float8_e4m3fn, device="cuda")
+    kv[:s_kv] = (
+        torch.randn((s_kv, 1, 512), device="cuda", generator=generator) * 0.05
+    ).to(torch.float8_e4m3fn)
+    indices = torch.randint(
+        s_kv,
+        (s_q, 1, topk),
+        dtype=torch.int32,
+        device="cuda",
+        generator=generator,
+    )
+    topk_length = torch.tensor([topk, topk - 32], dtype=torch.int32, device="cuda")
+    indices[1, :, topk - 32 :] = s_kv
+    attn_sink = torch.linspace(-0.05, 0.05, h_q, device="cuda")
+    identity_scale = torch.ones((), dtype=torch.float32, device="cuda")
+    sm_scale = 1.0 / math.sqrt(512)
+
+    actual, max_logits, lse = sparse_mla_q8kv8_prefill(
+        q,
+        kv,
+        indices,
+        identity_scale,
+        identity_scale,
+        attn_sink,
+        topk_length,
+        sm_scale,
+    )
+    repeated, repeated_max_logits, repeated_lse = sparse_mla_q8kv8_prefill(
+        q,
+        kv,
+        indices,
+        identity_scale,
+        identity_scale,
+        attn_sink,
+        topk_length,
+        sm_scale,
+    )
+    expected = _q8kv8_reference(q, kv, indices, topk_length, attn_sink, sm_scale)
+
+    assert torch.isfinite(actual.float()).all()
+    assert torch.isfinite(max_logits).all()
+    assert torch.isfinite(lse).all()
+    torch.testing.assert_close(actual.float(), expected, atol=8e-2, rtol=8e-2)
+    torch.testing.assert_close(repeated, actual, atol=0, rtol=0)
+    torch.testing.assert_close(repeated_max_logits, max_logits, atol=0, rtol=0)
+    torch.testing.assert_close(repeated_lse, lse, atol=0, rtol=0)
+
+
+def test_combine_topk_swa_indices_can_fill_q8kv8_sentinel() -> None:
+    """Ensure the Q8 path never leaves a negative or stale padding index."""
+    _require_sm90_q8kv8()
+    from vllm.models.deepseek_v4.common.ops import combine_topk_swa_indices
+
+    device = torch.device("cuda")
+    topk = 128
+    window_size = 8
+    M = 32
+    sentinel = 2 * M
+    topk_indices = (torch.arange(topk, dtype=torch.int32, device=device) % 8).repeat(
+        2, 1
+    )
+    topk_indices[0, 1] = -1
+    query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([16, 20], dtype=torch.int32, device=device)
+    gather_lens = torch.tensor([8, 8], dtype=torch.int32, device=device)
+    combined_width = 256
+    combined_indices = torch.full(
+        (2, combined_width), -12345, dtype=torch.int32, device=device
+    )
+    combined_lens = torch.empty(2, dtype=torch.int32, device=device)
+
+    actual_indices, actual_lens = combine_topk_swa_indices(
+        topk_indices,
+        query_start_loc,
+        seq_lens,
+        gather_lens,
+        window_size=window_size,
+        compress_ratio=4,
+        topk=topk,
+        M=M,
+        N=8,
+        out=(combined_indices, combined_lens),
+        padding_value=sentinel,
+    )
+
+    assert actual_indices[0, 1] == sentinel
+    for row, length in zip(actual_indices, actual_lens.tolist()):
+        assert torch.all(row[:length] >= 0)
+        assert torch.all(row[:length] <= sentinel)
+        assert torch.all(row[length:] == sentinel)
 
 
 @pytest.mark.parametrize("sm120", [False, True])

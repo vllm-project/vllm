@@ -8,6 +8,8 @@ preparation.
   the paged cache.
 - dequantize_and_gather_k_cache: gather and dequantize FP8 K from the paged
   cache for sparse/SWA prefill.
+- dequantize_and_gather_k_cache_fp8: gather and requantize the paged cache for
+  SM90 Q8KV8 sparse prefill.
 - compute_global_topk_indices_and_lens: map local topk indices to global KV
   cache slots and count valid entries.
 - combine_topk_swa_indices: concatenate topk compressed indices with SWA
@@ -248,6 +250,7 @@ def _dequantize_and_gather_k_kernel(
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,  # 7 real blocks
     use_fnuz: tl.constexpr = False,
+    output_fp8: tl.constexpr = False,
 ):
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
@@ -323,8 +326,18 @@ def _dequantize_and_gather_k_kernel(
                 # Dequantize: bf16_value = fp8_value * scale
                 x_dequant = x_float * scale
 
-                # Store as bf16
-                tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask)
+                if output_fp8:
+                    if use_fnuz:
+                        x_out = x_dequant.to(tl.float8e4b8)
+                    else:
+                        x_out = x_dequant.to(tl.float8e4nv)
+                    tl.store(output_row_ptr + offsets, x_out, mask=mask)
+                else:
+                    tl.store(
+                        output_row_ptr + offsets,
+                        x_dequant.to(tl.bfloat16),
+                        mask=mask,
+                    )
 
         # ========== Copy BF16 portion directly ==========
         bf16_output_offset = fp8_dim  # After 448 elements in output
@@ -336,7 +349,20 @@ def _dequantize_and_gather_k_kernel(
         for j in tl.static_range(bf16_dim // 16):
             chunk_offsets = j * 16 + tl.arange(0, 16)
             bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
-            tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+            if output_fp8:
+                if use_fnuz:
+                    rope_out = bf16_vals.to(tl.float8e4b8)
+                else:
+                    rope_out = bf16_vals.to(tl.float8e4nv)
+                tl.store(
+                    output_row_ptr + bf16_output_offset + chunk_offsets,
+                    rope_out,
+                )
+            else:
+                tl.store(
+                    output_row_ptr + bf16_output_offset + chunk_offsets,
+                    bf16_vals,
+                )
 
 
 def dequantize_and_gather_k_cache_triton(
@@ -384,6 +410,46 @@ def dequantize_and_gather_k_cache_triton(
         fp8_max=FP8_MAX,
         n_quant_blocks=7,
         use_fnuz=use_fnuz,
+        output_fp8=False,
+    )
+
+
+def dequantize_and_gather_k_cache_fp8(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor | None,
+    block_table: torch.Tensor,
+    block_size: int,
+    offset: int,
+) -> None:
+    """Gather a paged DSv4 cache and requantize it to OCP E4M3."""
+    if out.dtype != torch.float8_e4m3fn:
+        raise ValueError(f"out must be float8_e4m3fn, got {out.dtype}")
+
+    num_reqs = seq_lens.shape[0]
+    _dequantize_and_gather_k_kernel[(num_reqs, 128)](
+        out,
+        out.stride(0),
+        out.stride(1),
+        k_cache,
+        seq_lens,
+        block_table,
+        offset,
+        gather_lens,
+        max_blocks_per_seq=block_table.shape[-1],
+        fp8_dim=448,
+        bf16_dim=64,
+        scale_dim=8,
+        quant_block=64,
+        cache_block_size=block_size,
+        token_data_size=576,
+        block_stride=k_cache.stride(0),
+        output_dim=512,
+        fp8_max=448.0,
+        n_quant_blocks=7,
+        use_fnuz=False,
+        output_fp8=True,
     )
 
 
@@ -536,6 +602,7 @@ def combine_topk_swa_indices(
     M: int,
     N: int,
     out: tuple[torch.Tensor, torch.Tensor] | None = None,
+    padding_value: int = -1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = topk_indices.shape[0]
     combined_topk = (
@@ -568,6 +635,7 @@ def combine_topk_swa_indices(
         TOP_K=topk,
         COMPRESS_RATIO=compress_ratio,
         WINDOW_SIZE=window_size,
+        padding_value=padding_value,
     )
     return combined_indices, combined_lens
 
@@ -629,6 +697,7 @@ class CombineTopkSwaIndicesKernel(
         COMPRESS_RATIO: int
         WINDOW_SIZE: int
         PADDED_TOP_K: int
+        FILL_PADDING: bool
         input_variant: TritonPointerInputVariant
 
     @staticmethod
@@ -638,6 +707,7 @@ class CombineTopkSwaIndicesKernel(
             "topk_indices_stride",
             "M",
             "N",
+            "padding_value",
         ]
     )
     def kernel(
@@ -651,10 +721,12 @@ class CombineTopkSwaIndicesKernel(
         gather_lens_ptr,
         M,
         N,
+        padding_value,
         TOP_K: tl.constexpr,
         COMPRESS_RATIO: tl.constexpr,
         WINDOW_SIZE: tl.constexpr,
         PADDED_TOP_K: tl.constexpr,
+        FILL_PADDING: tl.constexpr,
     ):
         batch_idx = tl.program_id(0)
         worker_id = tl.program_id(1)
@@ -686,13 +758,20 @@ class CombineTopkSwaIndicesKernel(
 
             offset = tl.arange(0, PADDED_TOP_K)
             mask = offset < topk_len
-            topk_indices = tl.load(
+            raw_topk_indices = tl.load(
                 topk_indices_ptr + token_idx * topk_indices_stride + offset,
                 mask=mask,
             )
+            topk_indices = raw_topk_indices + M * batch_idx
+            if FILL_PADDING:
+                topk_indices = tl.where(
+                    raw_topk_indices < 0,
+                    padding_value,
+                    topk_indices,
+                )
             tl.store(
                 combined_indices_ptr + token_idx * combined_indices_stride + offset,
-                topk_indices + M * batch_idx,
+                topk_indices,
                 mask=mask,
             )
             offset = tl.arange(0, WINDOW_SIZE)
@@ -711,6 +790,21 @@ class CombineTopkSwaIndicesKernel(
             combined_len = topk_len + swa_len
             tl.store(combined_lens_ptr + token_idx, combined_len)
 
+            if FILL_PADDING:
+                output_width: tl.constexpr = (TOP_K + WINDOW_SIZE + 127) // 128 * 128
+                for start in tl.static_range(0, output_width, 256):
+                    padding_offsets = start + tl.arange(0, 256)
+                    padding_mask = (padding_offsets >= combined_len) & (
+                        padding_offsets < output_width
+                    )
+                    tl.store(
+                        combined_indices_ptr
+                        + token_idx * combined_indices_stride
+                        + padding_offsets,
+                        padding_value,
+                        mask=padding_mask,
+                    )
+
     def dispatch(  # type: ignore[override]
         self,
         *,
@@ -722,6 +816,7 @@ class CombineTopkSwaIndicesKernel(
         topk: int,
         compress_ratio: int,
         WINDOW_SIZE: int,
+        fill_padding: bool,
     ) -> CompileKey:
         padded_topk = next_power_of_2(topk_width)
         input_variant = TritonPointerInputVariant.from_alignment(
@@ -735,6 +830,7 @@ class CombineTopkSwaIndicesKernel(
             COMPRESS_RATIO=compress_ratio,
             WINDOW_SIZE=WINDOW_SIZE,
             PADDED_TOP_K=padded_topk,
+            FILL_PADDING=fill_padding,
             input_variant=input_variant,
         )
 
@@ -743,10 +839,15 @@ class CombineTopkSwaIndicesKernel(
             return []
 
         window_size = _hf_config_int(vllm_config, "sliding_window", 128)
+        attention_config = getattr(vllm_config, "attention_config", None)
+        use_q8kv8 = bool(
+            getattr(attention_config, "use_deepseek_v4_q8kv8_prefill", False)
+        )
         return self._trace_dispatch(self.dispatch)(
             _DSV4_COMBINE_TOPK_SWA_WARMUP_INPUTS,
             _COMBINE_TOPK_SWA_POINTER_INPUTS,
             WINDOW_SIZE=window_size,
+            fill_padding=[False, True] if use_q8kv8 else False,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -765,10 +866,12 @@ class CombineTopkSwaIndicesKernel(
             input_variant.pointer("gather_lens", torch.int32),
             1,  # do not specialize M
             1,  # do not specialize N
+            -1,  # do not specialize padding_value
             TOP_K=compile_key.TOP_K,
             COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
             WINDOW_SIZE=compile_key.WINDOW_SIZE,
             PADDED_TOP_K=compile_key.PADDED_TOP_K,
+            FILL_PADDING=compile_key.FILL_PADDING,
             grid=(1, _COMBINE_TOPK_SWA_NUM_WORKERS),
         )
 
@@ -786,6 +889,7 @@ class CombineTopkSwaIndicesKernel(
         TOP_K: int,
         COMPRESS_RATIO: int,
         WINDOW_SIZE: int,
+        padding_value: int = -1,
     ) -> None:
         num_reqs = seq_lens.shape[0]
         self.kernel[(num_reqs, _COMBINE_TOPK_SWA_NUM_WORKERS)](
@@ -799,10 +903,12 @@ class CombineTopkSwaIndicesKernel(
             gather_lens,
             M,
             N,
+            padding_value,
             TOP_K=TOP_K,
             COMPRESS_RATIO=COMPRESS_RATIO,
             WINDOW_SIZE=WINDOW_SIZE,
             PADDED_TOP_K=next_power_of_2(topk_indices.shape[-1]),
+            FILL_PADDING=padding_value >= 0,
         )
 
 

@@ -82,6 +82,10 @@ class AttentionConfig:
     When False (default), pure prefill batches use forward_mha when implemented.
     Set to True to always use the MQA path."""
 
+    use_deepseek_v4_q8kv8_prefill: bool = False
+    """Use native SM90 Q8 x KV8 sparse MLA for DeepSeek-V4 prefill. Requires
+    the FlashMLA backend and the ``fp8_ds_mla`` KV-cache layout."""
+
     flex_attn_block_m: int | None = None
     """Triton kernel BLOCK_M tile size for flex attention.
     Must be a power of 2 >= 16. If None and VLLM_BATCH_INVARIANT=1,
