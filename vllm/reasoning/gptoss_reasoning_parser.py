@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:

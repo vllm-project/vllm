@@ -575,13 +575,10 @@ class Qwen3ASRForConditionalGeneration(
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
 
-            # Get audio feature length from mm_feature data
-            audio_feature_length = mm_feature.data["audio_feature_lengths"].data
-            if isinstance(audio_feature_length, torch.Tensor):
-                audio_feature_length = audio_feature_length.item()
-            audio_len = _get_feat_extract_output_lengths(
-                torch.tensor(audio_feature_length)
-            ).item()
+            # The placeholder already contains one token per audio embedding.
+            # Use its length so M-RoPE can be reconstructed even when a covered
+            # prefix no longer carries the audio processor tensors.
+            audio_len = mm_feature.mm_position.length
 
             # Text segment before audio (includes audio_start token)
             text_len = offset - st
