@@ -59,6 +59,19 @@ def get_gpu_name(device_id: int | None = None) -> str:
     return current_platform.get_device_name(device_id)
 
 
+def normalize_gpu_name(name: str) -> str:
+    """
+    Normalize a GPU name to lowercase underscore form, preserving variant
+    suffixes (i.e. without applying _GPU_NAME_ALIASES).
+
+    e.g., "NVIDIA H100 80GB HBM3" -> "nvidia_h100_80gb_hbm3"
+          "NVIDIA A100-SXM4-80GB" -> "nvidia_a100_sxm4_80gb"
+    """
+    if not name or not name.strip():
+        raise ValueError("GPU name cannot be empty")
+    return re.sub(r"[\s/-]+", "_", name.lower())
+
+
 def canonicalize_gpu_name(name: str) -> str:
     """
     Canonicalize GPU name for use as a platform identifier.
@@ -69,16 +82,15 @@ def canonicalize_gpu_name(name: str) -> str:
           "NVIDIA A100-SXM4-80GB" -> "nvidia_a100"
           "AMD Instinct MI300X"   -> "amd_instinct_mi300x"
     """
-    if not name or not name.strip():
-        raise ValueError("GPU name cannot be empty")
-    name = re.sub(r"[\s/-]+", "_", name.lower())
-    if name in _GPU_NAME_ALIASES:
-        return _GPU_NAME_ALIASES[name]
-    return name
+    name = normalize_gpu_name(name)
+    return _GPU_NAME_ALIASES.get(name, name)
 
 
-def get_canonical_gpu_name(device_id: int | None = None) -> str:
-    return canonicalize_gpu_name(get_gpu_name(device_id))
+def get_config_gpu_name(keep_variant: bool, device_id: int | None = None) -> str:
+    if keep_variant:
+        return normalize_gpu_name(get_gpu_name(device_id))
+    else:
+        return canonicalize_gpu_name(get_gpu_name(device_id))
 
 
 def get_fp8_dtype() -> torch.dtype:
