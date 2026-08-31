@@ -1529,6 +1529,8 @@ class Scheduler(SchedulerInterface):
             # Drop from the in-flight-prefill set once it's no longer prefilling.
             if not request.is_prefill_chunk:
                 self._inflight_prefills.discard(request)
+            if request.streaming_prompt_appended_tokens:
+                request.streaming_prompt_appended_tokens = 0
 
         # Snapshot block IDs for routed experts before forward starts.
         # A concurrent schedule() may preempt requests and free blocks
@@ -1605,6 +1607,7 @@ class Scheduler(SchedulerInterface):
     ) -> CachedRequestData:
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
+        new_prompt_token_ids: list[list[int]] = []
         new_block_ids: list[tuple[list[int], ...] | None] = []
         all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
@@ -1631,6 +1634,13 @@ class Scheduler(SchedulerInterface):
                     req.num_computed_tokens : req.num_computed_tokens + num_tokens
                 ]
                 new_token_ids.append(token_ids)
+            if req.streaming_prompt and req.streaming_prompt_appended_tokens:
+                assert req.prompt_token_ids is not None
+                new_prompt_token_ids.append(
+                    req.prompt_token_ids[-req.streaming_prompt_appended_tokens :]
+                )
+            else:
+                new_prompt_token_ids.append([])
             if idx >= num_running_reqs:
                 resumed_req_ids.add(req_id)
             if not self.use_v2_model_runner:  # noqa: SIM102
@@ -1648,6 +1658,7 @@ class Scheduler(SchedulerInterface):
             req_ids=req_ids,
             resumed_req_ids=resumed_req_ids,
             new_token_ids=new_token_ids,
+            new_prompt_token_ids=new_prompt_token_ids,
             all_token_ids=all_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
@@ -2482,6 +2493,13 @@ class Scheduler(SchedulerInterface):
         self, request_id: str, token_ids: list[int]
     ) -> None:
         request = self.requests[request_id]
+        new_prompt_len = request.num_prompt_tokens + len(token_ids)
+        if new_prompt_len >= self.max_model_len:
+            raise ValueError(
+                f"Appending {len(token_ids)} streaming prompt token(s) would "
+                f"make the decoder prompt length {new_prompt_len}, which is "
+                f"not smaller than max_model_len {self.max_model_len}."
+            )
         request.append_streaming_prompt_token_ids(token_ids)
         if request.status == RequestStatus.WAITING_FOR_STREAMING_PROMPT:
             request.status = RequestStatus.WAITING

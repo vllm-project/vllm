@@ -179,6 +179,42 @@ class TestStreamingScheduler(unittest.TestCase):
         assert scheduled.prefill_only_req_ids == {"streaming_prompt"}
         assert request.num_computed_tokens == 5
 
+    def test_streaming_prompt_cached_append_sends_new_prompt_tokens(self):
+        scheduler = create_scheduler()
+        request = DummyRequest(
+            request_id="streaming_prompt",
+            resumable=False,
+            prompt_token_ids=[1, 2, 3, 4],
+        )
+        scheduler.add_streaming_prompt_request(request)
+
+        first = scheduler.schedule()
+
+        assert first.scheduled_new_reqs[0].prompt_token_ids == [1, 2, 3, 4]
+        assert first.num_scheduled_tokens["streaming_prompt"] == 3
+        assert request.num_computed_tokens == 3
+
+        scheduler.append_streaming_prompt_tokens("streaming_prompt", [5, 6])
+        second = scheduler.schedule()
+
+        assert second.scheduled_new_reqs == []
+        assert second.scheduled_cached_reqs.req_ids == ["streaming_prompt"]
+        assert second.scheduled_cached_reqs.new_prompt_token_ids == [[5, 6]]
+        assert second.num_scheduled_tokens["streaming_prompt"] == 2
+        assert second.prefill_only_req_ids == {"streaming_prompt"}
+
+    def test_streaming_prompt_append_rejects_max_model_len_overflow(self):
+        scheduler = create_scheduler()
+        request = DummyRequest(
+            request_id="streaming_prompt",
+            resumable=False,
+            prompt_token_ids=[1] * (scheduler.max_model_len - 1),
+        )
+        scheduler.add_streaming_prompt_request(request)
+
+        with self.assertRaises(ValueError):
+            scheduler.append_streaming_prompt_tokens("streaming_prompt", [2])
+
     def test_streaming_prompt_rejects_append_after_finalize(self):
         scheduler = create_scheduler()
         request = DummyRequest(

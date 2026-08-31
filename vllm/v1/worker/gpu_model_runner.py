@@ -1371,6 +1371,26 @@ class GPUModelRunner(
             resumed_from_preemption = req_id in req_data.resumed_req_ids
             num_output_tokens = req_data.num_output_tokens[i]
             req_index = self.input_batch.req_id_to_index.get(req_id)
+            new_prompt_token_ids = req_data.new_prompt_token_ids[i]
+            if new_prompt_token_ids:
+                if req_state.prompt_token_ids is None:
+                    raise ValueError(
+                        "Streaming prompt append requires prompt token IDs "
+                        f"for request {req_id}"
+                    )
+                start_idx = req_state.num_prompt_tokens
+                end_idx = start_idx + len(new_prompt_token_ids)
+                req_state.prompt_token_ids.extend(new_prompt_token_ids)
+                req_state.num_prompt_tokens = end_idx
+                if req_index is not None:
+                    self.input_batch.token_ids_cpu[req_index, start_idx:end_idx] = (
+                        new_prompt_token_ids
+                    )
+                    self.input_batch.is_token_ids[req_index, start_idx:end_idx] = True
+                    self.input_batch.num_prompt_tokens[req_index] = end_idx
+                    self.input_batch.num_tokens_no_spec[req_index] = (
+                        req_state.num_tokens
+                    )
 
             if req_state.prev_num_draft_len and self.use_async_scheduling:
                 # prev_num_draft_len is used in async scheduling mode with

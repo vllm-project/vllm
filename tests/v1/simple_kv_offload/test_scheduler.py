@@ -270,6 +270,7 @@ def make_scheduler_output(
             req_ids=cached_req_ids,
             resumed_req_ids=set(),
             new_token_ids=[[] for _ in cached_req_ids],
+            new_prompt_token_ids=[[] for _ in cached_req_ids],
             all_token_ids={},
             new_block_ids=cached_new_block_ids,
             num_computed_tokens=[0] * len(cached_req_ids),
