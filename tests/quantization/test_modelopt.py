@@ -297,8 +297,8 @@ def test_modelopt_nvfp4_mega_moe_uses_cached_inverse_activation_global_scale():
         method.apply(layer, x, topk_weights, topk_ids, None, None)
 
     assert prepare.call_args.args[1] is gscale
-    assert prepare.call_args.args[4] is method._symm_buffer.x
-    assert prepare.call_args.args[5] is method._symm_buffer.x_sf
+    assert prepare.call_args.args[4].data_ptr() == method._symm_buffer.x.data_ptr()
+    assert prepare.call_args.args[5].data_ptr() == method._symm_buffer.x_sf.data_ptr()
 
 
 def test_modelopt_nvfp4_mega_moe_initializes_runtime_on_ep_group():
