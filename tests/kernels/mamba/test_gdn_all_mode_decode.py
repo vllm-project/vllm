@@ -12,7 +12,7 @@ blocks in all-mode). Covered paths:
 * the packed non-spec decode fast path (``_forward_core_decode_non_spec``,
   in-place kernels -> carry-copy),
 * the non-packed decode branches in ``_forward_core`` (kernel-side dual
-  index: conv block args + K2 ``ssm_state_indices_output``),
+  index: conv block args + ``ssm_state_indices_output``),
 * the peeled decode rows of a mixed decode+prefill batch.
 
 Reuses the harness of test_gdn_all_mode_prefill (real ``_forward_core`` +
@@ -197,7 +197,7 @@ def test_prefill_then_decode_matches_single_prefill(packed):
 
 
 def test_mixed_decode_prefill_all_mode_matches_align():
-    """The peeled decode rows of a mixed decode+prefill batch use the K2
+    """The peeled decode rows of a mixed decode+prefill batch use the
     dual-index; in-block (read == write) the whole batch must match align
     bit-exactly (prefill part already proven by the prefill tests)."""
     torch.manual_seed(0)

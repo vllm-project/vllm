@@ -949,9 +949,7 @@ class Platform:
             # aligned. Ask the scheduler to clip prefill chunks accordingly
             # (a much weaker constraint than align mode's block-size split).
             if (
-                getattr(
-                    model_config.hf_text_config, "linear_conv_kernel_dim", None
-                )
+                getattr(model_config.hf_text_config, "linear_conv_kernel_dim", None)
                 is not None
             ):
                 cache_config.mamba_all_mode_prefill_align_size = (

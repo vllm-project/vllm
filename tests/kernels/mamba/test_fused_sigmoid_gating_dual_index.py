@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Stage-4 / K2 unit test: dual-anchor (separate read vs write) SSM state indices
+"""Unit test: dual-anchor (separate read vs write) SSM state indices
 for the GDN decode kernel ``fused_sigmoid_gating_delta_rule_update``.
 
 The all-mode + MTP decode path must read the initial recurrent state from one set
@@ -17,10 +17,10 @@ property plus backward compatibility (output index ``None`` -> in-place).
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops import (
     fused_sigmoid_gating_delta_rule_update,
 )
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type

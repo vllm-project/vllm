@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""T1: numerical-parity test for the per-chunk intermediate states (`h`) newly
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Numerical-parity test for the per-chunk intermediate states (`h`) newly
 exposed by chunk_gated_delta_rule(..., return_intermediate_states=True).
 
 Semantics under test (verified from chunk_delta_h.py: h is stored at the START of
@@ -9,19 +10,24 @@ each chunk loop iteration, before the chunk update):
     h[:, 0] == initial_state
     final_state == state after all tokens.
 
-This pins the index mapping the Stage-3 scatter relies on:
+This pins the index mapping gdn_scatter_block_checkpoints relies on:
     checkpoint after m*block_size tokens == h[:, m*(block_size//FLA_CHUNK_SIZE)].
 """
+
 import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.chunk import chunk_gated_delta_rule
 from vllm.third_party.flash_linear_attention.ops.index import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
 )
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
+
+if not current_platform.is_cuda():
+    pytest.skip(reason="FLA chunk kernels require CUDA", allow_module_level=True)
 
 DEVICE = "cuda"
 DT = torch.bfloat16
@@ -56,7 +62,13 @@ def test_block_states_equal_len():
     h0 = torch.randn(1, H, V, K, dtype=torch.float32, device=DEVICE)
 
     o, final_state, h = chunk_gated_delta_rule(
-        q, k, v, g, beta, initial_state=h0, output_final_state=True,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state=h0,
+        output_final_state=True,
         return_intermediate_states=True,
     )
     assert h is not None and h.shape == (B, NT, H, V, K), h.shape
@@ -68,8 +80,13 @@ def test_block_states_equal_len():
     # h[:,c] == replay(first c chunks).final_state  for c in 1..NT-1
     for c in range(1, NT):
         _, fs_c = chunk_gated_delta_rule(
-            q[:, : c * C], k[:, : c * C], v[:, : c * C], g[:, : c * C], beta[:, : c * C],
-            initial_state=h0, output_final_state=True,
+            q[:, : c * C],
+            k[:, : c * C],
+            v[:, : c * C],
+            g[:, : c * C],
+            beta[:, : c * C],
+            initial_state=h0,
+            output_final_state=True,
         )
         md, ok = _close(h[:, c], fs_c)
         assert ok, f"h[{c}] mismatch vs replay({c} chunks), maxdiff={md}"
@@ -80,7 +97,13 @@ def test_block_states_equal_len():
         )
     # final_state == replay(all)
     _, fs_all = chunk_gated_delta_rule(
-        q, k, v, g, beta, initial_state=h0, output_final_state=True,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state=h0,
+        output_final_state=True,
     )
     _, okf = _close(final_state, fs_all)
     assert okf
@@ -100,8 +123,16 @@ def test_block_states_varlen():
     h0 = torch.randn(len(lens), H, V, K, dtype=torch.float32, device=DEVICE)
 
     o, final_state, h = chunk_gated_delta_rule(
-        q, k, v, g, beta, initial_state=h0, output_final_state=True,
-        cu_seqlens=cu, chunk_indices=ci, chunk_offsets=co,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state=h0,
+        output_final_state=True,
+        cu_seqlens=cu,
+        chunk_indices=ci,
+        chunk_offsets=co,
         return_intermediate_states=True,
     )
     # per-sequence: h[0, chunk_offsets[n] + c] == replay(seq n, first c chunks)
@@ -121,17 +152,23 @@ def test_block_states_varlen():
             bs = beta[:, s : s + c * C]
             cu_c = torch.tensor([0, c * C], dtype=torch.int32, device=DEVICE)
             _, fs_c = chunk_gated_delta_rule(
-                qs, ks, vs, gs, bs, initial_state=h0[n : n + 1],
-                output_final_state=True, cu_seqlens=cu_c,
+                qs,
+                ks,
+                vs,
+                gs,
+                bs,
+                initial_state=h0[n : n + 1],
+                output_final_state=True,
+                cu_seqlens=cu_c,
                 chunk_indices=prepare_chunk_indices(cu_c, C),
                 chunk_offsets=prepare_chunk_offsets(cu_c, C),
             )
             md, ok = _close(h[:, base + c], fs_c)
-            assert ok, f"seq{n} h[{base+c}] mismatch, maxdiff={md}"
+            assert ok, f"seq{n} h[{base + c}] mismatch, maxdiff={md}"
     print("varlen OK")
 
 
 if __name__ == "__main__":
     test_block_states_equal_len()
     test_block_states_varlen()
-    print("T1 ALL PASS")
+    print("ALL PASS")

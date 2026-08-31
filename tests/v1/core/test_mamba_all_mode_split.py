@@ -16,8 +16,14 @@ from vllm.config import CacheConfig
 from vllm.v1.core.sched.scheduler import Scheduler
 
 
-def _sched(mode="all", align_size=64, block_size=576, hash_block_size=576,
-           use_eagle=False, partial_hit=False):
+def _sched(
+    mode="all",
+    align_size=64,
+    block_size=576,
+    hash_block_size=576,
+    use_eagle=False,
+    partial_hit=False,
+):
     """Minimal stand-in exposing the fields _mamba_block_aligned_split reads."""
     return SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -31,8 +37,7 @@ def _sched(mode="all", align_size=64, block_size=576, hash_block_size=576,
     )
 
 
-def _req(num_computed=0, num_prompt=100_000, num_tokens=None,
-         shared_prefix_boundary=0):
+def _req(num_computed=0, num_prompt=100_000, num_tokens=None, shared_prefix_boundary=0):
     return SimpleNamespace(
         num_computed_tokens=num_computed,
         num_prompt_tokens=num_prompt,
@@ -82,8 +87,9 @@ def test_all_mode_misaligned_start_realigns_at_next_boundary():
 def test_all_mode_final_chunk_unclipped():
     """The bite that finishes the prompt may end anywhere (tail is handled by
     kernel masking + the final-state write)."""
-    assert _split(_sched(), _req(num_computed=99_968, num_prompt=100_000),
-                  5_000) == 5_000
+    assert (
+        _split(_sched(), _req(num_computed=99_968, num_prompt=100_000), 5_000) == 5_000
+    )
 
 
 # --------------------------- align-mode regression ---------------------------
@@ -102,6 +108,8 @@ def test_cache_config_field_default_none_and_not_init():
     cfg = CacheConfig()
     assert cfg.mamba_all_mode_prefill_align_size is None
     import dataclasses
+
     f = {f.name: f for f in dataclasses.fields(CacheConfig)}[
-        "mamba_all_mode_prefill_align_size"]
+        "mamba_all_mode_prefill_align_size"
+    ]
     assert f.init is False

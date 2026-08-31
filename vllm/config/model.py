@@ -1663,9 +1663,12 @@ class ModelConfig:
         # FLA_CHUNK_SIZE (64). Use that instead of the Mamba1 2048 default so
         # the all-mode mamba cache block aligns to the real kernel chunk
         # (avoids a 3.5x-oversized block).
-        if chunk_size is None and getattr(
-                self.hf_text_config, "linear_conv_kernel_dim", None) is not None:
+        if (
+            chunk_size is None
+            and getattr(self.hf_text_config, "linear_conv_kernel_dim", None) is not None
+        ):
             from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
+
             chunk_size = FLA_CHUNK_SIZE
 
         # Since Mamba1 does not have a chunk notion

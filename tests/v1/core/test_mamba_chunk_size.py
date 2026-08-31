@@ -40,14 +40,18 @@ def test_gdn_marker_returns_fla_chunk_size():
     """NEW: GDN models (linear_conv_kernel_dim present, no chunk fields)
     resolve to the FLA kernel tile, not the Mamba1 default."""
     assert FLA_CHUNK_SIZE == 64
-    assert (ModelConfig.get_mamba_chunk_size(
-        _cfg(linear_conv_kernel_dim=4)) == FLA_CHUNK_SIZE)
+    assert (
+        ModelConfig.get_mamba_chunk_size(_cfg(linear_conv_kernel_dim=4))
+        == FLA_CHUNK_SIZE
+    )
 
 
 def test_gdn_marker_with_explicit_chunk_keeps_explicit():
     """NEW: an explicit chunk field wins over the GDN marker."""
-    assert ModelConfig.get_mamba_chunk_size(
-        _cfg(linear_conv_kernel_dim=4, chunk_size=256)) == 256
+    assert (
+        ModelConfig.get_mamba_chunk_size(_cfg(linear_conv_kernel_dim=4, chunk_size=256))
+        == 256
+    )
 
 
 # ------------- post-resolution all-mode block-size validation -------------
