@@ -611,7 +611,7 @@ class SpeculativeConfig:
             "extract_hidden_states",
             "dflash",
             "dspark",
-            "mtp" 
+            "mtp",
         )
         factors.append(uses_aux_hidden_states)
 
