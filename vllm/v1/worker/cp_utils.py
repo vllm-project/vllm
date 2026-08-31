@@ -82,7 +82,6 @@ def prepare_dcp_dummy_context_metadata(
     *,
     input_batch: Any,
     kv_cache_config: Any,
-    query_pos: Any,
     positions: torch.Tensor,
     query_start_loc: Any,
     num_reqs: int,
@@ -109,10 +108,6 @@ def prepare_dcp_dummy_context_metadata(
             blk_table.add_row(block_ids, req_idx)
         blk_table.commit_block_table(num_reqs)
 
-    query_pos.copy_to_gpu(num_tokens_unpadded)
-    positions[:num_tokens_unpadded] = (
-        query_pos.gpu[:num_tokens_unpadded] + dcp_dummy_context_len
-    )
     input_batch.block_table.compute_slot_mapping(
         num_reqs,
         query_start_loc.gpu[: num_reqs + 1],

@@ -277,6 +277,32 @@ def count_nans_per_row(logits: torch.Tensor) -> torch.Tensor:
     return logits.isnan().sum(dim=-1, dtype=torch.int32)
 
 
+def _stage_dummy_request_metadata(
+    *,
+    seq_lens: torch.Tensor,
+    num_scheduled_tokens: torch.Tensor,
+    req_indices: torch.Tensor,
+    query_pos: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    positions: torch.Tensor,
+    num_reqs_padded: int,
+    num_tokens_unpadded: int,
+    num_tokens_padded: int,
+) -> None:
+    """Stage internally consistent request metadata for a dummy batch.
+
+    Positions are absolute: computed context length plus per-request query offset.
+    """
+    num_computed_tokens[:num_reqs_padded] = (
+        seq_lens[:num_reqs_padded] - num_scheduled_tokens[:num_reqs_padded]
+    )
+    positions[:num_tokens_unpadded] = (
+        num_computed_tokens[req_indices[:num_tokens_unpadded]].to(torch.int64)
+        + query_pos[:num_tokens_unpadded]
+    )
+    positions[num_tokens_unpadded:num_tokens_padded].zero_()
+
+
 def nans_to_dict(counts: list[int], req_id_to_index: dict[str, int]) -> dict[str, int]:
     """Map per-row NaN counts onto request ids.
 
@@ -6107,6 +6133,26 @@ class GPUModelRunner(
                 cum_num_tokens = self._get_cumsum_and_arange(
                     num_scheduled_tokens, self.query_pos.np
                 )
+                self.req_indices.np[:num_tokens_unpadded] = np.repeat(
+                    self.arange_np[:num_reqs], num_scheduled_tokens
+                )
+                self.req_indices.copy_to_gpu(num_tokens_unpadded)
+                self.query_pos.copy_to_gpu(num_tokens_unpadded)
+                self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
+                self.num_scheduled_tokens.np[num_reqs:num_reqs_padded].fill(0)
+                self.num_scheduled_tokens.copy_to_gpu(num_reqs_padded)
+                _stage_dummy_request_metadata(
+                    seq_lens=self.seq_lens,
+                    num_scheduled_tokens=self.num_scheduled_tokens.gpu,
+                    req_indices=self.req_indices.gpu,
+                    query_pos=self.query_pos.gpu,
+                    num_computed_tokens=self.num_computed_tokens,
+                    positions=self.positions,
+                    num_reqs_padded=num_reqs_padded,
+                    num_tokens_unpadded=num_tokens_unpadded,
+                    num_tokens_padded=num_tokens_padded,
+                )
+
                 self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
                 self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1].fill(
                     cum_num_tokens[-1]
@@ -6116,7 +6162,6 @@ class GPUModelRunner(
                 prepare_dcp_dummy_context_metadata(
                     input_batch=self.input_batch,
                     kv_cache_config=getattr(self, "kv_cache_config", None),
-                    query_pos=self.query_pos,
                     positions=self.positions,
                     query_start_loc=self.query_start_loc,
                     num_reqs=num_reqs,
