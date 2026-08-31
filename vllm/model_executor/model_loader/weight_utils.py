@@ -119,7 +119,8 @@ def atomic_writer(
     """
     # Create a temporary file in the same directory as the target file
     # to ensure it's on the same filesystem for an atomic replace.
-    temp_dir = os.path.dirname(filepath)
+    # Bare filenames have an empty dirname; resolve so mkstemp gets a real dir.
+    temp_dir = os.path.dirname(os.path.abspath(filepath))
     temp_fd, temp_path = tempfile.mkstemp(dir=temp_dir)
 
     try:
