@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Any
+from copy import deepcopy
+from typing import Any, Final
 
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
@@ -27,10 +28,12 @@ from openai.types.responses.response_output_text import Logprob
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
-from openai.types.responses.tool import Tool
+from openai.types.responses.tool import Mcp, Tool
+from pydantic import TypeAdapter, ValidationError
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionMessageParam,
     ChatCompletionToolsParam,
@@ -393,3 +396,170 @@ def construct_tool_dicts(
         convert_tool_responses_to_completions_format(tool).model_dump()
         for tool in iter_response_function_tool_dicts(tools)
     ]
+
+
+# Canonical flat function names and schemas used to expose builtin tools to
+# models that call them through the standard function-call syntax. Names
+# match the dispatch expectations in ``ParsableContext.need_builtin_tool_call``
+# and the tool executors (e.g. ``call_python_tool`` expects ``{"code": ...}``).
+_BUILTIN_TOOL_PROMPT_SPECS: Final[dict[str, dict[str, Any]]] = {
+    "code_interpreter": {
+        "description": (
+            "Executes Python code in a stateful Jupyter notebook and returns"
+            " the result. Use this tool to run computations instead of"
+            " simulating them."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "The Python code to execute.",
+                }
+            },
+            "required": ["code"],
+        },
+    },
+    "web_search_preview": {
+        "description": "Searches the web and returns relevant results.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query.",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+    "container": {
+        "description": ("Executes a command inside a stateful container environment."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cmd": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "The command to execute.",
+                },
+                "workdir": {"type": "string"},
+                "env": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                },
+                "session_name": {"type": "string"},
+                "timeout": {"type": "integer"},
+                "user": {"type": "string"},
+            },
+            "required": ["cmd"],
+        },
+    },
+}
+
+# Request tool type -> ToolServer registration name.
+_REQUEST_TYPE_TO_SERVER_TOOL: Final[dict[str, str]] = {
+    "code_interpreter": "python",
+    "web_search_preview": "browser",
+    "container": "container",
+}
+
+_TOOL_ADAPTER: Final[TypeAdapter[Tool]] = TypeAdapter(Tool)
+
+
+def _extract_mcp_allowed_tool_names(tool: Mcp) -> list[str] | None:
+    """Return explicit MCP tool names, or None when unrestricted."""
+    allowed_tools_val = None
+    if tool.allowed_tools is not None:
+        if isinstance(tool.allowed_tools, list):
+            allowed_tools_val = tool.allowed_tools
+        elif hasattr(tool.allowed_tools, "tool_names"):
+            allowed_tools_val = tool.allowed_tools.tool_names
+    if allowed_tools_val is not None and "*" in allowed_tools_val:
+        return None
+    return allowed_tools_val
+
+
+def _builtin_tool_dict(
+    request_type: str,
+) -> dict[str, Any]:
+    spec = _BUILTIN_TOOL_PROMPT_SPECS[request_type]
+    return {
+        "type": "function",
+        "function": {
+            "name": request_type,
+            "description": spec["description"],
+            "parameters": deepcopy(spec["parameters"]),
+        },
+    }
+
+
+def _mcp_tool_dict(name: str) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": f"Tool '{name}' provided by an MCP server.",
+        },
+    }
+
+
+def construct_builtin_and_mcp_tool_dicts(
+    tools: list[Tool],
+    tool_server: ToolServer | None,
+) -> list[dict[str, Any]] | None:
+    """Build chat-completions function dicts for builtin and MCP tools.
+
+    Builtin tools (``code_interpreter``, ``web_search_preview``,
+    ``container``) are only rendered when a local tool server actually
+    provides the backing implementation. ``mcp`` tools are rendered from
+    their explicitly listed ``allowed_tools``; unrestricted lists cannot be
+    enumerated without contacting the remote server and are skipped.
+
+    Entries may be SDK tool models or raw dicts; raw dicts that do not
+    validate against the SDK tool union (e.g. tool types absent from the
+    installed SDK version) are matched by their raw ``type`` field.
+
+    Returns None when there is nothing to render so callers can merge the
+    result with ``construct_tool_dicts`` output directly.
+    """
+    prompt_tools: list[dict[str, Any]] = []
+    for tool in _normalize_tools(tools):
+        tool_type = _tool_type(tool)
+        if tool_type in _BUILTIN_TOOL_PROMPT_SPECS:
+            server_tool = _REQUEST_TYPE_TO_SERVER_TOOL[tool_type]
+            if tool_server is None or not tool_server.has_tool(server_tool):
+                continue
+            prompt_tools.append(_builtin_tool_dict(tool_type))
+        elif isinstance(tool, Mcp):
+            allowed = _extract_mcp_allowed_tool_names(tool)
+            if allowed is None:
+                logger.debug(
+                    "MCP server %r has unrestricted allowed_tools; skipping "
+                    "prompt rendering because the remote tool list cannot be "
+                    "enumerated.",
+                    tool.server_label,
+                )
+                continue
+            prompt_tools.extend(_mcp_tool_dict(name) for name in allowed)
+    return prompt_tools or None
+
+
+def _tool_type(tool: Tool | dict[str, Any]) -> str:
+    if isinstance(tool, dict):
+        return tool.get("type", "")
+    return tool.type
+
+
+def _normalize_tools(tools: list[Tool]) -> list[Tool]:
+    normalized: list[Tool] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            normalized.append(tool)
+            continue
+        try:
+            normalized.append(_TOOL_ADAPTER.validate_python(tool))
+        except ValidationError:
+            # Keep raw dicts for tool types the installed SDK cannot model.
+            normalized.append(tool)
+    return normalized

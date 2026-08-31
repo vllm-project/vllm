@@ -162,11 +162,13 @@ def _make_request_output(
     text: str = "Hello, world!",
     token_ids: Sequence[int] = (1, 2, 3),
     finish_reason: str = "stop",
+    prompt_token_ids: Sequence[int] = (),
+    num_cached_tokens: int = 0,
 ) -> RequestOutput:
     return RequestOutput(
         request_id="test",
         prompt=None,
-        prompt_token_ids=[],
+        prompt_token_ids=list(prompt_token_ids),
         prompt_logprobs=None,
         outputs=[
             CompletionOutput(
@@ -179,6 +181,7 @@ def _make_request_output(
             )
         ],
         finished=True,
+        num_cached_tokens=num_cached_tokens,
     )
 
 
@@ -200,6 +203,8 @@ def _make_context(parser_cls, **overrides):
         chat_template=None,
         chat_template_content_format="auto",
     )
+    if "tool_server" in overrides:
+        defaults["tool_server"] = overrides.pop("tool_server")
     defaults.update(overrides)
     return ParsableContext(**defaults)
 
@@ -361,3 +366,86 @@ def test_num_init_messages_offset():
     items = ctx.make_response_output_items()
     assert len(items) == 1
     assert items[0].type == "message"
+
+
+# ---------------------------------------------------------------------------
+# Tests: per-turn usage accounting
+# ---------------------------------------------------------------------------
+
+
+def test_tool_dicts_include_builtin_tools():
+    """Builtin tools requested by the client are rendered into tool_dicts
+    (merged with function tools) when a tool server provides them."""
+    request = _make_request(
+        tools=[
+            {"type": "code_interpreter", "container": {"type": "auto"}},
+        ],
+    )
+
+    class _FakeServer:
+        def has_tool(self, name):
+            return name == "python"
+
+    ctx = _make_context(None, request=request, tool_server=_FakeServer())
+
+    names = {d["function"]["name"] for d in ctx.tool_dicts}
+    assert "code_interpreter" in names
+
+
+def test_usage_metrics_single_turn():
+    """One finished round records a single turn's input/output/cached tokens."""
+    ctx = _make_context(_NoOpParser)
+    ctx.append_output(
+        _make_request_output(
+            prompt_token_ids=(1, 2, 3, 4, 5),
+            token_ids=(6, 7, 8),
+            num_cached_tokens=2,
+        )
+    )
+
+    assert ctx.num_prompt_tokens == 5
+    assert ctx.num_output_tokens == 3
+    assert ctx.num_cached_tokens == 2
+    assert len(ctx.all_turn_metrics) == 1
+    turn = ctx.all_turn_metrics[0]
+    assert turn.input_tokens == 5
+    assert turn.output_tokens == 3
+    assert turn.cached_input_tokens == 2
+    assert turn.tool_output_tokens == 0
+
+
+def test_usage_metrics_multi_turn_tool_loop():
+    """A builtin-tool round trip records tool_output_tokens on the next turn.
+
+    Turn 1: prompt 10, decode 3. The tool result appends 7 tokens to the
+    prompt, so turn 2 has prompt 20 and tool_output_tokens 7.
+    """
+    ctx = _make_context(_NoOpParser)
+
+    # Round 1.
+    ctx.append_output(
+        _make_request_output(prompt_token_ids=tuple(range(10)), token_ids=(1, 2, 3))
+    )
+
+    # Tool output is appended between rounds (no token accounting).
+    ctx.append_tool_output([])
+
+    # Round 2: prompt grew by the tool result.
+    ctx.append_output(
+        _make_request_output(
+            prompt_token_ids=tuple(range(20)),
+            token_ids=(4, 5),
+            num_cached_tokens=10,
+        )
+    )
+
+    assert ctx.num_prompt_tokens == 30
+    assert ctx.num_output_tokens == 5
+    assert ctx.num_cached_tokens == 10
+    assert len(ctx.all_turn_metrics) == 2
+
+    first, second = ctx.all_turn_metrics
+    assert (first.input_tokens, first.output_tokens) == (10, 3)
+    assert first.tool_output_tokens == 0
+    assert second.tool_output_tokens == 7
+    assert sum(t.tool_output_tokens for t in ctx.all_turn_metrics) == 7

@@ -900,3 +900,93 @@ class TestConstructInputMessagesInstructionsLeak:
         assert len(msgs) == 2
         assert msgs[0] == {"role": "system", "content": "be helpful"}
         assert msgs[1] == {"role": "user", "content": "hello"}
+
+
+# ---------------------------------------------------------------------------
+# Tests: builtin / MCP tool extraction for prompt rendering
+# ---------------------------------------------------------------------------
+
+
+class _FakeToolServer:
+    """Minimal ToolServer stub exposing builtin tool availability."""
+
+    def __init__(self, available=("browser", "python", "container")):
+        self._available = set(available)
+
+    def has_tool(self, tool_name):
+        return tool_name in self._available
+
+
+def test_builtin_tools_rendered_as_functions():
+    from vllm.entrypoints.openai.responses.utils import (
+        construct_builtin_and_mcp_tool_dicts,
+    )
+
+    tools = [
+        {"type": "code_interpreter", "container": {"type": "auto"}},
+        {"type": "web_search_preview"},
+    ]
+    dicts = construct_builtin_and_mcp_tool_dicts(tools, _FakeToolServer())
+
+    names = {d["function"]["name"] for d in dicts}
+    assert names == {"code_interpreter", "web_search_preview"}
+    for d in dicts:
+        assert d["type"] == "function"
+    code = next(d for d in dicts if d["function"]["name"] == "code_interpreter")
+    props = code["function"]["parameters"]["properties"]
+    assert "code" in props
+    search = next(d for d in dicts if d["function"]["name"] == "web_search_preview")
+    assert "query" in search["function"]["parameters"]["properties"]
+
+
+def test_container_tool_rendered_with_exec_schema():
+    from vllm.entrypoints.openai.responses.utils import (
+        construct_builtin_and_mcp_tool_dicts,
+    )
+
+    dicts = construct_builtin_and_mcp_tool_dicts(
+        [{"type": "container"}], _FakeToolServer()
+    )
+    assert len(dicts) == 1
+    params = dicts[0]["function"]["parameters"]
+    assert "cmd" in params["properties"]
+    assert params["required"] == ["cmd"]
+
+
+def test_builtin_tool_skipped_when_server_lacks_it():
+    from vllm.entrypoints.openai.responses.utils import (
+        construct_builtin_and_mcp_tool_dicts,
+    )
+
+    dicts = construct_builtin_and_mcp_tool_dicts(
+        [{"type": "web_search_preview"}], _FakeToolServer(available=())
+    )
+    assert dicts is None
+
+
+def test_builtin_tool_skipped_without_server():
+    from vllm.entrypoints.openai.responses.utils import (
+        construct_builtin_and_mcp_tool_dicts,
+    )
+
+    dicts = construct_builtin_and_mcp_tool_dicts([{"type": "code_interpreter"}], None)
+    assert dicts is None
+
+
+def test_mcp_allowed_tools_extracted_from_list():
+    from vllm.entrypoints.openai.responses.utils import (
+        construct_builtin_and_mcp_tool_dicts,
+    )
+
+    tools = [
+        {
+            "type": "mcp",
+            "server_label": "deepwiki",
+            "server_url": "https://example.com/mcp",
+            "allowed_tools": ["search", "read_page"],
+        }
+    ]
+    dicts = construct_builtin_and_mcp_tool_dicts(tools, None)
+    # MCP tools do not depend on the local builtin tool server.
+    names = [d["function"]["name"] for d in dicts]
+    assert names == ["search", "read_page"]

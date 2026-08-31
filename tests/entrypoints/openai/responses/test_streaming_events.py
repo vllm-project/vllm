@@ -8,6 +8,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
+    StreamingParsedOutput,
     _StateType,
     split_delta,
 )
@@ -124,3 +125,92 @@ class TestProcessorCompoundDeltas:
         types = [e.type for e in events]
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
+
+
+class TestStreamingParsedOutput:
+    """StreamingParsedOutput accumulates parsed delta components so the
+    final response can be built without reparsing the full text."""
+
+    def test_empty_has_no_output(self):
+        acc = StreamingParsedOutput()
+        assert not acc.has_any()
+
+    def test_accumulates_reasoning_and_content(self):
+        acc = StreamingParsedOutput()
+        acc.update(DeltaMessage(reasoning="think "))
+        acc.update(DeltaMessage(reasoning="hard"))
+        acc.update(DeltaMessage(content="Hello "))
+        acc.update(DeltaMessage(content="world"))
+
+        assert acc.has_any()
+        assert acc.reasoning_text == "think hard"
+        assert acc.content_text == "Hello world"
+
+    def test_merges_fragmented_tool_calls_by_index(self):
+        acc = StreamingParsedOutput()
+        acc.update(
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=0,
+                        id="call_a",
+                        function=DeltaFunctionCall(name="get_weather"),
+                    )
+                ]
+            )
+        )
+        acc.update(
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=0, function=DeltaFunctionCall(arguments='{"city":')
+                    )
+                ]
+            )
+        )
+        acc.update(
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=0, function=DeltaFunctionCall(arguments='Paris"}')
+                    )
+                ]
+            )
+        )
+        # A second, distinct tool call.
+        acc.update(
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=1,
+                        id="call_b",
+                        function=DeltaFunctionCall(name="get_time", arguments="{}"),
+                    )
+                ]
+            )
+        )
+
+        assert len(acc.tool_calls) == 2
+        first = acc.tool_calls[0]
+        assert first.name == "get_weather"
+        assert first.arguments == '{"city":Paris"}'
+        assert first.id == "call_a"
+        second = acc.tool_calls[1]
+        assert second.name == "get_time"
+        assert second.arguments == "{}"
+
+    def test_tool_only_output(self):
+        acc = StreamingParsedOutput()
+        acc.update(
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=0,
+                        function=DeltaFunctionCall(name="f", arguments="{}"),
+                    )
+                ]
+            )
+        )
+        assert acc.has_any()
+        assert acc.reasoning_text == ""
+        assert acc.content_text == ""

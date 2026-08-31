@@ -748,13 +748,24 @@ class ResponsesResponse(OpenAIBaseModel):
         output_messages: ResponseInputOutputMessage | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
+        incomplete_reason: Literal["max_output_tokens", "content_filter"] | None = None,
     ) -> "ResponsesResponse":
+        """Build a response from the request.
+
+        Args:
+            incomplete_reason: Reason reported via ``incomplete_details`` when
+                ``status == "incomplete"``. Callers should derive it from the
+                finish condition (e.g. ``finish_reason == "length"`` maps to
+                ``"max_output_tokens"``). Defaults to ``"max_output_tokens"``
+                for backwards compatibility. Note: vLLM has no content
+                moderation layer and will not produce ``"content_filter"``;
+                the value is accepted for API completeness.
+        """
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
-            incomplete_details = IncompleteDetails(reason="max_output_tokens")
-        # TODO: implement the other reason for incomplete_details,
-        # which is content_filter
-        # incomplete_details = IncompleteDetails(reason='content_filter')
+            incomplete_details = IncompleteDetails(
+                reason=incomplete_reason or "max_output_tokens"
+            )
         return cls(
             id=request.request_id,
             created_at=created_time,
