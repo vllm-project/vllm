@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.entrypoints.openai.engine.protocol import GenerationError, StreamOptions
+from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
@@ -17,6 +17,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateResponse,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+from vllm.exceptions import GenerationError
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers import renderer_from_config
