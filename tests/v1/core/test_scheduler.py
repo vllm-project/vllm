@@ -1761,6 +1761,52 @@ def test_spec_decode_padding_skipped_for_diffusion():
     assert r2.request_id not in out.scheduled_spec_decode_tokens
 
 
+@pytest.mark.parametrize("aligned_tokens", [1, 2, 3])
+def test_spec_decode_padding_dropped_when_recurrent_alignment_clips(
+    aligned_tokens: int,
+):
+    """A clipped padded request must drop its padding, not shorten it.
+
+    The sampler derives a request's row window from its draft count, so a
+    padded request that keeps fewer than 1 + num_spec query rows would select
+    the preceding request's hidden states.
+    """
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=16,
+    )
+    r1, r2 = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=16
+    )
+
+    scheduler.add_request(r1)
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens[r1.request_id] == 33
+    _model_output(scheduler, out, [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+
+    # Model the recurrent align split that clips a padded 1+3 prompt tail at
+    # the next cache boundary. The real QSA block size produces all three cases
+    # depending on prompt length modulo four.
+    scheduler.need_mamba_block_aligned_split = True
+    original_split = scheduler._mamba_block_aligned_split
+
+    def align_prompt_tail(request, num_new_tokens, *args):
+        if request is r2:
+            return aligned_tokens
+        return original_split(request, num_new_tokens, *args)
+
+    scheduler._mamba_block_aligned_split = align_prompt_tail
+    scheduler.add_request(r2)
+    out = scheduler.schedule()
+
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
+    assert out.num_scheduled_tokens[r2.request_id] == 1
+    assert r2.request_id not in out.scheduled_spec_decode_tokens
+
+
 def test_spec_decode_padding_skipped_with_prefill_in_batch():
     """Padding is skipped when the batch contains a prefill chunk: the batch is
     already mixed/non-uniform, so padding a new decode request buys nothing.
@@ -1973,6 +2019,47 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
         assert req_id in scheduler.finished_recving_kv_req_ids
 
     return initial_ecos
+
+
+@pytest.mark.parametrize(
+    ("load_modes", "expected_has_sync_loads"),
+    [
+        ((True,), False),
+        ((False,), True),
+        ((True, False), True),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_has_sync_kv_loads(
+    load_modes: tuple[bool, ...],
+    expected_has_sync_loads: bool,
+    tmp_path,
+):
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    block_size = 16
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        use_kv_connector=mock_kv(matched_tokens=block_size, is_async=False),
+        block_size=block_size,
+    )
+    requests = create_requests(
+        num_requests=len(load_modes),
+        num_tokens=block_size * 2,
+        block_size=block_size,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduler.connector.get_num_new_matched_tokens = Mock(
+        side_effect=[(block_size, is_async) for is_async in load_modes]
+    )
+
+    output = scheduler.schedule()
+
+    assert output.has_sync_kv_loads is expected_has_sync_loads
 
 
 @pytest.mark.parametrize("is_async", [False, True])
