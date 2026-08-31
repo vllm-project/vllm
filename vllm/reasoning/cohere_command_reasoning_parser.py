@@ -362,6 +362,11 @@ def _schema_dict_from_chat_response_format(
         if isinstance(rf, dict)
         else getattr(rf, "json_schema", None)
     )
+    if js_wr is not None:
+        strict = js_wr.get("strict") if isinstance(js_wr, dict) else js_wr.strict
+        if strict is False:
+            # strict=false: prompt-instruction-only, no decoding constraint.
+            return None
     return _schema_from_json_schema_field(js_wr)
 
 
