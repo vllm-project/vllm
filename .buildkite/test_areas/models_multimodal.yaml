@@ -80,7 +80,7 @@ steps:
       label: ":amd: (MI300) Multimodal Models (Standard) 4: other + whisper"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 50
+      timeout_in_minutes: 70
       depends_on:
       - image-build-amd
 
