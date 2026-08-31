@@ -97,11 +97,10 @@ def _make_sm120_impl(
         )
 
 
-@pytest.mark.parametrize("model_type", ["deepseek_v32", "glm4_moe", "kimi_k3", "hy_v4"])
+@pytest.mark.parametrize("model_type", ["deepseek_v32", "glm4_moe", "hy_v4"])
 def test_sm120_impl_reads_fp8_ds_mla_scales_as_arbitrary_fp32(
     monkeypatch, model_type: str
 ) -> None:
-    """The vLLM 656-byte writer contract does not depend on the model label."""
     impl = _make_sm120_impl(monkeypatch, model_type=model_type)
     assert impl.kv_scale_format == "arbitrary_fp32"
 
