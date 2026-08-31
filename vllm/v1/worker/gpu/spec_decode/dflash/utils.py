@@ -12,7 +12,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
 
 
 def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
-    from vllm.compilation.backends import set_model_tag
+    from vllm.backends.compiler.backends import set_model_tag
     from vllm.model_executor.models.qwen3_dflash import (
         dflash_has_any_non_causal,
         dflash_target_rope_is_neox_style,

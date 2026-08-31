@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.attention import Attention
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.torch_utils import (
     PIN_MEMORY,
     canonicalize_singleton_dim_strides,
@@ -60,7 +60,7 @@ from vllm.foundation.config import (
 from vllm.foundation.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms.interface import DeviceCapability
+from vllm.backends.platform.interface import DeviceCapability
 from vllm.foundation.utilities.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
     AttentionCGSupport,

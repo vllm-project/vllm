@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.model_executor.layers.fused_moe import (
@@ -30,7 +30,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import (

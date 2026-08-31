@@ -13,7 +13,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
     SparseMLACommonMetadataBuilder,
 )
-from vllm.platforms.interface import DeviceCapability
+from vllm.backends.platform.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

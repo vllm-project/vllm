@@ -42,7 +42,7 @@ from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
 )
 from transformers.models.whisper import WhisperFeatureExtractor
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size

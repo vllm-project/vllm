@@ -183,7 +183,7 @@ def _mxfp8_e4m3_quantize_impl(
     is_sf_swizzled_layout: bool = False,
     alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
     from vllm.foundation.utilities.flashinfer import has_flashinfer
 
     if current_platform.has_device_capability(100) and has_flashinfer():

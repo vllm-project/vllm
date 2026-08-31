@@ -19,7 +19,7 @@ import torch.multiprocessing as mp
 import vllm.foundation.system.envs as envs
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.system_utils import update_environment_variables
 
 logger = init_logger(__name__)
@@ -353,7 +353,7 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
 
     is_distributed = dist.is_initialized()
 
-    from vllm.platforms.interface import get_assigned_physical_gpu_ids
+    from vllm.backends.platform.interface import get_assigned_physical_gpu_ids
 
     assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
     if assigned_physical_gpu_ids is not None:

@@ -37,7 +37,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .model import DeepseekV32DecoderLayer

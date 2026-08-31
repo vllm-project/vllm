@@ -143,7 +143,7 @@ def get_attn_backend(
         and speculative_config.enable_adaptive_verification
     )
     if use_adaptive_verification:
-        from vllm.compilation.backends import model_tag
+        from vllm.backends.compiler.backends import model_tag
 
         # The drafter always runs full-length blocks; only the verifier sees
         # the trimmed, device-decided query lengths.
@@ -197,7 +197,7 @@ def _cached_get_attn_backend(
     attn_selector_config: AttentionSelectorConfig,
     num_heads: int | None = None,
 ) -> type[AttentionBackend]:
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     attention_cls = current_platform.get_attn_backend_cls(
         backend,

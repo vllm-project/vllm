@@ -7,7 +7,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.foundation.utilities.mem_utils import get_max_shared_memory_bytes

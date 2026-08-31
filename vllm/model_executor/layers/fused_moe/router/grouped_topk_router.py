@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.utils import maybe_disable_graph_partition
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 
 def fused_grouped_topk(

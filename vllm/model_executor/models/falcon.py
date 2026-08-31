@@ -30,7 +30,7 @@ from torch import nn
 from torch.nn import LayerNorm
 from transformers import FalconConfig as HF_FalconConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,

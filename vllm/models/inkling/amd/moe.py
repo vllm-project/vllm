@@ -38,7 +38,7 @@ from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, tldevice, triton
 from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
 from vllm.foundation.utilities.torch_utils import aux_stream

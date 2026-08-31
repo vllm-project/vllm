@@ -10,7 +10,7 @@
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.third_party.flash_linear_attention.ops.index import prepare_chunk_indices
 from vllm.third_party.flash_linear_attention.ops.op import exp2, gather
 from vllm.third_party.flash_linear_attention.ops.utils import is_gather_supported

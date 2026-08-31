@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.import_utils import has_triton_kernels
 
@@ -47,7 +47,7 @@ def _triton_kernel_moe_supports_current_device() -> bool:
         # range was not validated.
         return cap is not None and (9, 0) <= (cap.major, cap.minor) < (11, 0)
     if p.is_rocm():
-        from vllm.platforms.rocm import on_gfx1x, on_gfx9
+        from vllm.backends.platform.rocm import on_gfx1x, on_gfx9
 
         # gfx9 family: gfx90a (MI200), gfx942/gfx950 (MI3xx);
         # on_gfx9() already excludes gfx906/gfx908.

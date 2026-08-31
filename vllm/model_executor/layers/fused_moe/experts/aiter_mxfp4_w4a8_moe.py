@@ -104,7 +104,7 @@ def aiter_triton_kernel_w4a8_moe_forward(
         and quant_config.use_mxfp4_w4a8
         and rocm_aiter_ops.is_enabled()
     )
-    from vllm.platforms.rocm import on_gfx1250
+    from vllm.backends.platform.rocm import on_gfx1250
 
     try:
         from aiter.ops.triton.moe.moe_routing import routing as _routing_mod
@@ -280,7 +280,7 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     def _supports_current_device() -> bool:
         if not rocm_aiter_ops.is_enabled():
             return False
-        from vllm.platforms.rocm import on_gfx950, on_gfx1250
+        from vllm.backends.platform.rocm import on_gfx950, on_gfx1250
 
         return on_gfx950() or on_gfx1250()
 
@@ -486,7 +486,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
     score_mode: str | None = None,
 ):
     assert quant_config is not None and rocm_aiter_ops.is_enabled()
-    from vllm.platforms.rocm import on_gfx1250
+    from vllm.backends.platform.rocm import on_gfx1250
 
     try:
         from aiter.ops.triton.moe.moe_op_gemm_a16w4 import moe_gemm_a16w4
@@ -634,7 +634,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     def _supports_current_device() -> bool:
         if not rocm_aiter_ops.is_enabled():
             return False
-        from vllm.platforms.rocm import on_gfx950, on_gfx1250
+        from vllm.backends.platform.rocm import on_gfx950, on_gfx1250
 
         return on_gfx950() or on_gfx1250()
 

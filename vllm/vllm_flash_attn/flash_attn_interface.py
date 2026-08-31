@@ -52,7 +52,7 @@ DEFAULT_FA_VERSION = 2
 def _is_fa2_supported() -> tuple[bool, str | None]:
     if not FA2_AVAILABLE:
         return False, f"FA2 is unavailable due to: {FA2_UNAVAILABLE_REASON}"
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if not current_platform.has_device_capability(80):
         return False, "FA2 is only supported on devices with compute capability >= 8"
@@ -62,7 +62,7 @@ def _is_fa2_supported() -> tuple[bool, str | None]:
 def _is_fa3_supported() -> tuple[bool, str | None]:
     if not FA3_AVAILABLE:
         return False, f"FA3 is unavailable due to: {FA3_UNAVAILABLE_REASON}"
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if not current_platform.is_device_capability_family(90):
         return False, "FA3 is only supported on devices with compute capability 9.x"
@@ -72,7 +72,7 @@ def _is_fa3_supported() -> tuple[bool, str | None]:
 def _is_fa4_supported() -> tuple[bool, str | None]:
     if not FA4_AVAILABLE:
         return False, f"FA4 is unavailable due to: {FA4_UNAVAILABLE_REASON}"
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if not (
         current_platform.is_device_capability_family(90)

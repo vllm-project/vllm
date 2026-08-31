@@ -20,7 +20,7 @@ from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY, MultiModalR
 from vllm.frontend.processing.multimodal.encoder_budget import MultiModalBudget
 from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
 from vllm.frontend.processing.multimodal.utils import argsort_mm_positions
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.frontend.processing.renderers import BaseRenderer, renderer_from_config
 from vllm.frontend.processing.renderers.inputs.preprocess import parse_model_prompt

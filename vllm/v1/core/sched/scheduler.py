@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
-from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.backends.compiler.cuda_graph import CUDAGraphStat
 from vllm.foundation.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,

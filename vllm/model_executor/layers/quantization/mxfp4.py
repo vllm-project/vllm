@@ -37,7 +37,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 
@@ -737,7 +737,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # that don't support .detach(). Manually assign parameters.
         is_gfx1250 = False
         if current_platform.is_rocm():
-            from vllm.platforms.rocm import on_gfx1250
+            from vllm.backends.platform.rocm import on_gfx1250
 
             is_gfx1250 = on_gfx1250()
 
@@ -796,7 +796,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         is_gfx1250 = False
         if current_platform.is_rocm():
-            from vllm.platforms.rocm import on_gfx1250
+            from vllm.backends.platform.rocm import on_gfx1250
 
             is_gfx1250 = on_gfx1250()
 

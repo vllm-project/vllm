@@ -9,8 +9,8 @@ from torch.distributed import ProcessGroup
 
 from vllm.distributed.utils import pickle
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.platforms.interface import CpuArchEnum
+from vllm.backends.platform import current_platform
+from vllm.backends.platform.interface import CpuArchEnum
 
 from .base_device_communicator import DeviceCommunicatorBase
 

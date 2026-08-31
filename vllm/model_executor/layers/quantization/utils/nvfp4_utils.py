@@ -6,7 +6,7 @@ import torch
 from vllm._custom_ops import (
     cutlass_scaled_mm_supports_fp4,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.math_utils import round_up
 
 

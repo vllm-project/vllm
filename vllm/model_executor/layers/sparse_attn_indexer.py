@@ -7,7 +7,7 @@ import torch
 import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
 from vllm.foundation.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
@@ -16,7 +16,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.deep_gemm import (
     fp8_fp4_mqa_logits,
@@ -868,7 +868,7 @@ class SparseAttnIndexer(CustomOp):
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
-        from vllm.platforms.rocm import on_gfx11
+        from vllm.backends.platform.rocm import on_gfx11
 
         if (
             rocm_aiter_ops.is_enabled()

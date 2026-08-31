@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention

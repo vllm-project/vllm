@@ -10,7 +10,7 @@ from torch._ops import OpOverload
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.import_utils import PlaceholderModule
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
@@ -148,7 +148,7 @@ def is_aiter_found_and_supported() -> bool:
     VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
     """
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import get_cdna_version
+        from vllm.backends.platform.rocm import get_cdna_version
 
         return get_cdna_version() > 2
     return False
@@ -163,7 +163,7 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
     arch + library availability and does not check environment variables.
     """
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import on_rdna4
+        from vllm.backends.platform.rocm import on_rdna4
 
         return on_rdna4()
     return False
@@ -1868,7 +1868,7 @@ class rocm_aiter_ops:
         `is_enabled()`."""
         if not current_platform.is_rocm() or not IS_AITER_FOUND:
             return False
-        from vllm.platforms.rocm import on_rdna4
+        from vllm.backends.platform.rocm import on_rdna4
 
         return on_rdna4() and cls._AITER_ENABLED
 
@@ -1983,7 +1983,7 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_fp4bmm_enabled(cls) -> bool:
-        from vllm.platforms.rocm import get_cdna_version
+        from vllm.backends.platform.rocm import get_cdna_version
 
         # TODO GFX1250: Enable for cdna 4+ when aiter supports batched_gemm_a16wfp4 on gfx1250
         return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and get_cdna_version() == 4
@@ -1991,7 +1991,7 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_linear_hipbmm_enabled(cls) -> bool:
-        from vllm.platforms.rocm import get_cdna_version
+        from vllm.backends.platform.rocm import get_cdna_version
 
         return (
             cls.is_linear_enabled()
@@ -2002,7 +2002,7 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.backends.platform.rocm import on_gfx950
 
         return cls._AITER_ENABLED and on_gfx950()
 
@@ -2019,7 +2019,7 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_tgemm_enabled(cls) -> bool:
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.backends.platform.rocm import on_gfx950
 
         return cls.is_linear_enabled() and on_gfx950()
 
@@ -2093,7 +2093,7 @@ class rocm_aiter_ops:
             if not current_platform.is_rocm():
                 return
 
-            from vllm.platforms.rocm import on_gfx11
+            from vllm.backends.platform.rocm import on_gfx11
 
             if on_gfx11() and not _OPS_REGISTERED:
                 direct_register_custom_op(
@@ -3036,7 +3036,7 @@ class rocm_aiter_ops:
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:
         if not current_platform.is_rocm():
             return False
-        from vllm.platforms.rocm import on_gfx950, on_rdna4
+        from vllm.backends.platform.rocm import on_gfx950, on_rdna4
 
         gfx950_tuned = {
             (1024, 8192),

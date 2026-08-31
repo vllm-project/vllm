@@ -26,7 +26,7 @@ from vllm.foundation.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 # AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops;
 # every other platform uses the generic common.ops implementation.

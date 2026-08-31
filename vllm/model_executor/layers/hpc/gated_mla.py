@@ -47,7 +47,7 @@ def hpc_gated_mla_supported(
         )
         return False
 
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if not current_platform.is_cuda():
         logger.warning_once("HPC gated MLA disabled: only CUDA is supported.")

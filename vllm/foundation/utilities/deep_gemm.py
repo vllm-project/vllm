@@ -20,7 +20,7 @@ from vllm.foundation.observability.logger import logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.import_utils import has_deep_gemm
 from vllm.foundation.utilities.math_utils import cdiv
 

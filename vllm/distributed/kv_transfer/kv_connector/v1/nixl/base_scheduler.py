@@ -28,7 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.foundation.utilities.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput

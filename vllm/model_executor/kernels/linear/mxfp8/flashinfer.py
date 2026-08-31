@@ -9,7 +9,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
     swizzle_mxfp8_scale,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities import flashinfer as vllm_flashinfer
 from vllm.foundation.utilities.flashinfer import has_flashinfer, has_flashinfer_cutedsl
 

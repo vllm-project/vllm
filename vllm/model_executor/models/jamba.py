@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from transformers import JambaConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group

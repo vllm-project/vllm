@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.backends.platform import CpuArchEnum, current_platform
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.collection_utils import LazyDict
 

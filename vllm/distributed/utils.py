@@ -662,7 +662,7 @@ def stateless_init_torch_distributed_process_group(
             timeout=timeout,
         )
     else:
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         pg = current_platform.stateless_init_device_torch_dist_pg(
             backend=backend,

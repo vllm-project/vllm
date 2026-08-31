@@ -51,7 +51,7 @@ from vllm.models.deepseek_v32.nvidia.model import (
     DeepseekV32ForCausalLM,
     DeepseekV32Model,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from .attention import (

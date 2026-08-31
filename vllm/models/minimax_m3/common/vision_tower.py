@@ -27,7 +27,7 @@ from vllm.model_executor.models.vision import (
     get_vit_attn_backend,
     is_vit_use_data_parallel,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 # ROCm caps a kernel-launch gridDim.y at 65536. The HIP flash-attn Triton
 # rotary kernel launches grid.y = cdiv(seqlen, BLOCK_M), so it fails with

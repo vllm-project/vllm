@@ -13,7 +13,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

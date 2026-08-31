@@ -7,7 +7,7 @@ import torch
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.devtools.profiler.wrapper import TorchProfilerWrapper
 from vllm.foundation.utilities.mem_utils import MemorySnapshot, format_gib
 from vllm.foundation.utilities.torch_utils import set_random_seed
@@ -175,7 +175,7 @@ class XPUWorker(Worker):
             self.local_rank,
         )
         super().shutdown()
-        from vllm.device_allocator.xpumem import XpuMemAllocator
+        from vllm.backends.platform.device_allocator.xpumem import XpuMemAllocator
 
         if XpuMemAllocator.instance is not None:
             XpuMemAllocator.instance.release_pools()

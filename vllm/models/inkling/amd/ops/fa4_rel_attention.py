@@ -19,7 +19,7 @@ from vllm.models.inkling.amd.ops.rel_attention_decode import (
     inkling_rel_attention_split_kv_decode,
     use_split_kv_decode,
 )
-from vllm.platforms.rocm import on_gfx950
+from vllm.backends.platform.rocm import on_gfx950
 from vllm.triton_utils import tl, triton
 
 

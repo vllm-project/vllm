@@ -18,7 +18,7 @@ from pathlib import Path
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

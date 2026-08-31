@@ -64,7 +64,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.integrations.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d

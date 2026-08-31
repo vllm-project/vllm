@@ -12,9 +12,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed import P2POp
 
-from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
-from vllm.compilation.wrapper import reset_compile_wrapper
+from vllm.backends.compiler.counter import compilation_counter
+from vllm.backends.compiler.cuda_graph import CUDAGraphWrapper
+from vllm.backends.compiler.wrapper import reset_compile_wrapper
 from vllm.foundation.config import (
     CompilationMode,
     set_current_vllm_config,
@@ -186,7 +186,7 @@ class ElasticEPScalingExecutor:
         return done_key
 
     def _run_async(self, execute_method: str, *args, **kwargs) -> None:
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         self.worker.vllm_config.enable_trace_function_call_for_thread()
         assert hasattr(self.worker, "device")
@@ -215,7 +215,7 @@ class ElasticEPScalingExecutor:
     def _destroy_retired_groups(
         self, groups: tuple[GroupCoordinator | None, ...]
     ) -> None:
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         current_platform.set_device(self.worker.device)
         for group in groups:

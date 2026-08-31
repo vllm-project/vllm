@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.parameter import (
     permute_param_layout_,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
@@ -36,7 +36,7 @@ SUPPORTED_GROUP_SIZES = [32, 64, 128]
 def _on_gfx12x() -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx12x
+    from vllm.backends.platform.rocm import on_gfx12x
 
     return on_gfx12x()
 
@@ -44,7 +44,7 @@ def _on_gfx12x() -> bool:
 def _on_gfx1x() -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx1x
+    from vllm.backends.platform.rocm import on_gfx1x
 
     return on_gfx1x()
 
@@ -52,7 +52,7 @@ def _on_gfx1x() -> bool:
 def _on_gfx1151() -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx1151
+    from vllm.backends.platform.rocm import on_gfx1151
 
     return on_gfx1151()
 

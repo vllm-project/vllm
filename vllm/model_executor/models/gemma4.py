@@ -26,7 +26,7 @@ import regex as re
 import torch
 from torch import nn
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -61,7 +61,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.configs.gemma4 import gemma4_layer_config
 from vllm.triton_utils import tl, triton
@@ -1081,7 +1081,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             config, "num_kv_shared_layers", 0
         )
 
-        from vllm.compilation.backends import set_model_tag
+        from vllm.backends.compiler.backends import set_model_tag
 
         # Layers 0..(K-1) are self-decoder layers in YOCO
         with set_model_tag("self_decoder"):

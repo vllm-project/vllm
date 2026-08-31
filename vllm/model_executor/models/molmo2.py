@@ -23,7 +23,7 @@ from transformers import (
 from transformers.image_utils import ImageInput
 from transformers.video_utils import VideoMetadata
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import (

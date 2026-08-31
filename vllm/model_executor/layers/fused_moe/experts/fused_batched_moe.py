@@ -31,7 +31,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton, use_tensor_descriptor
 from vllm.triton_utils.allocation import set_triton_allocator
 
@@ -816,7 +816,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     ) -> bool:
         p = current_platform
         if p.is_rocm():
-            from vllm.platforms.rocm import get_cdna_version, on_rdna4
+            from vllm.backends.platform.rocm import get_cdna_version, on_rdna4
 
             is_rocm_fp8_supported = get_cdna_version() > 2 or on_rdna4()
         else:

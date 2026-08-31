@@ -1,6 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from . import ops
-from .op import enable_torch_wrap, register_op, set_default_torch_wrap
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-__all__ = ["enable_torch_wrap", "register_op", "set_default_torch_wrap", "ops"]
+"""Compatibility shim: vllm.ir/ -> vllm.backends.compute.ir (lazy __getattr__ delegation)."""
+import importlib as _importlib
+
+_real = _importlib.import_module("vllm.backends.compute.ir")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

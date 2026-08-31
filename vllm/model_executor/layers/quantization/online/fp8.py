@@ -54,7 +54,7 @@ from vllm.model_executor.model_loader.reload.layerwise import (
 )
 from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.deep_gemm import per_block_cast_to_fp8
 from vllm.foundation.utilities.math_utils import round_up
 

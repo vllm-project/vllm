@@ -27,7 +27,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.deep_gemm import (
     get_tma_aligned_size,
@@ -883,7 +883,7 @@ def w8a8_triton_block_scaled_mm(
 
     _on_gfx1250 = False
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx1250
+        from vllm.backends.platform.rocm import on_gfx1250
 
         _on_gfx1250 = on_gfx1250()
 

@@ -23,7 +23,7 @@ from collections.abc import Iterable
 import torch
 import torch.nn as nn
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import VllmConfig
 
 # SPDX-License-Identifier: Apache-2.0

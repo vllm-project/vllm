@@ -13,7 +13,7 @@ import torch
 from torch import nn
 
 from vllm import _custom_ops as ops
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm

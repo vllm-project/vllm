@@ -11,7 +11,7 @@ import torch.distributed as dist
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.network_utils import (
     aiter_requires_tcp_store,
     get_distributed_init_method,

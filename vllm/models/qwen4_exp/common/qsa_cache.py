@@ -24,7 +24,7 @@ from torch import nn
 from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.foundation.config.cache import CacheDType
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.attention.backend import (

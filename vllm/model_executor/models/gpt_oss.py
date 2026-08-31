@@ -8,7 +8,7 @@ import torch.distributed as dist
 from torch import nn
 from transformers import GptOssConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_dp_group,
@@ -47,7 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     remap_moe_expert_weights,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType

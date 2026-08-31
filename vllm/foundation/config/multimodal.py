@@ -375,7 +375,7 @@ class MultiModalConfig:
         if (mm_processor_kwargs or {}).get("device") is not None:
             return mm_processor_kwargs
 
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         # Any explicit value other than "cpu" means "the accelerator", so a
         # programmatically-set "cuda" still works on a platform whose device type
@@ -431,7 +431,7 @@ class MultiModalConfig:
                 is the accelerator on an instance that also runs the language
                 model.
         """
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         device_type = self.get_mm_processor_device_type()
         accelerator = current_platform.device_type

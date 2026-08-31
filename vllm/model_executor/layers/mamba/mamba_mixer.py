@@ -33,7 +33,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_scan_fn
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import selective_state_update
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.torch_utils import (
     LayerNameType,
     _encode_layer_name,

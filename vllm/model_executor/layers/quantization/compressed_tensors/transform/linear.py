@@ -25,7 +25,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.module
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils import (  # noqa: E501
     TransformTuple,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 
 class CompressedTensorsLinearTransformMethod(LinearMethodBase):

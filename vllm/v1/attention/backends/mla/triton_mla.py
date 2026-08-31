@@ -15,8 +15,8 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
     MLACommonMetadataBuilder,
 )
-from vllm.platforms import current_platform
-from vllm.platforms.interface import DeviceCapability
+from vllm.backends.platform import current_platform
+from vllm.backends.platform.interface import DeviceCapability
 from vllm.triton_utils import triton
 from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (

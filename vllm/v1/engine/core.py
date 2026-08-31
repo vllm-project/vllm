@@ -1384,7 +1384,7 @@ class EngineCoreProc(EngineCore):
             if engine_core is not None:
                 engine_core.shutdown()
             if clean_shutdown:
-                from vllm.platforms import current_platform
+                from vllm.backends.platform import current_platform
 
                 if current_platform.is_rocm():
                     # Cleanup above already unfreezes and collects the heap.
@@ -2457,7 +2457,7 @@ class EngineCoreActorMixin:
         )
 
     def _set_visible_devices(self, vllm_config: VllmConfig, local_dp_rank: int):
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         if current_platform.is_xpu():
             pass

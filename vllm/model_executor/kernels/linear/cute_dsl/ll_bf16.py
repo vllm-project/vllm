@@ -81,7 +81,7 @@ def _arch_tuned_configs() -> tuple[
     dict[tuple[int, int], dict[int, int]],
     dict[tuple[int, int], dict[int, tuple[int, int]]],
 ]:
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if current_platform.is_device_capability_family(100):
         return (
@@ -118,7 +118,7 @@ def _stream():
 
 
 def _use_pdl() -> bool:
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     return current_platform.is_arch_support_pdl()
 

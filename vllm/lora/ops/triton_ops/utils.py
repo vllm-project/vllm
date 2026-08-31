@@ -11,7 +11,7 @@ import torch
 
 from vllm import envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.math_utils import next_power_of_2
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 

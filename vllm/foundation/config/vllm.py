@@ -97,7 +97,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
 @lru_cache
 def default_breakable_cudagraph_architectures() -> frozenset[str]:
     """Architectures defaulting to breakable CUDA graphs on this platform."""
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if current_platform.is_rocm():
         return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES - {
@@ -160,7 +160,7 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
     """Enable if TP > 1 and Hopper/Blackwell and flashinfer installed."""
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
     from vllm.foundation.utilities.flashinfer import has_flashinfer
 
     # The fused all-reduce + RMSNorm path is not batch-invariant
@@ -647,7 +647,7 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         model_config = self.model_config
         if model_config is not None and current_platform.is_rocm():
@@ -718,7 +718,7 @@ class VllmConfig:
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
 
-        from vllm.compilation.breakable_cudagraph import (
+        from vllm.backends.compiler.breakable_cudagraph import (
             is_breakable_cudagraph_enabled,
         )
 
@@ -777,7 +777,7 @@ class VllmConfig:
         model_config: ModelConfig, load_config: LoadConfig
     ) -> QuantizationConfig | None:
         """Get the quantization config."""
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         if model_config.quantization is not None:
             from vllm.model_executor.model_loader.weight_utils import get_quant_config
@@ -1216,7 +1216,7 @@ class VllmConfig:
                     model_type,
                 )
 
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
         from vllm.v1.executor.abstract import Executor
 
         executor_backend = self.parallel_config.distributed_executor_backend
@@ -1490,7 +1490,7 @@ class VllmConfig:
                 pass_config.fuse_gemm_comms = False
             else:
                 if pass_config.sp_min_token_num is None:
-                    from vllm.compilation.passes.fusion.sequence_parallelism import (
+                    from vllm.backends.compiler.passes.fusion.sequence_parallelism import (
                         get_sequence_parallelism_threshold,
                     )
 
@@ -2001,7 +2001,7 @@ class VllmConfig:
             # here, so an explicit capture range is left exactly as configured.
             uniform_decode_sizes: list[int] = []
             if max_cudagraph_capture_size is None:
-                from vllm.platforms import current_platform
+                from vllm.backends.platform import current_platform
 
                 default_max_graph_size = (
                     1024 if current_platform.is_device_capability_family(100) else 512
@@ -2253,7 +2253,7 @@ class VllmConfig:
             # Calculate min_token_num if not explicitly provided
             # User override works regardless of hidden_size
             if pass_config.sp_min_token_num is None:
-                from vllm.compilation.passes.fusion.sequence_parallelism import (
+                from vllm.backends.compiler.passes.fusion.sequence_parallelism import (
                     get_sequence_parallelism_threshold,
                 )
 
@@ -2490,7 +2490,7 @@ class VllmConfig:
         if mm_config.get_mm_processor_device_type() is not None:
             return
 
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         device_type = current_platform.device_type
         if device_type in ("", "cpu"):
@@ -2921,7 +2921,7 @@ def set_current_vllm_config(
     global _current_vllm_config, _current_prefix
     old_vllm_config = _current_vllm_config
     old_prefix = _current_prefix
-    from vllm.compilation.counter import compilation_counter
+    from vllm.backends.compiler.counter import compilation_counter
 
     num_models_seen = compilation_counter.num_models_seen
     try:

@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.flashinfer import (
     flashinfer_cute_dsl_fused_moe_nvfp4,
     has_flashinfer_cutedsl_moe_nvfp4,

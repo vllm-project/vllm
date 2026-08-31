@@ -7,7 +7,7 @@ import torch
 import vllm.model_executor.kernels.mhc as mhc_kernels
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.model_executor.custom_op import CustomOp
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.import_utils import has_tilelang
 
 
@@ -17,7 +17,7 @@ def _has_tilelang_mhc() -> bool:
     if current_platform.is_cuda():
         return True
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx942
+        from vllm.backends.platform.rocm import on_gfx942
 
         # TileLang MHC currently produces incorrect results on gfx942. Keep
         # gfx942 on the existing torch/triton fallbacks until that path is fixed.

@@ -47,7 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.foundation.utilities.torch_utils import (
     LayerNameType,

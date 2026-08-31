@@ -37,7 +37,7 @@ from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
     ModelWeightParameter,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

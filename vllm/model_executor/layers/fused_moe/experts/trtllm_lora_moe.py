@@ -41,7 +41,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     trtllm_moe_pack_topk_ids_weights,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.flashinfer import has_flashinfer_trtllm_fused_moe
 

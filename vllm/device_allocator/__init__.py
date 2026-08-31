@@ -1,52 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-import dataclasses
-from contextlib import AbstractContextManager
-from typing import Protocol, TypeAlias
+"""Compatibility shim: vllm.device_allocator/ -> vllm.backends.platform.device_allocator (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-import torch
+_real = _importlib.import_module("vllm.backends.platform.device_allocator")
 
-from vllm.platforms import current_platform
+def __getattr__(name):
+    return getattr(_real, name)
 
-# py_device, py_size_or_aligned_size, py_ptr, py_handle
-# py_handle has type list[int] on ROCm and int otherwise
-HandleType: TypeAlias = tuple[int, int, int, list[int] | int]
+def __dir__():
+    return dir(_real)
 
-
-@dataclasses.dataclass
-class AllocationData:
-    handle: HandleType
-    tag: str
-    cpu_backup_tensor: torch.Tensor | None = None
-    is_asleep: bool = False
-
-
-class MemAllocator(Protocol):
-    def use_memory_pool(self, tag: str | None = None) -> AbstractContextManager: ...
-
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None: ...
-
-    def discard(self, tags: tuple[str, ...] | str) -> None: ...
-
-    def wake_up(self, tags: list[str] | None = None) -> None: ...
-
-    def get_current_usage(self) -> int: ...
-
-
-def get_mem_allocator_instance() -> MemAllocator:
-    if current_platform.is_cuda_alike():
-        from vllm.device_allocator.cumem import CuMemAllocator
-
-        return CuMemAllocator.get_instance()
-
-    if current_platform.is_xpu():
-        from vllm.device_allocator.xpumem import XpuMemAllocator
-
-        return XpuMemAllocator.get_instance()
-
-    raise RuntimeError(
-        "Sleep mode allocator is not available on platform "
-        f"{type(current_platform).__name__} "
-        f"(device_type={current_platform.device_type})."
-    )
+__all__ = getattr(_real, "__all__", [])

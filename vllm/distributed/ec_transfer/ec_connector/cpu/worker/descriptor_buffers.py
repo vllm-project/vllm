@@ -11,7 +11,7 @@ from typing import NamedTuple
 import numpy as np
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 # CUDA/ROCm cache_kernels.cu requires int64 pointers; the XPU DMA engine
 # requires uint64 (see vllm._custom_ops.swap_blocks_batch).

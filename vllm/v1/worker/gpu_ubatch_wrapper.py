@@ -9,7 +9,7 @@ from typing import Any
 import torch
 
 import vllm.foundation.system.envs as envs
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.backends.compiler.cuda_graph import CUDAGraphWrapper
 from vllm.foundation.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_ep_group
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
@@ -21,7 +21,7 @@ from vllm.forward_context import (
 )
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.utilities.deep_gemm import set_num_sms as deep_gemm_set_num_sms
 from vllm.foundation.utilities.import_utils import has_deep_gemm

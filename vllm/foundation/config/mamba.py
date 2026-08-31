@@ -83,7 +83,7 @@ class MambaConfig:
     def __post_init__(self):
         self.validate_ssu_algorithm()
         if self.enable_stochastic_rounding:
-            from vllm.platforms import current_platform
+            from vllm.backends.platform import current_platform
 
             if not current_platform.is_cuda():
                 raise ValueError(

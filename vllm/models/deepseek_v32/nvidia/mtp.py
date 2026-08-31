@@ -44,7 +44,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .glm52_low_latency_gemm import (

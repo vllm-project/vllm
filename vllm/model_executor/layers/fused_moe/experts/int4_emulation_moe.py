@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static32Asym,
     kInt4StaticAsym,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

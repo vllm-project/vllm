@@ -46,7 +46,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import ForwardContext
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.foundation.utilities.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.foundation.utilities.torch_utils import is_non_overlapping_and_dense

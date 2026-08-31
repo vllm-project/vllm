@@ -26,7 +26,7 @@ from vllm.foundation.config.quantization import QuantizationConfigArgs
 from vllm.foundation.config.scheduler import RunnerType
 from vllm.foundation.config.utils import config, getattr_iter
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.frontend.processing.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.foundation.integrations.transformers_utils.config import (
     ConfigFormat,

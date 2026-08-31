@@ -43,7 +43,7 @@ def maybe_execute_in_parallel(
         Tuple of (fn0_result, fn1_result).
     """
     if aux_stream is not None:
-        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+        from vllm.backends.compiler.breakable_cudagraph import BreakableCUDAGraphCapture
 
         if BreakableCUDAGraphCapture.is_active():
             aux_stream = None

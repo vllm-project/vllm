@@ -41,7 +41,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.backends.platform import CpuArchEnum, current_platform
 from vllm.foundation.utilities.math_utils import round_up
 
 # ===========================================================================

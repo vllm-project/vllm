@@ -20,7 +20,7 @@ from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 Backend = Literal["cute", "dsv3_fused_a"]
 ResolvedCall = tuple[Backend, SkinnyGemmConfig | None]

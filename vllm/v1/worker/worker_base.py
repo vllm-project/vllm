@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 import torch
 import torch.nn as nn
 
-import vllm.ir
+import vllm.backends.compute.ir
 from vllm.foundation.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.foundation.observability.logger import init_logger
@@ -79,7 +79,7 @@ class WorkerBase:
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.compilation_config = vllm_config.compilation_config
 
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         self.current_platform = current_platform
 
@@ -96,7 +96,7 @@ class WorkerBase:
         # IR op priority and torch-wrap state are constant for the worker's
         # lifetime.
         vllm_config.kernel_config.ir_op_priority.set_default()
-        vllm.ir.set_default_torch_wrap(
+        vllm.backends.compute.ir.set_default_torch_wrap(
             vllm_config.compilation_config.ir_enable_torch_wrap
         )
 

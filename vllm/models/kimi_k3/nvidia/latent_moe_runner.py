@@ -15,7 +15,7 @@ from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner, _unpack
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
 from vllm.foundation.utilities.torch_utils import aux_stream
 

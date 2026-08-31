@@ -19,7 +19,7 @@ import torch.nn as nn
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.foundation.config.compilation import CompilationMode
-from vllm.device_allocator import get_mem_allocator_instance
+from vllm.backends.platform.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -54,7 +54,7 @@ from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.frontend.processing.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.devtools.profiler.wrapper import (
     CudaProfilerWrapper,
     ProtonProfilerWrapper,
@@ -135,7 +135,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 
 
 if TYPE_CHECKING:
-    from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
+    from vllm.backends.platform.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -222,7 +222,7 @@ class Worker(WorkerBase):
 
     def _get_sleep_mode_backend(self) -> "SleepModeBackend":
         if self._sleep_mode_backend is None:
-            from vllm.device_allocator.sleep_mode_backend import (
+            from vllm.backends.platform.device_allocator.sleep_mode_backend import (
                 SleepModeBackendFactory,
             )
 
@@ -370,7 +370,7 @@ class Worker(WorkerBase):
             # such as NIC affinity and P2P checks.
             assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
             if assigned_physical_gpu_ids is not None:
-                from vllm.platforms.interface import set_assigned_physical_gpu_ids
+                from vllm.backends.platform.interface import set_assigned_physical_gpu_ids
 
                 set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
                 assert self.local_rank < len(assigned_physical_gpu_ids), (
@@ -891,7 +891,7 @@ class Worker(WorkerBase):
         # warmup (rather than on a later compile cache-miss at runtime).
         c_config = self.compilation_config
         if c_config.mode != CompilationMode.NONE and c_config.backend == "inductor":
-            from vllm.compilation.compiler_interface import (
+            from vllm.backends.compiler.compiler_interface import (
                 trigger_inductor_lazy_init,
             )
 
@@ -973,7 +973,7 @@ class Worker(WorkerBase):
         return self.model_runner.get_supported_tasks()
 
     def get_compilation_match_table(self) -> dict[str, int]:
-        from vllm.compilation.passes.vllm_inductor_pass import get_match_table
+        from vllm.backends.compiler.passes.vllm_inductor_pass import get_match_table
 
         return get_match_table()
 
@@ -1447,7 +1447,7 @@ class Worker(WorkerBase):
         # and callbacks are still alive, so MemPool teardown is not deferred to
         # interpreter finalization (pytorch/pytorch#145168).
         if current_platform.is_cuda_alike():
-            from vllm.device_allocator.cumem import CuMemAllocator
+            from vllm.backends.platform.device_allocator.cumem import CuMemAllocator
 
             if CuMemAllocator.instance is not None:
                 CuMemAllocator.instance.release_pools()

@@ -12,7 +12,7 @@ import torch
 from torch import fx
 
 from vllm.distributed.parallel_state import get_ep_group, get_tp_group
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
 if TYPE_CHECKING:

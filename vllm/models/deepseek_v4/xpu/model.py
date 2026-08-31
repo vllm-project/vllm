@@ -59,7 +59,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.xpu.xpu_sparse import DeepseekV4XPUAttention
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op

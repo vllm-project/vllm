@@ -58,7 +58,7 @@ def _ihc_supported(hc_mult: int, hidden_size: int) -> bool:
         )
         return False
 
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if not current_platform.is_cuda():
         logger.warning_once("HPC iHC disabled: only CUDA is supported.")

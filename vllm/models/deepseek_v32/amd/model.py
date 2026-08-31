@@ -125,7 +125,7 @@ class DeepseekV32Model(torch.nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         self.device = current_platform.device_type
 

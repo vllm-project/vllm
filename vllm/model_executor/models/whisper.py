@@ -17,7 +17,7 @@ from transformers import (
 )
 from transformers.models.whisper.modeling_whisper import sinusoids
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams

@@ -38,7 +38,7 @@ from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
     sparse_mla_triton_warmup,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.deep_gemm import is_deep_gemm_supported
 from vllm.foundation.utilities.flashinfer import has_flashinfer
 

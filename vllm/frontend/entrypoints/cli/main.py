@@ -65,7 +65,7 @@ def main():
             from vllm import platforms
 
             if platforms.current_platform.is_unspecified():
-                from vllm.platforms.cpu import CpuPlatform
+                from vllm.backends.platform.cpu import CpuPlatform
 
                 platforms.current_platform = CpuPlatform()
                 logger.info(

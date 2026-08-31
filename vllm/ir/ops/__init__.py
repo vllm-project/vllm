@@ -1,5 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from .layernorm import fused_add_rms_norm, rms_norm
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-__all__ = ["rms_norm", "fused_add_rms_norm"]
+"""Compatibility shim: vllm.ir/ops/ -> vllm.backends.compute.ir.ops (lazy __getattr__ delegation)."""
+import importlib as _importlib
+
+_real = _importlib.import_module("vllm.backends.compute.ir.ops")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

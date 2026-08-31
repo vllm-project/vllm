@@ -111,7 +111,7 @@ def _check_torchao_fp8_activation_capability(torchao_config) -> None:
     if "Float8" not in config_name or "Activation" not in config_name:
         return
 
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if current_platform.supports_fp8():
         return

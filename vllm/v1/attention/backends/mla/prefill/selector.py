@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms.interface import DeviceCapability
+from vllm.backends.platform.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 
@@ -58,7 +58,7 @@ def _get_mla_prefill_backend_priorities(
     Returns:
         List of backends in priority order (highest priority first).
     """
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if current_platform.is_rocm():
         return [
@@ -105,7 +105,7 @@ def get_mla_prefill_backend(
     Returns:
         The selected prefill backend class.
     """
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if current_platform.is_cpu():
         logger.info_once("Using CPU SDPA MLA prefill backend.")

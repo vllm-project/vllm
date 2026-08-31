@@ -19,7 +19,7 @@ leaves the prefill kernels (which parallelize over the query dim) idle.
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 
 # One sparse block == one KV page.

@@ -36,7 +36,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
 
-    from vllm.compilation.backends import set_model_tag
+    from vllm.backends.compiler.backends import set_model_tag
     from vllm.model_executor.model_loader import get_model
     from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
     from vllm.model_executor.models.utils import get_draft_quant_config

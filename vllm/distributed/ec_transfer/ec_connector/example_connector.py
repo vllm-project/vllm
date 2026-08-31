@@ -77,7 +77,7 @@ class ECExampleConnector(ECConnectorBase):
                 data hashes (`mm_hash`) to encoder cache tensors.
             kwargs (dict): Additional keyword arguments for the connector.
         """
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         # Get the metadata
         metadata: ECConnectorMetadata = self._get_connector_metadata()

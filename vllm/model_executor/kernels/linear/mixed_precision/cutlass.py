@@ -12,7 +12,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_packed_uint4b8_to_signed_int4_inplace,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig

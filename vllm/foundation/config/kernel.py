@@ -21,7 +21,7 @@ class IrOpPriorityConfig:
     """
     Configuration for vLLM IR op priority for dispatching/lowering during the
     forward pass. Each member is a list of strings, which will be installed
-    in worker init via vllm.ir.ops.<op_name>.set_default().
+    in worker init via vllm.backends.compute.ir.ops.<op_name>.set_default().
     A single comma-separated string is accepted as well,
 
     If specified manually, platform defaults will be appended to the lists.
@@ -29,10 +29,10 @@ class IrOpPriorityConfig:
     """
 
     rms_norm: list[str] = Field(default_factory=list)
-    """Priority list for vllm.ir.ops.rms_norm"""
+    """Priority list for vllm.backends.compute.ir.ops.rms_norm"""
 
     fused_add_rms_norm: list[str] = Field(default_factory=list)
-    """Priority list for vllm.ir.ops.fused_add_rms_norm"""
+    """Priority list for vllm.backends.compute.ir.ops.fused_add_rms_norm"""
 
     def compute_hash(self) -> str:
         """
@@ -46,7 +46,7 @@ class IrOpPriorityConfig:
 
         # Implementations are hidden from Dynamo,
         # so they don't show up in the traced files list.
-        from vllm.ir.op import IrOp
+        from vllm.backends.compute.ir.op import IrOp
 
         assert "_impls" not in factors
         factors["_impls"] = {
@@ -72,8 +72,8 @@ class IrOpPriorityConfig:
         Yield (IrOp, priority_list) for each field, after importing platform
         kernels and validating each entry.
         """
-        from vllm.ir.op import IrOp
-        from vllm.platforms import current_platform
+        from vllm.backends.compute.ir.op import IrOp
+        from vllm.backends.platform import current_platform
 
         current_platform.import_ir_kernels()
 
@@ -340,7 +340,7 @@ class KernelConfig:
 
     def set_platform_defaults(self, vllm_config: "VllmConfig") -> None:
         """Set platform-specific defaults for the kernel config."""
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         if vllm_config.model_config is not None:
             validate_flashinfer_moe_ep_model(

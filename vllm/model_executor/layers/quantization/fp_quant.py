@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 

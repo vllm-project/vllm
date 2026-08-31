@@ -285,7 +285,7 @@ def _platform_device_type() -> str:
     for the current platform, in the form expected by
     ``torch.distributed.init_process_group(backend=...)``.
     """
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if current_platform.is_cuda_alike():
         return "cuda"
@@ -511,7 +511,7 @@ class GroupCoordinator:
         self.cpu_group = self_cpu_group
         self.device_group = self_device_group
 
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         if current_platform.is_cuda_alike():
             visible_device_index = (
@@ -1639,7 +1639,7 @@ def _init_process_group_for_split_group(
     """
     if torch.accelerator.is_available() and backend != "gloo":
         init_backend = "cpu:gloo,cuda:nccl"
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         visible_device_index = current_platform.logical_device_id_to_visible_device_id(
             local_rank
@@ -2278,7 +2278,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     # Reset rocm_aiter_ops class variables to match current os.environ.
     # These are class-level attributes that persist across tests and are
     # NOT restored by monkeypatch (which only restores os.environ).
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if current_platform.is_rocm():
         from vllm._aiter_ops import rocm_aiter_ops
@@ -2295,7 +2295,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
 
         ray.shutdown()
     gc.collect()
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if not current_platform.is_cpu():
         torch.accelerator.empty_cache()

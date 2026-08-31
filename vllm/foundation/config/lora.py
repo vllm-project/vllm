@@ -11,7 +11,7 @@ from typing_extensions import Self
 from vllm import envs
 from vllm.foundation.config.utils import config
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.hashing import safe_hash
 
 if TYPE_CHECKING:

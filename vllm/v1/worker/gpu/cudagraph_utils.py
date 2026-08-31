@@ -12,12 +12,12 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from vllm.compilation.breakable_cudagraph import (
+from vllm.backends.compiler.breakable_cudagraph import (
     BreakableCUDAGraphWrapper,
     is_breakable_cudagraph_enabled,
 )
-from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.backends.compiler.counter import compilation_counter
+from vllm.backends.compiler.cuda_graph import CUDAGraphWrapper
 from vllm.foundation.config import VllmConfig, set_current_vllm_config
 from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
@@ -29,7 +29,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.utilities.math_utils import round_up
 from vllm.foundation.utilities.torch_utils import current_stream

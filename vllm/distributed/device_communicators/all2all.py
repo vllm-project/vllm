@@ -783,7 +783,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         self.num_experts = num_experts
 
         self.cleanup()
-        from vllm.platforms.interface import get_assigned_physical_gpu_ids
+        from vllm.backends.platform.interface import get_assigned_physical_gpu_ids
 
         assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
         gpus_per_node = (
@@ -934,7 +934,7 @@ class MoriAll2AllManager(All2AllManagerBase):
     ):
         import mori  # type: ignore[import-not-found]
 
-        from vllm.platforms.rocm import on_gfx942, on_gfx950
+        from vllm.backends.platform.rocm import on_gfx942, on_gfx950
 
         assert on_gfx942() or on_gfx950(), (
             "mori currently only support arch gfx942 and gfx950"

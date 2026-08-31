@@ -49,7 +49,7 @@ class DeviceConfig:
     def __post_init__(self):
         if self.device == "auto":
             # Automated device type detection
-            from vllm.platforms import current_platform
+            from vllm.backends.platform import current_platform
 
             self.device_type = current_platform.device_type
             if not self.device_type:
@@ -66,7 +66,7 @@ class DeviceConfig:
                 self.device_type = self.device.type
 
         # Some platforms require processing inputs on CPU.
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         if (
             current_platform.uses_host_device_handling()

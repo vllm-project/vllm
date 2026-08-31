@@ -10,7 +10,7 @@ import torch
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

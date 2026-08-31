@@ -46,7 +46,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_group_gemm_supported,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)

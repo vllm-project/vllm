@@ -9,7 +9,7 @@ import torch.nn as nn
 from vllm.foundation.config import get_cached_compilation_config
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.utils import maybe_disable_graph_partition
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

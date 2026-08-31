@@ -32,7 +32,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .quark_scheme import QuarkScheme
 

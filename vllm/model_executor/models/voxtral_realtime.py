@@ -13,7 +13,7 @@ from mistral_common.protocol.transcription.request import (
 )
 from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.frontend.compat.engine.protocol import StreamingInput

@@ -43,7 +43,7 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.tracing import instrument
 from vllm.foundation.integrations.transformers_utils.repo_utils import hf_api, hf_fs
 from vllm.foundation.utilities.import_utils import PlaceholderModule

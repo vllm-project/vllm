@@ -41,7 +41,7 @@ from vllm.model_executor.layers.quantization.quark.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper

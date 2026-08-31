@@ -13,7 +13,7 @@ import torch
 from torch import Tensor
 
 from vllm import ir
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 OINK_AVAILABLE = current_platform.has_device_capability(100) and hasattr(
     torch.ops, "oink"

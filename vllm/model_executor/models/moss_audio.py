@@ -15,7 +15,7 @@ from torch import nn
 from transformers import BatchFeature, PretrainedConfig, Qwen3Config
 from transformers.models.whisper import WhisperFeatureExtractor
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import (

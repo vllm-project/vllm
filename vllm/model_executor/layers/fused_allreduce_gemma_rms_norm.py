@@ -30,7 +30,7 @@ MiB = 1024 * 1024
 # allreduce_rms_fusion; both that op and the workspace helpers only exist when
 # flashinfer.comm.allreduce_fusion is importable.
 try:
-    from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
+    from vllm.backends.compiler.passes.fusion.allreduce_rms_fusion import (
         flashinfer_trtllm_fused_allreduce_norm,
     )
     from vllm.distributed.device_communicators.flashinfer_all_reduce import (

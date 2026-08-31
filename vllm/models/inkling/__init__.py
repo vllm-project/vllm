@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 if TYPE_CHECKING:
     if current_platform.is_rocm():

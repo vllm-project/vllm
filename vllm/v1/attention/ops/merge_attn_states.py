@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 
 def _merge_attn_states_torch(

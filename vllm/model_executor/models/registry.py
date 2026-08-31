@@ -1065,7 +1065,7 @@ def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
 ) -> type[nn.Module] | None:
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     current_platform.verify_model_arch(model_arch)
     try:

@@ -18,7 +18,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.platforms.interface import DeviceCapability
+from vllm.backends.platform.interface import DeviceCapability
 from vllm.foundation.utilities.platform_utils import num_compute_units
 from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (

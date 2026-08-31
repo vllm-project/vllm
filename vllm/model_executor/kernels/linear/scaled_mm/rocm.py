@@ -6,7 +6,7 @@ import torch
 
 import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.platform_utils import num_compute_units
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
@@ -79,7 +79,7 @@ class ROCmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not current_platform.is_rocm():
             return False, "requires ROCm."
 
-        from vllm.platforms.rocm import get_cdna_version, on_gfx12x, on_gfx1250
+        from vllm.backends.platform.rocm import get_cdna_version, on_gfx12x, on_gfx1250
 
         # wvSplitKQ (skinny GEMM) is excluded from the gfx1250 build.
         if on_gfx1250():

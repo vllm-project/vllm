@@ -9,7 +9,7 @@ the model registry. (Mirrors ``vllm.models.deepseek_v4``.)
 
 from typing import TYPE_CHECKING
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 # The NVIDIA branch is the static default that type-checkers see; the ROCm
 # branch overrides it at runtime (kept type-compatible via type: ignore).

@@ -24,11 +24,11 @@ from typing import Any
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import _ON_GFX950
+    from vllm.backends.platform.rocm import _ON_GFX950
 else:
     _ON_GFX950 = False
 

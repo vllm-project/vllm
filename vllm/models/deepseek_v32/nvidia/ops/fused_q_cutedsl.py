@@ -9,7 +9,7 @@ from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Float8E4M3FN, Float32, Int64, Uint8, Uint16, Uint32
 
 from vllm.cute_utils import _TORCH_TO_CUTE_DTYPE, cvt
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 
 def _make_fake_tensor(dtype, shape, divisibility):

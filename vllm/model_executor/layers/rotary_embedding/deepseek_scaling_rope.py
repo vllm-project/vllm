@@ -5,7 +5,7 @@ import math
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.flashinfer import has_flashinfer
 
 from .base import RotaryEmbeddingBase

@@ -35,7 +35,7 @@ def is_fused_kda_decode_supported(
     conv_state_dtype: torch.dtype,
 ) -> bool:
     """Whether the fused decode kernel can serve this layer on this device."""
-    from vllm.platforms.rocm import on_gfx942, on_gfx950
+    from vllm.backends.platform.rocm import on_gfx942, on_gfx950
 
     if (
         num_heads not in SUPPORTED_NUM_HEADS

@@ -13,7 +13,7 @@ import torch
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.model_executor.layers.quantization.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .ScaledMMLinearKernel import (
     Int8ScaledMMLinearKernel,

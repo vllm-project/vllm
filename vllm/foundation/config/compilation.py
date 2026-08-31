@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.foundation.system.envs as envs
-from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
+from vllm.backends.compiler.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.foundation.config.utils import (
     Range,
     config,
@@ -19,7 +19,7 @@ from vllm.foundation.config.utils import (
     hash_factors,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 from vllm.foundation.utilities.math_utils import round_up
 from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
@@ -203,10 +203,10 @@ class PassConfig:
 
     @staticmethod
     def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
-        from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
+        from vllm.backends.compiler.passes.fusion.allreduce_rms_fusion import (
             FI_ALLREDUCE_FUSION_MAX_SIZE_MB,
         )
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         if not current_platform.is_cuda():
             return {}
@@ -1106,7 +1106,7 @@ class CompilationConfig:
         if self.backend not in ["eager", "inductor"]:
             logger.info("Using OOT custom backend for compilation.")
 
-        from vllm.compilation.backends import VllmBackend
+        from vllm.backends.compiler.backends import VllmBackend
 
         return VllmBackend(vllm_config, prefix=prefix, is_encoder=is_encoder)
 

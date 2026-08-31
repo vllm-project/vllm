@@ -46,7 +46,7 @@ from transformers.dynamic_module_utils import (
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
-from vllm.compilation.decorators import (
+from vllm.backends.compiler.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )

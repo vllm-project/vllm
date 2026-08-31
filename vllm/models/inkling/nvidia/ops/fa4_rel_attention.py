@@ -15,7 +15,7 @@ from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
     zip_inputs,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.torch_utils import kv_cache_dtype_str_to_dtype
 
 if TYPE_CHECKING:

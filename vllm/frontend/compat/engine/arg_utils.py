@@ -106,7 +106,7 @@ from vllm.foundation.config.scheduler import SchedulerPolicy
 from vllm.foundation.config.utils import get_field
 from vllm.foundation.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.foundation.observability.logger import init_logger, suppress_logging
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.backends.platform import CpuArchEnum, current_platform
 from vllm.foundation.extensibility.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.foundation.integrations.transformers_utils.config import maybe_override_with_speculators

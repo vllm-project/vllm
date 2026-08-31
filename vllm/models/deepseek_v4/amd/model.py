@@ -64,7 +64,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)

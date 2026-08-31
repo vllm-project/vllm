@@ -44,7 +44,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import all_close_1d
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.import_utils import has_triton_kernels
 from vllm.foundation.utilities.math_utils import round_up
 
@@ -502,7 +502,7 @@ def _requires_qwen38_tep8_emulation(
     if not current_platform.is_rocm():
         return False
 
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.backends.platform.rocm import on_gfx950
 
     return on_gfx950()
 
@@ -1369,7 +1369,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     """
     is_gfx1250 = False
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx1250
+        from vllm.backends.platform.rocm import on_gfx1250
 
         is_gfx1250 = on_gfx1250()
 

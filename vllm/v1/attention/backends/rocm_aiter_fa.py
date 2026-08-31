@@ -16,8 +16,8 @@ from vllm.foundation.config import (
 from vllm.foundation.config.cache import CacheDType
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.platforms import current_platform
-from vllm.platforms.interface import DeviceCapability
+from vllm.backends.platform import current_platform
+from vllm.backends.platform.interface import DeviceCapability
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.foundation.utilities.platform_utils import num_compute_units
@@ -884,7 +884,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        from vllm.platforms.rocm import get_cdna_version
+        from vllm.backends.platform.rocm import get_cdna_version
 
         # DeviceCapability is currently created using torch.cuda.get_device_capability()
         # which is known to be buggy on rocm systems. on CDNA uses amd-smi which is

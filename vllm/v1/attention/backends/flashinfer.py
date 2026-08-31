@@ -36,8 +36,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
-from vllm.platforms import current_platform
-from vllm.platforms.interface import DeviceCapability
+from vllm.backends.platform import current_platform
+from vllm.backends.platform.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.flashinfer import (
     can_use_trtllm_attention,

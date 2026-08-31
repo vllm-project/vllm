@@ -57,7 +57,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticChannelSym,
     kInt8StaticTensorSym,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl
 from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
 

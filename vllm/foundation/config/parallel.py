@@ -16,7 +16,7 @@ import vllm.foundation.system.envs as envs
 from vllm.foundation.config.fault_tolerance import FaultToleranceConfig
 from vllm.foundation.config.utils import config
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.network_utils import get_open_ports_list
 
 if TYPE_CHECKING:

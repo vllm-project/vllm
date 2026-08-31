@@ -60,7 +60,7 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.foundation.integrations.transformers_utils.config import get_safetensors_params_metadata
 

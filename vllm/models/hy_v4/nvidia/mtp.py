@@ -429,7 +429,7 @@ class HYV4MultiTokenPredictor(nn.Module):
         # before any draft forward.
         self.topk_indices_buffer: torch.Tensor | None = None
         if hasattr(config, "index_topk"):
-            from vllm.platforms import current_platform
+            from vllm.backends.platform import current_platform
 
             self.topk_indices_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,

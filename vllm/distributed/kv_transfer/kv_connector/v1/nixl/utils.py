@@ -9,7 +9,7 @@ from typing import Any
 import regex as re
 import zmq
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.network_utils import make_zmq_socket
 from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
 

@@ -25,7 +25,7 @@ def __getattr__(name: str) -> Any:
         "Qwen4ExpForConditionalGeneration",
         "Qwen4ExpMTP",
     }:
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         if current_platform.is_xpu() or current_platform.is_tpu():
             raise NotImplementedError("Qwen4Exp currently supports CUDA and ROCm only")

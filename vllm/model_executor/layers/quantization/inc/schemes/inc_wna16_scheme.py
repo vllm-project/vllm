@@ -7,7 +7,7 @@ from vllm import envs
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from ..inc_linear import INCLinearMethod
 from .inc_scheme import INCScheme

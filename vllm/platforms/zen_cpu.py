@@ -1,32 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-import torch
+"""Compatibility shim: vllm.platforms/zen_cpu -> vllm.backends.platform.zen_cpu (sys.modules alias)."""
+import importlib
+import sys
 
-from vllm.foundation.observability.logger import init_logger
-from vllm.platforms.cpu import CpuPlatform
-
-logger = init_logger(__name__)
-
-
-class ZenCpuPlatform(CpuPlatform):
-    """CPU platform with AMD Zen (ZenDNN/zentorch) optimizations.
-
-    Model-load time (dispatch_cpu_unquantized_gemm in layers/utils.py):
-      - Routes linear ops to zentorch_linear_unary.
-      - When VLLM_ZENTORCH_WEIGHT_PREPACK=1 (default), eagerly prepacks
-        weights via zentorch_weight_prepack_for_linear.
-    """
-
-    device_name: str = "cpu"
-    device_type: str = "cpu"
-
-    def is_zen_cpu(self) -> bool:
-        # is_cpu() also returns True for this platform (inherited from CpuPlatform).
-        return True
-
-    # Currently, AMD CPUs do not support float16 compute.
-    # Hence explicitly return bfloat16 and float32.
-    @property
-    def supported_dtypes(self) -> list[torch.dtype]:
-        return [torch.bfloat16, torch.float32]
+_real = importlib.import_module("vllm.backends.platform.zen_cpu")
+sys.modules[__name__] = _real

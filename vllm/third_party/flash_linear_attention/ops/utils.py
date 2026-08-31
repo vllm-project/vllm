@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import triton
 
 logger = logging.getLogger(__name__)

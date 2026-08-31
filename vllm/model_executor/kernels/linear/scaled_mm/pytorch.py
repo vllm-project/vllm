@@ -8,7 +8,7 @@ import torch
 from vllm.foundation.config import CompilationMode, get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
@@ -25,7 +25,7 @@ def _get_num_tokens(output_shape: list) -> int:
 
 
 def _rocm_torch_fp8_scaled_mm_supported() -> bool:
-    from vllm.platforms.rocm import on_gfx12x, on_gfx942, on_gfx950, on_gfx1250
+    from vllm.backends.platform.rocm import on_gfx12x, on_gfx942, on_gfx950, on_gfx1250
 
     return on_gfx942() or on_gfx950() or on_gfx12x() or on_gfx1250()
 

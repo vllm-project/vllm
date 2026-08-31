@@ -10,7 +10,7 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import Siglip2VisionConfig
 
-from vllm.compilation.decorators import (
+from vllm.backends.compiler.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )

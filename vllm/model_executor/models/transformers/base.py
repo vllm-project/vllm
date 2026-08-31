@@ -35,7 +35,7 @@ from transformers.conversion_mapping import (
     get_model_conversion_mapping,
 )
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
@@ -255,7 +255,7 @@ class Base(
             cls: The PreTrainedModel class to decorate.
             dynamic_arg_dims: A mapping from argument name to the dynamic dimensions
                 of the argument. If None, default dynamic arg dims will be used. See
-                [`support_torch_compile`][vllm.compilation.decorators.support_torch_compile]
+                [`support_torch_compile`][vllm.backends.compiler.decorators.support_torch_compile]
                 for more details.
             enable_if: A function which takes in the vLLM config and returns whether
                 torch compile should be enabled for this class.

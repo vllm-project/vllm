@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig

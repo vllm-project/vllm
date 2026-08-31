@@ -21,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEKernelModularImpl,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .utils import _get_lora_aux_cuda_stream, _get_lora_device
 

@@ -19,7 +19,7 @@ from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.integrations.transformers_utils.configs.parakeet import ExtractorConfig, ParakeetConfig
 
 logger = init_logger(__name__)

@@ -11,7 +11,7 @@ from collections import defaultdict
 
 import torch.nn as nn
 
-from vllm.compilation.backends import set_model_tag
+from vllm.backends.compiler.backends import set_model_tag
 from vllm.foundation.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.foundation.observability.logger import init_logger

@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING, Union
 
 import numpy as np
 
-import vllm.platforms
+import vllm.backends.platform
 from vllm.foundation.config import ParallelConfig
 from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.utilities.network_utils import get_ip
 from vllm.v1.outputs import AsyncModelRunnerOutput
@@ -95,11 +95,11 @@ try:
 
         def get_node_and_physical_gpu_ids(self) -> tuple[str, list[int]]:
             node_id = ray.get_runtime_context().get_node_id()
-            device_key = vllm.platforms.current_platform.ray_device_key
+            device_key = vllm.backends.platform.current_platform.ray_device_key
             if not device_key:
                 raise RuntimeError(
                     "current platform %s does not support ray.",
-                    vllm.platforms.current_platform.device_name,
+                    vllm.backends.platform.current_platform.device_name,
                 )
             physical_gpu_ids = ray.get_runtime_context().get_accelerator_ids()[
                 device_key
@@ -538,7 +538,7 @@ def initialize_ray_cluster(
             is delegated to remote Ray actors.
     """
     assert_ray_available()
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     # Disable Ray usage stats collection
     if os.environ.get("RAY_USAGE_STATS_ENABLED", "0") != "1":

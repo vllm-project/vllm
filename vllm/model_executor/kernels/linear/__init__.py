@@ -222,7 +222,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
     ZentorchInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-from vllm.platforms import PlatformEnum, current_platform
+from vllm.backends.platform import PlatformEnum, current_platform
 
 logger = init_logger(__name__)
 

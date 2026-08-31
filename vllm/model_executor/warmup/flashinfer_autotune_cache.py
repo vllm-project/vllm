@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import vllm.foundation.system.envs as envs
-from vllm.compilation.caching import aot_compile_hash_factors
+from vllm.backends.compiler.caching import aot_compile_hash_factors
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner

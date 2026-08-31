@@ -2089,6 +2089,6 @@ def register_all_kvcache_specs(vllm_config):
         uniform_type_base_spec=FullAttentionSpec,
     )
 
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     current_platform.register_custom_kv_cache_specs(vllm_config)

@@ -19,7 +19,7 @@ from transformers import (
     PretrainedConfig,
 )
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import (

@@ -172,7 +172,7 @@ def _load_custom_logitsprocs(
     Returns:
       A list of all loaded logitproc types
     """
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if current_platform.is_tpu():
         # No logitsprocs specified by caller

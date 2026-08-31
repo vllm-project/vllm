@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .BlockScaledMMLinearKernel import (
     FP8BlockParams,
@@ -376,7 +376,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
         _on_gfx1250 = False
         if current_platform.is_rocm():
-            from vllm.platforms.rocm import on_gfx1250
+            from vllm.backends.platform.rocm import on_gfx1250
 
             _on_gfx1250 = on_gfx1250()
 

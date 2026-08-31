@@ -1,40 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from torch import fx
-from torch._ops import OpOverload, OpOverloadPacket
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.ir.op import IrOp
-from vllm.foundation.observability.logger import init_logger
+"""Compatibility shim: vllm.compilation/passes/ir/utils -> vllm.backends.compiler.passes.ir.utils (sys.modules alias)."""
+import importlib
+import sys
 
-logger = init_logger(__name__)
-
-
-def overload_or_default(op: OpOverload | OpOverloadPacket) -> OpOverload:
-    if isinstance(op, OpOverloadPacket):
-        return op.default
-    assert isinstance(op, OpOverload), "Expected an OpOverload or OpOverloadPacket"
-    return op
-
-
-def get_ir_op(node: fx.Node) -> IrOp | None:
-    if node.op != "call_function":
-        return None
-
-    if not isinstance(node.target, (OpOverload, OpOverloadPacket)):
-        return None
-
-    op_overload = overload_or_default(node.target)
-    if op_overload.namespace != "vllm_ir":
-        return None
-
-    op_name = op_overload._opname
-    if op_name not in IrOp.registry:
-        logger.warning(
-            "Unknown vLLM IR op %s, there's likely an issue with torch registration, "
-            "or a torch custom op was registered in the vllm_ir namespace by mistake.",
-            op_name,
-        )
-        return None
-
-    ir_op = IrOp.registry[op_name]
-    return ir_op
+_real = importlib.import_module("vllm.backends.compiler.passes.ir.utils")
+sys.modules[__name__] = _real

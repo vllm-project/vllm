@@ -34,7 +34,7 @@ import logging
 import torch
 from packaging import version
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 
 is_hip_ = current_platform.is_rocm()

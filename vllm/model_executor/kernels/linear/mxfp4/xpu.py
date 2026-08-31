@@ -10,7 +10,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 

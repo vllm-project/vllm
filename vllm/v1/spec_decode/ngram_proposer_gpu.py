@@ -10,7 +10,7 @@ finding the first match across all sequences in parallel.
 import torch
 from torch import nn
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import (
     CompilationConfig,
     CompilationMode,

@@ -19,7 +19,7 @@ import regex as re
 import torch
 from torch import nn
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import VllmConfig, replace, set_current_vllm_config
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe.utils import (

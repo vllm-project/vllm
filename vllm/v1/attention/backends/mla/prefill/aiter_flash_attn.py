@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
 if TYPE_CHECKING:
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import (
         MLACommonPrefillMetadata,
     )
-    from vllm.platforms.interface import DeviceCapability
+    from vllm.backends.platform.interface import DeviceCapability
 
 
 class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
@@ -34,7 +34,7 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
     def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
         if not current_platform.is_rocm():
             return False
-        from vllm.platforms.rocm import on_mi3xx
+        from vllm.backends.platform.rocm import on_mi3xx
 
         return on_mi3xx()
 

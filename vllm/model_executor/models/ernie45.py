@@ -23,7 +23,7 @@
 # limitations under the License.
 """Inference-only Erine model compatible with HuggingFace weights."""
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import VllmConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 

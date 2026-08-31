@@ -14,7 +14,7 @@ if TYPE_CHECKING:
         MLACommonPrefillMetadata,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-    from vllm.platforms.interface import DeviceCapability
+    from vllm.backends.platform.interface import DeviceCapability
     from vllm.v1.attention.backends.mla.prefill.selector import (
         MLAPrefillSelectorConfig,
     )

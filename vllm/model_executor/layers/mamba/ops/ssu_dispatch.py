@@ -287,7 +287,7 @@ def initialize_mamba_ssu_backend(
     # unstable or unavailable.  Silently fall back to the CPU
     # backend unless the user explicitly chose something other than "triton".
     if backend == MambaBackendEnum.TRITON:
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         if current_platform.is_cpu():
             logger.info(

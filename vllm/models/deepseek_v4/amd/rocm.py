@@ -20,8 +20,8 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4SparseMLABackend,
     DeepseekV4SparseMLAMetadataBuilder,
 )
-from vllm.platforms import current_platform
-from vllm.platforms.rocm import _ON_GFX950
+from vllm.backends.platform import current_platform
+from vllm.backends.platform.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,

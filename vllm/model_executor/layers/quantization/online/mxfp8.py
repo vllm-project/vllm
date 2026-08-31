@@ -31,7 +31,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 
 class Mxfp8OnlineLinearMethod(_Fp8OnlineLinearBase):

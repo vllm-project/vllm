@@ -34,7 +34,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 Backend = Literal["cute", "dsv3_fused_a"]
 # A resolved per-token-count call: the backend plus its CuTe config (None for

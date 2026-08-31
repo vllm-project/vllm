@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 import vllm.foundation.system.envs as envs
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
 from vllm.foundation.config import CacheConfig, get_current_vllm_config
 from vllm.foundation.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBa
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.torch_utils import (
     LayerNameType,
     _encode_layer_name,

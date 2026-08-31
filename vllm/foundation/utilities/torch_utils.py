@@ -318,7 +318,7 @@ def set_default_torch_num_threads(num_threads: int | None = None):
 @contextlib.contextmanager
 def guard_cuda_initialization():
     """Avoid unexpected CUDA initialization."""
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if not current_platform.is_cuda():
         yield
@@ -538,7 +538,7 @@ def set_random_seed(seed: int | None) -> None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         current_platform.manual_seed_all(seed)
 
@@ -802,7 +802,7 @@ def current_stream() -> torch.cuda.Stream:
     the underlying hypothesis is that we do not call `torch._C._cuda_setStream`
     from C/C++ code.
     """
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if not hasattr(_current_stream_tls, "value") or _current_stream_tls.value is None:
         # when this function is called before any stream is set,
@@ -846,7 +846,7 @@ def aux_stream() -> torch.cuda.Stream | None:
     """
     global _aux_stream
 
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if _aux_stream is None and current_platform.is_cuda_alike():
         _aux_stream = torch.cuda.Stream()
@@ -899,7 +899,7 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
     """
     Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA).
     """
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if current_platform.is_xpu():
         # Remove once the vllm-xpu-kernels fix for empty and non-pinned inputs
@@ -1066,7 +1066,7 @@ def direct_register_custom_op(
         mutates_args = []
 
     if dispatch_key is None:
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         dispatch_key = current_platform.dispatch_key
 

@@ -42,7 +42,7 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLVisionConfig,
 )
 
-from vllm.compilation.decorators import (
+from vllm.backends.compiler.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
@@ -80,7 +80,7 @@ from vllm.frontend.processing.multimodal.video_prune.evs import (
     compute_retention_mask,
     recompute_mrope_positions,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.utilities.cache import LRUCache
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape

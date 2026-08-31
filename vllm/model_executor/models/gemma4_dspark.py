@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear

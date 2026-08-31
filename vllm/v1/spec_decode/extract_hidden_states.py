@@ -367,7 +367,7 @@ class ExtractHiddenStatesProposer:
 
         assert self.vllm_config.speculative_config is not None
         draft_model_config = self.vllm_config.speculative_config.draft_model_config
-        from vllm.compilation.backends import set_model_tag
+        from vllm.backends.compiler.backends import set_model_tag
 
         with set_model_tag("extract_hidden_states"):
             self.model = get_model(

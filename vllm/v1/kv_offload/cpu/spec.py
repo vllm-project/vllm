@@ -5,7 +5,7 @@ from typing import Any
 import torch
 from typing_extensions import override
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.math_utils import round_up
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,

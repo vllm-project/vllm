@@ -27,7 +27,7 @@ from transformers.models.exaone4_5 import (
 )
 from transformers.models.exaone4_5.configuration_exaone4_5 import Exaone4_5_VisionConfig
 
-from vllm.compilation.decorators import (
+from vllm.backends.compiler.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )

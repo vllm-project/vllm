@@ -25,7 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.b12x import (
     B12xWarmupUnit,
     get_b12x_fused_moe,

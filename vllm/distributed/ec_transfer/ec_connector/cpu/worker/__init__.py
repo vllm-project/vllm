@@ -31,7 +31,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:

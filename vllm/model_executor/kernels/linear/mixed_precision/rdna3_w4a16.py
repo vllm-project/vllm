@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
@@ -36,7 +36,7 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         if not current_platform.is_rocm():
             return False, "RDNA3 W4A16 kernel is ROCm-only"
 
-        from vllm.platforms.rocm import on_gfx1100
+        from vllm.backends.platform.rocm import on_gfx1100
 
         if not on_gfx1100():
             return False, "RDNA3 W4A16 kernel requires gfx1100"

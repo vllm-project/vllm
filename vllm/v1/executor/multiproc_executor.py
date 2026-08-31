@@ -43,7 +43,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.foundation.system.envs import enable_envs_cache
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.tracing import instrument, maybe_init_worker_tracer
 from vllm.foundation.utilities import numa_utils
 from vllm.foundation.utilities.network_utils import (
@@ -878,7 +878,7 @@ class WorkerProc:
             "vllm_config"
         ].parallel_config.assigned_physical_gpu_ids
         if assigned_physical_gpu_ids is not None:
-            from vllm.platforms.interface import set_assigned_physical_gpu_ids
+            from vllm.backends.platform.interface import set_assigned_physical_gpu_ids
 
             set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
 
@@ -1017,7 +1017,7 @@ class WorkerProc:
         # create a new cuda context on device 0, consuming extra memory.
         # here we set the device to the worker device for the thread,
         # enforcing the context to be the same as the main thread.
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         if hasattr(self.worker, "device"):
             current_platform.set_device(self.worker.device)

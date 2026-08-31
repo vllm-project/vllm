@@ -12,7 +12,7 @@ import cloudpickle
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.foundation.utilities.network_utils import (
     get_distributed_init_method,

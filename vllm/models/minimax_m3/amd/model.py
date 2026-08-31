@@ -26,7 +26,7 @@ from transformers import PretrainedConfig
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
 from vllm.foundation.config import (
     CacheConfig,
     VllmConfig,
@@ -309,7 +309,7 @@ def _aiter_moe_fused_shared_experts_enabled(
     vLLM router's torch concat. Otherwise FSE still runs via the vLLM top-k bias
     router.
     """
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.backends.platform.rocm import on_gfx950
 
     return (
         on_gfx950()

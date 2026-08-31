@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import (
         MLACommonPrefillMetadata,
     )
-    from vllm.platforms.interface import DeviceCapability
+    from vllm.backends.platform.interface import DeviceCapability
 
 
 class TrtllmRaggedPrefillBackend(MLAPrefillBackend):

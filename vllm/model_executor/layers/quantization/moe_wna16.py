@@ -41,7 +41,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticGroupScale,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 
 class MoeWNA16Config(QuantizationConfig):

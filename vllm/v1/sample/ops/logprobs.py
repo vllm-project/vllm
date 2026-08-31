@@ -4,7 +4,7 @@
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 
 @torch.compile(backend=current_platform.simple_compile_backend)

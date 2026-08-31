@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.b12x import B12xWarmupUnit, b12x_warmup_token_counts
 
 if TYPE_CHECKING:

@@ -24,7 +24,7 @@ import torch
 from torch import nn
 from transformers import Llama4TextConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -55,7 +55,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel

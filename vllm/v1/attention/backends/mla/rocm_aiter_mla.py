@@ -66,7 +66,7 @@ def _fp8_mla_prefill_supported() -> bool:
     either is missing we silently fall back to ``flash_attn_varlen_func``.
     """
     try:
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.backends.platform.rocm import on_gfx950
     except Exception:  # noqa: BLE001
         return False
     if not on_gfx950():
@@ -131,7 +131,7 @@ def _gluon_mla_decode_supported() -> bool:
     correct for any 1..15 heads.
     """
     try:
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.backends.platform.rocm import on_gfx950
     except Exception:  # noqa: BLE001
         return False
     return on_gfx950()
@@ -1180,7 +1180,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         output buffer supplied by ``forward_mha``; no extra allocation or
         copy is required.
         """
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
         from vllm.v1.worker.workspace import current_workspace_manager
 
         fp8_dtype = current_platform.fp8_dtype()

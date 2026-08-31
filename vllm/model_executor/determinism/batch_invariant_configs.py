@@ -4,8 +4,8 @@ from typing import NamedTuple
 
 import torch
 
-from vllm.platforms import current_platform
-from vllm.platforms.interface import DeviceCapability
+from vllm.backends.platform import current_platform
+from vllm.backends.platform.interface import DeviceCapability
 
 
 class _MatmulMConfig(NamedTuple):

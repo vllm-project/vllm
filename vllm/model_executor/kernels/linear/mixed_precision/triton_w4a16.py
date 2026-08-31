@@ -23,7 +23,7 @@ import torch
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
 
@@ -209,7 +209,7 @@ def triton_w4a16_gemm(
     zeros_ptr = qzeros if has_zp else b_q
 
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx1x
+        from vllm.backends.platform.rocm import on_gfx1x
 
         if on_gfx1x():
             # Tuned for RDNA 3.5 (gfx1151, 40 CUs, 32-wide wavefronts).

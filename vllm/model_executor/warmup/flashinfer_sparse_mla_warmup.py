@@ -11,7 +11,7 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.flashinfer import autotune as flashinfer_autotune
 from vllm.foundation.utilities.flashinfer import has_flashinfer
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup

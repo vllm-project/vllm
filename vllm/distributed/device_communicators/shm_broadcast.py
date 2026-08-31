@@ -33,7 +33,7 @@ from zmq import (  # type: ignore
 import vllm.foundation.system.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.network_utils import (
     get_ip,
     get_open_zmq_inproc_path,
@@ -951,7 +951,7 @@ class MessageQueue:
             The MessageQueue instance for the calling process,
             and a list of handles (only non-empty for the reader process).
         """
-        from vllm.platforms.interface import get_assigned_physical_gpu_ids
+        from vllm.backends.platform.interface import get_assigned_physical_gpu_ids
 
         assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
         if assigned_physical_gpu_ids is not None:

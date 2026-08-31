@@ -54,7 +54,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_and_maybe_dequant_weights,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.v1.attention.backend import AttentionLayer, AttentionType, MultipleOf
 
 _MIN_WORK_PER_SPLIT = 512

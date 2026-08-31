@@ -31,7 +31,7 @@ from transformers.models.llama4.image_processing_llama4_fast import (
     get_best_fit,
 )
 
-from vllm.compilation.decorators import (
+from vllm.backends.compiler.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )

@@ -4,7 +4,7 @@
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops

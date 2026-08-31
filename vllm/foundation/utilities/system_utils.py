@@ -16,8 +16,8 @@ import psutil
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.platforms.interface import in_wsl
+from vllm.backends.platform import current_platform
+from vllm.backends.platform.interface import in_wsl
 from vllm.ray.lazy_utils import is_in_ray_actor
 
 from .platform_utils import cuda_is_initialized, xpu_is_initialized
@@ -118,7 +118,7 @@ def _sync_visible_devices_env_vars():
     if not current_platform.is_rocm():
         return
 
-    from vllm.platforms.rocm import _sync_hip_cuda_env_vars
+    from vllm.backends.platform.rocm import _sync_hip_cuda_env_vars
 
     _sync_hip_cuda_env_vars()
 

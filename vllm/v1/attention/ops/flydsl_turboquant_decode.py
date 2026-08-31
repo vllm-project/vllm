@@ -67,7 +67,7 @@ def is_flydsl_available() -> bool:
         return _FLYDSL_AVAILABLE
     try:
         # gfx950-only kernel (CDNA4 intrinsics); gate before importing FlyDSL.
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.backends.platform.rocm import on_gfx950
 
         if not on_gfx950():
             _FLYDSL_AVAILABLE = False

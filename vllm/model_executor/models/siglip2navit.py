@@ -26,7 +26,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 from .vision import is_vit_use_data_parallel

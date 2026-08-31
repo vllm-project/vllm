@@ -58,7 +58,7 @@ def _can_set_mempolicy() -> bool:
 
 def _is_auto_numa_available() -> bool:
     """Check whether automatic GPU-to-NUMA detection should be attempted."""
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if not current_platform.is_cuda_alike():
         return False
@@ -101,7 +101,7 @@ def _is_auto_numa_available() -> bool:
 @cache
 def get_auto_numa_nodes() -> list[int] | None:
     """Auto-detect NUMA nodes for all visible GPUs."""
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if not _is_auto_numa_available():
         return None

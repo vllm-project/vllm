@@ -101,7 +101,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         self_cpu_group = None
         self_tcp_store_group = None
 
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         backend = str(torch_distributed_backend)
         self.backend = backend

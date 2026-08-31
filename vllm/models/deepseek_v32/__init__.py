@@ -12,7 +12,7 @@ falls back when an optimization is unavailable. Other platforms use the
 generic implementation by default.
 """
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 if current_platform.is_cuda():
     # GLM-5.2 (glm_moe_dsa) reuses the CUDA DSA module. Individual optimized

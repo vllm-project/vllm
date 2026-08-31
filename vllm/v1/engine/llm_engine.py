@@ -446,7 +446,7 @@ class LLMEngine:
     @staticmethod
     def _cleanup_instance_caches(model_ref: "weakref.ref[nn.Module]") -> None:
         """Remove the bytecode hooks that pin the compiled model."""
-        from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+        from vllm.backends.compiler.wrapper import TorchCompileWithNoGuardsWrapper
 
         model = model_ref()
         if model is None:

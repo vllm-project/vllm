@@ -52,7 +52,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Static,
     kNvfp4Static,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
 

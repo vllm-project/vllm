@@ -5,7 +5,7 @@
 import numpy as np
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 
 from .base import RotaryEmbeddingBase

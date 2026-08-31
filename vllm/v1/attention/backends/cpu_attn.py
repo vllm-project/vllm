@@ -17,7 +17,7 @@ from vllm.foundation.config import (
 )
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.backends.platform import CpuArchEnum, current_platform
 from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,

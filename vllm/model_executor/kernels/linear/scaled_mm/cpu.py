@@ -10,8 +10,8 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
 from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
-from vllm.platforms import current_platform
-from vllm.platforms.interface import CpuArchEnum
+from vllm.backends.platform import current_platform
+from vllm.backends.platform.interface import CpuArchEnum
 
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,

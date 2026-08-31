@@ -31,7 +31,7 @@ import torch
 from torch import nn
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -75,7 +75,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.configs.AXK1 import AXK1Config
 

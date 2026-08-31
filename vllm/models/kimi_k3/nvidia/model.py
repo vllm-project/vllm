@@ -109,7 +109,7 @@ from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.ops import attn_res
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import NestedTensors
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig

@@ -9,8 +9,8 @@ import torch
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.cache import CacheDType
-from vllm.platforms import current_platform
-from vllm.platforms.interface import DeviceCapability
+from vllm.backends.platform import current_platform
+from vllm.backends.platform.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.attention.backend import (

@@ -473,7 +473,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         if (weight_key, activation_key) not in SUPPORTED_W_A:
             return False
         if weight_key == kMxfp4Static:
-            from vllm.platforms.rocm import on_gfx950, on_gfx1250
+            from vllm.backends.platform.rocm import on_gfx950, on_gfx1250
 
             if not on_gfx950() or on_gfx1250():
                 return False

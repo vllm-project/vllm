@@ -9,7 +9,7 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.foundation.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.backends.platform import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 
 def _skip_aiter_sampler_on_gfx1250() -> bool:
     # Lazy ROCm-only import; keeps arch detection out of import time on CUDA/CPU.
-    from vllm.platforms.rocm import on_gfx1250
+    from vllm.backends.platform.rocm import on_gfx1250
 
     return on_gfx1250()
 

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,

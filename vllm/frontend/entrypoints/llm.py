@@ -46,7 +46,7 @@ from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.frontend.processing.outputs import PoolingRequestOutput, RequestOutput
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.observability.usage.usage_lib import UsageContext

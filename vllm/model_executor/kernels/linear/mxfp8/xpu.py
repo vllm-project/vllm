@@ -7,7 +7,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     xpu_mxfp8_quantize as quant_mxfp8,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 

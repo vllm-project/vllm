@@ -33,7 +33,7 @@ from torch.distributed import ReduceOp
 
 from vllm import envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.nccl import find_nccl_library
 
 logger = init_logger(__name__)

@@ -34,7 +34,7 @@ from torch import nn
 if TYPE_CHECKING:
     from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -65,7 +65,7 @@ from vllm.model_executor.models.glm4_moe import (
     Glm4MoE,
     Glm4MoeMLP,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP

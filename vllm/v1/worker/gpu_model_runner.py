@@ -21,13 +21,13 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.foundation.system.envs as envs
-from vllm.compilation.breakable_cudagraph import (
+from vllm.backends.compiler.breakable_cudagraph import (
     BreakableCUDAGraphWrapper,
     is_breakable_cudagraph_enabled,
 )
-from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
-from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+from vllm.backends.compiler.counter import compilation_counter
+from vllm.backends.compiler.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
+from vllm.backends.compiler.monitor import set_cudagraph_capturing_enabled
 from vllm.foundation.config import (
     CompilationMode,
     CUDAGraphMode,
@@ -117,7 +117,7 @@ from vllm.frontend.processing.multimodal.utils import (
     group_and_batch_mm_kwargs,
     set_mm_embedding_modality,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.frontend.processing.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors

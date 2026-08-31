@@ -22,7 +22,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     should_use_atomic_add_reduce,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)

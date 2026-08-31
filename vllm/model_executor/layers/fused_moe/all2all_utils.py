@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one
 from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
     FlashInferNVLinkTwoSidedPrepareAndFinalize,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.import_utils import (
     has_deep_ep,
     has_deep_ep_v2,

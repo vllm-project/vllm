@@ -68,7 +68,7 @@ class EncoderRunner:
         assert manager is not None
 
         from vllm.distributed.parallel_state import graph_capture
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         with graph_capture(device=self.device):
             manager.capture(graph_pool=current_platform.graph_pool_handle())

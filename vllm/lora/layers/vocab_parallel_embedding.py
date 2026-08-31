@@ -12,7 +12,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .base import BaseLayerWithLoRA
 

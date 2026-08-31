@@ -25,7 +25,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
     swap_w13_to_w31,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey

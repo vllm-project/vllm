@@ -10,7 +10,7 @@ from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.torch_utils import (
     aux_stream,
     current_stream,

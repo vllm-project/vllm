@@ -10,7 +10,7 @@ import torch
 from torch import nn
 from torch.nn.parameter import Parameter
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_dp_group,

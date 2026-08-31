@@ -12,7 +12,7 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.backends.platform import CpuArchEnum, current_platform
 from vllm.foundation.utilities.flashinfer import (
     flashinfer_bf16_mm,
     is_flashinfer_cutedsl_bf16_gemm_supported,
@@ -260,7 +260,7 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1250
+    from vllm.backends.platform.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1250
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -377,7 +377,7 @@ def warmup_rocm_skinny_gemm_workspaces(device: torch.device) -> None:
     the KV cache backing buffer exists. If one landed in that segment's
     rounding tail, it would pin the entire segment at engine shutdown.
     """
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.backends.platform.rocm import on_gfx950
 
     if not on_gfx950():
         return

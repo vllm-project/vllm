@@ -90,7 +90,7 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     ResolvedPromptUpdate,
     cached_encode,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.processor import (
     _merge_mm_kwargs,

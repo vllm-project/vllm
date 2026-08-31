@@ -10,7 +10,7 @@ from vllm.model_executor.layers.quantization.utils.humming_utils import (
     get_humming_linear_compute_config,
     prepare_humming_linear_layer_config,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.import_utils import has_humming
 
 from .ScaledMMLinearKernel import (

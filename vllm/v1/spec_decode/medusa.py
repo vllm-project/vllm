@@ -58,7 +58,7 @@ class MedusaProposer:
         return draft_tokens
 
     def load_model(self, target_model: nn.Module) -> None:
-        from vllm.compilation.backends import set_model_tag
+        from vllm.backends.compiler.backends import set_model_tag
 
         with set_model_tag("medusa_head"):
             self.model = get_model(

@@ -19,7 +19,7 @@ from contextvars import ContextVar
 import torch
 
 import vllm.foundation.system.envs as envs
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 SYNC_ERROR_MESSAGE = (
     "GPU<->CPU sync detected - avoid it or wrap with gpu_sync_allowed()"

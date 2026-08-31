@@ -16,8 +16,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
-from vllm.platforms import current_platform
-from vllm.platforms.interface import DeviceCapability
+from vllm.backends.platform import current_platform
+from vllm.backends.platform.interface import DeviceCapability
 from vllm.foundation.utilities.math_utils import next_power_of_2
 from vllm.foundation.utilities.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (

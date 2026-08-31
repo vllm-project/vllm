@@ -22,7 +22,7 @@ from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLine
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.integrations.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )

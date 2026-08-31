@@ -18,7 +18,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     PerTensorScaleParameter,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .quark_scheme import QuarkScheme
 

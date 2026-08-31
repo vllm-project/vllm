@@ -12,7 +12,7 @@ from vllm.model_executor.determinism.batch_invariant_configs import (
     _get_matmul_config,
     resolve_tuned_matmul_configs,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.mem_utils import get_max_shared_memory_bytes
 from vllm.foundation.utilities.platform_utils import num_compute_units

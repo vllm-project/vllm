@@ -191,7 +191,7 @@ class UsageMessage:
         extra_kvs: dict[str, Any],
     ) -> None:
         # Platform information
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         if current_platform.is_cuda_alike():
             self.gpu_count = current_platform.device_count()

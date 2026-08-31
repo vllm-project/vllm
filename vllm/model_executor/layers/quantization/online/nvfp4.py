@@ -26,7 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     weight_amax,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 

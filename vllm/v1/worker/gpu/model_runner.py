@@ -29,7 +29,7 @@ import torch
 import torch.nn as nn
 
 import vllm.foundation.system.envs as envs
-from vllm.compilation.counter import compilation_counter
+from vllm.backends.compiler.counter import compilation_counter
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (

@@ -24,7 +24,7 @@ from vllm.model_executor.models.vision import (
     get_multimodal_config,
     get_vit_attn_backend,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.flashinfer import (
     is_flashinfer_cudnn_fp8_prefill_attn_supported,
 )
@@ -396,7 +396,7 @@ class MMEncoderAttention(CustomOp):
             if not current_platform.is_rocm():
                 raise ValueError("AITER FP8 ViT attention requires ROCm.")
 
-            from vllm.platforms.rocm import on_mi3xx
+            from vllm.backends.platform.rocm import on_mi3xx
 
             if not on_mi3xx():
                 raise ValueError(

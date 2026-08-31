@@ -12,7 +12,7 @@ import torch
 import torch.types
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .mem_constants import GiB_bytes, KiB_bytes, MiB_bytes
 

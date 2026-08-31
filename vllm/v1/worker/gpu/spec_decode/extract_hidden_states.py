@@ -5,7 +5,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.compilation.backends import set_model_tag
+from vllm.backends.compiler.backends import set_model_tag
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context

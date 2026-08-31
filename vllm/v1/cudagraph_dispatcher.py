@@ -42,7 +42,7 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
-        from vllm.compilation.breakable_cudagraph import (
+        from vllm.backends.compiler.breakable_cudagraph import (
             is_breakable_cudagraph_enabled,
         )
 

@@ -34,7 +34,7 @@ def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module
 
 
 def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
-    from vllm.compilation.backends import set_model_tag
+    from vllm.backends.compiler.backends import set_model_tag
 
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None

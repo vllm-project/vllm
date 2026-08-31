@@ -61,7 +61,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.configs.kimi_k25 import KimiK25Config
 from vllm.foundation.integrations.transformers_utils.processor import cached_get_image_processor

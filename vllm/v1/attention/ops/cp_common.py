@@ -11,7 +11,7 @@ import torch
 
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup

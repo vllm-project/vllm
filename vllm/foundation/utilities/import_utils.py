@@ -528,10 +528,10 @@ def has_tilelang() -> bool:
     if not _has_module_spec("tilelang"):
         return False
     # ROCm-only guard, imported lazily to avoid loading rocm on CUDA.
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx1250
+        from vllm.backends.platform.rocm import on_gfx1250
 
         # TODO: Re-enable when tilelang supports gfx1250
         if on_gfx1250():

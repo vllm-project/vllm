@@ -7,7 +7,7 @@ picks the right one for the current platform and re-exports the public
 classes used by the model registry and quantization config lookup.
 """
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .quant_config import DeepseekV4FP8Config
 

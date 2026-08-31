@@ -1,20 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.foundation.observability.logger import init_logger
+"""Compatibility shim: vllm.platforms/tpu -> vllm.backends.platform.tpu (sys.modules alias)."""
+import importlib
+import sys
 
-logger = init_logger(__name__)
-
-
-try:
-    from tpu_inference.platforms import (
-        TpuPlatform as TpuInferencePlatform,
-    )
-
-    TpuPlatform = TpuInferencePlatform  # type: ignore
-    USE_TPU_INFERENCE = True
-except ImportError:
-    logger.error(
-        "tpu_inference not found, please install tpu_inference to run vllm on TPU"
-    )
-    pass
+_real = importlib.import_module("vllm.backends.platform.tpu")
+sys.modules[__name__] = _real

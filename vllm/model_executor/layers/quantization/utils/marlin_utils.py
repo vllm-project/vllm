@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.foundation.utilities.math_utils import round_up
 from vllm.foundation.utilities.platform_utils import num_compute_units

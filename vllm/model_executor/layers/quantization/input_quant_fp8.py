@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     group_broadcast,
     prep_scale_for_group_broadcast,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.deep_gemm import (
     DeepGemmQuantScaleFMT,
     is_deep_gemm_e8m0_used,

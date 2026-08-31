@@ -10,7 +10,7 @@ from typing import Any
 import torch
 
 from vllm.foundation.config.attention import MiniMaxM3MSADecodeBackend
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 
 _MAX_NUM_Q_HEADS = 64

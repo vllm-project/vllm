@@ -17,7 +17,7 @@ import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.foundation.utilities.platform_utils import get_device_name_as_file_name
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -847,7 +847,7 @@ def selective_scan_fn(
         return z  # output written inplace to z
 
 
-from vllm.platforms import current_platform  # noqa: E402
+from vllm.backends.platform import current_platform  # noqa: E402
 
 if current_platform.is_cpu():
     from vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm import (

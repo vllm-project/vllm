@@ -22,7 +22,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
     DeepseekV4SparseMLABackend,
 )
-from vllm.platforms.interface import DeviceCapability
+from vllm.backends.platform.interface import DeviceCapability
 from vllm.foundation.utilities.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla.compressor_utils import (

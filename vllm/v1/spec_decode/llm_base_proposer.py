@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+from vllm.backends.compiler.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.foundation.config import (
     CUDAGraphMode,
     VllmConfig,
@@ -36,7 +36,7 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -1328,7 +1328,7 @@ class SpecDecodeBaseProposer:
         Default method to call get_model(). Can be overridden by subclasses which
         need to customize model loading.
         """
-        from vllm.compilation.backends import set_model_tag
+        from vllm.backends.compiler.backends import set_model_tag
 
         draft_vllm_config = self._create_draft_vllm_config()
         with set_model_tag("eagle_head"):

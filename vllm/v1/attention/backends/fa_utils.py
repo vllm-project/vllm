@@ -5,7 +5,7 @@ from typing import Any
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 
 logger = init_logger(__name__)
@@ -40,7 +40,7 @@ elif current_platform.is_rocm():
     # package is not installed/available. (Same source as aiter_triton_mla.py.)
     # The FA4 compile-from-specs API is CUDA-only, so it is unavailable on ROCm
     # regardless of whether AITER is present.
-    from vllm.platforms.rocm import on_gfx1250
+    from vllm.backends.platform.rocm import on_gfx1250
 
     compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
     try:
@@ -319,7 +319,7 @@ def flash_attn_supports_sinks() -> bool:
 
 
 def flash_attn_supports_mla():
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     if current_platform.is_cuda():
         try:

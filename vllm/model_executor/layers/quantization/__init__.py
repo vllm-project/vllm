@@ -5,7 +5,7 @@ from typing import Literal, get_args
 
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

@@ -60,7 +60,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.scalar_type import ScalarType
 from vllm.foundation.utilities.import_utils import has_humming
 from vllm.v1.worker.workspace import current_workspace_manager

@@ -10,7 +10,7 @@ from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 

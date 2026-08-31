@@ -8,7 +8,7 @@ from functools import cache
 
 import torch
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.tilelang_utils import T, tilelang, tilelang_jit
 from vllm.foundation.utilities.math_utils import cdiv
 

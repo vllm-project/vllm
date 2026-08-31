@@ -15,7 +15,7 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from .base_linear import BaseLinearLayerWithLoRA
 from .utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace

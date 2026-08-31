@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_VALUE_DTYPE,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.b12x import B12xWarmupUnit, reuse_packed_weight_storage
 from vllm.foundation.utilities.b12x import (
     get_b12x_mxfp8_linear as _import_b12x_mxfp8,

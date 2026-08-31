@@ -20,7 +20,7 @@ from vllm.frontend.compat.engine.arg_utils import EngineArgs
 from vllm.frontend.entrypoints.generate.base.protocol import StreamOptions
 from vllm.frontend.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.foundation.observability.logger import current_formatter_type, init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)

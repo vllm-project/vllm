@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.deep_gemm import (
     fp8_gemm_nt,
     is_deep_gemm_e8m0_used,

@@ -34,7 +34,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 __all__ = ["QuarkW8A8Fp8", "QuarkW8A8Fp8PerBlock"]
 

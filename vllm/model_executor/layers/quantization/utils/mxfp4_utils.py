@@ -5,7 +5,7 @@ from typing import Any
 import torch
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.import_utils import has_triton_kernels
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
@@ -22,7 +22,7 @@ def should_use_cdna4_mx_scale_swizzle() -> bool:
     the kernel-argument gate in `aiter_mxfp4_w4a8_moe`; they must agree.
     """
     from vllm.distributed import get_tensor_model_parallel_world_size
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.backends.platform.rocm import on_gfx950
 
     return on_gfx950() and get_tensor_model_parallel_world_size() <= 2
 

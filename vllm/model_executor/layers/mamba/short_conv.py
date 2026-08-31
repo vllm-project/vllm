@@ -24,7 +24,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -106,7 +106,7 @@ class ShortConv(MambaBase, PluggableLayer):
             causal_conv1d_update_cpu,
             causal_conv1d_update_torch,
         )
-        from vllm.platforms import CpuArchEnum, current_platform
+        from vllm.backends.platform import CpuArchEnum, current_platform
 
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata

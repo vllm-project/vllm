@@ -17,7 +17,7 @@ from vllm.distributed.device_communicators.pynccl_allocator import (
     is_symmetric_memory_enabled,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from ..utils import StatelessProcessGroup
 from .aiter_custom_all_reduce import AiterCustomAllreduce

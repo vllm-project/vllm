@@ -19,7 +19,7 @@ implementation's HPC/TPCP fusion paths, which depend on infrastructure that
 does not exist in this tree.
 """
 
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 if current_platform.is_rocm():
     raise NotImplementedError("hy_v4 does not yet support ROCm.")

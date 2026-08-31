@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from vllm.foundation.config.kernel import FLASHINFER_MOE_EP_BACKENDS
 from vllm.distributed import get_ep_group
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 if TYPE_CHECKING:
     from flashinfer.moe_ep import BootstrapConfig, MoEEpMegaLayer

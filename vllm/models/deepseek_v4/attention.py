@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm.foundation.system.envs as envs
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,

@@ -19,7 +19,7 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
 )
 from vllm.distributed.parallel_state import _node_count, get_node_count
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 

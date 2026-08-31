@@ -14,7 +14,7 @@ from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.observability.tracing import instrument
 from vllm.foundation.utilities.mem_utils import format_gib
 from vllm.foundation.utilities.torch_utils import set_default_torch_dtype

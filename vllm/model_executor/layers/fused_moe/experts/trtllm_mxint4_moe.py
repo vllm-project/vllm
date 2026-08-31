@@ -15,7 +15,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kInt4Static32,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 
 class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):

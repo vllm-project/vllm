@@ -37,7 +37,7 @@ def set_weight_attrs(
         # This sometimes causes OOM errors during model loading. To avoid this,
         # we sync the param tensor after its weight loader is called.
         # TODO(woosuk): Remove this hack once we have a better solution.
-        from vllm.platforms import current_platform
+        from vllm.backends.platform import current_platform
 
         if current_platform.use_sync_weight_loader() and key == "weight_loader":
             value = current_platform.make_synced_weight_loader(value)

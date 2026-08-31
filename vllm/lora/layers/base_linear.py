@@ -21,7 +21,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 

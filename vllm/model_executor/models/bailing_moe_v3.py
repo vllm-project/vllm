@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers.configuration_utils import PretrainedConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,

@@ -217,7 +217,7 @@ from tqdm import tqdm
 import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
 from vllm.foundation.config import (
     CacheConfig,
     ModelConfig,
@@ -258,7 +258,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.foundation.utilities.flashinfer import has_flashinfer
 from vllm.foundation.utilities.math_utils import cdiv, round_down, round_up
 from vllm.foundation.utilities.torch_utils import (

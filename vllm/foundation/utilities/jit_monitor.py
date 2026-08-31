@@ -30,7 +30,7 @@ from contextlib import suppress
 from typing import Any, Literal, cast
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils.importing import HAS_TRITON
 
 logger = init_logger(__name__)

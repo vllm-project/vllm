@@ -10,10 +10,10 @@ import torch
 import torch.nn.functional as F
 
 import vllm.foundation.system.envs as envs
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
 from vllm.foundation.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
@@ -21,7 +21,7 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
+    from vllm.backends.platform.rocm import _ON_GFX942, _ON_GFX950
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False

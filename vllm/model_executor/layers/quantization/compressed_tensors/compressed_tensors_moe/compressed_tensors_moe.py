@@ -18,7 +18,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 logger = init_logger(__name__)
 
@@ -96,7 +96,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     return rocm_moe_rdna.make_method(
                         weight_quant, input_quant, layer.moe_config
                     )
-                from vllm.platforms.rocm import on_gfx950
+                from vllm.backends.platform.rocm import on_gfx950
 
                 vllm_config = get_current_vllm_config()
                 is_lora_disabled = vllm_config.lora_config is None

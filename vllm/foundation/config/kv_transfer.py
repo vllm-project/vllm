@@ -14,7 +14,7 @@ KVRole = Literal[KVProducer, KVConsumer]
 
 
 def kv_buffer_device_default_factory() -> str:
-    from vllm.platforms import current_platform
+    from vllm.backends.platform import current_platform
 
     return current_platform.device_type
 

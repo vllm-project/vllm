@@ -25,7 +25,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
     init_mla_context_partial,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.flashinfer import has_flashinfer
 from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor

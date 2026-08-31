@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 
 from vllm import ir
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 current_platform.import_kernels()
 

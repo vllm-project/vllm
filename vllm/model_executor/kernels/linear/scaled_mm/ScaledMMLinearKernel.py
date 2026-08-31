@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-from vllm.platforms import current_platform
+from vllm.backends.platform import current_platform
 
 from ..base import MMLinearLayerConfig
 
