@@ -1203,13 +1203,13 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                     and param_name == "qkv_proj"
                     and name.replace(weight_name, param_name) not in params_dict
                 ):
-                    assert weight_name in ["q_proj", "k_proj"]
                     qk_name = name.replace(weight_name, "qk_proj")
                     if is_pp_missing_parameter(qk_name, self):
                         continue
                     if qk_name not in params_dict:
                         continue
 
+                    assert weight_name in ["q_proj", "k_proj"]
                     if weight_name == "k_proj":
                         tp_size = get_tensor_model_parallel_world_size()
                         num_kv_heads = self.config.num_key_value_heads
