@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from argparse import Namespace
 
 from fastapi import FastAPI
@@ -50,13 +49,9 @@ def register_api_routers(
 
         elastic_ep_attach_router(app)
 
-    if (
-        "render" in supported_tasks
-        and "VLLM_ENABLE_SCALE_OUT_ENDPOINTS" in os.environ
-        and not envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS
-    ):
+    if "render" in supported_tasks and envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is False:
         raise ValueError(
-            "VLLM_ENABLE_SCALE_OUT_ENDPOINTS=0 conflicts with "
+            "`VLLM_ENABLE_SCALE_OUT_ENDPOINTS=0` conflicts with "
             "`vllm launch render`; unset it or set it to 1"
         )
 

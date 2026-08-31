@@ -50,6 +50,16 @@ def test_scale_out_endpoints_flag_is_runtime_only(monkeypatch: pytest.MonkeyPatc
     assert "VLLM_ENABLE_SCALE_OUT_ENDPOINTS" not in envs.compile_factors()
 
 
+def test_scale_out_endpoints_flag_distinguishes_unset_from_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", raising=False)
+    assert envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is None
+
+    monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "0")
+    assert envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is False
+
+
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
