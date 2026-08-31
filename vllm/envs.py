@@ -327,6 +327,7 @@ if TYPE_CHECKING:
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
     VLLM_ENABLE_HPC_OPS: bool = False
+    VLLM_MAMBA_ALIGN_ELIDE_FINAL_SPLIT: bool = False
 
 
 def get_default_cache_root():
@@ -1165,6 +1166,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"])
         if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
         else None
+    ),
+    # Mamba "align" prefix caching: finish a prefill in one chunk instead of
+    # splitting a final remainder off at the last cacheable block boundary.
+    # The boundary state is then never cached, so a same-prefix extension
+    # recomputes one extra mamba block of the prompt. Off by default.
+    "VLLM_MAMBA_ALIGN_ELIDE_FINAL_SPLIT": lambda: bool(
+        int(os.getenv("VLLM_MAMBA_ALIGN_ELIDE_FINAL_SPLIT", "0"))
     ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and

@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -358,6 +359,14 @@ class Scheduler(SchedulerInterface):
             and self.hash_block_size < self.block_size
             and self.kv_cache_manager.coordinator.enable_partial_hash_hits
         )
+        # Opt-in: finish a prefill in one chunk instead of splitting a final
+        # remainder off at last_cache_position (state at that boundary is then
+        # never written or cached; a same-prefix extension recomputes one
+        # extra block). Default OFF.
+        self.mamba_elide_final_split = (
+            self.need_mamba_block_aligned_split
+            and envs.VLLM_MAMBA_ALIGN_ELIDE_FINAL_SPLIT
+        )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
         # is called once per scheduled step in FIFO order, so these stay in sync.
@@ -457,12 +466,18 @@ class Scheduler(SchedulerInterface):
             if self.mamba_partial_cache_hit
             else 0
         )
+        # The prompt's final chunk is exempt from the block-aligned-end
+        # invariant, so when the whole remainder fits this chunk the
+        # last_cache_position stop only exists to snapshot a reusable state.
+        # Eliding it (opt-in) merges the final two chunks; the boundary block
+        # simply stays null, so nothing incoherent is ever registered.
+        elide_final_stop = self.mamba_elide_final_split and end >= prefill_end
         stops = (
             # Same invariant: a chunk starting mid-block stops at the boundary
             # rather than running past it.
             next_block_boundary if start % block_size != 0 else 0,
             # Never run past the last cacheable block boundary mid-chunk.
-            last_cache_position,
+            0 if elide_final_stop else last_cache_position,
             # Fine-grained hits: the prompt's partial-tail entry can only be
             # registered by a chunk ending exactly at its last hash boundary.
             tail_boundary
