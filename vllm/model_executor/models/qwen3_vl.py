@@ -928,6 +928,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         do_resize: bool = True,
         image_processor: Qwen2VLImageProcessor | Qwen3VLVideoProcessor,
         mm_kwargs: Mapping[str, object],
+        modality: str | None = None,
     ) -> tuple[ImageSize, int]:
         is_video = isinstance(image_processor, Qwen3VLVideoProcessor)
 
@@ -937,7 +938,9 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = vision_config.temporal_patch_size
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        if modality is None:
+            modality = "video" if is_video else "image"
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs, modality=modality)
         size = image_processor.size
         if override_size := mm_kwargs.get("size"):
             size = size | override_size
@@ -1001,7 +1004,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
     ) -> int:
         video_processor = self.get_video_processor()
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        mm_kwargs = self.ctx.get_merged_mm_kwargs({}, modality="video")
         video_size = mm_kwargs.get("size", video_processor.size)
         temporal_patch_size = mm_kwargs.get(
             "temporal_patch_size", video_processor.temporal_patch_size
@@ -1137,7 +1140,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
 
         video_processor = self.info.get_video_processor()
 
-        mm_kwargs = self.info.ctx.get_merged_mm_kwargs({})
+        mm_kwargs = self.info.ctx.get_merged_mm_kwargs({}, modality="video")
         video_size = mm_kwargs.get("size", video_processor.size)
         temporal_patch_size = mm_kwargs.get(
             "temporal_patch_size", video_processor.temporal_patch_size
@@ -1352,7 +1355,9 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 # NOTE: a copy of is created to update do_sample_frames,
                 # otherwise mm_hash for the object will be incorrect.
                 video_mm_kwargs = dict(**hf_processor_mm_kwargs)
-                merged = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+                merged = self.info.ctx.get_merged_mm_kwargs(
+                    hf_processor_mm_kwargs, modality="video"
+                )
                 if merged.keys() & {"size", "min_pixels", "max_pixels"}:
                     video_size = dict(self.info.get_video_processor().size)
                     size_override = merged.get("size")
