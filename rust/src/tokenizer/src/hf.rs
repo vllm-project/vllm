@@ -175,6 +175,7 @@ impl HuggingFaceTokenizer {
             ids.dedup();
             Arc::from(ids)
         };
+        // HF materializes the merged vocabulary to count it, so cache the result.
         let vocab_size = tokenizer.get_vocab_size(true);
         Self {
             backend: Backend::Hf(Box::new(tokenizer)),
