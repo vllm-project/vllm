@@ -20,9 +20,28 @@ def causal_conv1d_fn_cpu(
     has_initial_state: torch.Tensor | None = None,
     activation: str | None = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
+    num_computed_tokens: torch.Tensor | None = None,
+    block_size_to_align: int | None = None,
     **kwargs,
 ) -> torch.Tensor:
-    """CPU implementation for causal_conv1d_fwd."""
+    """CPU implementation for causal_conv1d_fwd.
+
+    Supports both the legacy layout (1-D ``cache_indices``: one state slot per
+    sequence) and the mamba-prefix-caching layout (2-D ``cache_indices``: a
+    per-sequence block table). In the block-table layout, mirroring the GPU
+    kernel contract documented in ``mamba_mixer2.conv_ssm_forward``:
+
+      * the initial state is read from
+        ``cache_indices[seq, initial_state_idx[seq]]``,
+      * the end-of-step state is written to
+        ``cache_indices[seq, block_idx_last_scheduled_token[seq]]``,
+      * an additional snapshot is written at every ``block_size_to_align``
+        token boundary crossed by this step, into that boundary's block slot,
+        so prefix-cache hits can restore conv state at any block boundary.
+    """
     if isinstance(activation, bool) and activation:
         activation = "silu"
     elif isinstance(activation, bool):
@@ -41,21 +60,38 @@ def causal_conv1d_fn_cpu(
     ]
     weight = weight.unsqueeze(1)
 
+    block_table_mode = cache_indices is not None and cache_indices.dim() == 2
+
     for seq_idx, (bos, eos) in enumerate(seq_begin_end_idx):
         if bos == eos:
             continue
 
-        slot = (
-            int(cache_indices[seq_idx].item()) if cache_indices is not None else seq_idx
-        )
+        if cache_indices is None:
+            slot = seq_idx
+            block_row = None
+        elif block_table_mode:
+            block_row = cache_indices[seq_idx]
+            last_block = (
+                int(block_idx_last_scheduled_token[seq_idx].item())
+                if block_idx_last_scheduled_token is not None
+                else 0
+            )
+            slot = int(block_row[last_block].item())
+        else:
+            block_row = None
+            slot = int(cache_indices[seq_idx].item())
 
-        if slot == pad_slot_id:
+        if slot == pad_slot_id or slot == NULL_BLOCK_ID:
             continue
 
         seq_x = x[:, bos:eos].unsqueeze(0)
 
         if has_initial_state is not None and bool(has_initial_state[seq_idx].item()):
-            initial_state = conv_states[slot, :, :state_len].unsqueeze(0)
+            if block_table_mode and initial_state_idx is not None:
+                init_slot = int(block_row[int(initial_state_idx[seq_idx].item())].item())
+            else:
+                init_slot = slot
+            initial_state = conv_states[init_slot, :, :state_len].unsqueeze(0)
         else:
             initial_state = torch.zeros(
                 1,
@@ -79,7 +115,40 @@ def causal_conv1d_fn_cpu(
             seq_out = F.silu(seq_out)
 
         out[:, bos:eos] = seq_out.squeeze(0)
-        conv_states[slot, :, :state_len].copy_(conv_input[..., -state_len:].squeeze(0))
+
+        # Aligned boundary snapshots (block-table mode only). A boundary at
+        # global token position P (multiple of block_size_to_align) crossed by
+        # this step gets the conv window ending at P: conv_input[t : t+state_len]
+        # where t is P local to this step's tokens.
+        if (
+            block_table_mode
+            and block_size_to_align is not None
+            and block_size_to_align > 0
+        ):
+            computed = (
+                int(num_computed_tokens[seq_idx].item())
+                if num_computed_tokens is not None
+                else 0
+            )
+            seqlen = eos - bos
+            first_boundary = (
+                (computed + block_size_to_align) // block_size_to_align
+            ) * block_size_to_align
+            for pos in range(first_boundary, computed + seqlen, block_size_to_align):
+                t_local = pos - computed
+                boundary_block = pos // block_size_to_align - 1
+                if 0 <= boundary_block < block_row.shape[0]:
+                    b_slot = int(block_row[boundary_block].item())
+                    if b_slot not in (pad_slot_id, NULL_BLOCK_ID) and b_slot >= 0:
+                        conv_states[b_slot, :, :state_len].copy_(
+                            conv_input[..., t_local : t_local + state_len]
+                            .squeeze(0)
+                            .to(conv_states.dtype)
+                        )
+
+        conv_states[slot, :, :state_len].copy_(
+            conv_input[..., -state_len:].squeeze(0)
+        )
 
     return out.to(original_x_dtype)
 
