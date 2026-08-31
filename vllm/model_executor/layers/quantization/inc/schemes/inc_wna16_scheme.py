@@ -157,8 +157,27 @@ class INCWna16Scheme(INCScheme):
                 INCWNA16MoEScheme,
             )
 
-            is_ark_available, ark_error, _, _ = get_ark_state()
-            if is_ark_available:
+            backend = envs.VLLM_XPU_INC_WNA16_BACKEND
+            if backend in XPU_ONEDNN_BACKENDS:
+                return INCWNA16MoEScheme(layer_config).get_method(layer)
+
+            is_ark_available, ark_error, ark, _ = get_ark_state()
+            xpu_lib = getattr(ark, "xpu_lib", None) if ark is not None else None
+            is_ark_moe_available = (
+                is_ark_available
+                and ark is not None
+                and hasattr(ark, "MoeSymmetricGemm")
+                and xpu_lib is not None
+            )
+            ark_moe_error = ark_error or "ARK MoE kernels are unavailable"
+            if backend == "ark" and not is_ark_moe_available:
+                raise NotImplementedError(
+                    "VLLM_XPU_INC_WNA16_BACKEND=ark was requested but "
+                    f"ARK MoE kernels are unavailable: {ark_moe_error}. "
+                    f"Layer: {prefix}."
+                )
+
+            if is_ark_moe_available:
                 moe_config = MoeWNA16Config.from_config(
                     {
                         "quant_method": "gptq",
@@ -174,7 +193,7 @@ class INCWna16Scheme(INCScheme):
                 "ARK backend is unavailable for MoE layer %s; "
                 "falling back to the default WNA16 MoE path. Error: %s",
                 prefix,
-                ark_error or "unknown error",
+                ark_moe_error,
             )
 
             return INCWNA16MoEScheme(layer_config).get_method(layer)
