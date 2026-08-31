@@ -372,7 +372,7 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
     device = torch.device("cuda")
     dcp_world_size = 2
     qlen = 3
-    num_heads = 96
+    num_heads = 64
     kv_lora_rank = 512
     rope_dim = 64
     head_dim = kv_lora_rank + rope_dim

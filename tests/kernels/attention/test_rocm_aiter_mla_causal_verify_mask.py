@@ -106,6 +106,10 @@ def _run_verify_block():
     vllm_config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=QLEN - 1
     )
+    vllm_config.model_config.get_num_attention_heads = types.MethodType(
+        lambda self, parallel_config, arch_config=None: NUM_QUERY_HEADS,
+        vllm_config.model_config,
+    )
 
     spec = MLAAttentionSpec(
         block_size=PAGE_SIZE,
