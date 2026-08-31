@@ -14,6 +14,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import share_replayssm_ring_trackers
+from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
@@ -394,12 +395,21 @@ def allocate_kv_cache(
     sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
     raw_size = sizes.pop()
-    page_size = 4096
-    buf = torch.zeros(
-        ((raw_size + page_size - 1) // page_size) * page_size,
-        dtype=torch.int8,
-        device=device,
-    )
+    # wvSplitKrc's process-lifetime static workspaces (csrc/rocm/skinny_gemms.cu)
+    # are created lazily on the first qualifying GEMM. Force that now, before
+    # the giant backing allocation below: if one landed in this segment's
+    # rounding tail it would pin the whole segment at engine shutdown.
+    if current_platform.is_rocm():
+        warmup_rocm_skinny_gemm_workspaces(device)
+        # Pad to the page granularity MoRIIO needs to register the shared
+        # backing as a single RDMA memory region. Other platforms keep the
+        # exact-size allocation: NIXL and SimpleCPUOffload rely on
+        # storage.nbytes() matching the logical KV size (see #53974).
+        page_size = 4096
+        buf_size = ((raw_size + page_size - 1) // page_size) * page_size
+    else:
+        buf_size = raw_size
+    buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
 
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:
@@ -616,6 +626,27 @@ def bind_kv_cache(
         forward_context[layer_name].bind_kv_cache(kv_cache)
 
     share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+
+
+def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
+    """Detach the KV/state cache tensors installed by bind_kv_cache().
+
+    The model object can outlive the runner (e.g. LLMEngine's finalizer keeps
+    it reachable until engine deletion), so dropping the runner's references
+    alone does not release the KV cache memory on teardown paths.
+    """
+    for layer in layers:
+        if not hasattr(layer, "kv_cache"):
+            continue
+        kv_cache = layer.kv_cache
+        layer.kv_cache = torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
+        # Clean up quantized KV cache scale views
+        # (int8_per_token_head, fp8_per_token_head)
+        if hasattr(layer, "impl"):
+            if hasattr(layer.impl, "_k_scale_cache"):
+                layer.impl._k_scale_cache = None
+            if hasattr(layer.impl, "_v_scale_cache"):
+                layer.impl._v_scale_cache = None
 
 
 def copy_kv_cache_blocks_inplace(
