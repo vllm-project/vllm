@@ -769,9 +769,6 @@ def test_qsa_decode_warmup_compiles_profiles_without_launching(
         "_qsa_mqa_paged_uniform_kernel",
         kernel,
     )
-    monkeypatch.setattr(qsa_indexer_ops.current_platform, "is_cuda", lambda: True)
-    monkeypatch.setattr(qsa_indexer_ops, "HAS_TRITON", True)
-
     profiles = qsa_indexer_ops.warmup_qsa_mqa_paged_decode(
         torch.empty(40, 4, 1, 128, dtype=torch.bfloat16),
         torch.empty(33, 20, dtype=torch.int32),

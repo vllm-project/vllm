@@ -10,7 +10,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
 from vllm.platforms import current_platform
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.triton_utils import tl, triton
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
@@ -339,8 +339,6 @@ def warmup_qsa_mqa_paged_decode(
 ) -> tuple[tuple[int, int], ...]:
     """Compile every reachable decode specialization without launching it."""
 
-    if not current_platform.is_cuda() or not HAS_TRITON:
-        return ()
     profiles = _qsa_decode_warmup_profiles(
         max_decode_query_len,
         max_num_reqs,
@@ -438,9 +436,6 @@ def qsa_mqa_paged_decode(
         raise ValueError("QSA decode page-table rows must be contiguous")
     if visible_blocks.stride(0) != 1:
         raise ValueError("QSA decode row metadata must be contiguous")
-    if not q.is_cuda or not HAS_TRITON:
-        raise RuntimeError("paged QSA decode scoring requires CUDA and Triton")
-
     columns = page_table.shape[1] * k_cache.shape[1]
     logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
     if not q.shape[0] or not columns:
@@ -497,8 +492,6 @@ def _launch_qsa_mqa_paged_prefill(
     num_queries: int,
 ) -> torch.Tensor:
     _validate_mqa(q)
-    if not q.is_cuda or not HAS_TRITON:
-        raise RuntimeError("paged QSA prefill scoring requires CUDA and Triton")
     if k_cache.ndim != 4 or k_cache.shape[2] != 1:
         raise ValueError("QSA cache must be [pages, page_size, 1, head_dim]")
     if k_cache.shape[3] != q.shape[2]:
@@ -599,8 +592,6 @@ def expand_qsa_block_indices(
 ) -> torch.Tensor:
     """Expand compressed blocks and compact the causal tail of the open group."""
 
-    if not block_indices.is_cuda or not HAS_TRITON:
-        raise RuntimeError("QSA CUDA expansion requires Triton")
     if token_topk % compress_ratio:
         raise ValueError("QSA token top-k must be divisible by compression ratio")
     block_topk = token_topk // compress_ratio
