@@ -140,6 +140,7 @@ def _fused_norm_rope_kernel(
     mla_cache_ptr,
     mla_cache_block_stride,
     mla_cache_entry_stride,
+    MLA_CACHE_BLOCK_SIZE: tl.constexpr,
     MLA_CACHE_FP8: tl.constexpr,
     mla_cache_scale_ptr,
     # fp8_ds_mla cache views (block-scaled fp8 NoPE + unquantized bf16 RoPE).
@@ -242,7 +243,7 @@ def _fused_norm_rope_kernel(
                 return
 
             slot_idx = tl.load(slot_mapping_ptr + tok_idx)
-            mla_block_size = mla_cache_block_stride // mla_cache_entry_stride
+            mla_block_size = MLA_CACHE_BLOCK_SIZE
             mla_block_idx = slot_idx // mla_block_size
             mla_block_off = slot_idx % mla_block_size
 
@@ -479,6 +480,7 @@ def fused_norm_rope(
     mla_ds_scale_view = torch.empty(0, dtype=torch.float32, device=device)
     mla_ds_rope_view = torch.empty(0, dtype=torch.bfloat16, device=device)
     if mla_kv_cache is not None:
+        mla_block_size = mla_kv_cache.shape[1]
         if mla_cache_ds_mla:
             # 656-byte custom layout addressed in bytes; mla_cache_ptr is the
             # 1-byte fp8 view, so block/entry strides are byte offsets and the
@@ -503,6 +505,7 @@ def fused_norm_rope(
         mla_kv_cache = torch.empty(0, dtype=torch.bfloat16, device=device)
         mla_block_stride = 0
         mla_entry_stride = 0
+        mla_block_size = 1
         mla_k_scale = _dummy((1,), torch.float32, device)
 
     if q_c_out is None:
@@ -570,6 +573,7 @@ def fused_norm_rope(
         mla_kv_cache,
         mla_block_stride,
         mla_entry_stride,
+        mla_block_size,
         mla_cache_fp8,
         mla_k_scale,
         mla_ds_scale_view,
