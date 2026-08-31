@@ -260,12 +260,8 @@ def get_quant_config(
         and hf_quant_config.get("quant_method") == "compressed-tensors"
         and "config_groups" in hf_quant_config
     ):
-        if hf_text_config is not None:
-            n_heads = getattr(hf_text_config, "num_attention_heads", None)
-            n_kv_heads = getattr(hf_text_config, "num_key_value_heads", None)
-        else:
-            n_heads = getattr(model_config.hf_config, "num_attention_heads", None)
-            n_kv_heads = getattr(model_config.hf_config, "num_key_value_heads", None)
+        n_heads = model_config.model_arch_config.total_num_attention_heads
+        n_kv_heads = model_config.model_arch_config.total_num_kv_heads
 
         hf_quant_config["total_num_heads"] = n_heads
         hf_quant_config["total_num_kv_heads"] = (
@@ -293,12 +289,17 @@ def get_quant_config(
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
     hf_overrides = model_config.hf_overrides
+    if callable(hf_overrides):
+        # A callable hf_overrides is a config-to-config transform (e.g. the
+        # one SpeculativeConfig installs on draft model configs); it cannot
+        # carry quantization config entries, so treat it as no overrides.
+        hf_overrides = {}
     if not isinstance(hf_overrides, dict):
         raise ValueError(
             "hf_overrides must be a dict for get_quant_config "
             "to get the quantization config from it."
         )
-    quantization_config_file = hf_overrides.get("quantization_config_file", None)
+    quantization_config_file = hf_overrides.get("quantization_config_file")
     if quantization_config_file is not None:
         if hasattr(quant_cls, "from_config_file"):
             return quant_cls.from_config_file(quantization_config_file)
@@ -308,7 +309,7 @@ def get_quant_config(
                 "but quant_cls.from_config_file is not implemented in "
                 f"{quant_cls}"
             )
-    quantization_config_json = hf_overrides.get("quantization_config_dict_json", None)
+    quantization_config_json = hf_overrides.get("quantization_config_dict_json")
     if quantization_config_json is not None:
         if hasattr(quant_cls, "from_config_dict_json"):
             return quant_cls.from_config_dict_json(quantization_config_json)
@@ -330,9 +331,6 @@ def get_quant_config(
         assert isinstance(model_config.quantization_config, QuantizationConfigArgs)
         return OnlineQuantizationConfig(args=model_config.quantization_config)
 
-    # Inflight BNB quantization
-    if model_config.quantization == "bitsandbytes":
-        return quant_cls.from_config({})
     model_name_or_path = (
         maybe_download_from_modelscope(
             model_config.model,
@@ -380,9 +378,7 @@ def get_quant_config(
     with open(quant_config_file) as f:
         config = json.load(f)
 
-        if model_config.quantization == "bitsandbytes":
-            config["adapter_name_or_path"] = model_config.model
-        elif model_config.quantization in ("modelopt", "modelopt_mixed"):
+        if model_config.quantization in ("modelopt", "modelopt_mixed"):
             if config.get("producer", {}).get("name") == "modelopt":
                 return quant_cls.from_config(config)
             else:
@@ -694,12 +690,10 @@ def _get_checkpoints_size_bytes(files: list[str]) -> int:
 
 
 def _get_available_ram_bytes() -> int:
-    """Return available RAM, honoring cgroup limits on ROCm."""
+    """Return available RAM, honoring cgroup limits."""
     import psutil
 
     host_available = psutil.virtual_memory().available
-    if not current_platform.is_rocm():
-        return host_available
 
     from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
 

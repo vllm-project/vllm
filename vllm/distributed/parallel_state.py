@@ -27,7 +27,7 @@ import contextlib
 import gc
 import pickle
 import weakref
-from collections import namedtuple
+from collections import deque, namedtuple
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -78,6 +78,37 @@ class Handle(Protocol):
     def wait(self) -> None: ...
 
 
+class _RetainedHandle:
+    """Handle that retains source tensors until all posted work completes.
+
+    Used by ``isend_object`` to keep the serialized CPU tensors alive while
+    gloo copies them in the background; ``wait`` drops the refs once drained.
+
+    ``wait`` must be idempotent: gloo ``Work.wait()`` is single-shot for
+    point-to-point operations — calling it a second time on an already
+    completed send blocks forever (verified empirically). Both the worker's
+    top-of-step drain of ``_pp_send_work`` and ``_reap_completed_isends``
+    may wait the same entry's metadata handle, so the second caller must
+    not re-wait the underlying works.
+    """
+
+    def __init__(self, works: list[Any], retained: tuple[torch.Tensor, ...]) -> None:
+        self._works = works
+        self._retained = retained
+        self._waited = False
+
+    def is_completed(self) -> bool:
+        return all(w.is_completed() for w in self._works)
+
+    def wait(self) -> None:
+        if self._waited:
+            return
+        for w in self._works:
+            w.wait()
+        self._waited = True
+        self._retained = ()
+
+
 def _split_tensor_dict(
     tensor_dict: dict[str, torch.Tensor | Any],
 ) -> tuple[list[tuple[str, Any]], list[torch.Tensor]]:
@@ -125,6 +156,28 @@ _groups: dict[str, Callable[[], "GroupCoordinator | None"]] = {}
 
 def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
+
+
+def _apply_to_device_comms(
+    action: Callable[[DeviceCommunicatorBase], None],
+) -> None:
+    """Apply ``action`` to every group's device communicator.
+
+    Walks the registered parallel groups and skips those without a device
+    communicator (absent at ``world_size == 1``).
+    """
+    comms = []
+    for group_ref in _groups.values():
+        group = group_ref()
+        if group is None:
+            continue
+        dc = group.device_communicator
+        if dc is None:
+            continue
+        comms.append(dc)
+
+    for dc in comms:
+        action(dc)
 
 
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
@@ -392,6 +445,7 @@ class GroupCoordinator:
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
+        use_all2all: bool = False,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -400,13 +454,10 @@ class GroupCoordinator:
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
         self.device_index: int
-        if _WORLD is not None:
-            self.device_index = _WORLD.device_index
-        else:
-            assert local_rank >= 0, (
-                "local_rank must be provided when creating the world group"
-            )
-            self.device_index = local_rank
+        assert local_rank >= 0, (
+            "local_rank must be provided when creating the world group"
+        )
+        self.device_index = local_rank
 
         self_device_group = None
         self_cpu_group = None
@@ -489,6 +540,7 @@ class GroupCoordinator:
                 device=self.device,
                 device_group=self.device_group,
                 unique_name=self.unique_name,
+                use_all2all=use_all2all,
             )
 
         from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
@@ -510,6 +562,15 @@ class GroupCoordinator:
             and self.device_communicator
             and getattr(self.device_communicator, "supports_tensor_dict", False)
         )
+
+        # FIFO of in-flight ``isend_tensor_dict`` calls: one entry per call,
+        # (handles, sent source tensors). Self-retention keeps the send
+        # buffers alive for fire-and-forget callers that drop the returned
+        # handles; entries are reaped lazily on the next ``isend_tensor_dict``
+        # (see ``_reap_completed_isends``). Lazily created instead of plain
+        # attribute init because some subclasses replicate ``__init__``
+        # without calling ``super().__init__``.
+        self._pending_isends: deque[tuple[list[Handle], list[torch.Tensor]]] = deque()
 
     def make_sibling_device_group(self, group_desc: str | None = None) -> ProcessGroup:
         """Create a new device-side ProcessGroup with the same per-rank membership
@@ -861,6 +922,33 @@ class GroupCoordinator:
 
         return obj
 
+    def isend_object(self, obj: Any, dst: int) -> Handle:
+        """Non-blocking ``send_object``: isend size + pickled object on the
+        CPU group. Returns a handle that retains the serialized source
+        tensors until ``wait`` drains both sends.
+        """
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+        assert dst != self.rank_in_group, (
+            "Invalid destination rank. Destination rank is the same "
+            "as the current rank."
+        )
+
+        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8)
+        size_tensor = torch.tensor(
+            [object_tensor.numel()], dtype=torch.long, device="cpu"
+        )
+
+        retained = (size_tensor, object_tensor)
+        works: list[Any] = []
+        for tensor in retained:
+            work = torch.distributed.isend(
+                tensor, dst=self.ranks[dst], group=self.cpu_group
+            )
+            if work is not None:
+                works.append(work)
+
+        return _RetainedHandle(works, retained)
+
     def broadcast_tensor_dict(
         self,
         tensor_dict: dict[str, torch.Tensor | Any] | None = None,
@@ -993,7 +1081,50 @@ class GroupCoordinator:
         )
         for handle in handles:
             handle.wait()
+        # The sync path waited every handle, so the self-retention entry
+        # appended by ``isend_tensor_dict`` is already drained; drop it
+        # instead of leaking the tensor refs until the next async send.
+        pending = getattr(self, "_pending_isends", None)
+        if pending and pending[-1][0] is handles:
+            pending.pop()
         return None
+
+    def _reap_completed_isends(self) -> None:
+        """Lazily drop self-retained ``isend_tensor_dict`` entries that have
+        completed, oldest first (FIFO).
+
+        gloo ``Work.is_completed()`` is unreliable (it can report completion
+        before the background copy of the source buffer finishes), so the
+        metadata handle (``handles[0]``, a gloo-backed ``_RetainedHandle``) is
+        never used as the completion gate. Instead we gate on the tensor-send
+        handles (``handles[1:]``), which run on the device backend where
+        ``is_completed()`` is reliable. Once all tensor sends are done the
+        peer must already have posted the matching tensor recvs — and since
+        the receiver ingests metadata before tensors, the gloo metadata send
+        is then guaranteed complete, so ``wait()`` on it is ~instant and only
+        serves to drop the retained refs.
+
+        Metadata-only entries (``handles[1:]`` empty, e.g. an empty
+        ``IntermediateTensors``) have no reliable completion signal; drop them
+        best-effort without blocking on the gloo metadata wait.
+        """
+        pending = getattr(self, "_pending_isends", None)
+        if pending is None:
+            # Subclasses that replicate __init__ without calling
+            # super().__init__ may not have the attribute yet.
+            self._pending_isends = pending = deque()
+        while pending:
+            handles, _ = pending[0]
+            tensor_handles = handles[1:]
+            if not tensor_handles:
+                pending.popleft()
+                continue
+            if not all(h.is_completed() for h in tensor_handles):
+                # The oldest send is still in flight; FIFO ordering means the
+                # rest are no further along, so stop here.
+                break
+            handles[0].wait()
+            pending.popleft()
 
     def isend_tensor_dict(
         self,
@@ -1002,6 +1133,16 @@ class GroupCoordinator:
         all_gather_group: "GroupCoordinator | None" = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> list[Handle]:
+        """Send the input tensor dictionary asynchronously.
+
+        The returned handles are additionally self-retained in
+        ``self._pending_isends`` (together with the sent source tensors) and
+        reaped lazily on subsequent calls, so fire-and-forget callers that
+        drop the handles cannot free or overwrite the send buffers while the
+        sends are still in flight. Callers that do keep the handles may
+        ``wait()`` them as before; the retention entry is dropped on reap
+        either way.
+        """
         if self.world_size <= 1:
             return []
 
@@ -1027,12 +1168,16 @@ class GroupCoordinator:
         metadata_group = self.cpu_group
 
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
-        self.send_object(metadata_list, dst=dst)
 
         tensor_keys = [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)]
         assert len(tensor_keys) == len(tensor_list)
 
-        handles: list[Handle] = []
+        # Reap completed sends before posting new ones, bounding the
+        # self-retention FIFO.
+        self._reap_completed_isends()
+        handles: list[Handle] = [self.isend_object(metadata_list, dst=dst)]
+
+        sent_tensors: list[torch.Tensor] = []
         for key, tensor in zip(tensor_keys, tensor_list):
             if tensor.numel() == 0:
                 continue
@@ -1049,6 +1194,19 @@ class GroupCoordinator:
             if tensor.is_cuda:
                 tensor.record_stream(torch.cuda.current_stream(tensor.device))
             handles.append(handle)
+            sent_tensors.append(tensor)
+
+        # Self-retain for fire-and-forget callers: keep the handles and
+        # the source tensors alive until the sends complete (reaped
+        # lazily by ``_reap_completed_isends``). Without this, dropping
+        # the returned handles would GC the ``_RetainedHandle``'s
+        # serialized metadata buffers mid-send, and non-CUDA devices
+        # have no ``record_stream`` equivalent protecting the tensor
+        # sources.
+        pending = getattr(self, "_pending_isends", None)
+        if pending is None:
+            self._pending_isends = pending = deque()
+        pending.append((handles, sent_tensors))
 
         return handles
 
@@ -1213,10 +1371,6 @@ class GroupCoordinator:
         if self.mq_broadcaster is not None:
             self.mq_broadcaster = None
 
-    def prepare_communication_buffer_for_model(self, model: torch.nn.Module):
-        if self.device_communicator is not None:
-            self.device_communicator.prepare_communication_buffer_for_model(model)
-
     def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
@@ -1302,6 +1456,7 @@ def init_model_parallel_group(
     use_message_queue_broadcaster: bool = False,
     group_name: str | None = None,
     use_device_communicator: bool = True,
+    use_all2all: bool = False,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=group_ranks,
@@ -1310,6 +1465,7 @@ def init_model_parallel_group(
         use_device_communicator=use_device_communicator,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
+        use_all2all=use_all2all,
     )
 
 
@@ -1320,6 +1476,7 @@ def _init_stateless_group(
     backend: str,
     coord_store: Store,
     use_device_communicator: bool = True,
+    use_all2all: bool = False,
 ) -> "StatelessGroupCoordinator":
     """Create a StatelessGroupCoordinator with the given parameters."""
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -1335,6 +1492,7 @@ def _init_stateless_group(
         coord_store=coord_store,
         global_rank=world.rank,
         global_world_size=world.world_size,
+        use_all2all=use_all2all,
     )
 
 
@@ -1345,21 +1503,21 @@ def _replace_active_groups(
     ep: GroupCoordinator | None,
     eplb: GroupCoordinator | None,
     node_count: int | None,
-) -> None:
-    """Destroy the current DP/EP/WORLD/EPLB groups and replace them.
+) -> tuple[GroupCoordinator | None, ...]:
+    """Replace the active groups and return the groups they replaced.
 
-    Destruction is collective — all ranks in the old groups must call this
-    function together.  Pass all-``None`` to tear down without replacement.
+    The caller must destroy the returned DP, EP, WORLD, and EPLB groups
+    collectively and in that order. Pass all-``None`` to remove the active
+    groups without replacement.
     """
     global _WORLD, _DP, _EP, _EPLB, _NODE_COUNT
-    for group in (_DP, _EP, _WORLD, _EPLB):
-        if group is not None:
-            group.destroy()
+    old_groups = _DP, _EP, _WORLD, _EPLB
     _WORLD = world
     _DP = dp
     _EP = ep
     _EPLB = eplb
     _NODE_COUNT = node_count
+    return old_groups
 
 
 _TP: GroupCoordinator | None = None
@@ -1468,6 +1626,7 @@ def _init_process_group_for_split_group(
     *,
     backend: str,
     distributed_init_method: str,
+    store: Store | None,
     world_size: int,
     rank: int,
     local_rank: int,
@@ -1491,7 +1650,8 @@ def _init_process_group_for_split_group(
         device_id = None
     torch.distributed.init_process_group(
         backend=init_backend,
-        init_method=distributed_init_method,
+        init_method=distributed_init_method if store is None else None,
+        store=store,
         world_size=world_size,
         rank=rank,
         timeout=timeout,
@@ -1633,6 +1793,11 @@ def init_distributed_environment(
                 "Fallback Gloo backend is not available."
             )
             backend = "gloo"
+        store = None
+        if distributed_init_method.startswith("file://"):
+            store = torch.distributed.FileStore(
+                distributed_init_method.removeprefix("file://"), world_size
+            )
         if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
             # split_group needs local_rank early to compute device_id for
             # the eager init. local_rank is not available in torch
@@ -1646,6 +1811,7 @@ def init_distributed_environment(
             _init_process_group_for_split_group(
                 backend=backend,
                 distributed_init_method=distributed_init_method,
+                store=store,
                 world_size=world_size,
                 rank=rank,
                 local_rank=local_rank,
@@ -1655,7 +1821,8 @@ def init_distributed_environment(
             # this backend is used for WORLD
             torch.distributed.init_process_group(
                 backend=backend,
-                init_method=distributed_init_method,
+                init_method=distributed_init_method if store is None else None,
+                store=store,
                 world_size=world_size,
                 rank=rank,
                 timeout=timeout,
@@ -1905,6 +2072,7 @@ def initialize_model_parallel(
             .unbind(0)
         )
         group_ranks = [x.tolist() for x in group_ranks]
+        use_all2all = parallel_config.use_all2all
         if enable_elastic_ep:
             _EP = _init_stateless_group(
                 group_ranks,
@@ -1912,10 +2080,15 @@ def initialize_model_parallel(
                 parallel_config.data_parallel_master_ip,
                 backend,
                 coord_store=coord_store,
+                use_all2all=use_all2all,
             )
         else:
             _EP = init_model_parallel_group(
-                group_ranks, get_world_group().local_rank, backend, group_name="ep"
+                group_ranks,
+                get_world_group().local_rank,
+                backend,
+                group_name="ep",
+                use_all2all=use_all2all,
             )
 
         # Create EPLB group with the same ranks as EP if EPLB is enabled.
@@ -2010,33 +2183,23 @@ def ensure_model_parallel_initialized(
     )
 
 
-def prepare_communication_buffer_for_model(model: torch.nn.Module):
-    """Prepare the communication buffer for the model.
-    Traditional communication libraries like NCCL are almost
-    model agnostic. However, emerging new communication libraries like
-    MoE all2all (DeepEP) usually allocate the communication buffer
-    based on the model shape for optimal performance.
-    """
-    if _TP is not None:
-        _TP.prepare_communication_buffer_for_model(model)
-    if _PCP is not None:
-        _PCP.prepare_communication_buffer_for_model(model)
-    if _PP is not None:
-        _PP.prepare_communication_buffer_for_model(model)
-    if _DP is not None:
-        _DP.prepare_communication_buffer_for_model(model)
-    if _EP is not None:
-        _EP.prepare_communication_buffer_for_model(model)
-    if _EPLB is not None:
-        _EPLB.prepare_communication_buffer_for_model(model)
+def checkpoint_prepare_distributed_state() -> None:
+    """Prepare every device communicator for a process checkpoint."""
+    torch.accelerator.synchronize()
+    _apply_to_device_comms(lambda comm: comm.checkpoint_prepare())
+    torch.accelerator.synchronize()
+
+
+def checkpoint_restore_distributed_state() -> None:
+    """Restore every device communicator after a process checkpoint."""
+    torch.accelerator.synchronize()
+    _apply_to_device_comms(lambda comm: comm.checkpoint_restore())
+    torch.accelerator.synchronize()
 
 
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
     return _TP is not None and _PP is not None
-
-
-_TP_STATE_PATCHED = False
 
 
 def get_tensor_model_parallel_world_size() -> int:
@@ -2137,10 +2300,10 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     if not current_platform.is_cpu():
         torch.accelerator.empty_cache()
         try:
-            torch._C._host_emptyCache()
+            torch.accelerator.empty_host_cache()
         except AttributeError:
             logger.warning(
-                "torch._C._host_emptyCache() only available in Pytorch >=2.5"
+                "torch.accelerator.empty_host_cache() only available in Pytorch >=2.9"
             )
 
     logger.debug_once("[shutdown] Distributed: cleanup complete")

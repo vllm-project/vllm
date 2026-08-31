@@ -16,7 +16,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -178,6 +178,7 @@ class Cohere2MoeAttention(nn.Module):
         self.max_position_embeddings = getattr(
             config, "model_max_length", None
         ) or getattr(config, "max_position_embeddings", 8192)
+        assert isinstance(self.max_position_embeddings, int)
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
             self.head_dim,
@@ -207,7 +208,7 @@ class Cohere2MoeAttention(nn.Module):
             layer_types is not None
             and layer_types[self.layer_idx] == "sliding_attention"
         ):
-            self.sliding_window = config.sliding_window
+            self.sliding_window = config.sliding_window + 1
 
         # Prefix-dense layers have full attention (no sliding window). When
         # prefix_dense_sliding_window_pattern == 1, they keep RoPE even though
@@ -283,6 +284,7 @@ class Cohere2Moe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        self.shared_experts: Cohere2MoeMLP | None
         if hasattr(config, "num_shared_experts") and config.num_shared_experts > 0:
             self.shared_experts = Cohere2MoeMLP(
                 config=config,
@@ -300,7 +302,7 @@ class Cohere2Moe(nn.Module):
             self.shared_experts = None
             self.shared_expert_combination_strategy = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -318,7 +320,7 @@ class Cohere2Moe(nn.Module):
         orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         router_logits, _ = self.gate(hidden_states)
-        # FusedMoE handles shared expert overlap internally and returns
+        # FusedMoEFactory handles shared expert overlap internally and returns
         # shared_output + routed_output when shared_experts is set.
         final_hidden_states = self.experts(hidden_states, router_logits)
         if self.shared_expert_combination_strategy == "average":
@@ -472,7 +474,8 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
             ".mlp.up_proj": (".mlp.gate_up_proj", 1),
             ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
             ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
-        }
+        },
+        orig_to_new_prefix={"lm_head.": None},
     )
     packed_modules_mapping = {
         "qkv_proj": [
@@ -491,7 +494,6 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        assert getattr(config, "tie_word_embeddings", True)
         self.unpadded_vocab_size = config.vocab_size
         self.quant_config = quant_config
         self.logits_scale = config.logit_scale
@@ -528,5 +530,5 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         return self.logits_processor(self.model.embed_tokens, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

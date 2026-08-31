@@ -18,8 +18,22 @@ def activation_to_flashinfer_int(activation: MoEActivation) -> int:
     return activation_to_flashinfer_type(activation).value
 
 
+def has_flashinfer_situ_activation() -> bool:
+    try:
+        from flashinfer.fused_moe.core import ActivationType
+    except ImportError:
+        return False
+    return hasattr(ActivationType, "Situ")
+
+
 def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType":
     from flashinfer.fused_moe.core import ActivationType
+
+    if activation == MoEActivation.SITU:
+        situ = getattr(ActivationType, "Situ", None)
+        if situ is None:
+            raise ValueError("The installed FlashInfer does not support SITU")
+        return situ
 
     # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
@@ -27,11 +41,11 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.GELU_NO_MUL: ActivationType.Gelu,
         MoEActivation.SILU: ActivationType.Swiglu,
         # SwiGLU-OAI uses Swiglu; the OAI alpha/beta/clamp come from gemm1_* args.
+        MoEActivation.SWIGLUOAI: ActivationType.Swiglu,
         MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
         MoEActivation.GELU: ActivationType.Geglu,
         MoEActivation.GELU_TANH: ActivationType.Geglu,
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
-        MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation]
 
@@ -218,7 +232,16 @@ def align_fp4_moe_weights_for_fi(
 
     # Pad w13 and w2 along its intermediate dimension.
     padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size // 2))
-    padded_w13[:, : w13.shape[1], :] = w13
+    if is_act_and_mul:
+        # Keep the two logical projections independently aligned. Copying the
+        # fused [gate, up] tensor contiguously would move the up projection into
+        # the padded tail of gate when intermediate is rounded up.
+        padded_w13[:, :intermediate, :] = w13[:, :intermediate, :]
+        padded_w13[:, padded_intermediate : padded_intermediate + intermediate, :] = (
+            w13[:, intermediate:, :]
+        )
+    else:
+        padded_w13[:, : w13.shape[1], :] = w13
 
     padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate // 2))
     padded_w2[:, :, : w2.shape[2]] = w2
@@ -226,7 +249,13 @@ def align_fp4_moe_weights_for_fi(
     padded_w13_scale = w13_scale.new_zeros(
         (num_experts, padded_gate_up_dim, hidden_size // 16)
     )
-    padded_w13_scale[:, : w13_scale.shape[1], :] = w13_scale
+    if is_act_and_mul:
+        padded_w13_scale[:, :intermediate, :] = w13_scale[:, :intermediate, :]
+        padded_w13_scale[
+            :, padded_intermediate : padded_intermediate + intermediate, :
+        ] = w13_scale[:, intermediate:, :]
+    else:
+        padded_w13_scale[:, : w13_scale.shape[1], :] = w13_scale
 
     padded_w2_scale = w2_scale.new_zeros(
         (num_experts, hidden_size, padded_intermediate // 16)
@@ -308,7 +337,13 @@ def align_moe_weights_for_fi(
 
     # Pad w13 and w2 along its intermediate dimension.
     padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size))
-    padded_w13[:, : w13.shape[1], :] = w13
+    if is_act_and_mul:
+        padded_w13[:, :intermediate, :] = w13[:, :intermediate, :]
+        padded_w13[:, padded_intermediate : padded_intermediate + intermediate, :] = (
+            w13[:, intermediate:, :]
+        )
+    else:
+        padded_w13[:, :intermediate, :] = w13
 
     padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate))
     padded_w2[:, :, :intermediate] = w2
