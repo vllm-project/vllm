@@ -20,6 +20,7 @@ from vllm.triton_utils import tl, triton
         or args["block_table"] is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
         "HAS_TABLE": lambda args: args["block_table"] is not None,
+        "PACKED": lambda args: args["mixed_qkv"] is not None,
     }
 )
 @triton.jit(do_not_specialize=["N", "T"])
@@ -33,6 +34,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     q,
     k,
     v,
+    mixed_qkv,
     o,
     h0,
     ht,
@@ -59,6 +61,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     stride_indices_tok: tl.constexpr,
     stride_indices_output_seq: tl.constexpr,
     stride_block_table_seq: tl.constexpr,
+    stride_mixed_qkv_tok: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
@@ -66,6 +69,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     HAS_TABLE: tl.constexpr,
+    PACKED: tl.constexpr,
     IS_KDA: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -89,9 +93,17 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
 
-    p_q = q + (bos * H + i_h) * K + o_k
-    p_k = k + (bos * H + i_h) * K + o_k
-    p_v = v + (bos * HV + i_hv) * V + o_v
+    if PACKED:
+        # q/k/v live interleaved per token in a single packed buffer; the
+        # per-tensor offsets mirror fused_recurrent_gated_delta_rule_packed_decode.
+        p_mixed = mixed_qkv + bos * stride_mixed_qkv_tok
+        p_q = p_mixed + i_h * K + o_k
+        p_k = p_mixed + (H * K) + i_h * K + o_k
+        p_v = p_mixed + (2 * H * K) + i_hv * V + o_v
+    else:
+        p_q = q + (bos * H + i_h) * K + o_k
+        p_k = k + (bos * H + i_h) * K + o_k
+        p_v = v + (bos * HV + i_hv) * V + o_v
 
     p_A_log = A_log + i_hv
     if not IS_KDA:
@@ -195,10 +207,15 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
         # Update pointers for next timestep
-        p_q += H * K
-        p_k += H * K
+        if PACKED:
+            p_q += stride_mixed_qkv_tok
+            p_k += stride_mixed_qkv_tok
+            p_v += stride_mixed_qkv_tok
+        else:
+            p_q += H * K
+            p_k += H * K
+            p_v += HV * V
         p_o += HV * V
-        p_v += HV * V
         p_b += HV
         p_a += HV
 
@@ -208,9 +225,9 @@ def fused_sigmoid_gating_delta_rule_update(
     a: torch.Tensor,
     b: torch.Tensor,
     dt_bias: torch.Tensor,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
+    q: torch.Tensor | None = None,
+    k: torch.Tensor | None = None,
+    v: torch.Tensor | None = None,
     beta: float = 1.0,
     threshold: float = 20.0,
     scale: float = None,
@@ -223,6 +240,11 @@ def fused_sigmoid_gating_delta_rule_update(
     block_table: torch.Tensor | None = None,
     read_anchor: torch.Tensor | None = None,
     write_anchor: torch.Tensor | None = None,
+    mixed_qkv: torch.Tensor | None = None,
+    num_qk_heads: int | None = None,
+    head_qk_dim: int | None = None,
+    num_v_heads: int | None = None,
+    head_v_dim: int | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
 ):
@@ -238,9 +260,38 @@ def fused_sigmoid_gating_delta_rule_update(
     ``num_accepted_tokens`` in spec mode) and write slot
     ``block_table[i, write_anchor[i] + i_t]`` per token — equivalent to the
     host-side ``block_table.gather(1, anchor.unsqueeze(1) + arange(T))``.
+
+    When ``mixed_qkv`` (2D ``(num_tokens, 2 * key_dim + value_dim)``, the
+    packed conv output) is given instead of ``q``/``k``/``v``, the kernel
+    reads q/k/v straight from the packed buffer with per-tensor offsets
+    (same addressing as ``fused_recurrent_gated_delta_rule_packed_decode``),
+    skipping the host-side rearrange copies. The head geometry cannot be
+    inferred from a packed buffer, so ``num_qk_heads``/``head_qk_dim``/
+    ``num_v_heads``/``head_v_dim`` are required in this mode.
     """
-    B, T, H, K, V = *k.shape, v.shape[-1]
-    HV = v.shape[2]
+    if mixed_qkv is not None:
+        assert q is None and k is None and v is None, (
+            "mixed_qkv and q/k/v are mutually exclusive"
+        )
+        assert mixed_qkv.stride(-1) == 1, (
+            "mixed_qkv must be contiguous in the last dim"
+        )
+        assert (
+            num_qk_heads is not None
+            and head_qk_dim is not None
+            and num_v_heads is not None
+            and head_v_dim is not None
+        ), "head geometry kwargs are required with mixed_qkv"
+        H, K, HV, V = num_qk_heads, head_qk_dim, num_v_heads, head_v_dim
+        if cu_seqlens is not None:
+            B, T = 1, mixed_qkv.shape[0]
+        else:
+            B, T = mixed_qkv.shape[0], 1
+        stride_mixed_qkv_tok = mixed_qkv.stride(0)
+    else:
+        B, T, H, K, V = *k.shape, v.shape[-1]
+        HV = v.shape[2]
+        stride_mixed_qkv_tok = 0
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
@@ -248,22 +299,25 @@ def fused_sigmoid_gating_delta_rule_update(
     num_stages = 3
     num_warps = 4
 
-    if cu_seqlens is not None and q.shape[0] != 1:
+    if cu_seqlens is not None and q is not None and q.shape[0] != 1:
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]}"
             f" when using `cu_seqlens`. Please flatten variable-length"
             f" inputs before processing."
         )
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = K**-0.5
     else:
         assert scale > 0, "scale must be positive"
 
-    o = q.new_empty(NK, *v.shape)
+    if mixed_qkv is not None:
+        o = mixed_qkv.new_empty(NK, B, T, HV, V)
+    else:
+        o = q.new_empty(NK, *v.shape)
     if inplace_final_state:
         final_state = initial_state
     else:
-        final_state = q.new_empty(T, HV, V, K, dtype=initial_state.dtype)
+        final_state = o.new_empty(T, HV, V, K, dtype=initial_state.dtype)
 
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
@@ -316,9 +370,10 @@ def fused_sigmoid_gating_delta_rule_update(
         dt_bias=dt_bias,
         beta=beta,
         threshold=threshold,
-        q=q.contiguous(),
-        k=k.contiguous(),
-        v=v.contiguous(),
+        q=q.contiguous() if q is not None else None,
+        k=k.contiguous() if k is not None else None,
+        v=v.contiguous() if v is not None else None,
+        mixed_qkv=mixed_qkv,
         o=o,
         h0=initial_state,
         ht=final_state,
@@ -345,6 +400,7 @@ def fused_sigmoid_gating_delta_rule_update(
         stride_indices_tok=stride_indices_tok,
         stride_indices_output_seq=stride_indices_output_seq,
         stride_block_table_seq=stride_block_table_seq,
+        stride_mixed_qkv_tok=stride_mixed_qkv_tok,
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_KDA=is_kda,

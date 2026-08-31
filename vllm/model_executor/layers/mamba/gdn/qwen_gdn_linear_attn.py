@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
+import functools
 import os
 from typing import Literal
 
@@ -1578,7 +1579,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+        # Packed spec/decode qkv: hand the packed conv output straight to the
+        # gating kernel (per-tensor offsets in-kernel) instead of splitting it
+        # into contiguous q/k/v via rearrange_mixed_qkv (cat + 3 copies).
+        # VLLM_GDN_PACKED_SPEC_QKV=0 restores the rearrange path (A/B tests).
+        use_packed_spec_qkv = os.environ.get("VLLM_GDN_PACKED_SPEC_QKV", "1") != "0"
+        if use_packed_spec_qkv:
+            query_spec = key_spec = value_spec = None
+        else:
+            query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
 
         # Split mixed non-spec-decode+prefill to process independently
         split_non_spec = (
@@ -1651,6 +1660,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     q=query_spec,
                     k=key_spec,
                     v=value_spec,
+                    mixed_qkv=mixed_qkv_spec if use_packed_spec_qkv else None,
+                    num_qk_heads=self.num_k_heads // self.tp_size,
+                    head_qk_dim=self.head_k_dim,
+                    num_v_heads=self.num_v_heads // self.tp_size,
+                    head_v_dim=self.head_v_dim,
                     initial_state=ssm_state,
                     inplace_final_state=True,
                     cu_seqlens=spec_query_start_loc[  # type: ignore[index]
@@ -1677,9 +1691,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.2: Process non-spec-decode part
         if split_non_spec:
-            query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
+            mixed_qkv_decode = (
                 mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
             )
+            if use_packed_spec_qkv:
+                query_decode = key_decode = value_decode = None
+            else:
+                query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
+                    mixed_qkv_decode
+                )
             if is_all_mode:
                 # all-mode dual anchor for the peeled decode rows: the kernel
                 # derives its slots from the block table in-kernel — read the
@@ -1703,6 +1723,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 q=query_decode,
                 k=key_decode,
                 v=value_decode,
+                mixed_qkv=mixed_qkv_decode if use_packed_spec_qkv else None,
+                num_qk_heads=self.num_k_heads // self.tp_size,
+                head_qk_dim=self.head_k_dim,
+                num_v_heads=self.num_v_heads // self.tp_size,
+                head_v_dim=self.head_v_dim,
                 initial_state=ssm_state,
                 inplace_final_state=True,
                 cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
