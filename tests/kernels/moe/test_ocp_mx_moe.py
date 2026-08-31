@@ -141,9 +141,6 @@ def swiglu(
     limit: float | None = None,
     interleaved: bool = False,
 ):
-    # ``beta`` is the additive bias on the linear (up) branch.
-    # interleaved=False: chunked layout (first half gate, second half up).
-    # interleaved=True: gate/up alternating columns (aiter moe_gemm_a16w4).
     if interleaved:
         x_glu, x_linear = x[..., ::2], x[..., 1::2]
     else:
@@ -242,8 +239,6 @@ def reference_moe(
 
     # Apply activation
     if activation in ("swiglu", "silu"):
-        # Layout: interleaved gate/up (SWIGLUOAI, aiter moe_gemm_a16w4) vs
-        # chunked (standard swiglu/silu). ``beta`` is the up-branch bias.
         t = swiglu(
             t, alpha=alpha, beta=beta, limit=limit, interleaved=use_interleaved_layout
         )
@@ -1408,9 +1403,6 @@ ROCM_BACKEND_CONFIGS = {
         "percent": 0.95,
         "requires_aiter": True,
         "requires_gfx950": False,
-        # moe_gemm_a16w4's fused SwiGLU reads gate/up as interleaved columns
-        # (see aiter_triton_kernel_w4a16_moe_forward), which is the layout
-        # gpt-oss checkpoints already ship, so the reference must match.
         "interleaved_layout": True,
     },
     "AITER_MXFP4_FP8": {
