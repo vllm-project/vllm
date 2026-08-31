@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
+from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, tl, tldevice, triton
 
 # Smallest positive value produced by Triton's fp32 `tl.rand`. Used to clamp
 # zero draws before the flipped Gumbel transform below.

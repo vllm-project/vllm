@@ -16,7 +16,7 @@ from typing import Literal
 import torch
 from torch.library import wrap_triton
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.math_utils import cdiv
 
 

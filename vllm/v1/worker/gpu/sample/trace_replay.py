@@ -3,7 +3,7 @@
 import torch
 
 from vllm.frontend.processing.sampling_params import SamplingParams
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 from vllm.v1.worker.gpu.states import RequestState
 

@@ -32,8 +32,8 @@ from vllm.model_executor.layers.fused_moe.utils import (
     warn_if_moe_use_td_ineffective,
 )
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
-from vllm.triton_utils.allocation import set_triton_allocator
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils.allocation import set_triton_allocator
 from vllm.foundation.utilities.math_utils import next_power_of_2
 from vllm.foundation.utilities.platform_utils import get_device_name_as_file_name
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op

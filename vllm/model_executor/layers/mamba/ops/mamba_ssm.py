@@ -18,7 +18,7 @@ from vllm import _custom_ops as ops
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, tl, triton
 from vllm.foundation.utilities.platform_utils import get_device_name_as_file_name
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 

@@ -91,7 +91,7 @@ def _mxfp8_quant_triton_kernel():
     Fuses what ``_mxfp8_e4m3_quantize_torch`` does in several elementwise passes
     into one launch. Each program handles ``[BLOCK_M, 32]`` (one MX block).
     """
-    from vllm.triton_utils import tl, triton
+    from vllm.backends.compute.dsl.triton_utils import tl, triton
 
     @triton.jit
     def _kernel(
@@ -145,7 +145,7 @@ def _mxfp8_e4m3_quantize_triton(
     x: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused 2D MXFP8 quant (non-swizzled, row-major [M, K//32] scales)."""
-    from vllm.triton_utils import triton
+    from vllm.backends.compute.dsl.triton_utils import triton
 
     global _MXFP8_QUANT_KERNEL
     if _MXFP8_QUANT_KERNEL is None:

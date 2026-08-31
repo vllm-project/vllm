@@ -31,7 +31,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PackedvLLMParameter,
 )
-from vllm.scalar_type import scalar_types
+from vllm.backends.compute.scalar_type import scalar_types
 
 __all__ = ["CompressedTensorsWNA8O8Int", "fake_quant_static_int8"]
 

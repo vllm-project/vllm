@@ -17,7 +17,7 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 __all__ = ["CompressedTensorsEmbeddingWNA16Int"]
 

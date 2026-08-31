@@ -7,7 +7,7 @@ import torch
 
 from vllm.foundation.config import SpeculativeConfig
 from vllm.foundation.config.model import PROCESSED_LOGPROBS_MODES
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 from vllm.v1.worker.gpu.input_batch import (

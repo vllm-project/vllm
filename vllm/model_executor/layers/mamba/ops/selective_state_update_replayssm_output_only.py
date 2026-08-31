@@ -7,7 +7,7 @@ import torch
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import convert_rs_fp16x2, softplus
 from vllm.model_executor.layers.mamba.ops.replayssm_config import get_replayssm_config
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 

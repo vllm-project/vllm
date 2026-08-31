@@ -12,7 +12,7 @@ ROCm/aiter#3257 bugfix for gfx942.
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 # gfx942 (MI300X) has 64 KiB of LDS per CU. We accept the default
 # (BLOCK_KV=128, num_stages=2) tile only when *both* of these hold:

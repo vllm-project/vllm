@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities import random_uuid
 from vllm.foundation.utilities.math_utils import cdiv
 

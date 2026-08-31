@@ -8,7 +8,7 @@
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 
 @triton.autotune(

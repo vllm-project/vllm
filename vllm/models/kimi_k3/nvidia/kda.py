@@ -46,7 +46,7 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
 from vllm.backends.platform import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec

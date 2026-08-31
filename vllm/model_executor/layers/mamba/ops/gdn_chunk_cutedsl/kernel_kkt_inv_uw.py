@@ -9,7 +9,7 @@ from cutlass import BFloat16, Float32, Int32, Int64, Uint32, cute
 from cutlass.cute.nvgpu import cpasync, warp
 from quack.compile_utils import make_fake_tensor
 
-from vllm.cute_utils import (
+from vllm.backends.compute.dsl.cute_utils import (
     EVICT_FIRST,
     _bf16x2_neg,
     _bf16x2_sub,

@@ -9,7 +9,7 @@
 from packaging import version
 
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
 

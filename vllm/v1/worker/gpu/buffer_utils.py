@@ -6,7 +6,7 @@ from functools import partial
 import numpy as np
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.platform_utils import is_uva_available
 from vllm.foundation.utilities.torch_utils import (
     async_tensor_h2d,

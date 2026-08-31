@@ -9,7 +9,7 @@ from typing import Any
 import torch
 
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 # Static kernels parameters
 BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64

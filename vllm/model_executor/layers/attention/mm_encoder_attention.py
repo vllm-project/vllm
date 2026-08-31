@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from vllm.foundation.config import MultiModalConfig
-from vllm.kernels.triton.qkv_padded_fp8_quant import (
+from vllm.backends.compute.kernels.triton.qkv_padded_fp8_quant import (
     quantize_fp8_maybe_pad_head_dim,
 )
 from vllm.foundation.observability.logger import init_logger

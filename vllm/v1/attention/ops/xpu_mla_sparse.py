@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.triton_utils import LOG2E, LOGE2, tl, triton
+from vllm.backends.compute.dsl.triton_utils import LOG2E, LOGE2, tl, triton
 
 
 @triton.jit

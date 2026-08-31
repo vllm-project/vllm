@@ -6,7 +6,7 @@ from functools import lru_cache
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 _MAX_FUSED_SIZE = 65536
 

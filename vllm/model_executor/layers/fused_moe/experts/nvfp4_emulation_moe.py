@@ -42,7 +42,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 

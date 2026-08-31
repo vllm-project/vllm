@@ -5,7 +5,7 @@ from collections.abc import Callable
 import torch
 
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 
 # Cache of tiny 1-element dummy tensors (per device, dtype) reused by the

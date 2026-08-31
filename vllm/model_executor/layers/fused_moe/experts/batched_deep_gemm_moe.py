@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
 )
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.deep_gemm import (
     DeepGemmQuantScaleFMT,
     fp8_m_grouped_gemm_nt_masked,

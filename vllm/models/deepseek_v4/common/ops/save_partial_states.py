@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 
 def save_partial_states(

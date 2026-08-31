@@ -11,7 +11,7 @@ from cutlass import BFloat16, Int32, Uint8, Uint32
 from cutlass.cute.nvgpu import cpasync
 from quack.compile_utils import make_fake_tensor
 
-from vllm.cute_utils import _bf16x2_mul, cvt
+from vllm.backends.compute.dsl.cute_utils import _bf16x2_mul, cvt
 
 
 def dequantize_and_gather_k_cache_cutedsl(

@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Import kernels
-import vllm.kernels  # noqa: F401
+import vllm.backends.compute.kernels  # noqa: F401
 from vllm import envs, ir
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp

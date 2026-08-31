@@ -11,7 +11,7 @@
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 

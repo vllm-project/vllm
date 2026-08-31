@@ -1,14 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
+"""Compatibility shim: vllm.triton_utils/tensor_descriptor -> vllm.backends.compute.dsl.triton_utils.tensor_descriptor (sys.modules alias)."""
+import importlib
+import sys
 
-def use_tensor_descriptor(override: bool | None = None) -> bool:
-    """Tri-state VLLM_TRITON_USE_TD: unset=auto (on for XPU), 1/0=force on/off."""
-    from vllm import envs
-    from vllm.backends.platform import current_platform
-
-    if override is None:
-        override = envs.VLLM_TRITON_USE_TD
-    if override is not None:
-        return override
-    return current_platform.is_xpu()
+_real = importlib.import_module("vllm.backends.compute.dsl.triton_utils.tensor_descriptor")
+sys.modules[__name__] = _real

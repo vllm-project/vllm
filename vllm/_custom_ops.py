@@ -9,7 +9,7 @@ import torch
 import vllm.foundation.system.envs as envs
 from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
-from vllm.scalar_type import ScalarType
+from vllm.backends.compute.scalar_type import ScalarType
 from vllm.foundation.utilities.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor

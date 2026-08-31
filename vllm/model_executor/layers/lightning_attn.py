@@ -5,7 +5,7 @@ import torch
 from einops import rearrange
 
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 

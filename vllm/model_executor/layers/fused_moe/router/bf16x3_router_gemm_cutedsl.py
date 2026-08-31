@@ -19,8 +19,8 @@ from cutlass.cute.nvgpu import cpasync
 from cutlass.cutlass_dsl import T, dsl_user_op
 from quack.compile_utils import make_fake_tensor
 
-from vllm.cute_utils import _tcgen05, simple_tma_copy
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.cute_utils import _tcgen05, simple_tma_copy
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities import math_utils
 
 __all__ = ["bf16x3_router_gemm"]

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.triton_utils import tl, tldevice, triton
+from vllm.backends.compute.dsl.triton_utils import tl, tldevice, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
 
 

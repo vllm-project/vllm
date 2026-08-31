@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu

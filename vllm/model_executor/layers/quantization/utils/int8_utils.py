@@ -7,7 +7,7 @@ import logging
 import torch
 
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 logger = logging.getLogger(__name__)
 

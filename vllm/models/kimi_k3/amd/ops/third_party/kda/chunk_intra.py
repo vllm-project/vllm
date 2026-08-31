@@ -14,7 +14,7 @@ from vllm.backends.platform import current_platform
 from vllm.third_party.flash_linear_attention.ops.index import prepare_chunk_indices
 from vllm.third_party.flash_linear_attention.ops.op import exp2, gather
 from vllm.third_party.flash_linear_attention.ops.utils import is_gather_supported
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 from .chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 

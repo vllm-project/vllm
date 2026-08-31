@@ -1,7 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kernel implementations for vLLM."""
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from . import aiter_ops, oink_ops, vllm_c
+"""Compatibility shim: vllm.kernels/ -> vllm.backends.compute.kernels (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-__all__ = ["vllm_c", "aiter_ops", "oink_ops"]
+_real = _importlib.import_module("vllm.backends.compute.kernels")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

@@ -10,7 +10,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, tl, triton
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024

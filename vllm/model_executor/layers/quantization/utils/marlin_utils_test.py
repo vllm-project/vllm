@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.scalar_type import ScalarType, scalar_types
+from vllm.backends.compute.scalar_type import ScalarType, scalar_types
 
 from .marlin_utils import GPTQ_MARLIN_TILE, marlin_permute_scales, marlin_zero_points
 from .quant_utils import (

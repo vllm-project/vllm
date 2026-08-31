@@ -5,7 +5,7 @@
 import torch
 
 try:
-    from vllm.triton_utils import tl, triton
+    from vllm.backends.compute.dsl.triton_utils import tl, triton
 except ModuleNotFoundError:
     import triton
     import triton.language as tl

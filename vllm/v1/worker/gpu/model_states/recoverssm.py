@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.backends.recoverssm_metadata import RecoverSSMMetadata
 from vllm.v1.worker.utils import AttentionGroup
 

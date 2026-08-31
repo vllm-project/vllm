@@ -17,7 +17,7 @@ feed the block-sparse attention kernels in ``sparse_attn``.
 import torch
 
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.math_utils import round_up
 
 # One sparse block == one KV page.

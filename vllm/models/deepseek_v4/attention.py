@@ -47,7 +47,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4.compressor import DeepseekCompressor
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,

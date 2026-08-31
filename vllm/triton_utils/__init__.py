@@ -1,42 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.triton_utils.importing import (
-    HAS_TRITON,
-    TritonLanguagePlaceholder,
-    TritonPlaceholder,
-)
+"""Compatibility shim: vllm.triton_utils/ -> vllm.backends.compute.dsl.triton_utils (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-if TYPE_CHECKING or HAS_TRITON:
-    import triton
-    import triton.language as tl
-    import triton.language.extra.libdevice as tldevice
-    from triton.experimental import gluon
-    from triton.experimental.gluon import language as gl
-    from triton.language.core import _aggregate as aggregate  # noqa: E501
-else:
-    triton = TritonPlaceholder()
-    tl = TritonLanguagePlaceholder()
-    tldevice = TritonLanguagePlaceholder()
-    gluon = TritonLanguagePlaceholder()
-    gl = TritonLanguagePlaceholder()
-    aggregate = TritonLanguagePlaceholder()
+_real = _importlib.import_module("vllm.backends.compute.dsl.triton_utils")
 
-from vllm.triton_utils.tensor_descriptor import use_tensor_descriptor
+def __getattr__(name):
+    return getattr(_real, name)
 
-LOG2E = 1.4426950408889634
-LOGE2 = 0.6931471805599453
+def __dir__():
+    return dir(_real)
 
-__all__ = [
-    "HAS_TRITON",
-    "triton",
-    "tl",
-    "tldevice",
-    "LOG2E",
-    "LOGE2",
-    "gluon",
-    "gl",
-    "aggregate",
-    "use_tensor_descriptor",
-]
+__all__ = getattr(_real, "__all__", [])

@@ -4,7 +4,7 @@ from collections.abc import Iterable
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import (
     FusedStagedWriter,

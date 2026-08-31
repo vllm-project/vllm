@@ -29,7 +29,7 @@ It supports page size = 1.
 import torch
 
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.math_utils import RCP_LN2
 
 

@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from vllm.foundation.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.foundation.observability.logger import init_logger
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata

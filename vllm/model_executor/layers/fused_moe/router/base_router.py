@@ -10,7 +10,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():

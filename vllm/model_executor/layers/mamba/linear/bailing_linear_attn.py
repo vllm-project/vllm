@@ -33,7 +33,7 @@ from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
     RMSNormGated,
     layernorm_fn,
 )
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 

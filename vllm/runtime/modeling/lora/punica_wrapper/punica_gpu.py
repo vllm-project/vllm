@@ -13,7 +13,7 @@ import torch
 
 from vllm.runtime.modeling.lora.layers import LoRAMapping
 from vllm.runtime.modeling.lora.utils import get_captured_lora_counts
-from vllm.triton_utils import HAS_TRITON, triton
+from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, triton
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.foundation.utilities.math_utils import round_up
 

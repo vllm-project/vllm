@@ -3,7 +3,7 @@
 import torch
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 

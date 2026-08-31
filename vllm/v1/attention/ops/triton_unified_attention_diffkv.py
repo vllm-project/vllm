@@ -28,7 +28,7 @@ import torch
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,

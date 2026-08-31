@@ -10,7 +10,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     unpack_quantized_values_into_int32,
 )
 from vllm.backends.platform import CpuArchEnum, current_platform
-from vllm.scalar_type import scalar_types
+from vllm.backends.compute.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 

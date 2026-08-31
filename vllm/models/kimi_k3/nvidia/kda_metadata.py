@@ -19,7 +19,7 @@ import torch
 
 from vllm.foundation.config import VllmConfig
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (

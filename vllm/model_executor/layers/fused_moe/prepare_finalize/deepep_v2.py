@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     swizzle_mxfp8_scale,
 )
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.math_utils import round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,

@@ -21,7 +21,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from vllm.triton_utils import aggregate, gl, gluon, tl
+from vllm.backends.compute.dsl.triton_utils import aggregate, gl, gluon, tl
 
 _INV_LN2_VALUE = 1.4426950408889634
 _INV_LN2 = tl.constexpr(_INV_LN2_VALUE)

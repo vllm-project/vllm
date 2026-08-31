@@ -6,7 +6,7 @@ import torch
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.backends.platform import CpuArchEnum, current_platform
-from vllm.scalar_type import scalar_types
+from vllm.backends.compute.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 

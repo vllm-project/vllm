@@ -58,7 +58,7 @@ from vllm.third_party.flash_linear_attention.ops import (
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.foundation.integrations.transformers_utils.configs.qwen3_next import Qwen3NextConfig
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.torch_utils import (
     LayerNameType,
     _encode_layer_name,

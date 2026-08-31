@@ -32,7 +32,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
 )
-from vllm.scalar_type import scalar_types
+from vllm.backends.compute.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 

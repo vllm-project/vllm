@@ -10,7 +10,7 @@ single Triton launch. See :func:`fused_qk_rmsnorm_rope_gate`.
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 
 @triton.jit

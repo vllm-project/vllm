@@ -26,7 +26,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     init_mla_context_partial,
 )
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.flashinfer import has_flashinfer
 from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
 from vllm.v1.attention.backend import AttentionMetadata, AttentionMetadataBuilder

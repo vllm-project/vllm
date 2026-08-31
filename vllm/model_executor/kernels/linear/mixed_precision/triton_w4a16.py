@@ -24,8 +24,8 @@ import torch
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
 from vllm.backends.platform import current_platform
-from vllm.scalar_type import scalar_types
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.scalar_type import scalar_types
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 

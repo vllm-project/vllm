@@ -42,7 +42,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.math_utils import cdiv
 
 if TYPE_CHECKING:

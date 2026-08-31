@@ -10,8 +10,8 @@ from cuda.bindings.driver import CUstream
 from cutlass import Float32, Int32, Uint32, Uint64
 from quack.compile_utils import make_fake_tensor
 
-from vllm.cute_utils import recast_val
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.cute_utils import recast_val
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 
 def stable_topk_from_gathered_candidates_cutedsl(

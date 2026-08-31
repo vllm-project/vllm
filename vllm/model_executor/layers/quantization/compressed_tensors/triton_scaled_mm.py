@@ -4,8 +4,8 @@
 
 import torch
 
-from vllm.triton_utils import tl, triton, use_tensor_descriptor
-from vllm.triton_utils.allocation import set_triton_allocator
+from vllm.backends.compute.dsl.triton_utils import tl, triton, use_tensor_descriptor
+from vllm.backends.compute.dsl.triton_utils.allocation import set_triton_allocator
 
 _TD_ALLOCATOR_DEVICES: set[torch.device] = set()
 

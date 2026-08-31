@@ -31,7 +31,7 @@ from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
 )
-from vllm.triton_utils import triton
+from vllm.backends.compute.dsl.triton_utils import triton
 from vllm.foundation.utilities.math_utils import round_up
 from vllm.v1.attention.backend import (
     AttentionBackend,

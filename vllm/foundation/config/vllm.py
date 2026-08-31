@@ -23,7 +23,7 @@ from pydantic import ConfigDict, Field, model_validator
 import vllm.foundation.system.envs as envs
 from vllm.foundation.observability.logger import enable_trace_function_call, init_logger
 from vllm.foundation.integrations.transformers_utils.runai_utils import is_runai_obj_uri
-from vllm.triton_utils import HAS_TRITON
+from vllm.backends.compute.dsl.triton_utils import HAS_TRITON
 from vllm.foundation.utilities import random_uuid
 from vllm.foundation.utilities.hashing import safe_hash
 

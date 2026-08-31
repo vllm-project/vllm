@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from vllm.frontend.processing.sampling_params import SamplingParams
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor

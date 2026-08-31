@@ -25,7 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
 )
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.import_utils import has_triton_kernels
 
 from ..utils import swiglu_limit_func

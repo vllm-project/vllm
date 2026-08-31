@@ -10,7 +10,7 @@ import torch.nn as nn
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.short_conv_attn import (

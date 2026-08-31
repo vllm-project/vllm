@@ -28,7 +28,7 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.deep_gemm import (
     get_tma_aligned_size,
     is_deep_gemm_e8m0_used,

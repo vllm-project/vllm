@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import torch
 
-from vllm.triton_utils import tl, tldevice, triton
+from vllm.backends.compute.dsl.triton_utils import tl, tldevice, triton
 
 from .norm import _get_num_warps_from_block_size
 

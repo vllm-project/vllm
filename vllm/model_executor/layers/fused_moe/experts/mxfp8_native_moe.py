@@ -29,7 +29,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 
 def _select_cfg(M, N, K, block_m):

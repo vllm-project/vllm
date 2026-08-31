@@ -10,7 +10,7 @@ import torch
 from einops import rearrange
 from packaging import version
 
-from vllm.triton_utils import triton
+from vllm.backends.compute.dsl.triton_utils import triton
 
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd

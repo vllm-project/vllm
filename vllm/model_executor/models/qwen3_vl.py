@@ -109,7 +109,7 @@ from vllm.frontend.processing.multimodal.video_prune.vidcom2 import (
 from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers.protocol import TokenizerLike
 from vllm.frontend.processing.tokenizers.registry import cached_tokenizer_from_config
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, tl, triton
 from vllm.foundation.utilities.cache import LRUCache
 from vllm.foundation.utilities.collection_utils import is_list_of
 from vllm.foundation.utilities.math_utils import cdiv, round_up

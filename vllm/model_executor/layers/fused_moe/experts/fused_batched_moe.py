@@ -32,8 +32,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton, use_tensor_descriptor
-from vllm.triton_utils.allocation import set_triton_allocator
+from vllm.backends.compute.dsl.triton_utils import tl, triton, use_tensor_descriptor
+from vllm.backends.compute.dsl.triton_utils.allocation import set_triton_allocator
 
 
 def _is_capturing_or_compiling() -> bool:

@@ -37,8 +37,8 @@ from vllm.third_party.flash_linear_attention.ops import (
     chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule,
 )
-from vllm.triton_utils import tl, triton
-from vllm.triton_utils.allocation import set_triton_allocator
+from vllm.backends.compute.dsl.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils.allocation import set_triton_allocator
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 

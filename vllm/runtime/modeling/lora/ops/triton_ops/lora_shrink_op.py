@@ -16,7 +16,7 @@ from vllm.runtime.modeling.lora.ops.triton_ops.utils import (
     get_lora_op_configs,
     supports_pdl,
 )
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 

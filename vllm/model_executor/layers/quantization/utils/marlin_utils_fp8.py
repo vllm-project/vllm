@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.backends.platform import current_platform
-from vllm.scalar_type import scalar_types
+from vllm.backends.compute.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 

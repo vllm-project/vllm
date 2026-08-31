@@ -51,7 +51,7 @@ import torch
 from vllm.backends.distributed import get_tp_group
 from vllm.backends.distributed.parallel_state import in_the_same_node_as
 from vllm.foundation.observability.logger import init_logger
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, tl, triton
 
 logger = init_logger(__name__)
 

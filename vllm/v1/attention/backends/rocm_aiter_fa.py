@@ -75,7 +75,7 @@ if current_platform.is_rocm():
         pa_decode_gluon as _pa_decode_gluon,
     )
 
-    from vllm.triton_utils import tl, triton
+    from vllm.backends.compute.dsl.triton_utils import tl, triton
 
     def block_size(x, head_dim):
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))

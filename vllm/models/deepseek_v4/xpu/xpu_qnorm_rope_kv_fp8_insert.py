@@ -8,7 +8,7 @@ Uses the existing quantize_and_insert_k_cache for the FP8 portion.
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 HEAD_DIM = 512
 ROPE_DIM = 64

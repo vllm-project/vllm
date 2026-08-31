@@ -30,7 +30,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
-from vllm.scalar_type import scalar_types
+from vllm.backends.compute.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 

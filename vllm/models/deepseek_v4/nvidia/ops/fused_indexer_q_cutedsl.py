@@ -9,7 +9,7 @@ from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Float32, Int64, Uint8, Uint32, const_expr
 from quack.compile_utils import make_fake_tensor
 
-from vllm.cute_utils import (
+from vllm.backends.compute.dsl.cute_utils import (
     _bf16x2_abs,
     _bf16x2_max,
     cvt,

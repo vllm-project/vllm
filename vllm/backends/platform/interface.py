@@ -254,11 +254,11 @@ class Platform:
     @classmethod
     def import_ir_kernels(cls) -> None:
         """
-        The default implementation imports ``vllm.kernels``, which registers
+        The default implementation imports ``vllm.backends.compute.kernels``, which registers
         the built-in IR op implementations. Out-of-tree (OOT) platforms should
         override this method to import their own kernel modules.
         """
-        import vllm.kernels  # noqa: F401
+        import vllm.backends.compute.kernels  # noqa: F401
 
     @classmethod
     def device_control_id_to_physical_device_id(cls, device_id: str) -> int:

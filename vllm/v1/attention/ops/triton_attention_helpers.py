@@ -11,7 +11,7 @@ kernel (and any future consumer) share a single implementation.
 
 from __future__ import annotations
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 # ===========================================================================
 # Scalar helpers (reused by every kernel + reduce_segments)

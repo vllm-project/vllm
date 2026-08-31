@@ -11,7 +11,7 @@ import functools
 from contextlib import contextmanager
 
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import triton
+from vllm.backends.compute.dsl.triton_utils import triton
 
 
 @functools.cache

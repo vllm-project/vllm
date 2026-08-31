@@ -13,7 +13,7 @@ from vllm.model_executor.warmup.jit_warmup import (
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backend import (
     AttentionBackend,

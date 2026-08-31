@@ -38,7 +38,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.backends.platform import current_platform
 from vllm.backends.platform.interface import DeviceCapability
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.flashinfer import (
     can_use_trtllm_attention,
     flashinfer_xqa_batch_decode_with_kv_cache,

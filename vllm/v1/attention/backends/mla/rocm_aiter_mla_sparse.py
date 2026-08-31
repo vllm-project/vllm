@@ -16,7 +16,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.torch_utils import np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,

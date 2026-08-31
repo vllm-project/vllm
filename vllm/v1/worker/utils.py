@@ -17,7 +17,7 @@ from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.mem_utils import MemorySnapshot, format_gib
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (

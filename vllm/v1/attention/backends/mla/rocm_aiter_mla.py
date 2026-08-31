@@ -20,7 +20,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,

@@ -1,33 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Helion kernel implementation.
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-Importing this package does NOT register any kernels. Runtime code imports the
-specific op module it needs, e.g.::
+"""Compatibility shim: vllm.kernels/helion/ops/ -> vllm.backends.compute.kernels.helion.ops (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-    from vllm.kernels.helion.ops import scaled_mm  # noqa: F401
+_real = _importlib.import_module("vllm.backends.compute.kernels.helion.ops")
 
-which triggers that op's ``@register_kernel`` as an import side effect.
+def __getattr__(name):
+    return getattr(_real, name)
 
-Tools that need the full registry (e.g. scripts/autotune_helion_kernels.py)
-call ``import_all_ops()`` to force every op module to register.
-"""
+def __dir__():
+    return dir(_real)
 
-import importlib
-import pkgutil
-
-
-def import_all_kernels() -> list[str]:
-    """Import every kernel submodule so all ``@register_kernel`` decorators run.
-
-    Returns:
-        The fully-qualified module names that were imported.
-    """
-    imported: list[str] = []
-    for module_info in pkgutil.iter_modules(__path__):
-        if module_info.ispkg:
-            continue
-        module_name = f"{__name__}.{module_info.name}"
-        importlib.import_module(module_name)
-        imported.append(module_name)
-    return imported
+__all__ = getattr(_real, "__all__", [])

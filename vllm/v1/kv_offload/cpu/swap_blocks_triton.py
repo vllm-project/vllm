@@ -7,7 +7,7 @@ from __future__ import annotations
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 # Constants tuned empirically on H100 (PCIe Gen5):
 #   NUM_SMS         - smallest SM slice within 5% of peak bandwidth at the

@@ -19,7 +19,7 @@ inputs_embeds[token, :], task k+1 is hnorm on previous_hidden_states[token, k, :
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 
 @triton.jit

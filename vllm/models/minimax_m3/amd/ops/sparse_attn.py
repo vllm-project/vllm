@@ -18,7 +18,7 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
     minimax_m3_sparse_attn_decode,
 )
 from vllm.backends.platform.rocm import on_gfx950, on_mi3xx
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 __all__ = ["minimax_m3_sparse_attn", "minimax_m3_sparse_attn_decode"]
 

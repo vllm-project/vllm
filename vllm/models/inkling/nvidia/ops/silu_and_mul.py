@@ -9,7 +9,7 @@ variant with the per-expert dequant scale and per-token gamma fused in.
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 
 @triton.jit(do_not_specialize=["M"])

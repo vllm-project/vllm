@@ -13,7 +13,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import HAS_TRITON, triton
+from vllm.backends.compute.dsl.triton_utils import HAS_TRITON, triton
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.v1.kv_offload.base import (

@@ -3,7 +3,7 @@
 import torch
 from torch._inductor.runtime.triton_helpers import libdevice
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 
 @triton.jit

@@ -11,7 +11,7 @@ using Pivot-based Truncation and Selection" By Park et al.
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.foundation.utilities.math_utils import next_power_of_2
 from vllm.foundation.utilities.platform_utils import num_compute_units

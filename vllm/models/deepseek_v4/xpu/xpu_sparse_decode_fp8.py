@@ -9,7 +9,7 @@ This keeps the external KV cache layout identical to CUDA/ROCm.
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.ops.xpu_mla_sparse import (
     triton_bf16_mla_sparse_interface,
 )

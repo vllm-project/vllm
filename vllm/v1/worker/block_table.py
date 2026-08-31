@@ -18,7 +18,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     triton_scalar_specialization_rep,
 )
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer

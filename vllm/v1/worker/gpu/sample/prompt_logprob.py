@@ -7,7 +7,7 @@ import torch
 
 from vllm.foundation.config.model import LogprobsMode
 from vllm.frontend.processing.sampling_params import SamplingParams
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores

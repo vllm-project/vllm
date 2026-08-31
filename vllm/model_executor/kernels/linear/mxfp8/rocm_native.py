@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 

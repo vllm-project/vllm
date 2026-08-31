@@ -12,7 +12,7 @@ from vllm.foundation.config import VllmConfig, replace
 from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.runtime.execution.forward_context import BatchDescriptor, set_forward_context
 from vllm.foundation.observability.logger import init_logger
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig

@@ -9,7 +9,7 @@
 
 import os
 
-from vllm.triton_utils import tl, tldevice, triton
+from vllm.backends.compute.dsl.triton_utils import tl, tldevice, triton
 
 from .utils import is_gather_supported
 

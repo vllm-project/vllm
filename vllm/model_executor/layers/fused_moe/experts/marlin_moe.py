@@ -53,7 +53,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.backends.platform import current_platform
-from vllm.scalar_type import ScalarType, scalar_types
+from vllm.backends.compute.scalar_type import ScalarType, scalar_types
 
 
 def _fused_marlin_moe(

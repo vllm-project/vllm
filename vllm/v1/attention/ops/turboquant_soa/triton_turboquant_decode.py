@@ -14,7 +14,7 @@ from typing import Any
 import torch
 
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_decode_attention import (
     _fwd_kernel_stage2,
 )

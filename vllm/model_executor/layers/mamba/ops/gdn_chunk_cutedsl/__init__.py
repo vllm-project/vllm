@@ -9,7 +9,7 @@ from cuda.bindings.driver import CUstream
 from cutlass import Int32, cute
 from quack.compile_utils import make_fake_tensor
 
-from vllm.triton_utils import triton
+from vllm.backends.compute.dsl.triton_utils import triton
 
 from .kernel_h import h_cutedsl
 from .kernel_kkt_inv_uw import kkt_inv_uw_cutedsl

@@ -61,7 +61,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
 )
 from vllm.backends.platform import current_platform
-from vllm.scalar_type import scalar_types
+from vllm.backends.compute.scalar_type import scalar_types
 from vllm.foundation.integrations.transformers_utils.config import get_safetensors_params_metadata
 
 if TYPE_CHECKING:

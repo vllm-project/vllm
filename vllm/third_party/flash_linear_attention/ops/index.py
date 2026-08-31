@@ -10,7 +10,7 @@
 import torch
 
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
-from vllm.triton_utils import triton
+from vllm.backends.compute.dsl.triton_utils import triton
 
 from .utils import tensor_cache
 

@@ -63,7 +63,7 @@ class CPUModelRunner(GPUModelRunner):
                     v.gpu = v.cpu
 
     def _postprocess_triton(self) -> None:
-        from vllm.triton_utils import HAS_TRITON
+        from vllm.backends.compute.dsl.triton_utils import HAS_TRITON
 
         if HAS_TRITON:
             logger.info(

@@ -24,8 +24,8 @@ from vllm.model_executor.parameter import (
     permute_param_layout_,
 )
 from vllm.backends.platform import current_platform
-from vllm.scalar_type import scalar_types
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.scalar_type import scalar_types
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig

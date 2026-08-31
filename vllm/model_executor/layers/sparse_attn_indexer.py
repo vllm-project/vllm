@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
 from vllm.backends.platform import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.backends.compute.dsl.triton_utils import tl, triton
 from vllm.foundation.utilities.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
