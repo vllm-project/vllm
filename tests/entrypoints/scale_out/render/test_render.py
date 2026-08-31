@@ -348,6 +348,42 @@ async def test_chat_render_default_no_token_offsets(client):
 
 
 @pytest.mark.asyncio
+async def test_completion_render_truncated_token_offsets(client):
+    """Truncation must shorten token_offsets together with token_ids.
+
+    An explicit truncation_side turns off tokenizer-level truncation, so the
+    tokenizer returns offsets for the whole prompt and they are reduced
+    afterwards -- separately from token_ids. GenerateRequest documents that the
+    two lists have equal length.
+    """
+    prompt = "The quick brown fox jumps over the lazy dog."
+    keep = 4
+    response = await client.post(
+        "/v1/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "prompt": prompt,
+            "return_token_offsets": True,
+            "truncate_prompt_tokens": keep,
+            "truncation_side": "left",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    token_ids = data[0]["token_ids"]
+    offsets = data[0]["token_offsets"]
+
+    assert len(token_ids) == keep
+    assert len(offsets) == len(token_ids)
+
+    # Equal length is not enough: truncating from the left keeps the *last*
+    # tokens, so the surviving offsets must cover the end of the prompt.
+    assert offsets[-1][1] == len(prompt)
+    assert offsets[0][0] > 0
+
+
+@pytest.mark.asyncio
 async def test_completion_render_multiple_prompts_token_offsets(client):
     """Each prompt in a batch gets its own offsets aligned with its tokens."""
     prompts = ["Hello, world.", "Goodbye, world."]
