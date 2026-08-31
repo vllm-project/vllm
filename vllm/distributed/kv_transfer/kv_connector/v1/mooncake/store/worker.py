@@ -1821,7 +1821,7 @@ class MooncakeStoreWorker:
                 supports_group_ids=self._supports_group_ids,
                 record_operation=self._record_kv_connector_operation,
                 group_participates=[
-                    group.kv_cache_spec.participates_in_prefix_caching
+                    group.kv_cache_spec.prefix_cacheable
                     for group in self._kv_cache_groups
                 ],
             )
@@ -1842,7 +1842,7 @@ class MooncakeStoreWorker:
                 record_operation=self._record_kv_connector_operation,
                 request_queue=self.recv_request_queue,
                 group_participates=[
-                    group.kv_cache_spec.participates_in_prefix_caching
+                    group.kv_cache_spec.prefix_cacheable
                     for group in self._kv_cache_groups
                 ],
             )
@@ -2018,9 +2018,7 @@ class MooncakeStoreWorker:
         lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
         for g_idx, db in enumerate(self.token_dbs):
             if (
-                not self._kv_cache_groups[
-                    g_idx
-                ].kv_cache_spec.participates_in_prefix_caching
+                not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable
                 or db.block_size < self.block_size
             ):
                 continue

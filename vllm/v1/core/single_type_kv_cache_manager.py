@@ -19,6 +19,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
     CrossAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -87,8 +88,10 @@ class SingleTypeKVCacheManager(ABC):
         self._max_admission_blocks_per_request = max_admission_blocks_per_request
         # Record newly allocated block ids only when worker-side zeroing will
         # consume them and this manager holds a spec type that gets zeroed.
-        self._record_new_block_ids = needs_kv_cache_zeroing and isinstance(
-            kv_cache_spec, AttentionSpec
+        self._record_new_block_ids = (
+            needs_kv_cache_zeroing
+            and isinstance(kv_cache_spec, AttentionSpec)
+            and not isinstance(kv_cache_spec, CircularBufferSpec)
         )
         self.new_block_ids: list[int] = []
 
@@ -1113,26 +1116,45 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         return 0
 
 
-class KpoolTailManager(FullAttentionManager):
-    """Fixed 1-block-per-request circular buffer for ``KpoolTailSpec``.
-
-    The GLM-5.3-Flash kpool indexer tail cache holds the incomplete
-    pool's raw K + gate score: exactly one block of ``kpool`` slots per request,
-    overwritten in place by ``pos % kpool`` as decode/spec-decode advances.
-    Prefill seeds it; the connector transfers it across PD; decode reads it to
-    compress the boundary pool correctly.
-
-    This manager allocates that single block on first admission and reuses it
-    for the request's whole lifetime. It **never skips, never prunes, never
-    prefix-caches**. The no-prune guarantee is load-bearing:
-    ``SlidingWindowManager.remove_skipped_blocks`` would evict the in-progress
-    pool's earlier tokens mid-pool (before completion, before PD transfer),
-    which is fatal. Because the block is circularly reused, allocation is
-    independent of sequence length and of MTP size (MTP > kpool still fits in
-    one block: completed pools flush mid-step).
-    """
+class CircularBufferManager(FullAttentionManager):
+    """Claims the ring's single block per request; prefix caching disabled."""
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
+
+    def _claim_ring_block(self, request_id: str) -> list[KVCacheBlock]:
+        req_blocks = self.req_to_blocks[request_id]
+        if req_blocks:
+            return []
+        new_blocks = self.block_pool.get_new_blocks(1)
+        req_blocks.extend(new_blocks)
+        if self._record_new_block_ids:
+            self.new_block_ids.extend(block.block_id for block in new_blocks)
+        return new_blocks
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+    ) -> int:
+        return 0 if self.req_to_blocks.get(request_id) else 1
+
+    def allocate_new_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
+        return self._claim_ring_block(request_id)
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        self._claim_ring_block(request_id)
 
     @classmethod
     def find_longest_cache_hit(
@@ -1147,9 +1169,7 @@ class KpoolTailManager(FullAttentionManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        # Tail state is per-request transient (circularly overwritten), so it is
-        # neither shareable nor a stable function of a shareable prefix.
-        return tuple([] for _ in range(len(kv_cache_group_ids))), 0
+        return tuple([] for _ in kv_cache_group_ids), 0
 
     def cache_blocks(
         self,
@@ -1157,53 +1177,7 @@ class KpoolTailManager(FullAttentionManager):
         num_tokens: int,
         retention_interval: int | None = None,
     ) -> None:
-        # Never hash tail blocks into the prefix cache.
         return
-
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        return 0
-
-    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
-        # The single block holds the in-progress pool for the whole request; no
-        # token is ever out of window.
-        return 0
-
-    def remove_skipped_blocks(
-        self,
-        request_id: str,
-        processed_computed_tokens: int,
-        num_prompt_tokens: int | None = None,
-    ) -> None:
-        # Never prune mid-request; the block is freed on request completion.
-        return
-
-    def get_num_blocks_to_allocate(
-        self,
-        request_id: str,
-        num_tokens: int,
-        new_computed_blocks: Sequence[KVCacheBlock],
-        total_computed_tokens: int,
-        num_local_computed_tokens: int,
-        num_tokens_main_model: int,
-        apply_admission_cap: bool = False,
-    ) -> int:
-        # Exactly one block per request, reused circularly; never grow.
-        return max(1 - len(self.req_to_blocks.get(request_id, ())), 0)
-
-    def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
-    ) -> list[KVCacheBlock]:
-        # Cap at one block regardless of num_tokens; the kernel reuses its slots
-        # via pos % kpool. No partial-hit CoW path (find_longest_cache_hit never
-        # hits, so _partial_hit_reqs is always empty).
-        req_blocks = self.req_to_blocks[request_id]
-        if len(req_blocks) >= 1:
-            return []
-        new_blocks = self.block_pool.get_new_blocks(1)
-        req_blocks.extend(new_blocks)
-        if self._record_new_block_ids:
-            self.new_block_ids.extend(b.block_id for b in new_blocks)
-        return new_blocks
 
     def add_local_computed_blocks(
         self,
@@ -1212,31 +1186,25 @@ class KpoolTailManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
     ) -> None:
-        # The tail never has local prefix-cache hits (find_longest_cache_hit
-        # returns none); external (PD-transferred) tokens are handled by
-        # allocate_external_computed_blocks below.
         return
 
-    def allocate_external_computed_blocks(
+    def remove_skipped_blocks(
         self,
         request_id: str,
-        num_local_computed_tokens: int,
-        num_external_computed_tokens: int,
+        processed_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
     ) -> None:
-        # The tail is a fixed 1-block circular buffer; PD-transferred
-        # (external) tokens do not grow it -- the kernel reuses the single
-        # block's slots via pos % kpool. The base FullAttention path would
-        # allocate cdiv(num_external, block_size) blocks (one per kpool
-        # tokens), which (a) wastes blocks and (b) mismatches the producer's
-        # 1-block transfer and trips the NIXL reconcile block-count assert.
-        # Cap at one block, matching allocate_new_blocks / the producer.
-        req_blocks = self.req_to_blocks[request_id]
-        if len(req_blocks) >= 1:
-            return
-        new_blocks = self.block_pool.get_new_blocks(1)
-        req_blocks.extend(new_blocks)
-        if self._record_new_block_ids:
-            self.new_block_ids.extend(b.block_id for b in new_blocks)
+        return
+
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+        return 0
+
+    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
+        return 0
+
+
+class KpoolTailManager(CircularBufferManager):
+    """One-block circular scratch manager for ``KpoolTailSpec``."""
 
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
@@ -2082,6 +2050,11 @@ def register_all_kvcache_specs(vllm_config):
         SlidingWindowSpec,
         SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowSpec,
+    )
+    KVCacheSpecRegistry.register(
+        CircularBufferSpec,
+        CircularBufferManager,
+        uniform_type_base_spec=CircularBufferSpec,
     )
     KVCacheSpecRegistry.register(
         SlidingWindowMLASpec,

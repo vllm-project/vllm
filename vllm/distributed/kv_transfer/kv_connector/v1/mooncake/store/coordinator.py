@@ -120,7 +120,7 @@ class MooncakeStoreCoordinator:
             # kpool tail): per-request scratch, never shareable, so they must
             # not participate in hit lookup. Mirrors core's
             # KVCacheCoordinator.verify_and_split_kv_cache_groups.
-            if not g.kv_cache_spec.participates_in_prefix_caching:
+            if not g.kv_cache_spec.prefix_cacheable:
                 continue
             spec = _unwrap_spec(g.kv_cache_spec)
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)

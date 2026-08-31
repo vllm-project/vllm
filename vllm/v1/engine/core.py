@@ -340,7 +340,7 @@ class EngineCore:
             participating = [
                 g.kv_cache_spec.block_size
                 for g in kv_cache_groups
-                if g.kv_cache_spec.participates_in_prefix_caching
+                if g.kv_cache_spec.prefix_cacheable
             ]
             vllm_config.cache_config.block_size = min(
                 participating
