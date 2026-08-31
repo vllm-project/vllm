@@ -477,36 +477,40 @@ async def test_multi_video_input(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_completions_with_video_with_uuid(
+async def test_omitted_video_url_requires_cached_uuid(
     client: openai.AsyncOpenAI,
     model_name: str,
 ):
+    video_uuid = "test-video-uuid"
     video_url = TEST_VIDEO_URLS[0]
-    await complete_and_check(
-        client,
-        model_name,
-        describe_video_messages(video_url, extra_video_fields={"uuid": video_url}),
-        context=f"uuid first request url={video_url}",
-    )
-    await complete_and_check(
-        client,
-        model_name,
-        describe_video_messages(None, extra_video_fields={"uuid": video_url}),
-        context=f"uuid cached (empty video) uuid={video_url}",
+
+    omitted_video_messages = describe_video_messages(
+        None,
+        extra_video_fields={"uuid": video_uuid},
     )
 
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_completions_with_empty_video_with_uuid_without_cache_hit(
-    client: openai.AsyncOpenAI,
-    model_name: str,
-):
-    with pytest.raises(openai.BadRequestError):
+    with pytest.raises(
+        openai.BadRequestError,
+        match="Cache miss for video at index 0 but data is not provided",
+    ):
         await client.chat.completions.create(
-            messages=describe_video_messages(
-                None,
-                extra_video_fields={"uuid": "uuid_not_previously_seen"},
-            ),
             model=model_name,
+            messages=omitted_video_messages,
         )
+
+    await complete_and_check(
+        client,
+        model_name,
+        describe_video_messages(
+            video_url,
+            extra_video_fields={"uuid": video_uuid},
+        ),
+        context="populate UUID cache",
+    )
+
+    await complete_and_check(
+        client,
+        model_name,
+        omitted_video_messages,
+        context="reuse cached video without URL",
+    )
