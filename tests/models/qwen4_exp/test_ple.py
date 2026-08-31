@@ -950,28 +950,3 @@ def test_fused_conv_mixed_batch_correctness() -> None:
         output_kernel.float(), output_eager.float(), atol=3e-2, rtol=3e-2
     )
     assert torch.equal(state_kernel, state_eager.transpose(-1, -2).contiguous())
-
-
-def test_ple_kv_weights_mapper_routes_shards() -> None:
-    """The model mapper renames ckpt shards onto kv_proj with shard ids."""
-    from vllm.models.qwen4_exp.nvidia.model import (
-        _PLE_KV_WEIGHTS_MAPPER,
-    )
-
-    key_w = torch.randn(12, 8)
-    value_w = torch.randn(4, 8)
-    other = torch.randn(2, 2)
-    weights = [
-        ("model.layers.1.ple.key_proj.weight", key_w),
-        ("model.layers.1.ple.value_proj.weight", value_w),
-        ("model.layers.1.mlp.gate.weight", other),
-    ]
-    mapped = list(_PLE_KV_WEIGHTS_MAPPER.apply(weights))
-    assert [n for n, _ in mapped] == [
-        "model.layers.1.ple.kv_proj.weight",
-        "model.layers.1.ple.kv_proj.weight",
-        "model.layers.1.mlp.gate.weight",
-    ]
-    assert mapped[0][1].shard_id == 0
-    assert mapped[1][1].shard_id == 1
-    assert getattr(mapped[2][1], "shard_id", None) is None

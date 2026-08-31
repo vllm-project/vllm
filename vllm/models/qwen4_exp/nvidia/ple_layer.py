@@ -10,10 +10,7 @@ from torch import nn
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
-    ReplicatedLinear,
-)
+from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
@@ -417,7 +414,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             0, packed.shape[1] - 1
         )
         packed[request_indices, columns] = input_ids
-        ngram_context = ngram_context[:num_reqs]
+        ngram_context = ngram_context[:num_reqs].to(
+            device=input_ids.device, dtype=torch.long
+        )
 
         context = torch.cat([ngram_context, packed], dim=-1)
         positions_2d, position_in_segment = self._shift_precompute(
@@ -579,34 +578,15 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             quant_config=quant_config,
             params_dtype=model_config.dtype,
         )
-        # The two projections share the embedding input; merging them into one
-        # weight turns two GEMM launches into one. FP8 checkpoints keep the
-        # separate ReplicatedLinears (quantized loaders handle their scales).
-        self._merged_kv = quant_config is None
-        if self._merged_kv:
-            self.kv_proj = MergedColumnParallelLinear(
-                int(config.ple_embed_dim),
-                [self.hc_hidden_size, self.hidden_size],
-                bias=False,
-                params_dtype=model_config.dtype,
-                prefix=f"{prefix}.kv_proj",
-                disable_tp=True,
-            )
-        else:
-            self.key_proj = ReplicatedLinear(
-                int(config.ple_embed_dim),
-                self.hc_hidden_size,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.key_proj",
-            )
-            self.value_proj = ReplicatedLinear(
-                int(config.ple_embed_dim),
-                self.hidden_size,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.value_proj",
-            )
+        self.kv_proj = MergedColumnParallelLinear(
+            int(config.ple_embed_dim),
+            [self.hc_hidden_size, self.hidden_size],
+            bias=False,
+            params_dtype=model_config.dtype,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_proj",
+            disable_tp=True,
+        )
         norm_args = (
             self.hc_hidden_size,
             config.rms_norm_eps,
@@ -1270,12 +1250,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             )
         embeddings = self.ple_embedding(input_ids, query_start_loc, ngram_context)
         embeddings = self._dequantize_embeddings(embeddings, hidden_states.dtype)
-        if self._merged_kv:
-            kv, _ = self.kv_proj(embeddings)
-            key, value = kv.split(self.kv_proj.output_sizes, dim=-1)
-        else:
-            key, _ = self.key_proj(embeddings)
-            value, _ = self.value_proj(embeddings)
+        kv, _ = self.kv_proj(embeddings)
+        key, value = kv.split(self.kv_proj.output_sizes, dim=-1)
         gated_value, normalized = ple_gate(
             key,
             value,
