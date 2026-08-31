@@ -405,6 +405,8 @@ class CustomAllreduce:
     def should_custom_ar(self, inp: torch.Tensor):
         if self.disabled or self.world_size > 8:
             return False
+        if inp.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+            return False
         inp_size = inp.numel() * inp.element_size()
         # custom allreduce requires input byte size to be multiples of 16
         if inp_size % 16 != 0:
