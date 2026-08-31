@@ -37,7 +37,7 @@ fi
 
 # read_builds only. Needed because a job cannot see its siblings' outcomes:
 # the agent exposes only its own step, so the job list comes from the REST API.
-TOKEN_SECRET_KEY="${CRCR_BUILDKITE_TOKEN_SECRET_KEY:-crcr_buildkite_api_token}"
+TOKEN_SECRET_KEY="${CRCR_BUILDKITE_TOKEN_SECRET_KEY:-CRCR_BUILDKITE_API_TOKEN}"
 BK_TOKEN="${BUILDKITE_API_TOKEN:-}"
 if [[ -z "${BK_TOKEN}" ]] && command -v buildkite-agent >/dev/null 2>&1; then
     # Not in the job environment, so read it from a Buildkite secret. The agent
