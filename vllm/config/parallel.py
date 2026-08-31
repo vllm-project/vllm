@@ -926,6 +926,12 @@ class ParallelConfig:
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
 
+            if self.data_parallel_size > 1 and self.is_moe_model is False:
+                raise ValueError(
+                    "Offline data parallel mode is not supported/useful"
+                    " for dense models."
+                )
+
         self.data_parallel_index = self.data_parallel_rank
 
         if self.distributed_executor_backend == "external_launcher":
