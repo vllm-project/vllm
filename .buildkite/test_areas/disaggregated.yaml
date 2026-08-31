@@ -6,6 +6,7 @@ steps:
   key: distributed-nixlconnector-pd-accuracy-4-gpus
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -33,6 +34,7 @@ steps:
   key: distributed-flashinfer-nixlconnector-pd-accuracy-4-gpus
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -45,6 +47,7 @@ steps:
   key: push-nixlconnector-pp-prefill-pd-accuracy-4-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -58,6 +61,7 @@ steps:
   key: dp-ep-distributed-nixlconnector-pd-accuracy-tests-4-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -85,6 +89,7 @@ steps:
   key: crosslayer-kv-layout-distributed-nixlconnector-pd-accuracy-tests-4-gpus
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -112,6 +117,7 @@ steps:
   key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -139,6 +145,7 @@ steps:
   key: nixlconnector-pd-edge-cases-2-gpus
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -155,6 +162,7 @@ steps:
   key: hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -169,6 +177,7 @@ steps:
   key: multiconnector-nixl-offloading-pd-accuracy-2-gpus
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
@@ -214,6 +223,7 @@ steps:
   key: multiconnector-nixl-offloading-pd-edge-cases-2-gpus
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
