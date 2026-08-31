@@ -14,6 +14,11 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.shm_utils import (
+    hold_region_file_lock,
+    path_backed_by_fd,
+    reap_orphaned_region_files,
+)
 
 logger = init_logger(__name__)
 
@@ -103,39 +108,45 @@ class SharedOffloadRegion:
             self._worker_offset = rank * cpu_page_size
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
+        reap_orphaned_region_files("/dev/shm/vllm_offload_*.mmap")
         try:
-            try:
-                self.fd: int | None = os.open(
-                    self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
-                )
-            except FileExistsError:
-                # Joiner path — another worker won O_EXCL. Reopen and wait
-                # for the file to reach expected size.
-                self.fd = os.open(self.mmap_path, os.O_RDWR)
+            self.fd: int | None = None
+            while True:
                 try:
-                    _wait_for_file_size(self.fd, self.total_size_bytes)
-                except (TimeoutError, OSError):
-                    os.close(self.fd)
-                    raise
-                logger.info("Opened existing mmap file %s", self.mmap_path)
-            else:
-                # Creator path. We won O_EXCL, so we own the file: any
-                # failure here must clean up so concurrent joiners don't
-                # land on a 0-byte stub and spin in _wait_for_file_size
-                # for the full 30 s timeout.
-                try:
-                    check_shm_free_space(self.total_size_bytes)
-                    os.ftruncate(self.fd, self.total_size_bytes)
-                except (RuntimeError, OSError):
-                    os.unlink(self.mmap_path)
-                    os.close(self.fd)
-                    raise
-                self._creator = True
-                logger.info(
-                    "Created mmap file %s (%.2f GB)",
-                    self.mmap_path,
-                    self.total_size_bytes / 1e9,
-                )
+                    self.fd = os.open(
+                        self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
+                    )
+                except FileExistsError:
+                    try:
+                        self.fd = os.open(self.mmap_path, os.O_RDWR)
+                    except FileNotFoundError:
+                        continue
+                    hold_region_file_lock(self.fd)
+                    if not path_backed_by_fd(self.mmap_path, self.fd):
+                        os.close(self.fd)
+                        continue
+                    try:
+                        _wait_for_file_size(self.fd, self.total_size_bytes)
+                    except (TimeoutError, OSError):
+                        os.close(self.fd)
+                        raise
+                    logger.info("Opened existing mmap file %s", self.mmap_path)
+                else:
+                    hold_region_file_lock(self.fd)
+                    try:
+                        check_shm_free_space(self.total_size_bytes)
+                        os.ftruncate(self.fd, self.total_size_bytes)
+                    except (RuntimeError, OSError):
+                        os.unlink(self.mmap_path)
+                        os.close(self.fd)
+                        raise
+                    self._creator = True
+                    logger.info(
+                        "Created mmap file %s (%.2f GB)",
+                        self.mmap_path,
+                        self.total_size_bytes / 1e9,
+                    )
+                break
 
             self.mmap_obj: mmap.mmap | None = mmap.mmap(
                 self.fd,

@@ -17,6 +17,11 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils.shm_utils import (
+    hold_region_file_lock,
+    path_backed_by_fd,
+    reap_orphaned_region_files,
+)
 
 logger = init_logger(__name__)
 
@@ -97,27 +102,46 @@ class ECSharedRegion:
         # True after successful cudaHostRegister (cleanup must unregister).
         self._is_pinned = False
 
-        # File descriptor for the shared memory backing file.
-        try:
-            self._fd: int | None = os.open(
-                self._mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
-            )
-            os.ftruncate(self._fd, total_size_bytes)
-            self._is_creator = True
-            logger.info(
-                "Created EC mmap file %s (%.2f MiB)",
-                self._mmap_path,
-                total_size_bytes / (1 << 20),
-            )
-        except FileExistsError:
-            self._fd = os.open(self._mmap_path, os.O_RDWR)
+        reap_orphaned_region_files("/dev/shm/vllm_ec_*.mmap")
+        self._fd: int | None = None
+        while True:
             try:
-                _wait_for_file_size(self._fd, total_size_bytes)
-            except Exception:
-                os.close(self._fd)
-                self._fd = None
-                raise
-            logger.info("Opened existing EC mmap file %s", self._mmap_path)
+                self._fd = os.open(
+                    self._mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
+                )
+            except FileExistsError:
+                try:
+                    self._fd = os.open(self._mmap_path, os.O_RDWR)
+                except FileNotFoundError:
+                    continue
+                hold_region_file_lock(self._fd)
+                if not path_backed_by_fd(self._mmap_path, self._fd):
+                    os.close(self._fd)
+                    self._fd = None
+                    continue
+                try:
+                    _wait_for_file_size(self._fd, total_size_bytes)
+                except Exception:
+                    os.close(self._fd)
+                    self._fd = None
+                    raise
+                logger.info("Opened existing EC mmap file %s", self._mmap_path)
+            else:
+                hold_region_file_lock(self._fd)
+                try:
+                    os.ftruncate(self._fd, total_size_bytes)
+                except OSError:
+                    os.unlink(self._mmap_path)
+                    os.close(self._fd)
+                    self._fd = None
+                    raise
+                self._is_creator = True
+                logger.info(
+                    "Created EC mmap file %s (%.2f MiB)",
+                    self._mmap_path,
+                    total_size_bytes / (1 << 20),
+                )
+            break
 
         # MAP_SHARED mmap over _fd; all processes see the same pages.
         self._mmap_obj: mmap.mmap | None = mmap.mmap(

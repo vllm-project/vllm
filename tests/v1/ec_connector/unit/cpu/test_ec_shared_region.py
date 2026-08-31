@@ -366,3 +366,46 @@ def test_pin_memory_noop_without_cuda(region):
 def test_cleanup_is_idempotent(region):
     region.cleanup()
     region.cleanup()  # fixture calls a third time — must not raise
+
+
+def _write_orphan(path: str, size: int) -> None:
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    os.ftruncate(fd, size)
+    os.close(fd)
+
+
+def test_orphaned_ec_file_reclaimed_on_next_start():
+    orphan = f"/dev/shm/vllm_ec_orphan-{uuid.uuid4()}.mmap"
+    _write_orphan(orphan, 4096)
+    try:
+        r = _make_region()
+        try:
+            assert not os.path.exists(orphan)
+        finally:
+            r.cleanup()
+    finally:
+        if os.path.exists(orphan):
+            os.unlink(orphan)
+
+
+def test_live_ec_region_survives_another_start():
+    live = _make_region()
+    try:
+        other = _make_region()
+        try:
+            assert os.path.exists(live._mmap_path)
+        finally:
+            other.cleanup()
+    finally:
+        live.cleanup()
+
+
+def test_stale_ec_file_with_same_engine_id_does_not_wedge_restart():
+    engine_id = str(uuid.uuid4())
+    path = f"/dev/shm/vllm_ec_{engine_id}.mmap"
+    _write_orphan(path, 8 * 64)
+    r = ECSharedRegion(engine_id=engine_id, num_blocks=8, block_size_bytes=64)
+    try:
+        assert r._is_creator is True
+    finally:
+        r.cleanup()
