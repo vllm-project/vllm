@@ -75,8 +75,14 @@ class MooncakeStoreCoordinator:
         retention_interval: int | None = None,
         dcp_world_size: int = 1,
     ) -> None:
+        # Mirrors core's resolve_kv_cache_block_sizes: the hash unit only has
+        # to divide groups that participate in prefix caching. Non-shareable
+        # scratch groups (e.g. GLM-5.3-Flash's kpool tail) are skipped by
+        # _verify_and_split_kv_cache_groups and never probed for hits.
         assert all(
-            g.kv_cache_spec.block_size % hash_block_size == 0 for g in kv_cache_groups
+            g.kv_cache_spec.block_size % hash_block_size == 0
+            for g in kv_cache_groups
+            if g.kv_cache_spec.participates_in_prefix_caching
         ), "block_size must be divisible by hash_block_size"
         assert scheduler_block_size % hash_block_size == 0, (
             f"scheduler_block_size ({scheduler_block_size}) must be a multiple of "

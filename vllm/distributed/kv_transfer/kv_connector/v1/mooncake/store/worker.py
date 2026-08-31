@@ -1655,7 +1655,16 @@ class MooncakeStoreWorker:
                     tp_rank=self.tp_rank // self._group_tp_replication_factors[g_idx],
                 ),
                 g.kv_cache_spec.block_size,
-                hash_block_size=self.hash_block_size,
+                # Scratch groups outside prefix caching (e.g. GLM-5.3-Flash's
+                # kpool tail) may be finer than the hash unit. Their DB is
+                # never probed — store, load and lookup all skip
+                # non-participating groups — so key it at its own block size
+                # to keep the divisibility invariant trivially true.
+                hash_block_size=(
+                    self.hash_block_size
+                    if g.kv_cache_spec.participates_in_prefix_caching
+                    else g.kv_cache_spec.block_size
+                ),
             )
             for g_idx, g in enumerate(self._kv_cache_groups)
         ]
@@ -2014,7 +2023,7 @@ class MooncakeStoreWorker:
         # candidate_meta stores the (group, hash_bytes) for key slice.
         candidate_keys: list[str] = []
         candidate_meta: list[tuple[int, bytes]] = []
-        fine_grained = False
+        fine_grained = self.coord.enable_partial_hash_hits
         lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
         for g_idx, db in enumerate(self.token_dbs):
             if (
@@ -2132,6 +2141,11 @@ class MooncakeStoreWorker:
         boundaries = []
         hit_boundary_hash_idx = hit_length // self.hash_block_size - 1
         for group_id, db in enumerate(self.token_dbs):
+            if not self._kv_cache_groups[
+                group_id
+            ].kv_cache_spec.participates_in_prefix_caching:
+                # Scratch groups are never stored, so they have no tail key.
+                continue
             chunk_id = cdiv(hit_length, db.block_size) - 1
             boundary_tokens = hit_length
             contains_hit_boundary = cached_block_pool.contains(
