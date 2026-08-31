@@ -1259,6 +1259,14 @@ class SamplingParams(
             prompt_logprobs=1,
         )
 
+    @staticmethod
+    def for_sampler_warmup_configs() -> tuple["SamplingParams", ...]:
+        """Set parameters to exercise processed and greedy sampler paths."""
+        return (
+            SamplingParams.for_sampler_warmup(),
+            SamplingParams(temperature=0.0),
+        )
+
 
 class BeamSearchParams(
     msgspec.Struct,

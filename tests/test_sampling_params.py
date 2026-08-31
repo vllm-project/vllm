@@ -49,3 +49,11 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+def test_sampler_warmup_configs_cover_greedy_path():
+    configs = SamplingParams.for_sampler_warmup_configs()
+
+    assert len(configs) == 2
+    assert configs[0].temperature == 0.9
+    assert configs[1].temperature == 0.0

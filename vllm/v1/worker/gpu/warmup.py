@@ -209,87 +209,28 @@ def run_mixed_prefill_decode_warmup(
     return True
 
 
-@torch.inference_mode()
-def warmup_kernels(
+def _run_warmup_pass(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+    *,
+    block_count: Callable[[int, KVCacheSpec], int],
+    kv_cache_specs: list[KVCacheSpec],
+    num_kv_cache_groups: int,
+    prefill_block_counts: list[int],
+    num_reqs: int,
+    prompt_len: int,
+    prompt_token_ids: list[int],
+    decode_query_len: int,
+    num_spec_steps: int,
+    warmup_mm_features: list[MultiModalFeatureSpec],
+    sampling_params: SamplingParams | None,
+    pooling_params: PoolingParams | None,
+    warmup_index: int,
 ) -> None:
-    """Run scheduler-realistic prefill and decode steps to JIT compile kernels.
-
-    We must call the provided worker's execute_model for pipeline parallel
-    coordination.
-    """
-    if model_runner.vllm_config.is_mm_encoder_only:
-        return
-
-    num_spec_steps = model_runner.num_speculative_steps
-    decode_query_len = model_runner.decode_query_len
-    # Use decode_query_len + 1 tokens so the prefill batch's per-request query
-    # length exceeds decode_query_len, preventing it from being misclassified as
-    # a uniform decode batch.
-    prompt_len = decode_query_len + 1
-    prompt_token_ids = list(range(prompt_len))
-    # Upper bound on the decode steps built in `decode_steps` below.
-    num_decode_steps = 1
-    if not model_runner.is_pooling_model:
-        num_decode_steps = 5 if num_spec_steps > 0 else 3
-    # Size the block allocation for the worst case: every request advancing
-    # decode_query_len tokens on every decode step.
-    decode_len = prompt_len + num_decode_steps * decode_query_len
-
-    kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
-    num_kv_cache_groups = len(kv_cache_groups)
-
-    # Encoder-decoder models: give each warmup request a dummy encoder input so
-    # cross-attention warms up over a realistic, non-empty key sequence.
-    # The dummy mm_feature is registered in the encoder cache and only its encoder
-    # length is read (not the inputs themselves); the encoder itself is not scheduled.
-    max_encoder_len = getattr(model_runner.model_state, "max_encoder_len", 0)
-    warmup_mm_features: list[MultiModalFeatureSpec] = []
-    if model_runner.is_encoder_decoder and max_encoder_len:
-        warmup_mm_features = [
-            MultiModalFeatureSpec(
-                data=None,
-                modality="",
-                identifier="_warmup_encoder",
-                mm_position=PlaceholderRange(offset=0, length=max_encoder_len),
-            )
-        ]
-
-    # Compute per-request block counts for each KV cache group.
-    block_count = _warmup_block_counter(model_runner)
-    kv_cache_specs = [g.kv_cache_spec for g in kv_cache_groups]
-    prefill_block_counts = [block_count(prompt_len, s) for s in kv_cache_specs]
-    decode_block_counts = [block_count(decode_len, s) for s in kv_cache_specs]
-    max_blocks_per_req = sum(decode_block_counts)
-
-    num_reqs = min(
-        model_runner.scheduler_config.max_num_seqs,
-        model_runner.scheduler_config.max_num_batched_tokens
-        // max(prompt_len, decode_query_len),
-    )
-    if max_blocks_per_req > 0:
-        # Reserve block 0 (null block) and ensure we have enough blocks.
-        # Encoder-only models allocate no KV blocks, so this cap doesn't apply.
-        num_reqs = min(
-            num_reqs,
-            max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
-        )
-
-    req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
-
-    # SamplingParams exercising all sampling features.
-    if model_runner.is_pooling_model:
-        sampling_params = None
-        pooling_task = model_runner.model_config.get_pooling_task(
-            model_runner.get_supported_tasks()
-        )
-        pooling_params = PoolingParams(task=pooling_task)
-        pooling_params.verify(model_runner.model_config)
-    else:
-        sampling_params = SamplingParams.for_sampler_warmup()
-        pooling_params = None
+    """Run the scheduler trajectory for one sampler configuration."""
+    req_id_prefix = "_warmup_" if warmup_index == 0 else "_warmup_greedy_"
+    req_ids = [f"{req_id_prefix}{i}_" for i in range(num_reqs)]
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.
     next_block_id = 1
@@ -297,11 +238,6 @@ def warmup_kernels(
     def _alloc_blocks(num_blocks: int) -> list[int]:
         nonlocal next_block_id
         return list(range(next_block_id, next_block_id := next_block_id + num_blocks))
-
-    # The KV-block zeroing kernel is driven by the scheduler's
-    # new_block_ids_to_zero, so none of the steps below reach it.
-    if model_runner.kv_block_zeroer is not None:
-        model_runner.kv_block_zeroer.warmup(model_runner.kv_cache_config.num_blocks)
 
     # Step 1: Prefill all requests with 1 + decode_query_len prompt tokens each.
     new_reqs = [
@@ -325,8 +261,6 @@ def warmup_kernels(
     prefill_output.total_num_scheduled_tokens = prompt_len * num_reqs
     prefill_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
-    # Disable KV connector for warmup run.
-    model_runner.kv_connector.set_disabled(True)
     worker_execute_model(prefill_output)
 
     if not model_runner.is_pooling_model:
@@ -424,5 +358,117 @@ def warmup_kernels(
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
-    model_runner.kv_connector.set_disabled(False)
+
+
+@torch.inference_mode()
+def warmup_kernels(
+    model_runner: GPUModelRunner,
+    worker_execute_model: Callable[[SchedulerOutput], Any],
+    worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+) -> None:
+    """Run scheduler-realistic prefill and decode steps to JIT compile kernels.
+
+    We must call the provided worker's execute_model for pipeline parallel
+    coordination.
+    """
+    if model_runner.vllm_config.is_mm_encoder_only:
+        return
+
+    num_spec_steps = model_runner.num_speculative_steps
+    decode_query_len = model_runner.decode_query_len
+    # Use decode_query_len + 1 tokens so the prefill batch's per-request query
+    # length exceeds decode_query_len, preventing it from being misclassified as
+    # a uniform decode batch.
+    prompt_len = decode_query_len + 1
+    prompt_token_ids = list(range(prompt_len))
+    # Upper bound on the decode steps built in `decode_steps` below.
+    num_decode_steps = 1
+    if not model_runner.is_pooling_model:
+        num_decode_steps = 5 if num_spec_steps > 0 else 3
+    # Size the block allocation for the worst case: every request advancing
+    # decode_query_len tokens on every decode step.
+    decode_len = prompt_len + num_decode_steps * decode_query_len
+
+    kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
+    num_kv_cache_groups = len(kv_cache_groups)
+
+    # Encoder-decoder models: give each warmup request a dummy encoder input so
+    # cross-attention warms up over a realistic, non-empty key sequence.
+    # The dummy mm_feature is registered in the encoder cache and only its encoder
+    # length is read (not the inputs themselves); the encoder itself is not scheduled.
+    max_encoder_len = getattr(model_runner.model_state, "max_encoder_len", 0)
+    warmup_mm_features: list[MultiModalFeatureSpec] = []
+    if model_runner.is_encoder_decoder and max_encoder_len:
+        warmup_mm_features = [
+            MultiModalFeatureSpec(
+                data=None,
+                modality="",
+                identifier="_warmup_encoder",
+                mm_position=PlaceholderRange(offset=0, length=max_encoder_len),
+            )
+        ]
+
+    # Compute per-request block counts for each KV cache group.
+    block_count = _warmup_block_counter(model_runner)
+    kv_cache_specs = [g.kv_cache_spec for g in kv_cache_groups]
+    prefill_block_counts = [block_count(prompt_len, s) for s in kv_cache_specs]
+    decode_block_counts = [block_count(decode_len, s) for s in kv_cache_specs]
+    max_blocks_per_req = sum(decode_block_counts)
+
+    num_reqs = min(
+        model_runner.scheduler_config.max_num_seqs,
+        model_runner.scheduler_config.max_num_batched_tokens
+        // max(prompt_len, decode_query_len),
+    )
+    if max_blocks_per_req > 0:
+        # Reserve block 0 (null block) and ensure we have enough blocks.
+        # Encoder-only models allocate no KV blocks, so this cap doesn't apply.
+        num_reqs = min(
+            num_reqs,
+            max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
+        )
+
+    # Pooling models do not use the sampler. Generation models need separate
+    # batches so both the processed and plain-greedy sampler paths are JIT
+    # compiled with their corresponding logits representation.
+    if model_runner.is_pooling_model:
+        sampler_warmup_params: tuple[SamplingParams | None, ...] = (None,)
+        pooling_task = model_runner.model_config.get_pooling_task(
+            model_runner.get_supported_tasks()
+        )
+        pooling_params = PoolingParams(task=pooling_task)
+        pooling_params.verify(model_runner.model_config)
+    else:
+        sampler_warmup_params = SamplingParams.for_sampler_warmup_configs()
+        pooling_params = None
+
+    # The KV-block zeroing kernel is driven by the scheduler's
+    # new_block_ids_to_zero, so none of the steps below reach it.
+    if model_runner.kv_block_zeroer is not None:
+        model_runner.kv_block_zeroer.warmup(model_runner.kv_cache_config.num_blocks)
+
+    # Disable KV connector for warmup run.
+    model_runner.kv_connector.set_disabled(True)
+    try:
+        for warmup_index, sampling_params in enumerate(sampler_warmup_params):
+            _run_warmup_pass(
+                model_runner,
+                worker_execute_model,
+                worker_sample_tokens,
+                block_count=block_count,
+                kv_cache_specs=kv_cache_specs,
+                num_kv_cache_groups=num_kv_cache_groups,
+                prefill_block_counts=prefill_block_counts,
+                num_reqs=num_reqs,
+                prompt_len=prompt_len,
+                prompt_token_ids=prompt_token_ids,
+                decode_query_len=decode_query_len,
+                num_spec_steps=num_spec_steps,
+                warmup_mm_features=warmup_mm_features,
+                sampling_params=sampling_params,
+                pooling_params=pooling_params,
+                warmup_index=warmup_index,
+            )
+    finally:
+        model_runner.kv_connector.set_disabled(False)
     torch.accelerator.synchronize()
