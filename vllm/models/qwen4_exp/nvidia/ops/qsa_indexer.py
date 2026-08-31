@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton kernels for Qwen4Exp QSA index selection."""
 
-import math
-
 import torch
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
@@ -14,7 +12,7 @@ from vllm.triton_utils import tl, triton
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
-_LARGE_DECODE_REQUESTS = 33
+_DECODE_TILE_GROUPING_MIN_REQUESTS = 33
 
 
 @triton.jit
@@ -30,9 +28,7 @@ def _qsa_mqa_paged_uniform_kernel(
     stride_cache_token,
     stride_table_req,
     stride_logits_row,
-    num_columns,
     num_pages,
-    score_divisor,
     PAGE_SIZE: tl.constexpr,
     PAGE_TABLE_WIDTH: tl.constexpr,
     NUM_HEADS: tl.constexpr,
@@ -40,12 +36,12 @@ def _qsa_mqa_paged_uniform_kernel(
     DECODE_QUERY_LEN: tl.constexpr,
     DECODE_QUERY_LEN_PADDED: tl.constexpr,
     NUM_HEADS_PADDED: tl.constexpr,
-    MMA_N: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     TILES_PER_PROG: tl.constexpr,
     STAGES: tl.constexpr,
 ) -> None:
+    num_columns: tl.constexpr = PAGE_TABLE_WIDTH * PAGE_SIZE
     request = tl.program_id(0)
     tile_start = tl.program_id(1) * TILES_PER_PROG
     query_offsets = tl.arange(0, DECODE_QUERY_LEN_PADDED)
@@ -63,7 +59,7 @@ def _qsa_mqa_paged_uniform_kernel(
     tile_end = tl.minimum(tile_end, tl.cdiv(num_columns, BLOCK_N))
 
     dims = tl.arange(0, BLOCK_D)
-    n = tl.arange(0, MMA_N)
+    n = tl.arange(0, DECODE_QUERY_LEN_PADDED * NUM_HEADS_PADDED)
     query_offset = n // NUM_HEADS_PADDED
     head = n % NUM_HEADS_PADDED
     valid_query = (query_offset < DECODE_QUERY_LEN) & (head < NUM_HEADS)
@@ -103,7 +99,7 @@ def _qsa_mqa_paged_uniform_kernel(
             scores,
             (BLOCK_N, DECODE_QUERY_LEN_PADDED, NUM_HEADS_PADDED),
         )
-        score = tl.sum(scores, axis=2) / score_divisor
+        score = tl.sum(scores, axis=2) / HEAD_DIM**0.5
         valid = (columns[:, None] < visible[None, :]) & page_valid[:, None]
         tl.store(
             logits_ptr + rows[None, :] * stride_logits_row + columns[:, None],
@@ -129,10 +125,8 @@ def _qsa_mqa_paged_prefill_kernel(
     stride_table_req,
     stride_logits_row,
     num_rows,
-    num_columns,
     num_pages,
     query_offset,
-    score_divisor,
     PAGE_SIZE: tl.constexpr,
     PAGE_TABLE_WIDTH: tl.constexpr,
     NUM_HEADS: tl.constexpr,
@@ -144,6 +138,7 @@ def _qsa_mqa_paged_prefill_kernel(
     K_TILES: tl.constexpr,
     STAGES: tl.constexpr,
 ) -> None:
+    num_columns: tl.constexpr = PAGE_TABLE_WIDTH * PAGE_SIZE
     request = tl.program_id(0)
     query_base = tl.load(query_start_loc_ptr)
     query_end = query_offset + num_rows
@@ -212,7 +207,7 @@ def _qsa_mqa_paged_prefill_kernel(
         )
         scores = tl.dot(keys, query, out_dtype=tl.float32)
         scores = tl.reshape(scores, (BLOCK_N, TILE_R, NUM_HEADS_PADDED))
-        score = tl.sum(tl.maximum(scores, 0.0), axis=2) / score_divisor
+        score = tl.sum(tl.maximum(scores, 0.0), axis=2) / HEAD_DIM**0.5
         store_mask = (
             valid_rows[None, :]
             & (columns[:, None] < visible[None, :])
@@ -225,7 +220,7 @@ def _qsa_mqa_paged_prefill_kernel(
         )
 
 
-@triton.jit(do_not_specialize=["rows"])
+@triton.jit
 def _expand_qsa_indices_kernel(
     block_indices_ptr,
     query_positions_ptr,
@@ -235,13 +230,11 @@ def _expand_qsa_indices_kernel(
     stride_blocks_column,
     stride_output_row,
     stride_output_column,
-    rows,
     BLOCK_TOPK: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
-    TOKEN_TOPK: tl.constexpr,
-    OUTPUT_WIDTH: tl.constexpr,
     COLUMN_BLOCK: tl.constexpr,
 ) -> None:
+    output_width: tl.constexpr = BLOCK_TOPK * COMPRESS_RATIO + COMPRESS_RATIO - 1
     row = tl.program_id(0)
     columns = tl.program_id(1) * COLUMN_BLOCK + tl.arange(0, COLUMN_BLOCK)
     query_position = tl.load(query_positions_ptr + row)
@@ -257,7 +250,7 @@ def _expand_qsa_indices_kernel(
     safe_rank = tl.minimum(block_rank, BLOCK_TOPK - 1)
     block = tl.load(
         block_indices_ptr + row * stride_blocks_row + safe_rank * stride_blocks_column,
-        mask=(row < rows) & is_expanded,
+        mask=is_expanded,
         other=-1,
     )
     expanded = block * COMPRESS_RATIO + offset
@@ -268,13 +261,11 @@ def _expand_qsa_indices_kernel(
         & (tail_offset < COMPRESS_RATIO - 1)
     )
     token = tl.where(is_expanded, expanded, tail_start + tail_offset)
-    valid = (
-        (row < rows) & (columns < OUTPUT_WIDTH) & (is_expanded | is_tail) & (token >= 0)
-    )
+    valid = (columns < output_width) & (is_expanded | is_tail) & (token >= 0)
     tl.store(
         output_ptr + row * stride_output_row + columns * stride_output_column,
         tl.where(valid, token, -1),
-        mask=(row < rows) & (columns < OUTPUT_WIDTH),
+        mask=columns < output_width,
     )
 
 
@@ -288,10 +279,10 @@ def _qsa_decode_warmup_profiles(
         if dql <= max_num_batched_tokens:
             profiles.append((dql, 1))
         if (
-            max_num_reqs >= _LARGE_DECODE_REQUESTS
-            and dql * _LARGE_DECODE_REQUESTS <= max_num_batched_tokens
+            max_num_reqs >= _DECODE_TILE_GROUPING_MIN_REQUESTS
+            and dql * _DECODE_TILE_GROUPING_MIN_REQUESTS <= max_num_batched_tokens
         ):
-            profiles.append((dql, _LARGE_DECODE_REQUESTS))
+            profiles.append((dql, _DECODE_TILE_GROUPING_MIN_REQUESTS))
     return tuple(profiles)
 
 
@@ -314,10 +305,11 @@ def _qsa_decode_kernel_config(
         "DECODE_QUERY_LEN": decode_query_len,
         "DECODE_QUERY_LEN_PADDED": decode_query_len_padded,
         "NUM_HEADS_PADDED": num_heads_padded,
-        "MMA_N": decode_query_len_padded * num_heads_padded,
         "BLOCK_N": 64,
         "BLOCK_D": max(16, triton.next_power_of_2(head_dim)),
-        "TILES_PER_PROG": 1 if num_requests <= 32 else 8,
+        "TILES_PER_PROG": (
+            1 if num_requests < _DECODE_TILE_GROUPING_MIN_REQUESTS else 8
+        ),
         "STAGES": 2,
     }
 
@@ -350,7 +342,7 @@ def warmup_qsa_mqa_paged_decode(
         page_table.dtype,
         shape=(max_num_reqs, page_table_width),
     )
-    int32_ptr = TritonWarmupTensor(torch.int32)
+    visible_blocks_ptr = TritonWarmupTensor(torch.int32)
 
     for decode_query_len, num_requests in profiles:
         num_rows = decode_query_len * num_requests
@@ -374,7 +366,7 @@ def warmup_qsa_mqa_paged_decode(
             q_ptr,
             k_cache_ptr,
             page_table_ptr,
-            int32_ptr,
+            visible_blocks_ptr,
             logits_ptr,
             q_ptr.stride()[0],
             q_ptr.stride()[1],
@@ -382,9 +374,7 @@ def warmup_qsa_mqa_paged_decode(
             k_cache_ptr.stride()[1],
             page_table_ptr.stride()[0],
             logits_ptr.stride()[0],
-            columns,
             k_cache.shape[0],
-            math.sqrt(head_dim),
             **kernel_config,
             num_warps=2,
             grid=(
@@ -415,14 +405,20 @@ def qsa_mqa_paged_decode(
     logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
     if not q.shape[0] or not columns:
         return logits
-    block_n = 64
-    tiles_per_program = 1 if num_requests <= 32 else 8
-    stages = 2
-    decode_query_len_padded = triton.next_power_of_2(decode_query_len)
-    num_heads_padded = triton.next_power_of_2(q.shape[1])
+    kernel_config = _qsa_decode_kernel_config(
+        page_size=k_cache.shape[1],
+        page_table_width=page_table.shape[1],
+        num_heads=q.shape[1],
+        head_dim=q.shape[2],
+        decode_query_len=decode_query_len,
+        num_requests=num_requests,
+    )
     grid = (
         num_requests,
-        triton.cdiv(columns, block_n * tiles_per_program),
+        triton.cdiv(
+            columns,
+            kernel_config["BLOCK_N"] * kernel_config["TILES_PER_PROG"],
+        ),
     )
     _qsa_mqa_paged_uniform_kernel[grid](
         q,
@@ -436,21 +432,8 @@ def qsa_mqa_paged_decode(
         k_cache.stride(1),
         page_table.stride(0),
         logits.stride(0),
-        columns,
         k_cache.shape[0],
-        math.sqrt(q.shape[2]),
-        PAGE_SIZE=k_cache.shape[1],
-        PAGE_TABLE_WIDTH=page_table.shape[1],
-        NUM_HEADS=q.shape[1],
-        HEAD_DIM=q.shape[2],
-        DECODE_QUERY_LEN=decode_query_len,
-        DECODE_QUERY_LEN_PADDED=decode_query_len_padded,
-        NUM_HEADS_PADDED=num_heads_padded,
-        MMA_N=decode_query_len_padded * num_heads_padded,
-        BLOCK_N=block_n,
-        BLOCK_D=max(16, triton.next_power_of_2(q.shape[2])),
-        TILES_PER_PROG=tiles_per_program,
-        STAGES=stages,
+        **kernel_config,
         num_warps=2,
     )
     return logits
@@ -496,10 +479,8 @@ def _launch_qsa_mqa_paged_prefill(
         page_table.stride(0),
         logits.stride(0),
         num_queries,
-        columns,
         k_cache.shape[0],
         query_offset,
-        math.sqrt(q.shape[2]),
         PAGE_SIZE=k_cache.shape[1],
         PAGE_TABLE_WIDTH=page_table.shape[1],
         NUM_HEADS=q.shape[1],
@@ -567,11 +548,8 @@ def expand_qsa_block_indices(
         block_indices.stride(1),
         out.stride(0),
         out.stride(1),
-        block_indices.shape[0],
         BLOCK_TOPK=block_topk,
         COMPRESS_RATIO=compress_ratio,
-        TOKEN_TOPK=token_topk,
-        OUTPUT_WIDTH=output_width,
         COLUMN_BLOCK=column_block,
         num_warps=4,
     )
