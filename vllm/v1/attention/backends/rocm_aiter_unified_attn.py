@@ -213,9 +213,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def _shuffle_kv_views(
         self, key_cache: torch.Tensor, value_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # No-copy reinterpret of standalone-contiguous K/V (num_blocks,
-        # block_size, num_kv_heads, head_size) as the 5D shuffle layout the
-        # gluon kernel reads (the shuffle WRITER laid bytes in this order).
         nb, bs, nkv, hd = key_cache.shape
         x = 16 // key_cache.element_size()
         kc = key_cache.reshape(nb, nkv, hd // x, bs, x)
@@ -296,9 +293,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
 
-        # The shuffle writer pre-divides K/V by k/v_scale before the
-        # (scale=1.0) store, so the stored fp8 matches what
-        # reshape_and_cache_flash writes and descaling is unchanged.
         if self._use_shuffle_kv:
             key_cache, value_cache = self._shuffle_kv_views(key_cache, value_cache)
 
@@ -435,8 +429,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        # _split_kv_cache picks the unbind dim per layout. The writer must
-        # match what forward() reads back, hence use_shuffle_layout below.
         key_cache, value_cache = self._split_kv_cache(kv_cache)
         rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
             qkv=qkv,

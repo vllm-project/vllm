@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -315,19 +313,6 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             unpadded_N_w2=self.moe_config.hidden_dim_unpadded,
             unpadded_K_w2=self.moe_config.intermediate_size_per_partition_unpadded,
         )
-
-
-def a4w4_backend():
-    """Override aiter's moe_gemm_a4w4 backend ("triton" | "gluon").
-
-    Default (None) lets aiter choose, which is "gluon" on gfx1250. Set
-    VLLM_AITER_A4W4_BACKEND=triton to take the non-gluon path, which avoids the
-    gfx1250 TDM descriptor API the installed aiter/Triton pair disagrees on.
-
-    Read at weight-load time (oracle/mxfp4.py picks the w_scale layout) as well
-    as at forward time, so both must see the same value.
-    """
-    return os.environ.get("VLLM_AITER_A4W4_BACKEND") or None
 
 
 def _aiter_raw(t):
@@ -795,13 +780,8 @@ def aiter_triton_kernel_w4a4_moe_forward(
             "limit": swiglu_limit,
             "swiglu_add_residual": quant_config.gemm1_beta == 1.0,
         }
-    # GFX1250_SCALE is a gluon-only scale layout. The Triton kernel only
-    # branches on CDNA4_SCALE / None, so it would read a swizzled buffer with
-    # plain [E, K_scale, N] indexing and stride off the end of it. Keep this in
-    # sync with the swizzle decision in the oracle's
-    # convert_gpt_oss_weight_to_mxfp4_moe_kernel_format.
     swizzle_mx_scale = (
-        "GFX1250_SCALE" if on_gfx1250() and a4w4_backend() != "triton" else None
+        "GFX1250_SCALE" if on_gfx1250() else None
     )
 
     x_q, x_scale = mxfp4_quant(hidden_states.to(torch.bfloat16))
@@ -818,7 +798,6 @@ def aiter_triton_kernel_w4a4_moe_forward(
         gammas=gammas if apply_router_weight_on_input else None,
         swizzle_mx_scale=swizzle_mx_scale,
         apply_swiglu=fused_swiglu,
-        backend=a4w4_backend(),
         **swiglu_kwargs,
     )
 
@@ -864,7 +843,6 @@ def aiter_triton_kernel_w4a4_moe_forward(
         gammas=None if apply_router_weight_on_input else gammas,
         swizzle_mx_scale=swizzle_mx_scale,
         apply_swiglu=False,
-        backend=a4w4_backend(),
     )
 
     return out

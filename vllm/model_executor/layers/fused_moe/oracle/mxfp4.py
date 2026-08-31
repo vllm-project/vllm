@@ -1164,13 +1164,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
 
-        fp4_dtype = torch.float4_e2m1fn_x2
-
         if is_gfx1250:
-            from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (  # noqa: E501
-                a4w4_backend,
-            )
-
             # Triton moe_gemm_a4w4: uint8 column-major weights.
             w13_data = w13_weight.data.view(torch.uint8)
             w2_data = w2_weight.data.view(torch.uint8)
@@ -1197,24 +1191,20 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w13_scale = w13_scale_data.transpose(1, 2)
             w2_scale = w2_weight_scale.data.view(torch.uint8).transpose(1, 2)
 
-            # GFX1250_SCALE is a gluon-only layout
-            # The a4w4 gfx1250 kernels both hardcode SCALE_KWIDTH = 4 in their
-            # SWIZZLE_MX_SCALE == "GFX1250_SCALE" branch
-            if a4w4_backend() != "triton":
-                from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
+            from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
 
-                w13_scale = shuffle_scale_moe(
-                    w13_scale,
-                    arch="gfx1250",
-                    preshuffle_factor=32,
-                    scale_kwidth=4,
-                )
-                w2_scale = shuffle_scale_moe(
-                    w2_scale,
-                    arch="gfx1250",
-                    preshuffle_factor=32,
-                    scale_kwidth=4,
-                )
+            w13_scale = shuffle_scale_moe(
+                w13_scale,
+                arch="gfx1250",
+                preshuffle_factor=32,
+                scale_kwidth=4,
+            )
+            w2_scale = shuffle_scale_moe(
+                w2_scale,
+                arch="gfx1250",
+                preshuffle_factor=32,
+                scale_kwidth=4,
+            )
 
             return (w13_data, w2_data, w13_scale, w2_scale,
                     w13_bias, w2_bias)
@@ -1235,8 +1225,10 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
 
         # View as native FP4 dtype
-        w13_weight.data = w13_weight.data.view(fp4_dtype)
-        w2_weight.data = w2_weight.data.view(fp4_dtype)
+        fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
+        if fp4_dtype is not None:
+            w13_weight.data = w13_weight.data.view(fp4_dtype)
+            w2_weight.data = w2_weight.data.view(fp4_dtype)
 
         # Shuffle weights for AITER CK kernel
         shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(

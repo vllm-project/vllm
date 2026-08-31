@@ -950,9 +950,6 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl(
     from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale_preshuffle
 
     n, k = B.shape
-    # B is (16,16)-shuffled and the kernel consumes it as (N // 16, K * 16).
-    # is_x_scale_tranposed=False makes aiter read As' own strides, so As may be
-    # either row-major or column-major (the layout its configs are tuned for).
     return gemm_a8w8_blockscale_preshuffle(
         A,
         B.reshape(n // 16, k * 16),
@@ -3720,8 +3717,8 @@ class rocm_aiter_ops:
 
         Shared by the AITER FA and unified-attention impls. The caller splits
         kv_cache, since the unbind dim depends on the layout (e.g. the unified
-        encoder-decoder path is K/V-first), and passes use_shuffle_layout to
-        match the layout its own read path expects.
+        encoder-decoder path is K/V-first), and passes use_shuffle_layout
+        (unified reads NHD and must pass False).
         """
         if kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(current_platform.fp8_dtype())
@@ -3983,23 +3980,36 @@ class rocm_aiter_ops:
     @staticmethod
     @if_aiter_supported
     def is_blockscale_bpreshuffle_gemm_tuned(n: int, k: int) -> bool:
-        """Whether aiter ships a shape-specialized tuned config for the
-        B-preshuffled A8W8 blockscale GEMM at this (N, K) on the running arch.
-
-        The non-preshuffled blockscale GEMM has no per-shape tuning on gfx1250,
-        so this decides whether preshuffling the weight buys tuned kernels.
-        """
-        from pathlib import Path
-
-        try:
-            import aiter.ops.triton as aiter_triton
-            from aiter.ops.triton.utils._triton.arch_info import get_arch
-
-            name = f"{get_arch()}-GEMM-A8W8_BLOCKSCALE_PRESHUFFLED-N={n}-K={k}.json"
-            configs = Path(aiter_triton.__file__).parent / "configs" / "gemm"
-        except Exception:
-            return False
-        return (configs / name).is_file() or (configs / "gluon" / name).is_file()
+        #TODO: Swap this to the proper AITER API for getting the gemm config
+        # rather then snapshot
+        gfx1250_tuned = {
+            (1536,4096),
+            (32768,1024),
+            (4096,2048),
+            (4096,4096),
+            (4096,81920),
+            (8192,1024),
+            (1536, 4096),
+            (1536, 7168),
+            (16384, 1536),
+            (2048, 7168),
+            (32768, 1024),
+            (4096, 2048),
+            (4096, 4096),
+            (4096, 8192),
+            (6144, 7168),
+            (65536, 1536),
+            (7168, 16384),
+            (7168, 3072),
+            (7168, 4096),
+            (7168, 768),
+            (8192, 1024),
+            (8192, 1536),
+        }
+        from vllm.platforms.rocm import on_gfx1250
+        if on_gfx1250():
+            return (n,k) in gfx1250_tuned
+        return False
 
     @staticmethod
     @functools.cache

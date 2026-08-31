@@ -14,11 +14,6 @@ logger = init_logger(__name__)
 
 
 def should_use_gfx1250_mx_scale_swizzle() -> bool:
-    """Whether to pre-shuffle the mxfp4 scales into the gfx1250 layout.
-
-    The weight-load swizzle in `_swizzle_mxfp4` and the SWIZZLE_MX_SCALE
-    kernel argument in `aiter_mxfp4_w4a8_moe` must agree.
-    """
     if not current_platform.is_rocm():
         return False
     from vllm.platforms.rocm import on_gfx1250
@@ -153,9 +148,6 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     if should_use_gfx1250_mx_scale_swizzle():
         from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
 
-        # preshuffle_factor / scale_kwidth must match PRESHUFFLE_FACTOR and
-        # SCALE_KWIDTH in the gfx1250 a8w4 kernel's SWIZZLE_MX_SCALE ==
-        # "GFX1250_SCALE" branch, which hardcodes 32 and 4.
         assert (
             scale.dim() == 3 and scale.shape[-1] % 32 == 0 and scale.shape[-2] % 4 == 0
         ), f"GFX1250 scale swizzle needs (E,K_SCALE%4,N%32); got {tuple(scale.shape)}"
