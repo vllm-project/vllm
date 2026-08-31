@@ -112,7 +112,8 @@ class DynamicNvFp4LinearKernel(NvFp4LinearKernel):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         m = x.numel() // x.shape[-1]
         kernel = self.a16_kernel if m <= self.a16_max_m else self.a4_kernel
-        return kernel.apply_weights(layer, x, bias)
+        return kernel.apply_weights(layer, x, bias, **kwargs)

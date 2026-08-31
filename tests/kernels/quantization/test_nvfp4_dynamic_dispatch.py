@@ -24,6 +24,7 @@ class _Kernel:
 
     def __init__(self, tag, rewrites=False):
         self.tag, self.rewrites, self.seen = tag, rewrites, []
+        self.kwargs = {}
 
     def process_weights_after_loading(self, layer):
         if self.rewrites:
@@ -31,8 +32,9 @@ class _Kernel:
                 torch.zeros(8, 8, dtype=torch.uint8), requires_grad=False
             )
 
-    def apply_weights(self, layer, x, bias=None):
+    def apply_weights(self, layer, x, bias=None, **kwargs):
         self.seen.append(x.numel() // x.shape[-1])
+        self.kwargs = kwargs
         return torch.zeros((*x.shape[:-1], 4))
 
 
@@ -126,3 +128,20 @@ def test_opt_in_branch_executes_on_any_platform(monkeypatch):
         pytest.fail(f"dispatch branch references an unbound name: {e}")
     except Exception:
         pass  # no NVFP4 kernel on this platform is an acceptable outcome
+
+
+def test_forwards_extra_kwargs_to_the_selected_kernel():
+    """The wrapper must stay transparent to the signature it wraps.
+
+    Kernels take backend-specific keyword arguments such as per-forward
+    activation scales. A dispatcher that drops them either raises or, worse,
+    silently falls back to the layer's static values.
+    """
+    a16, a4 = _Kernel("a16"), _Kernel("a4")
+    k = _build(a16, a4, max_m=16)
+    scale = torch.ones(1)
+    k.apply_weights(
+        _layer(), torch.zeros(4, 4), None, input_global_scale_inv=scale, alpha=scale
+    )
+    assert set(a16.kwargs) == {"input_global_scale_inv", "alpha"}
+    assert a4.kwargs == {}
