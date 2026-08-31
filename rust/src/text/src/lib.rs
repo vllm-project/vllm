@@ -21,7 +21,7 @@ pub use output::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
     DecodedTextEvent, DecodedTokenLogprob, Finished, TextDecodeOptions, TextOutputStreamExt,
 };
-pub use request::{Prompt, SamplingParams, TextRequest};
+pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
 use trait_set::trait_set;
 use vllm_engine_core_client::EngineCoreClient;
 pub use vllm_llm::FinishReason;
@@ -33,6 +33,8 @@ mod error;
 mod lower;
 pub mod output;
 mod request;
+mod truncation;
+pub use truncation::{PromptTruncation, PromptTruncationLimit, TruncationSide};
 pub use vllm_tokenizer as tokenizer;
 
 trait_set! {
@@ -80,26 +82,35 @@ impl TextRequestProcessor {
         self.max_model_len
     }
 
-    fn tokenize_prompt(
-        tokenizer: &DynTokenizer,
+    fn prepare_prompt_tokens(
+        &self,
         prompt: Prompt,
         add_special_tokens: bool,
+        prompt_truncation: Option<PromptTruncation>,
+        max_output_tokens: Option<u32>,
     ) -> Result<Vec<u32>> {
-        match prompt {
-            Prompt::Text(text) => tokenizer.encode(&text, add_special_tokens).map_err(Into::into),
+        let tokenizer = self.backend.tokenizer();
+        let mut prompt_token_ids = match prompt {
+            Prompt::Text(text) => tokenizer.encode(&text, add_special_tokens)?,
             // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
             // and infra workloads bypass chat rendering and tokenizer overhead entirely.
-            Prompt::TokenIds(token_ids) => Ok(token_ids),
+            Prompt::TokenIds(token_ids) => token_ids,
+        };
+        if let Some(prompt_truncation) = prompt_truncation {
+            let input_budget = self.max_model_len.saturating_sub(max_output_tokens.unwrap_or(0));
+            prompt_truncation.apply(&mut prompt_token_ids, input_budget)?;
         }
+        Ok(prompt_token_ids)
     }
 
-    /// Tokenize one request without generation-specific lowering.
+    /// Prepare one request's prompt tokens without generation-specific lowering.
     pub fn tokenize(&self, request: TextRequest) -> Result<Vec<u32>> {
         request.validate()?;
-        Self::tokenize_prompt(
-            &self.backend.tokenizer(),
+        self.prepare_prompt_tokens(
             request.prompt,
             request.add_special_tokens,
+            request.prompt_truncation,
+            request.sampling_params.max_tokens,
         )
     }
 
@@ -111,12 +122,13 @@ impl TextRequestProcessor {
             request.arrival_time = Some(vllm_llm::current_unix_timestamp_secs());
         }
 
-        let tokenizer = self.backend.tokenizer();
-        let prompt_token_ids = Self::tokenize_prompt(
-            &tokenizer,
+        let prompt_token_ids = self.prepare_prompt_tokens(
             take(&mut request.prompt),
             request.add_special_tokens,
+            request.prompt_truncation,
+            request.sampling_params.max_tokens,
         )?;
+        let tokenizer = self.backend.tokenizer();
         let sampling_hints = self.backend.sampling_hints()?;
         let sampling_limits = SamplingLimits {
             max_model_len: self.max_model_len,
@@ -245,5 +257,46 @@ impl TextLlm {
     pub async fn shutdown(self) -> Result<()> {
         self.llm.shutdown().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use vllm_tokenizer::test_utils::TestTokenizer;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestTextBackend;
+
+    impl TextBackend for TestTextBackend {
+        fn tokenizer(&self) -> DynTokenizer {
+            Arc::new(TestTokenizer::new())
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+    }
+
+    #[test]
+    fn tokenize_and_prepare_apply_the_same_prompt_truncation() {
+        let processor = TextRequestProcessor::new(Arc::new(TestTextBackend), 10);
+        let request = TextRequest {
+            prompt: Prompt::TokenIds(vec![1, 2, 3, 4, 5]),
+            prompt_truncation: Some(PromptTruncation {
+                limit: PromptTruncationLimit::Fixed(3),
+                side: TruncationSide::Left,
+            }),
+            ..TextRequest::for_test()
+        };
+
+        assert_eq!(processor.tokenize(request.clone()).unwrap(), vec![3, 4, 5]);
+        assert_eq!(
+            processor.prepare(request).unwrap().generate_request.prompt_token_ids,
+            vec![3, 4, 5]
+        );
     }
 }

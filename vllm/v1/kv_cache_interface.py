@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
+from functools import cached_property
 from math import prod
 from typing import TYPE_CHECKING, TypeVar
 
@@ -569,6 +570,11 @@ class MLAAttentionSpec(FullAttentionSpec):
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, and model version."
         )
+        non_causal_mtd_set = {spec.non_causal_multi_token_decode for spec in specs}
+        assert len(non_causal_mtd_set) == 1, (
+            "All attention layers in the same KV cache group must agree on "
+            "non_causal_multi_token_decode."
+        )
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -581,9 +587,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
-            non_causal_multi_token_decode=any(
-                spec.non_causal_multi_token_decode for spec in specs
-            ),
+            non_causal_multi_token_decode=non_causal_mtd_set.pop(),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -815,6 +819,7 @@ class MambaSpec(KVCacheSpec):
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
+    num_prefill_checkpoint_blocks: int = 0
     num_heads: int = 1
     tokens_per_state: int = -1
 
@@ -843,7 +848,9 @@ class MambaSpec(KVCacheSpec):
                 cdiv(max_model_len, self.block_size) + self.num_speculative_blocks
             ) * self.page_size_bytes
         elif vllm_config.cache_config.mamba_cache_mode == "align":
-            return self.page_size_bytes * (2 + self.num_speculative_blocks)
+            return self.page_size_bytes * (
+                2 + self.num_speculative_blocks + self.num_prefill_checkpoint_blocks
+            )
         else:
             return self.page_size_bytes * (1 + self.num_speculative_blocks)
 
@@ -865,6 +872,7 @@ class MambaSpec(KVCacheSpec):
         return all(
             isinstance(spec, MambaSpec)
             and spec.num_speculative_blocks == self.num_speculative_blocks
+            and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
             for spec in kv_cache_specs.values()
         )
 
@@ -1139,6 +1147,8 @@ class KVCacheGroupSpec:
     kv_cache_spec: KVCacheSpec
     # Whether this group contains EAGLE/MTP draft attention layers.
     is_eagle_group: bool = False
+    # Whether this group is part of the externally transferable KV state.
+    enable_kv_transfer: bool = True
 
 
 @dataclass
@@ -1163,6 +1173,42 @@ class KVCacheConfig:
     """Resolved retention policy for local prefix-cache checkpoints."""
     kv_cache_layout: str | None = None
     """The KV cache layout resolved by the engine core, adopted by all workers."""
+
+    @cached_property
+    def transfer_group_ids(self) -> tuple[int, ...]:
+        """IDs of cache groups that participate in external KV transfer."""
+        return tuple(
+            group_id
+            for group_id, group in enumerate(self.kv_cache_groups)
+            if group.enable_kv_transfer
+        )
+
+    @cached_property
+    def transfer_groups(self) -> tuple[KVCacheGroupSpec, ...]:
+        """Cache groups that participate in external KV transfer."""
+        return tuple(
+            self.kv_cache_groups[group_id] for group_id in self.transfer_group_ids
+        )
+
+    @cached_property
+    def transfer_group_index_by_layer(self) -> dict[str, int]:
+        """Transfer-group tuple index for each participating layer."""
+        return {
+            layer_name: group_index
+            for group_index, group in enumerate(self.transfer_groups)
+            for layer_name in group.layer_names
+        }
+
+    def select_transfer_block_ids(
+        self, block_ids: Sequence[list[int]]
+    ) -> tuple[list[int], ...]:
+        """Select block IDs for externally transferable cache groups."""
+        if len(block_ids) != len(self.kv_cache_groups):
+            raise ValueError(
+                f"Expected {len(self.kv_cache_groups)} KV cache groups, "
+                f"got {len(block_ids)}."
+            )
+        return tuple(block_ids[group_id] for group_id in self.transfer_group_ids)
 
     @property
     def has_mamba_layers(self) -> bool:

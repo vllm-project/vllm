@@ -63,6 +63,15 @@ encoder_rr_lock = asyncio.Lock()
 
 MM_TYPES = {"image_url", "audio_url", "input_audio", "video_url"}
 
+# The embeds content type each MM item is rewritten to once the encoder has
+# published its embedding out of band.
+EMBEDS_TYPES = {
+    "image_url": "image_embeds",
+    "audio_url": "audio_embeds",
+    "input_audio": "audio_embeds",
+    "video_url": "video_embeds",
+}
+
 
 def encoder_rr_assignment(
     e_urls: list[str], start: int, count: int
@@ -105,9 +114,12 @@ def _b64_tensor(values: list) -> str:
     import torch
 
     buf = io.BytesIO()
-    grid = torch.tensor(values, dtype=torch.long)
-    # Downstream stacks per item, so hand over a flat (t, h, w).
-    torch.save(grid.reshape(-1)[:3], buf)
+    flat = [v for item in values for v in (item if isinstance(item, list) else [item])]
+    # Floats stay float64 so timestamp strings format exactly as the
+    # encoder computed them.
+    dtype = torch.float64 if any(isinstance(v, float) for v in flat) else None
+    # Downstream stacks per item, so hand over a flat vector.
+    torch.save(torch.tensor(flat, dtype=dtype), buf)
     return base64.b64encode(buf.getvalue()).decode()
 
 
@@ -148,15 +160,9 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
                 # processor cache); let the decoder process the media itself.
                 new_content.append(item)
                 continue
-            embeds_type = (
-                "video_embeds" if item.get("type") == "video_url" else "image_embeds"
-            )
+            embeds_type = EMBEDS_TYPES[item["type"]]
             new_content.append(
-                {
-                    "type": embeds_type,
-                    embeds_type: metadata,
-                    "uuid": item_uuid,
-                }
+                {"type": embeds_type, embeds_type: metadata, "uuid": item_uuid}
             )
             rewritten += 1
         new_messages.append({**msg, "content": new_content})
