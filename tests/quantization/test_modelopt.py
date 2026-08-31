@@ -896,8 +896,8 @@ def test_modelopt_fp8_pb_wo_hides_output_padding(monkeypatch):
 
 def test_modelopt_fp8_pb_wo_rejects_non_128_input():
     """Input width must still be a multiple of 128 (same as #53132, which only
-    pads the output). A partial input block is refused loudly, not silently
-    mis-scaled."""
+    pads the output). A partial input block is refused loudly rather than
+    silently loading wrong scales."""
     from vllm.model_executor.layers.quantization import modelopt as mo
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kFp8Static128BlockSym,
