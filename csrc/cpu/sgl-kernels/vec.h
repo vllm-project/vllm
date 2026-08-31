@@ -9,6 +9,10 @@
 #define CPU_CAPABILITY_AVX512
 #endif
 
+#ifdef VLLM_CPU_FP8_BRGEMM
+#define CPUBLAS_BRGEMM_F8F8BF16
+#endif
+
 #if defined(__riscv_v_min_vlen) && (__riscv_v_min_vlen == 128 || __riscv_v_min_vlen == 256)
 #define CPU_CAPABILITY_RVV
 #endif
