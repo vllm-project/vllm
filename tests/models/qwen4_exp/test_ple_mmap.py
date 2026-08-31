@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import errno
 import gc
+import inspect
 import logging
 import os
+from collections.abc import Iterable
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -34,6 +37,11 @@ from vllm.config import CompilationConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
+from vllm.models.qwen4_exp.common.ple import (
+    PLEVocabParallelEmbedding,
+    copy_ple_embedding_shard_,
+)
+from vllm.models.qwen4_exp.nvidia import ple_layer as ple_layer_module
 from vllm.models.qwen4_exp.nvidia.ple_layer import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
@@ -1382,13 +1390,13 @@ def test_op_is_registered_under_platform_default_and_cpu_dispatch_keys() -> None
     assert schema.endswith("-> ()")
     # Exercise the CPU key directly: this is what every other test below
     # relies on to run without a GPU. The widened op calls
-    # ple_embedding_module._hash_ngram_ids THEN .ngram_embedding(...), so
+    # ple_embedding_module.compute_ngram_ids THEN .ngram_embedding(...), so
     # the fake stands in for both.
     hash_calls: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
     gather_calls: list[torch.Tensor] = []
 
     class _FakePleEmbeddingModule:
-        def _hash_ngram_ids(
+        def compute_ngram_ids(
             self,
             input_ids: torch.Tensor,
             query_start_loc: torch.Tensor,
@@ -2311,6 +2319,78 @@ def test_ngram_embedding_mmap_load_weights_rejects_mismatched_shard_shape() -> N
         module.load_weights([("ngram_embedding.shard_0.weight", torch.zeros(3, 2))])
 
 
+def test_ngram_embedding_mmap_load_weights_rejects_same_instance_reload(
+    tmp_path: Path,
+) -> None:
+    """QA round 1, High: a same-path iterator reload must not mix
+    checkpoint A's attached table with checkpoint B's scale. Once a table
+    is attached, load_weights must fail closed on any later invocation on
+    the SAME module — before consuming or mutating checkpoint B's iterator
+    — leaving A's table identity, scale, weights_streamed, and a
+    representative gathered row untouched. build_tables' own model_path
+    check never catches this: the path never changes, so it silently
+    reuses the attached table while an unguarded load_weights would have
+    already stomped weight_scale/weights_streamed."""
+    full_a = _write_ple_layer(
+        tmp_path, layer_idx=0, vocab=8, parts=2, cols=2, scale=0.25
+    )
+    module = _mmap_ngram_module_for_load_test(vocab=8, cols=2)
+    module.load_weights(
+        [
+            ("ngram_embedding.shard_0.weight", full_a[0:4]),
+            ("ngram_embedding.shard_1.weight", full_a[4:8]),
+            (
+                "ngram_embedding.weight_scale",
+                torch.tensor([0.25], dtype=torch.bfloat16),
+            ),
+        ]
+    )
+    cc = SimpleNamespace(
+        static_forward_context={"a.ple": _fake_ple_layer(0, module.ngram_embedding, 2)}
+    )
+    ple_mmap.build_tables(_model_config(tmp_path), cc)
+    embedding = module.ngram_embedding
+    table_a = embedding.table
+    assert table_a is not None
+    scale_a = embedding.weight_scale.clone()
+    ids = torch.tensor([0, 7], dtype=torch.long)
+    row_a_before = embedding(ids).clone()
+    assert torch.equal(row_a_before, full_a[ids])  # sanity: A's gather is correct
+
+    # Checkpoint B: distinct shard values and scale, never written to
+    # `tmp_path` — the bug is keyed on the SAME module already holding a
+    # table, not on any particular directory, so build_tables must never
+    # even be reached to reproduce it.
+    full_b = _synthetic_weight(8, 2, layer_idx=1)
+    consumed: list[str] = []
+
+    def checkpoint_b_iter():
+        for name, tensor in (
+            ("ngram_embedding.shard_0.weight", full_b[0:4]),
+            ("ngram_embedding.shard_1.weight", full_b[4:8]),
+            (
+                "ngram_embedding.weight_scale",
+                torch.tensor([0.75], dtype=torch.bfloat16),
+            ),
+        ):
+            consumed.append(name)
+            yield name, tensor
+
+    with pytest.raises(RuntimeError, match="already has a table attached"):
+        module.load_weights(checkpoint_b_iter())
+
+    assert consumed == []  # raised before the iterator was ever advanced
+    assert embedding.table is table_a  # A's table identity is unchanged
+    assert torch.equal(embedding.weight_scale, scale_a)  # A's scale is unchanged
+    assert embedding.weights_streamed is True  # unchanged from A's load
+    assert torch.equal(embedding(ids), row_a_before)  # A's gathered row is unchanged
+
+    # Repeated idempotent build_tables calls with no further weight load
+    # must keep working, unaffected by the rejected reload above.
+    ple_mmap.build_tables(_model_config(tmp_path), cc)
+    assert embedding.table is table_a
+
+
 # --------------------------------------------------------------------------- #
 # build_tables: construction hook, fail-closed validation, per-layer keying.
 # --------------------------------------------------------------------------- #
@@ -2983,20 +3063,20 @@ def test_resolve_model_path_falls_back_to_offline_snapshot_download(
 # --------------------------------------------------------------------------- #
 # (a) env-on vs env-off FORWARD equivalence, through the CPU dispatch key.
 # The op boundary is the whole forward: env-on hashes AND gathers inside the
-# op. Both arms call the SAME Qwen4ExpNGramEmbedding._hash_ngram_ids, so
+# op. Both arms call the SAME Qwen4ExpNGramEmbedding.compute_ngram_ids, so
 # this test proves the env-on path loads the RIGHT weights and gathers and
-# dequantizes them the same way the stock VocabParallelEmbedding path
+# dequantizes them the same way the stock PLEVocabParallelEmbedding path
 # does — it does NOT independently verify the hashing math itself: a bug
-# in _hash_ngram_ids would move both arms identically and cancel out here.
+# in compute_ngram_ids would move both arms identically and cancel out here.
 # Hashing correctness is pinned separately by
-# test_hash_ngram_ids_matches_golden_ids below.
+# test_compute_ngram_ids_matches_golden_ids below.
 # --------------------------------------------------------------------------- #
 
 
 def test_env_on_off_forward_equivalence_fp8_and_dequantized(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """env-off: a real stock VocabParallelEmbedding under
+    """env-off: a real stock PLEVocabParallelEmbedding under
     Qwen4ExpPLEFp8EmbeddingMethod (real FP8 weight + weight_scale
     Parameters, mirrors test_ple.py's _make_fp8_embedding_layer). env-on:
     an MmapNgramEmbedding placeholder attached to shard files holding the
@@ -3005,7 +3085,7 @@ def test_env_on_off_forward_equivalence_fp8_and_dequantized(
     both sides; compared byte-equal at fp8 AND through
     _dequantize_embeddings to bf16. Proves weight-loading/gather/dequant
     equivalence between the two paths, not hashing correctness (both
-    arms share the same _hash_ngram_ids call, see module comment above).
+    arms share the same compute_ngram_ids call, see module comment above).
     """
     config = _make_text_config()  # ngram_size=3, heads_per_ngram=2 -> 4 heads
     embedding_dim = 8  # head_dim = 2
@@ -3028,7 +3108,7 @@ def test_env_on_off_forward_equivalence_fp8_and_dequantized(
         quant_config=quant_config,
         params_dtype=torch.bfloat16,
     )
-    assert isinstance(stock.ngram_embedding, embedding_module.VocabParallelEmbedding)
+    assert isinstance(stock.ngram_embedding, PLEVocabParallelEmbedding)
     vocab = stock.ngram_embedding.org_vocab_size
     head_dim = stock.head_dim
     parts = stock.split_ngram_parts
@@ -3041,6 +3121,32 @@ def test_env_on_off_forward_equivalence_fp8_and_dequantized(
     input_ids = torch.tensor([1, 2], dtype=torch.long)
     query_start_loc = torch.tensor([0, 2], dtype=torch.long)
     ngram_context = torch.zeros((1, 4), dtype=torch.long)
+
+    # The stock branch of forward() routes ID generation through the
+    # REGISTERED qwen4_exp_compute_ple_ngram_ids op (upstream architecture,
+    # untouched by this PR). That op only has a CUDA dispatch-key impl
+    # (matches upstream test_ple.py, which drives it as a plain function for
+    # the same reason), so on a CUDA-platform host it cannot run against CPU
+    # tensors through torch.ops. Shadow the OpOverloadPacket with the real
+    # underlying function, and stand in a no_compile_layers context
+    # resolving straight to `stock` -- mirrors test_ple.py's
+    # test_ple_ngram_ids_custom_op_uses_current_request_layout. This must
+    # compute the SAME real IDs the mmap arm below gets via a direct
+    # compute_ngram_ids call, or the equivalence assertion would compare
+    # unrelated values.
+    monkeypatch.setattr(
+        ple_layer_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            no_compile_layers={stock.layer_name: SimpleNamespace(ple_embedding=stock)}
+        ),
+    )
+    monkeypatch.setattr(
+        torch.ops.vllm,
+        "qwen4_exp_compute_ple_ngram_ids",
+        ple_layer_module.qwen4_exp_compute_ple_ngram_ids,
+        raising=False,
+    )
 
     reference = stock.forward(input_ids, query_start_loc, ngram_context)
     assert reference.dtype == torch.float8_e4m3fn
@@ -3129,8 +3235,8 @@ def test_dequantize_embeddings_casts_a_bf16_table_to_the_output_dtype() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# _hash_ngram_ids golden pin. The equivalence test above drives BOTH
-# arms through the same _hash_ngram_ids call, so it cannot catch a bug in
+# compute_ngram_ids golden pin. The equivalence test above drives BOTH
+# arms through the same compute_ngram_ids call, so it cannot catch a bug in
 # the hashing math itself (xor chain / remainder / offset) — a mutation
 # there moves both arms identically and cancels out. This test freezes the
 # exact output of a fixed, small, real Qwen4ExpNGramEmbedding on fixed
@@ -3138,10 +3244,10 @@ def test_dequantize_embeddings_casts_a_bf16_table_to_the_output_dtype() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_hash_ngram_ids_matches_golden_ids() -> None:
+def test_compute_ngram_ids_matches_golden_ids() -> None:
     """Golden values captured by running this exact scenario once and
     hardcoding the result — they pin the xor-chain/remainder/offset math
-    in _hash_ngram_ids (ngram_size=3, heads_per_ngram=2, seed=1234,
+    in compute_ngram_ids (ngram_size=3, heads_per_ngram=2, seed=1234,
     ple_dense_layer_id=0), not merely its shape.
     """
     config = _make_text_config()  # ngram_size=3, heads_per_ngram=2 -> 4 heads
@@ -3160,7 +3266,7 @@ def test_hash_ngram_ids_matches_golden_ids() -> None:
     query_start_loc = torch.tensor([0, 2, 3], dtype=torch.long)
     ngram_context = torch.tensor([[44, 55], [66, 77]], dtype=torch.long)
 
-    ngram_ids = module._hash_ngram_ids(input_ids, query_start_loc, ngram_context)
+    ngram_ids = module.compute_ngram_ids(input_ids, query_start_loc, ngram_context)
 
     assert ngram_ids.shape == (3, 4)
     golden = torch.tensor(
@@ -3242,7 +3348,7 @@ def test_mmap_forward_allocates_an_fp8_output_buffer(
     )
 
     # ple_embedding must be the REAL module (not a bare embedding wrapper):
-    # the widened op calls ple_embedding_module._hash_ngram_ids(...)
+    # the widened op calls ple_embedding_module.compute_ngram_ids(...)
     # before the gather, and only Qwen4ExpNGramEmbedding provides that.
     fake_ple_layer = SimpleNamespace(ple_embedding=module)
     ctx = SimpleNamespace(no_compile_layers={layer_name: fake_ple_layer})
@@ -3412,6 +3518,225 @@ def test_model_load_weights_never_calls_build_tables_when_disabled(
 
 
 # --------------------------------------------------------------------------- #
+# QA round 2, High: the child-level guard in Qwen4ExpNGramEmbedding.load_weights
+# only fires once AutoWeightsLoader's recursive walk reaches that specific PLE
+# layer -- by then AutoWeightsLoader may already have mutated earlier,
+# unrelated parameters from the same reload. Both top-level load_weights must
+# preflight -- via ple_mmap.preflight_reload_check -- BEFORE AutoWeightsLoader
+# is even constructed and before `weights` is advanced at all.
+# --------------------------------------------------------------------------- #
+
+
+class _ConstructionRecordingAutoWeightsLoader:
+    """Stands in for AutoWeightsLoader, recording every construction attempt
+    so a test can assert it was NEVER constructed (the preflight raised
+    strictly before this point). If it ever were constructed and reached,
+    `load_weights` fully drains the iterator, so a bug that swallows the
+    preflight failure would still show up as a consumed iterator."""
+
+    def __init__(self, constructed: list[object], *args: object, **kwargs: object):
+        del args, kwargs
+        constructed.append(self)
+
+    def load_weights(
+        self, weights: Iterable[object], mapper: object = None
+    ) -> set[str]:
+        del mapper
+        list(weights)
+        return {"dummy"}
+
+
+@pytest.mark.parametrize(
+    "cls_name", ["Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"]
+)
+def test_model_load_weights_preflights_before_autoweightsloader_touches_anything(
+    monkeypatch: pytest.MonkeyPatch, cls_name: str, tmp_path: Path
+) -> None:
+    """A same-instance reload onto a PLE layer that already has a table
+    attached must be rejected before AutoWeightsLoader is constructed, before
+    the checkpoint iterator is advanced at all, before build_tables runs, and
+    without mutating any earlier parameter this reload's stream would
+    otherwise reach first."""
+    monkeypatch.setenv("VLLM_PLE_MMAP", "1")
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=8, parts=2, cols=2, scale=0.25)
+    embedding = _attached_embedding(
+        tmp_path, layer_idx=0, vocab=8, parts=2, cols=2, scale=0.25
+    )
+    table_before = embedding.table
+    assert table_before is not None
+    scale_before = embedding.weight_scale.clone()
+
+    constructed: list[object] = []
+    monkeypatch.setattr(
+        model_module,
+        "AutoWeightsLoader",
+        partial(_ConstructionRecordingAutoWeightsLoader, constructed),
+    )
+    build_table_calls: list[object] = []
+    monkeypatch.setattr(
+        ple_mmap, "build_tables", lambda mc, cc: build_table_calls.append((mc, cc))
+    )
+
+    # An "earlier" parameter this reload's stream would reach well before the
+    # PLE layer buried under model.layers.N.ple.ple_embedding.ngram_embedding
+    # -- a real Parameter, not a plain attribute, so an in-place weight_loader
+    # mutation would actually show up in the before/after comparison below.
+    sentinel_param = torch.nn.Parameter(torch.tensor([9.0, 9.0, 9.0]))
+    sentinel_before = sentinel_param.detach().clone()
+
+    consumed: list[str] = []
+
+    def reload_checkpoint_iter():
+        for name, tensor in (
+            ("lm_head.weight", torch.tensor([1.0, 2.0, 3.0])),
+            ("model.embed_tokens.weight", torch.tensor([4.0, 5.0, 6.0])),
+        ):
+            consumed.append(name)
+            yield name, tensor
+
+    cls = getattr(model_module, cls_name)
+    model_config = _model_config(tmp_path)
+    stub_self = SimpleNamespace(
+        hf_to_vllm_mapper=cls.hf_to_vllm_mapper,
+        model_config=model_config,
+        language_model_only=False,
+        sentinel_param=sentinel_param,
+    )
+    cc = SimpleNamespace(
+        static_forward_context={"a.ple": _fake_ple_layer(0, embedding, 2)}
+    )
+    vllm_config = SimpleNamespace(compilation_config=cc)
+
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(RuntimeError, match="already has a table attached"),
+    ):
+        cls.load_weights(stub_self, reload_checkpoint_iter())
+
+    assert consumed == []  # the checkpoint iterator was never advanced
+    assert constructed == []  # AutoWeightsLoader was never constructed
+    assert build_table_calls == []  # build_tables was never reached
+    assert torch.equal(stub_self.sentinel_param, sentinel_before)  # unmutated
+    assert embedding.table is table_before  # unchanged identity
+    assert torch.equal(embedding.weight_scale, scale_before)  # unchanged
+
+
+@pytest.mark.parametrize(
+    "cls_name", ["Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"]
+)
+def test_model_load_weights_preflight_and_build_tables_share_one_captured_config(
+    monkeypatch: pytest.MonkeyPatch, cls_name: str, tmp_path: Path
+) -> None:
+    """Both the preflight call and the build_tables call must use the SAME
+    captured compilation_config object -- re-reading
+    get_current_vllm_config() a second time after AutoWeightsLoader runs
+    would be a needless second lookup and could in principle observe a
+    different config."""
+    monkeypatch.setenv("VLLM_PLE_MMAP", "1")
+    monkeypatch.setattr(model_module, "AutoWeightsLoader", _FakeAutoWeightsLoader)
+
+    preflight_calls: list[object] = []
+    monkeypatch.setattr(
+        ple_mmap,
+        "preflight_reload_check",
+        lambda cc: preflight_calls.append(cc),
+    )
+    build_table_calls: list[tuple[object, object]] = []
+    monkeypatch.setattr(
+        ple_mmap, "build_tables", lambda mc, cc: build_table_calls.append((mc, cc))
+    )
+    lookups: list[object] = []
+    real_get_current_vllm_config = model_module.get_current_vllm_config
+
+    def _counting_get_current_vllm_config():
+        result = real_get_current_vllm_config()
+        lookups.append(result)
+        return result
+
+    monkeypatch.setattr(
+        model_module, "get_current_vllm_config", _counting_get_current_vllm_config
+    )
+
+    cls = getattr(model_module, cls_name)
+    model_config = _model_config(tmp_path)
+    stub_self = SimpleNamespace(
+        hf_to_vllm_mapper=cls.hf_to_vllm_mapper,
+        model_config=model_config,
+        language_model_only=False,
+    )
+    cc = SimpleNamespace(static_forward_context={})
+    vllm_config = SimpleNamespace(compilation_config=cc)
+
+    with set_current_vllm_config(vllm_config):
+        result = cls.load_weights(stub_self, iter([]))
+
+    assert result == {"dummy"}
+    assert len(lookups) == 1  # captured exactly once, not re-read post-load
+    assert preflight_calls == [cc]
+    assert build_table_calls == [(model_config, cc)]
+    assert preflight_calls[0] is build_table_calls[0][1]  # same captured object
+
+
+def test_preflight_reload_check_ignores_layers_without_a_ple_embedding() -> None:
+    cc = SimpleNamespace(static_forward_context={"a": SimpleNamespace(layer_idx=0)})
+    ple_mmap.preflight_reload_check(cc)  # must not raise
+
+
+def test_preflight_reload_check_ignores_non_mmap_embeddings() -> None:
+    """A stock (non-mmap) PLEVocabParallelEmbedding has no `.table` at all --
+    the isinstance(embedding, MmapNgramEmbedding) check must gate before any
+    attribute access that would otherwise raise."""
+    stock_embedding = SimpleNamespace()
+    cc = SimpleNamespace(
+        static_forward_context={"a.ple": _fake_ple_layer(0, stock_embedding, 2)}
+    )
+    ple_mmap.preflight_reload_check(cc)  # must not raise
+
+
+def test_preflight_reload_check_ignores_an_mmap_embedding_with_no_table_yet() -> None:
+    embedding = ple_mmap.MmapNgramEmbedding(8, 2)
+    assert embedding.table is None
+    cc = SimpleNamespace(
+        static_forward_context={"a.ple": _fake_ple_layer(0, embedding, 2)}
+    )
+    ple_mmap.preflight_reload_check(cc)  # must not raise
+
+
+def test_preflight_reload_check_raises_when_a_layer_already_has_a_table(
+    tmp_path: Path,
+) -> None:
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=8, parts=2, cols=2, scale=0.25)
+    embedding = _attached_embedding(
+        tmp_path, layer_idx=0, vocab=8, parts=2, cols=2, scale=0.25
+    )
+    cc = SimpleNamespace(
+        static_forward_context={"a.ple": _fake_ple_layer(0, embedding, 2)}
+    )
+    with pytest.raises(RuntimeError, match="already has a table attached"):
+        ple_mmap.preflight_reload_check(cc)
+
+
+def test_preflight_reload_check_scans_past_a_clean_layer_to_find_the_attached_one(
+    tmp_path: Path,
+) -> None:
+    """An earlier, never-loaded PLE layer in iteration order must not mask
+    an attached table discovered on a later one."""
+    clean_embedding = ple_mmap.MmapNgramEmbedding(8, 2)
+    _write_ple_layer(tmp_path, layer_idx=1, vocab=8, parts=2, cols=2, scale=0.25)
+    attached_embedding = _attached_embedding(
+        tmp_path, layer_idx=1, vocab=8, parts=2, cols=2, scale=0.25
+    )
+    cc = SimpleNamespace(
+        static_forward_context={
+            "a.ple": _fake_ple_layer(0, clean_embedding, 2),
+            "b.ple": _fake_ple_layer(1, attached_embedding, 2),
+        }
+    )
+    with pytest.raises(RuntimeError, match="already has a table attached"):
+        ple_mmap.preflight_reload_check(cc)
+
+
+# --------------------------------------------------------------------------- #
 # Default-off inertness (invariant 2)
 # --------------------------------------------------------------------------- #
 
@@ -3431,7 +3756,7 @@ def test_default_off_uses_the_stock_vocab_parallel_embedding() -> None:
         params_dtype=torch.float32,
     )
 
-    assert isinstance(module.ngram_embedding, embedding_module.VocabParallelEmbedding)
+    assert isinstance(module.ngram_embedding, PLEVocabParallelEmbedding)
     assert not isinstance(module.ngram_embedding, ple_mmap.MmapNgramEmbedding)
 
 
@@ -3466,6 +3791,28 @@ def test_default_off_forward_never_calls_the_mmap_gather_op(
         lambda *a, **k: op_calls.append((a, k)),
         raising=False,
     )
+    # forward() still routes ID generation through the REGISTERED
+    # qwen4_exp_compute_ple_ngram_ids op (upstream architecture, untouched by
+    # this PR). That op only has a CUDA dispatch-key impl (matches upstream
+    # test_ple.py, which drives it as a plain function for the same reason),
+    # so on a CUDA-platform host it cannot run against CPU tensors through
+    # torch.ops. Shadow the OpOverloadPacket with the real underlying
+    # function, and stand in a no_compile_layers context resolving straight
+    # to this module -- mirrors test_ple.py's
+    # test_ple_ngram_ids_custom_op_uses_current_request_layout.
+    monkeypatch.setattr(
+        ple_layer_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            no_compile_layers={module.layer_name: SimpleNamespace(ple_embedding=module)}
+        ),
+    )
+    monkeypatch.setattr(
+        torch.ops.vllm,
+        "qwen4_exp_compute_ple_ngram_ids",
+        ple_layer_module.qwen4_exp_compute_ple_ngram_ids,
+        raising=False,
+    )
 
     input_ids = torch.tensor([1, 2], dtype=torch.long)
     query_start_loc = torch.tensor([0, 2], dtype=torch.long)
@@ -3491,6 +3838,17 @@ def test_default_off_load_weights_matches_the_stock_contract() -> None:
         weight=torch.nn.Parameter(torch.full((4, 2), -1.0)),
         shard_indices=SimpleNamespace(org_vocab_start_index=2, org_vocab_end_index=6),
     )
+    # Real PLEVocabParallelEmbedding construction attaches weight_loader to
+    # the weight Parameter itself (see VocabParallelEmbedding.__init__ ->
+    # quant_method.create_weights(..., weight_loader=self.weight_loader));
+    # this fake embedding needs the same attribute for load_weights's
+    # generic `embedding.weight.weight_loader(...)` dispatch to resolve.
+    # Mirrors test_ple.py's _set_test_embedding_weight_loader.
+    embedding.weight.weight_loader = partial(
+        copy_ple_embedding_shard_,
+        tp_start=embedding.shard_indices.org_vocab_start_index,
+        tp_end=embedding.shard_indices.org_vocab_end_index,
+    )
     module.ngram_embedding = embedding  # not MmapNgramEmbedding -> mmap_enabled=False
 
     shard_0 = torch.arange(8, dtype=torch.float32).reshape(4, 2)
@@ -3505,3 +3863,30 @@ def test_default_off_load_weights_matches_the_stock_contract() -> None:
     assert loaded == {"ngram_embedding.weight"}
     expected = torch.cat((shard_0[2:4], shard_1[0:2]))
     torch.testing.assert_close(embedding.weight, expected)
+
+
+# --------------------------------------------------------------------------- #
+# Source-level oracles: the reconciliation onto #53896 must have fully
+# removed the private hash helper and never construct the generic resident
+# embedding directly — a bug here would still pass every behavioral test
+# above by coincidence (e.g. a leftover dead `_hash_ngram_ids` method that
+# nothing calls), so these inspect the actual source text/AST.
+# --------------------------------------------------------------------------- #
+
+
+def test_ple_layer_has_no_private_hash_helper() -> None:
+    source = inspect.getsource(ple_layer_module)
+    assert "_hash_ngram_ids" not in source
+
+
+def test_ple_mmap_has_no_private_hash_helper() -> None:
+    source = inspect.getsource(ple_mmap)
+    assert "_hash_ngram_ids" not in source
+
+
+def test_ple_layer_constructs_ple_vocab_embedding_once_in_env_off_arm() -> None:
+    """`PLEVocabParallelEmbedding(` must appear exactly once, as the env-off
+    construction — never a bare, generic `VocabParallelEmbedding(`."""
+    source = inspect.getsource(ple_layer_module)
+    assert source.count("PLEVocabParallelEmbedding(") == 1
+    assert "= VocabParallelEmbedding(" not in source

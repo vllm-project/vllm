@@ -6,6 +6,10 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding,
+)
+
 
 @dataclass(frozen=True)
 class PLEShardOverlap:
@@ -73,3 +77,24 @@ def copy_ple_embedding_shard_(
     with torch.no_grad():
         target.copy_(source.to(device=target.device, dtype=target.dtype))
     return overlap.row_count
+
+
+class PLEVocabParallelEmbedding(VocabParallelEmbedding):
+    """Vocab-parallel embedding that accepts checkpoint row shards."""
+
+    def weight_loader(
+        self,
+        param: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        checkpoint_start: int | None = None,
+    ) -> None:
+        if checkpoint_start is None:
+            super().weight_loader(param, loaded_weight)
+            return
+        copy_ple_embedding_shard_(
+            param,
+            loaded_weight,
+            checkpoint_start=checkpoint_start,
+            tp_start=self.shard_indices.org_vocab_start_index,
+            tp_end=self.shard_indices.org_vocab_end_index,
+        )

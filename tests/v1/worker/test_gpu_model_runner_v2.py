@@ -27,8 +27,13 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner.dcp_rank = 0
     runner.cp_interleave = 1
     runner.cache_config = SimpleNamespace(enable_prefix_caching=True)
+    parallel_config = SimpleNamespace(
+        decode_context_parallel_size=1,
+        cp_kv_cache_interleave_size=1,
+    )
+    runner.parallel_config = parallel_config
     runner.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        parallel_config=parallel_config,
         cache_config=SimpleNamespace(mamba_cache_mode="none"),
     )
     runner.model_state = SimpleNamespace(

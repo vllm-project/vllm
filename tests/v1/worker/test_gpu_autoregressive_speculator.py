@@ -105,7 +105,9 @@ def _make_speculator(
 
 
 @pytest.mark.parametrize(("hc_mult", "expected"), [(None, 64), (4, 256)])
-def test_speculator_uses_draft_model_hidden_size(hc_mult, expected):
+def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected):
+    # Qwen4Exp targets expose multi-stream HC residuals to the drafter.
+    monkeypatch.setattr(base_spec_module, "_target_feeds_hc_residual", lambda _: True)
     hf_config = SimpleNamespace()
     if hc_mult is not None:
         hf_config.hc_mult = hc_mult

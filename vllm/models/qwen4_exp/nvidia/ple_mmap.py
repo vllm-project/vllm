@@ -1287,6 +1287,56 @@ def validate_shards_for(
 
 
 # --------------------------------------------------------------------------- #
+# Reload preflight: called from the top-level model's load_weights, before
+# AutoWeightsLoader is even constructed.
+# --------------------------------------------------------------------------- #
+def preflight_reload_check(compilation_config: CompilationConfig) -> None:
+    """Fail closed, before any weights stream, if a PLE layer already has a
+    table attached.
+
+    The child-level guard in ``Qwen4ExpNGramEmbedding.load_weights`` only
+    fires once ``AutoWeightsLoader``'s recursive walk reaches that specific
+    PLE layer's own ``load_weights``. ``AutoWeightsLoader`` walks (and
+    mutates) checkpoint weights in stream order as it descends the module
+    tree, so a same-instance reload can already have overwritten earlier,
+    unrelated parameters (e.g. ``lm_head``, ``embed_tokens``, other decoder
+    layers) before it ever reaches the PLE layer whose guard rejects the
+    call. Calling this from the top-level ``Qwen4ExpForCausalLM.load_weights``
+    / ``Qwen4ExpForConditionalGeneration.load_weights`` — before their
+    ``AutoWeightsLoader`` is constructed and before ``weights`` is advanced
+    at all — rejects that same reload before anything is mutated. The
+    child-level guard stays in place as defense in depth for any load path
+    that reaches a PLE child directly.
+
+    Args:
+        compilation_config: the current call's compilation config; every
+            layer registered in ``static_forward_context`` that resolves to
+            an :class:`MmapNgramEmbedding` with a non-None ``table`` fails
+            this check.
+
+    Raises:
+        RuntimeError: a PLE layer already has a table attached from a
+            previous load — reloading onto the same live module would mix
+            this reload's rows with the already-attached checkpoint's scale.
+    """
+    for layer_name, layer in compilation_config.static_forward_context.items():
+        ple_embedding_module = getattr(layer, "ple_embedding", None)
+        if ple_embedding_module is None:
+            continue
+        embedding = getattr(ple_embedding_module, "ngram_embedding", None)
+        if not isinstance(embedding, MmapNgramEmbedding):
+            continue
+        if embedding.table is not None:
+            raise RuntimeError(
+                f"PLE mmap: {layer_name!r} already has a table "
+                "attached from a previous load; calling load_weights again "
+                "on the same live module is unsupported — it would mix "
+                "this reload's rows with the already-attached checkpoint's "
+                "scale. Restart the seat to load different weights."
+            )
+
+
+# --------------------------------------------------------------------------- #
 # Table construction, invoked once from the top-level model's load_weights.
 # --------------------------------------------------------------------------- #
 def build_tables(
@@ -1551,13 +1601,17 @@ def _qwen4_exp_ple_mmap_forward(
         ) from None
     ple_embedding_module = getattr(layer, "ple_embedding", None)
     if ple_embedding_module is None or not hasattr(
-        ple_embedding_module, "_hash_ngram_ids"
+        ple_embedding_module, "compute_ngram_ids"
     ):
         raise RuntimeError(f"PLE mmap: {layer_name!r} does not resolve to a PLE layer")
     # The stock trigram hashing runs here, eagerly and untraced — ordinary
     # GPU tensor ops are fine inside a custom op body; they are simply never
-    # seen by Dynamo, which is the whole point of the widened boundary.
-    ngram_ids = ple_embedding_module._hash_ngram_ids(
+    # seen by Dynamo, which is the whole point of the widened boundary. Call
+    # the method directly rather than through the registered
+    # qwen4_exp_compute_ple_ngram_ids op: this body already runs inside one
+    # custom op (qwen4_exp_ple_mmap_forward), and nesting a second would
+    # dispatch a custom op from within a custom op.
+    ngram_ids = ple_embedding_module.compute_ngram_ids(
         input_ids, query_start_loc, ngram_context
     )
     result = ple_embedding_module.ngram_embedding(ngram_ids).flatten(-2)
@@ -1600,6 +1654,7 @@ __all__ = [
     "discover_shards",
     "enabled",
     "parse_safetensors_header",
+    "preflight_reload_check",
     "resolve_model_path",
     "set_weight_scale",
     "validate_shards_for",

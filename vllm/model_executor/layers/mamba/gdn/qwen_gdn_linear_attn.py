@@ -150,6 +150,15 @@ def _log_gdn_backend_decision(
     head_k_dim = getattr(
         vllm_config.model_config.hf_text_config, "linear_key_head_dim", None
     )
+
+    if current_platform.is_cpu():
+        logger.info_once(
+            "Using %s GDN prefill kernel (head_k_dim=%s).",
+            "CPU",
+            head_k_dim,
+        )
+        return
+
     chosen = {
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
@@ -197,6 +206,8 @@ def fi_chunk_gated_delta_rule(
     fi_state = initial_state.to(torch.float32)
     fi_g = g.to(torch.float32)
     fi_beta = beta.to(torch.float32)
+    if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.to(torch.int64)
     result = chunk_gated_delta_rule_fi(
         q=q,
         k=k,
@@ -490,7 +501,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
         self.gdn_decode_kernel = envs.VLLM_GDN_DECODE_KERNEL.strip().lower()
-        if self.gdn_decode_kernel == "cuda":
+        if self.gdn_decode_kernel == "cuda" and current_platform.is_cuda_alike():
             reason = self._fused_gdn_decode_unsupported_reason(vllm_config)
             if reason is not None:
                 if "VLLM_GDN_DECODE_KERNEL" in os.environ:
@@ -501,6 +512,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     "Falling back to the Triton GDN decode path: %s", reason
                 )
                 self.gdn_decode_kernel = "triton"
+        elif current_platform.is_cpu():
+            self.gdn_decode_kernel = "CPU"
+
         self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
         logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
 

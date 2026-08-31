@@ -7,10 +7,10 @@ from typing import Any
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tool_parsers.granite4_tool_parser import Granite4ToolParser
 
 MODEL = "ibm-granite/granite-4.0-h-tiny"

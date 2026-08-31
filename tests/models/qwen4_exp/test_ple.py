@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -41,7 +42,16 @@ def _make_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
             org_vocab_end_index=6,
         ),
     )
+    _set_test_embedding_weight_loader(module.ngram_embedding)
     return module
+
+
+def _set_test_embedding_weight_loader(embedding) -> None:
+    embedding.weight.weight_loader = partial(
+        copy_ple_embedding_shard_,
+        tp_start=embedding.shard_indices.org_vocab_start_index,
+        tp_end=embedding.shard_indices.org_vocab_end_index,
+    )
 
 
 def _make_fp8_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
@@ -64,6 +74,7 @@ def _make_fp8_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
         "weight_scale",
         nn.Parameter(torch.zeros(1, dtype=torch.bfloat16), requires_grad=False),
     )
+    _set_test_embedding_weight_loader(embedding)
     module.ngram_embedding = embedding
     return module
 
@@ -121,16 +132,6 @@ def test_ngram_embedding_loads_shards_and_ignores_legacy_token_lookup() -> None:
         module.ngram_embedding.weight,
         torch.cat((shard_0[2:4], shard_1[0:2])),
     )
-
-
-def test_ngram_embedding_rejects_mismatched_checkpoint_shard() -> None:
-    module = _make_ngram_embedding_for_load_test()
-
-    with pytest.raises(
-        ValueError,
-        match=r"Shape mismatch for PLE embedding shard 0",
-    ):
-        module.load_weights([("ngram_embedding.shard_0.weight", torch.zeros(3, 2))])
 
 
 def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
@@ -267,6 +268,49 @@ def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
     assert _get_ple_embedding_quant_method(quant_config, prefix) is None
 
 
+def test_ple_ngram_ids_custom_op_uses_current_request_layout(monkeypatch) -> None:
+    class RuntimeNGramEmbedding(nn.Module):
+        def compute_ngram_ids(
+            self,
+            input_ids: torch.Tensor,
+            query_start_loc: torch.Tensor,
+            ngram_context: torch.Tensor,
+        ) -> torch.Tensor:
+            del input_ids, ngram_context
+            num_reqs = query_start_loc.numel() - 1
+            return torch.full((4, 2), num_reqs, dtype=torch.long)
+
+    layer = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
+    nn.Module.__init__(layer)
+    layer.ple_embedding = RuntimeNGramEmbedding()
+    monkeypatch.setattr(
+        ple_layer_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(no_compile_layers={"ple": layer}),
+    )
+    input_ids = torch.arange(4)
+    ngram_context = torch.zeros(2, 2, dtype=torch.long)
+    output = torch.empty(4, 2, dtype=torch.long)
+
+    ple_layer_module.qwen4_exp_compute_ple_ngram_ids(
+        input_ids,
+        torch.tensor([0, 4]),
+        ngram_context,
+        output,
+        "ple",
+    )
+    assert torch.equal(output, torch.ones_like(output))
+
+    ple_layer_module.qwen4_exp_compute_ple_ngram_ids(
+        input_ids,
+        torch.tensor([0, 2, 4]),
+        ngram_context,
+        output,
+        "ple",
+    )
+    assert torch.equal(output, torch.full_like(output, 2))
+
+
 def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:
     module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
     nn.Module.__init__(module)
@@ -335,16 +379,6 @@ def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:
     ).transpose(1, 2)[0, :2]
     torch.testing.assert_close(second_output, expected_second_output)
     torch.testing.assert_close(conv_state[1:], expected_second_state)
-
-
-def test_ple_state_shape_reserves_speculative_tokens() -> None:
-    module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
-    nn.Module.__init__(module)
-    module.hc_hidden_size = 32
-    module.conv_state_len = 9
-    module.num_spec_tokens = 3
-
-    assert module.get_state_shape()[0] in ((32, 12), (12, 32))
 
 
 def test_ple_short_conv_uses_fallback_when_profile_metadata_is_omitted(

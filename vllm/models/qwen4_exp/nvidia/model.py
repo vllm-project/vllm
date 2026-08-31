@@ -11,6 +11,9 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_pp_group
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
@@ -416,6 +419,11 @@ class Qwen4ExpModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.layers,
+            Qwen4ExpSparseMoeBlock,
+            "mlp",
+        )
         intermediate_size = config.hidden_size * config.hc_count
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], intermediate_size
@@ -559,6 +567,7 @@ class Qwen4ExpModel(nn.Module):
         )
         weights = maybe_fuse_shared_experts(
             weights,
+            enabled=self.is_fused_shared_expert_enabled,
             n_routed_experts=getattr(self.config, "num_experts", 0) or 0,
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
@@ -573,8 +582,16 @@ class Qwen4ExpModel(nn.Module):
         mapper = self.hf_to_vllm_mapper | WeightsMapper(
             orig_to_new_substr={substr: None for substr in skip_substrs}
         )
+        # The final HC mixer only exists on the last PP rank; earlier ranks
+        # must drop its checkpoint weights instead of failing to place them.
+        ignore_prefixes = (
+            None
+            if self.hyper_connection_mixer is not None
+            else ["hyper_connection_mixer."]
+        )
         loader = AutoWeightsLoader(
             self,
+            ignore_unexpected_prefixes=ignore_prefixes,
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
         loaded = loader.load_weights(
@@ -802,6 +819,15 @@ class Qwen4ExpForCausalLM(
         return positions.unsqueeze(0).expand(3, -1), 0
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Preflight BEFORE AutoWeightsLoader is constructed or `weights` is
+        # advanced: AutoWeightsLoader mutates checkpoint weights in stream
+        # order as it descends the module tree, so waiting for the PLE
+        # child's own guard to fire would let a same-instance reload already
+        # overwrite earlier, unrelated parameters first.
+        compilation_config = None
+        if ple_mmap.enabled():
+            compilation_config = get_current_vllm_config().compilation_config
+            ple_mmap.preflight_reload_check(compilation_config)
         mapper = self.hf_to_vllm_mapper | WeightsMapper(
             orig_to_new_substr={"mtp.": None}
         )
@@ -810,10 +836,8 @@ class Qwen4ExpForCausalLM(
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
         loaded = loader.load_weights(weights, mapper=mapper)
-        if ple_mmap.enabled():
-            ple_mmap.build_tables(
-                self.model_config, get_current_vllm_config().compilation_config
-            )
+        if compilation_config is not None:
+            ple_mmap.build_tables(self.model_config, compilation_config)
         return loaded
 
 
@@ -1000,6 +1024,15 @@ class Qwen4ExpForConditionalGeneration(
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Preflight BEFORE AutoWeightsLoader is constructed or `weights` is
+        # advanced — see Qwen4ExpForCausalLM.load_weights for why waiting for
+        # the PLE child's own guard is too late (this wrapper's loader walks
+        # the vision tower first, so it has even more to mutate before ever
+        # reaching a PLE layer).
+        compilation_config = None
+        if ple_mmap.enabled():
+            compilation_config = get_current_vllm_config().compilation_config
+            ple_mmap.preflight_reload_check(compilation_config)
         mapper = self.hf_to_vllm_mapper | WeightsMapper(
             orig_to_new_substr={"mtp.": None},
             orig_to_new_prefix={"visual.": None} if self.language_model_only else {},
@@ -1009,10 +1042,8 @@ class Qwen4ExpForConditionalGeneration(
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
         loaded = loader.load_weights(weights, mapper=mapper)
-        if ple_mmap.enabled():
-            ple_mmap.build_tables(
-                self.model_config, get_current_vllm_config().compilation_config
-            )
+        if compilation_config is not None:
+            ple_mmap.build_tables(self.model_config, compilation_config)
         return loaded
 
     @classmethod

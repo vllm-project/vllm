@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
@@ -33,8 +32,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.platforms import current_platform
-from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -1131,95 +1128,6 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens
 
 
-@functools.cache
-def _metadata_launch_pdl() -> bool:
-    return current_platform.is_arch_support_pdl()
-
-
-@triton.jit(do_not_specialize=["num_requests"])
-def _get_aligned_state_indices_kernel(
-    block_table_ptr,
-    seq_lens_ptr,
-    state_indices_ptr,
-    block_table_stride_0: tl.constexpr,
-    block_table_stride_1: tl.constexpr,
-    seq_lens_stride: tl.constexpr,
-    state_indices_stride_0: tl.constexpr,
-    state_indices_stride_1: tl.constexpr,
-    num_requests,
-    CACHE_BLOCK_SIZE: tl.constexpr,
-    NUM_STATE_SLOTS: tl.constexpr,
-    BLOCK_STATE_SLOTS: tl.constexpr,
-    BLOCK_ROWS: tl.constexpr,
-    launch_pdl: tl.constexpr,
-):
-    if launch_pdl:
-        tl.extra.cuda.gdc_wait()
-        tl.extra.cuda.gdc_launch_dependents()
-
-    rows = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
-    valid_row = rows < num_requests
-    seq_lens = tl.load(
-        seq_lens_ptr + rows * seq_lens_stride,
-        mask=valid_row,
-        other=1,
-    )
-    # Triton truncates signed division toward zero, unlike PyTorch floor
-    # division. Clamping keeps both paths equivalent for zero-length requests.
-    first_state_slot = tl.maximum((seq_lens - 1) // CACHE_BLOCK_SIZE, 0)
-
-    state_slots = tl.arange(0, BLOCK_STATE_SLOTS)
-    valid_state_slot = state_slots < NUM_STATE_SLOTS
-    state_indices = tl.load(
-        block_table_ptr
-        + rows[:, None] * block_table_stride_0
-        + (first_state_slot[:, None] + state_slots[None, :]) * block_table_stride_1,
-        mask=valid_row[:, None] & valid_state_slot[None, :],
-    )
-    tl.store(
-        state_indices_ptr
-        + rows[:, None] * state_indices_stride_0
-        + state_slots[None, :] * state_indices_stride_1,
-        state_indices,
-        mask=valid_row[:, None] & valid_state_slot[None, :],
-    )
-
-
-def mamba_get_block_table_tensor_triton(
-    block_table: torch.Tensor,
-    seq_lens: torch.Tensor,
-    kv_cache_spec: MambaSpec,
-) -> torch.Tensor:
-    """Gather aligned Mamba state indices with one Triton kernel."""
-    assert block_table.is_cuda and seq_lens.is_cuda
-    num_requests = block_table.shape[0]
-    num_state_slots = 1 + kv_cache_spec.num_speculative_blocks
-    state_indices = torch.empty(
-        (num_requests, num_state_slots),
-        dtype=block_table.dtype,
-        device=block_table.device,
-    )
-    block_rows = 32
-    _get_aligned_state_indices_kernel[(triton.cdiv(num_requests, block_rows),)](
-        block_table,
-        seq_lens,
-        state_indices,
-        block_table.stride(0),
-        block_table.stride(1),
-        seq_lens.stride(0),
-        state_indices.stride(0),
-        state_indices.stride(1),
-        num_requests,
-        CACHE_BLOCK_SIZE=kv_cache_spec.block_size,
-        NUM_STATE_SLOTS=num_state_slots,
-        BLOCK_STATE_SLOTS=triton.next_power_of_2(num_state_slots),
-        BLOCK_ROWS=block_rows,
-        num_warps=1,
-        launch_pdl=_metadata_launch_pdl(),
-    )
-    return state_indices
-
-
 def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -1244,19 +1152,18 @@ def mamba_get_block_table_tensor(
     """
     if mamba_cache_mode in ("all", "none"):
         return block_table
-    assert isinstance(kv_cache_spec, MambaSpec)
-    if HAS_TRITON and block_table.is_cuda and seq_lens.is_cuda:
-        return mamba_get_block_table_tensor_triton(block_table, seq_lens, kv_cache_spec)
-
-    # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
-    # to handle the invalid block table.
-    start_indices = (seq_lens - 1) // kv_cache_spec.block_size
-    start_indices.clamp_(min=0)
-    # Keep the arithmetic in int32; torch.gather alone requires int64 indices.
-    offsets = torch.arange(
-        1 + kv_cache_spec.num_speculative_blocks,
-        device=block_table.device,
-        dtype=torch.int32,
-    )
-    indices_to_gather = (start_indices.unsqueeze(1) + offsets).to(torch.int64)
-    return torch.gather(block_table, 1, indices_to_gather)
+    else:
+        assert isinstance(kv_cache_spec, MambaSpec)
+        # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
+        # to handle the invalid block table.
+        start_indices = (seq_lens - 1) // kv_cache_spec.block_size
+        start_indices.clamp_(min=0)
+        # Use int32 for arithmetic to avoid dtype promotion overhead,
+        # then convert to int64 for gather (which requires Long indices)
+        offsets = torch.arange(
+            1 + kv_cache_spec.num_speculative_blocks,
+            device=block_table.device,
+            dtype=torch.int32,
+        )
+        indices_to_gather = (start_indices.unsqueeze(1) + offsets).to(torch.int64)
+        return torch.gather(block_table, 1, indices_to_gather)

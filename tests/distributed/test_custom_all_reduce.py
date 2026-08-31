@@ -10,9 +10,6 @@ import torch.distributed as dist
 
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators import custom_all_reduce as car
-from vllm.distributed.device_communicators.custom_all_reduce import (
-    CustomAllreduce,
-)
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
 
 from ..utils import (
@@ -41,7 +38,7 @@ def test_custom_allreduce_filters_dtype(
     dtype: torch.dtype,
     expected: bool,
 ) -> None:
-    communicator = CustomAllreduce.__new__(CustomAllreduce)
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
     communicator.disabled = False
     communicator.world_size = 2
     communicator.max_size = 1024

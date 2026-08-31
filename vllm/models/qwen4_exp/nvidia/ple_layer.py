@@ -32,9 +32,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding,
-)
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.transformers_utils.configs.qwen4_exp import (
@@ -48,62 +45,8 @@ from vllm.v1.attention.backends.short_conv_attn import (
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
-from ..common.ple import copy_ple_embedding_shard_
+from ..common.ple import PLEVocabParallelEmbedding
 from . import ple_mmap
-
-_MASK64 = (1 << 64) - 1
-_SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
-_SPLITMIX_M1 = 0xBF58476D1CE4E5B9
-_SPLITMIX_M2 = 0x94D049BB133111EB
-_PLE_LAYER_PRIME = 10007
-
-
-def _splitmix64(value: int) -> int:
-    value = (value + _SPLITMIX_GAMMA) & _MASK64
-    value = ((value ^ (value >> 30)) * _SPLITMIX_M1) & _MASK64
-    value = ((value ^ (value >> 27)) * _SPLITMIX_M2) & _MASK64
-    return (value ^ (value >> 31)) & _MASK64
-
-
-def _is_prime_64(value: int) -> bool:
-    if value < 2:
-        return False
-    for prime in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
-        if value % prime == 0:
-            return value == prime
-    exponent = value - 1
-    shifts = 0
-    while exponent % 2 == 0:
-        exponent //= 2
-        shifts += 1
-    for base in (2, 325, 9375, 28178, 450775, 9780504, 1795265022):
-        if base % value == 0:
-            continue
-        witness = pow(base, exponent, value)
-        if witness in (1, value - 1):
-            continue
-        for _ in range(shifts - 1):
-            witness = pow(witness, 2, value)
-            if witness == value - 1:
-                break
-        else:
-            return False
-    return True
-
-
-def _nth_prime_after(start: int, count: int) -> int:
-    prime = int(start)
-    for _ in range(count):
-        candidate = prime + 1
-        if candidate <= 2:
-            prime = 2
-            continue
-        if candidate % 2 == 0:
-            candidate += 1
-        while not _is_prime_64(candidate):
-            candidate += 2
-        prime = candidate
-    return prime
 
 
 class Qwen4ExpPLEGroupedNorm(nn.Module):
@@ -208,6 +151,102 @@ def _get_ple_embedding_quant_method(
 
 
 class Qwen4ExpNGramEmbedding(nn.Module):
+    _MASK64 = (1 << 64) - 1
+    _SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
+    _SPLITMIX_M1 = 0xBF58476D1CE4E5B9
+    _SPLITMIX_M2 = 0x94D049BB133111EB
+    _PLE_LAYER_PRIME = 10007
+
+    @classmethod
+    def _splitmix64(cls, value: int) -> int:
+        """Mix an integer into a deterministic unsigned 64-bit value."""
+        value = (value + cls._SPLITMIX_GAMMA) & cls._MASK64
+        value = ((value ^ (value >> 30)) * cls._SPLITMIX_M1) & cls._MASK64
+        value = ((value ^ (value >> 27)) * cls._SPLITMIX_M2) & cls._MASK64
+        return (value ^ (value >> 31)) & cls._MASK64
+
+    @staticmethod
+    def _is_prime_64(value: int) -> bool:
+        """Return whether a 64-bit integer is prime."""
+        if value < 2:
+            return False
+        for prime in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
+            if value % prime == 0:
+                return value == prime
+        exponent = value - 1
+        shifts = 0
+        while exponent % 2 == 0:
+            exponent //= 2
+            shifts += 1
+        for base in (2, 325, 9375, 28178, 450775, 9780504, 1795265022):
+            if base % value == 0:
+                continue
+            witness = pow(base, exponent, value)
+            if witness in (1, value - 1):
+                continue
+            for _ in range(shifts - 1):
+                witness = pow(witness, 2, value)
+                if witness == value - 1:
+                    break
+            else:
+                return False
+        return True
+
+    @classmethod
+    def _nth_prime_after(cls, start: int, count: int) -> int:
+        """Return the ``count``-th prime strictly greater than ``start``."""
+        prime = int(start)
+        for _ in range(count):
+            candidate = prime + 1
+            if candidate <= 2:
+                prime = 2
+                continue
+            if candidate % 2 == 0:
+                candidate += 1
+            while not cls._is_prime_64(candidate):
+                candidate += 2
+            prime = candidate
+        return prime
+
+    @classmethod
+    def _make_layer_multipliers(
+        cls,
+        *,
+        ngram_size: int,
+        unigram_vocab_size: int,
+        seed: int,
+        ple_dense_layer_id: int,
+    ) -> list[int]:
+        """Build deterministic hash multipliers for one PLE layer."""
+        max_multiplier = ((1 << 63) - 1) // unigram_vocab_size
+        half_bound = max(1, max_multiplier // 2)
+        base_seed = seed + cls._PLE_LAYER_PRIME * ple_dense_layer_id
+        multipliers = []
+        for index in range(ngram_size):
+            value = base_seed + cls._SPLITMIX_GAMMA * (index + 1)
+            multipliers.append(2 * (cls._splitmix64(value) % half_bound) + 1)
+        return multipliers
+
+    @classmethod
+    def _make_vocab_layout(
+        cls,
+        *,
+        ngram_vocab_size_base: int,
+        ngram_heads: int,
+        ple_dense_layer_id: int,
+    ) -> tuple[list[int], list[int], int]:
+        """Build per-head vocabulary sizes, offsets, and total row count."""
+        sizes: list[int] = []
+        offsets: list[int] = []
+        offset = 0
+        for local_head in range(ngram_heads):
+            global_head = ple_dense_layer_id * ngram_heads + local_head
+            size = cls._nth_prime_after(ngram_vocab_size_base - 1, global_head + 1)
+            sizes.append(size)
+            offsets.append(offset)
+            offset += size
+        return sizes, offsets, offset
+
     def __init__(
         self,
         config: Qwen4ExpTextConfig,
@@ -242,30 +281,23 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         if self.split_ngram_parts <= 0:
             raise ValueError("split_ngram_parts must be positive")
 
-        max_multiplier = ((1 << 63) - 1) // self.unigram_vocab_size
-        half_bound = max(1, max_multiplier // 2)
-        seed = int(getattr(config, "seed", 1234))
-        base_seed = seed + _PLE_LAYER_PRIME * ple_dense_layer_id
-        multipliers = []
-        for index in range(self.ngram_size):
-            value = base_seed + _SPLITMIX_GAMMA * (index + 1)
-            multipliers.append(2 * (_splitmix64(value) % half_bound) + 1)
+        multipliers = self._make_layer_multipliers(
+            ngram_size=self.ngram_size,
+            unigram_vocab_size=self.unigram_vocab_size,
+            seed=int(getattr(config, "seed", 1234)),
+            ple_dense_layer_id=ple_dense_layer_id,
+        )
         self.register_buffer(
             "layer_multipliers",
             torch.tensor(multipliers, dtype=torch.long),
             persistent=True,
         )
 
-        ngram_vocab_size_base = int(config.ngram_vocab_size_base)
-        sizes: list[int] = []
-        offsets: list[int] = []
-        offset = 0
-        for local_head in range(self.ngram_heads):
-            global_head = ple_dense_layer_id * self.ngram_heads + local_head
-            size = _nth_prime_after(ngram_vocab_size_base - 1, global_head + 1)
-            sizes.append(size)
-            offsets.append(offset)
-            offset += size
+        sizes, offsets, total_vocab_size = self._make_vocab_layout(
+            ngram_vocab_size_base=int(config.ngram_vocab_size_base),
+            ngram_heads=self.ngram_heads,
+            ple_dense_layer_id=ple_dense_layer_id,
+        )
         self.register_buffer(
             "ngram_heads_vocab_sizes",
             torch.tensor(sizes, dtype=torch.long),
@@ -277,8 +309,8 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             persistent=True,
         )
         divisor = int(config.make_ngram_vocab_size_divisible_by)
-        padded_vocab_size = ((offset + divisor - 1) // divisor) * divisor
-        self.ngram_embedding: VocabParallelEmbedding | ple_mmap.MmapNgramEmbedding
+        padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
+        self.ngram_embedding: PLEVocabParallelEmbedding | ple_mmap.MmapNgramEmbedding
         if ple_mmap.enabled():
             vllm_config = get_current_vllm_config()
             ple_mmap.check_cudagraph_safety(vllm_config.compilation_config)
@@ -289,7 +321,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 padded_vocab_size, self.head_dim
             )
         else:
-            self.ngram_embedding = VocabParallelEmbedding(
+            self.ngram_embedding = PLEVocabParallelEmbedding(
                 padded_vocab_size,
                 self.head_dim,
                 params_dtype=params_dtype,
@@ -349,17 +381,13 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         valid = (source.unsqueeze(0) >= 0) & (position_in_segment >= shift)
         return torch.where(valid, shifted, tokens.new_full((), eos_token_id))
 
-    def _hash_ngram_ids(
+    def compute_ngram_ids(
         self,
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
     ) -> torch.Tensor:
-        """Stock trigram hashing. Factored out of ``forward`` so the env-off
-        path and the env-on widened custom op share exactly one
-        implementation — this body is otherwise byte-identical to what
-        used to be inline in ``forward``.
-        """
+        """Compute n-gram embedding indices for the current request layout."""
         input_ids = input_ids.reshape(-1).long()
         query_start_loc = query_start_loc.long()
         num_reqs = query_start_loc.numel() - 1
@@ -376,7 +404,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             )
 
         positions = self.positions_buffer[:num_tokens]
-        packed = self.padded_buffer[:num_reqs]
+        packed = self.padded_buffer[:num_reqs, :num_tokens]
         packed.fill_(self.eos_token_id)
         request_indices = torch.searchsorted(query_start_loc, positions, right=True) - 1
         request_indices.clamp_(max=num_reqs - 1)
@@ -433,7 +461,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             # forward (hashing runs eagerly, untraced, inside the op)
             # rather than just the gather. The allocation below is still
             # traced code; new_empty with a symbolic dim is fine — it is
-            # the .numel()-to-int SLICING inside _hash_ngram_ids that
+            # the .numel()-to-int SLICING inside compute_ngram_ids that
             # specialized, so num_tokens here must stay symbolic (no int()).
             num_tokens = input_ids.reshape(-1).shape[0]
             output = input_ids.new_empty(
@@ -444,11 +472,44 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 input_ids, query_start_loc, ngram_context, output, self.layer_name
             )
             return output
-        ngram_ids = self._hash_ngram_ids(input_ids, query_start_loc, ngram_context)
+        ngram_ids = input_ids.new_empty(
+            (input_ids.shape[0], self.ngram_heads),
+            dtype=torch.long,
+        )
+        # Keep num_reqs-dependent ID generation outside PIECEWISE CUDA graphs,
+        # which dispatch only on the padded token count.
+        torch.ops.vllm.qwen4_exp_compute_ple_ngram_ids(
+            input_ids,
+            query_start_loc,
+            ngram_context,
+            ngram_ids,
+            self.layer_name,
+        )
         return self.ngram_embedding(ngram_ids).flatten(-2)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
+        embedding = self.ngram_embedding
+        if (
+            isinstance(embedding, ple_mmap.MmapNgramEmbedding)
+            and embedding.table is not None
+        ):
+            # Fail closed BEFORE touching `weights` at all: a same-path
+            # reload (build_tables' own model_path check never fires, since
+            # nothing about the path changed) would otherwise mutate
+            # weight_scale and discard this call's shards onto a module
+            # whose table+scale still belong to the load that already
+            # attached — silently pairing the new checkpoint's scale with
+            # the previous checkpoint's mmap rows. Rejecting here, before
+            # the iterator is ever advanced, leaves the existing table,
+            # scale, weights_streamed, and iterator exactly as they were.
+            raise RuntimeError(
+                f"PLE mmap: {self.layer_name!r} already has a table "
+                "attached from a previous load; calling load_weights again "
+                "on the same live module is unsupported — it would mix "
+                "this reload's rows with the already-attached checkpoint's "
+                "scale. Restart the seat to load different weights."
+            )
 
         persistent_buffers = {
             "layer_multipliers": self.layer_multipliers,
@@ -458,7 +519,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         loaded: set[str] = set()
         regular_weights: list[tuple[str, torch.Tensor]] = []
         shard_prefix = "ngram_embedding.shard_"
-        embedding = self.ngram_embedding
 
         for name, loaded_weight in weights:
             leaf_name = name.rsplit(".", 1)[-1]
@@ -525,18 +585,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                     embedding.weights_streamed = True
                     loaded.add("ngram_embedding.weight")
                     continue
-                # The stock path below reads .weight/.shard_indices, which
-                # only the real VocabParallelEmbedding provides (never
-                # reached when mmap-enabled, per the isinstance branch
-                # above); cast rather than assert so duck-typed test
-                # doubles still work.
-                stock_embedding = cast(VocabParallelEmbedding, embedding)
-                copy_ple_embedding_shard_(
-                    cast(torch.Tensor, stock_embedding.weight).data,
+                embedding.weight.weight_loader(
+                    embedding.weight,
                     loaded_weight,
                     checkpoint_start=checkpoint_start,
-                    tp_start=stock_embedding.shard_indices.org_vocab_start_index,
-                    tp_end=stock_embedding.shard_indices.org_vocab_end_index,
                 )
                 loaded.add("ngram_embedding.weight")
                 continue
@@ -577,14 +629,14 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self.conv_state_len = (self.conv_kernel_size - 1) * self.short_conv_dilation
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.activation = "silu"
-        self.ple_embedding: nn.Module = Qwen4ExpNGramEmbedding(
+        self.ple_embedding = Qwen4ExpNGramEmbedding(
             config,
             int(config.ple_embed_dim),
             self.ple_dense_layer_id,
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.scheduler_config.max_num_seqs,
-            f"{prefix}.ple_embedding",
-            prefix,
+            prefix=f"{prefix}.ple_embedding",
+            layer_name=prefix,
             quant_config=quant_config,
             params_dtype=model_config.dtype,
         )
@@ -698,7 +750,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         state_indices = state_indices_tensor_d.to(
             device=conv_state.device, dtype=torch.int64
         )
-        # TODO: need double-check
         # FULL cudagraph padded decode rows use NULL_BLOCK_ID. Remap them to
         # slot 0 for a safe gather, then zero output and skip write-back.
         valid_state = state_indices != NULL_BLOCK_ID
@@ -1216,6 +1267,33 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         return gated_value.flatten(-2) + conv_output
 
 
+def qwen4_exp_compute_ple_ngram_ids(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Compute request-dependent PLE n-gram IDs outside piecewise graphs."""
+    layer = get_forward_context().no_compile_layers[layer_name]
+    ngram_ids = layer.ple_embedding.compute_ngram_ids(
+        input_ids,
+        query_start_loc,
+        ngram_context,
+    )
+    output.copy_(ngram_ids)
+
+
+def qwen4_exp_compute_ple_ngram_ids_fake(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
 def qwen4_exp_ple_short_conv(
     inputs: torch.Tensor,
     output: torch.Tensor,
@@ -1232,6 +1310,14 @@ def qwen4_exp_ple_short_conv_fake(
     layer_name: str,
 ) -> None:
     return
+
+
+direct_register_custom_op(
+    op_name="qwen4_exp_compute_ple_ngram_ids",
+    op_func=qwen4_exp_compute_ple_ngram_ids,
+    mutates_args=["output"],
+    fake_impl=qwen4_exp_compute_ple_ngram_ids_fake,
+)
 
 
 direct_register_custom_op(
