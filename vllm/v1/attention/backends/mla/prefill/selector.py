@@ -83,17 +83,8 @@ def _get_mla_prefill_backend_priorities(
             MLAPrefillBackendEnum.TOKENSPEED_MLA,
         ]
     elif current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx950
-
-        if on_gfx950():
-            # AITER ASM is preferred with FP8 KV cache; falls through to the
-            # AITER FlashAttention backend (then plain FA) when not using FP8 KV.
-            return [
-                MLAPrefillBackendEnum.AITER_ASM,
-                MLAPrefillBackendEnum.ROCM_AITER_FA,
-                MLAPrefillBackendEnum.FLASH_ATTN,
-            ]
         return [
+            MLAPrefillBackendEnum.AITER_ASM,
             MLAPrefillBackendEnum.ROCM_AITER_FA,
             MLAPrefillBackendEnum.FLASH_ATTN,
         ]
