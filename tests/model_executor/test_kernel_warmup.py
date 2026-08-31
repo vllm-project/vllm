@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -11,6 +11,16 @@ import torch
 from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup import kernel_warmup as warmup
+
+
+@pytest.fixture(autouse=True)
+def _replayssm_autotune_supported():
+    with patch.object(
+        warmup,
+        "flashinfer_replayssm_autotune_supported",
+        return_value=True,
+    ):
+        yield
 
 
 def _replayssm_mixer() -> MambaMixer2:
@@ -85,6 +95,26 @@ def test_replayssm_autotune_decode_kwargs_clamps_to_state_capacity():
     assert result is not None
     assert result[0] == 4
     assert result[1]["num_tokens"] == 4
+
+
+def test_replayssm_autotune_decode_kwargs_skips_without_runner():
+    runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            cache_config=SimpleNamespace(use_replayssm=True),
+            mamba_config=SimpleNamespace(backend=MambaBackendEnum.FLASHINFER),
+            use_v2_model_runner=False,
+        ),
+        uniform_decode_query_len=1,
+        max_num_tokens=128,
+        scheduler_config=SimpleNamespace(max_num_seqs=64),
+        kv_cache_config=SimpleNamespace(num_blocks=5),
+    )
+    with patch.object(
+        warmup,
+        "flashinfer_replayssm_autotune_supported",
+        return_value=False,
+    ):
+        assert warmup._replayssm_autotune_kwargs(runner, {}) is None
 
 
 def test_replayssm_autotune_slots_restore_state_and_trackers():

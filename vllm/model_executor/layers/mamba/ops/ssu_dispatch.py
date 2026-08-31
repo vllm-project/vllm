@@ -11,6 +11,7 @@ the backend defaults to 'cpu'.
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from functools import cache
 
 import torch
 
@@ -360,6 +361,16 @@ _mamba_ssu_backend: MambaSSUBackend | None = None
 _flashinfer_replayssm_kernel: Callable[..., torch.Tensor] | None = None
 
 
+@cache
+def flashinfer_replayssm_autotune_supported() -> bool:
+    """Return True when FlashInfer exposes ReplaySSM autotuning."""
+    try:
+        from flashinfer.mamba.checkpointing_ssu import CheckpointingSSURunner
+    except ImportError:
+        return False
+    return callable(CheckpointingSSURunner)
+
+
 def selective_state_update_replayssm_flashinfer(
     state: torch.Tensor,
     x: torch.Tensor,
@@ -494,16 +505,11 @@ def initialize_mamba_ssu_backend(
     _flashinfer_replayssm_kernel = None
     if use_replayssm and backend == MambaBackendEnum.FLASHINFER:
         try:
-            from flashinfer.mamba.checkpointing_ssu import (
-                CheckpointingSSURunner,
-                checkpointing_ssu,
-            )
+            from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
         except ImportError as e:
             raise ImportError(
                 "FlashInfer ReplaySSM requires a compatible flashinfer-python package"
             ) from e
-        if not callable(CheckpointingSSURunner):
-            raise ImportError("FlashInfer ReplaySSM requires native autotuning support")
         _flashinfer_replayssm_kernel = checkpointing_ssu
     if use_replayssm:
         logger.info("Using %s ReplaySSM backend.", backend.value)
