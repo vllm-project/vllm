@@ -629,7 +629,10 @@ class GPUModelRunner(
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
-        if self.speculative_config and get_pp_group().is_last_rank:
+        self.has_speculative_drafter = bool(
+            self.speculative_config and get_pp_group().is_last_rank
+        )
+        if self.has_speculative_drafter:
             self.drafter: (
                 NgramProposer  # noqa: F823
                 | NgramProposerGPU
@@ -2609,7 +2612,10 @@ class GPUModelRunner(
                 cm.block_table_tensor = _get_block_table(kv_cache_gid)
                 cm.slot_mapping = slot_mappings[kv_cache_gid]
 
-            if self.speculative_config and spec_decode_common_attn_metadata is None:
+            if (
+                self.has_speculative_drafter
+                and spec_decode_common_attn_metadata is None
+            ):
                 if isinstance(
                     self.drafter,
                     (
@@ -2624,11 +2630,15 @@ class GPUModelRunner(
                 else:
                     spec_decode_common_attn_metadata = cm
             # Capture per-group block tables for multi-group proposers.
-            if self.speculative_config and isinstance(self.drafter, Step3p5MTPProposer):
+            if self.has_speculative_drafter and isinstance(
+                self.drafter, Step3p5MTPProposer
+            ):
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping
                 )
-            elif self.speculative_config and isinstance(self.drafter, Gemma4Proposer):
+            elif self.has_speculative_drafter and isinstance(
+                self.drafter, Gemma4Proposer
+            ):
                 self.drafter.set_per_group_block_table(
                     kv_cache_gid, cm.block_table_tensor
                 )
@@ -4701,7 +4711,7 @@ class GPUModelRunner(
 
         spec_config = self.speculative_config
         draft_after_bookkeeping = False
-        if spec_config is not None:
+        if spec_config is not None and self.has_speculative_drafter:
             # Decide whether to run the drafter or zero out draft tokens.
             input_fits_in_drafter = self._input_fits_in_drafter(
                 spec_decode_common_attn_metadata
@@ -4914,10 +4924,14 @@ class GPUModelRunner(
         """Broadcast sampled token ids (GPU) from last PP stage"""
         pp = get_pp_group()
         assert pp.is_last_rank
-        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
-        assert sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] == 1, (
-            "PP+async expects sampled_token_ids to have shape [num_reqs, 1]"
+        assert sampled_token_ids.dim() == 2, (
+            "PP+async expects sampled_token_ids to have shape [num_reqs, *]"
         )
+        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
+        # Spec decode produces multiple sampled columns; only the verifier's
+        # accepted sampled token is needed by earlier PP ranks for the next step.
+        if sampled_token_ids.shape[-1] != 1:
+            sampled_token_ids = sampled_token_ids[:, :1].contiguous()
         # Skip for chunked prefill: sampled tokens are dummy
         # and will be discarded, no need to broadcast.
         if not self._is_all_reqs_chunked_prefill():
@@ -6232,7 +6246,7 @@ class GPUModelRunner(
             else:
                 hidden_states = outputs
 
-            if self.speculative_config and (
+            if self.has_speculative_drafter and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
                 or self.speculative_config.uses_extract_hidden_states()
@@ -7236,7 +7250,7 @@ class GPUModelRunner(
         self.calculate_reorder_batch_threshold()
 
         # Initialize drafter attention backend
-        if self.speculative_config and (
+        if self.has_speculative_drafter and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
         ):
@@ -7290,7 +7304,7 @@ class GPUModelRunner(
         )
 
         # Initialize drafter's cudagraph dispatcher if using spec decode.
-        if self.speculative_config and (
+        if self.has_speculative_drafter and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
             or self.speculative_config.uses_extract_hidden_states()
@@ -7528,7 +7542,7 @@ class GPUModelRunner(
         )
 
         if (
-            self.speculative_config
+            self.has_speculative_drafter
             and self.speculative_config.uses_extract_hidden_states()
         ):
             assert isinstance(self.drafter, ExtractHiddenStatesProposer)
