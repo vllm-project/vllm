@@ -1317,7 +1317,7 @@ def test_wna16_linear_gptq_uses_auto_gptq_when_supported(monkeypatch) -> None:
 
     scheme = INCWNA16LinearScheme(make_layer_config())
 
-    assert isinstance(scheme.inner_method, DummyMethod)
+    assert isinstance(scheme.linear_method, DummyMethod)
     assert isinstance(captured["cfg"], AutoGPTQConfig)
     assert captured["cfg"].weight_bits == 4
     assert captured["cfg"].group_size == 128

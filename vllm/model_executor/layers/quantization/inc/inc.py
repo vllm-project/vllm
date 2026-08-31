@@ -241,7 +241,7 @@ class INCConfig(QuantizationConfig):
                 expected_fields,
                 "INC block-wise FP8",
             )
-        elif self.data_type == self.MXFP8_DATA_TYPE:
+        elif self.is_mxfp8:
             expected_fields = {
                 "act_bits": self.MXFP8_BITS,
                 "act_data_type": self.MXFP8_DATA_TYPE,
