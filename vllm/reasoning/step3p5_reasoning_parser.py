@@ -19,7 +19,7 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
 
     Step3p5 uses the <think>...</think> format, but it tends to emit an extra
     newline immediately before and/or after the </think> token. This parser
-    trims those newlines in extract_reasoning*.
+    trims the newline before </think> in extract_reasoning*.
 
     Reasoning end detection doesn't wait for an extra token after </think> so
     structured output can constrain the first post-think token.
@@ -48,8 +48,6 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
         reasoning, content = super().extract_reasoning(model_output, request)
         if reasoning is not None:
             reasoning = reasoning.removesuffix("\n")
-        if content is not None:
-            content = content.removeprefix("\n")
         return reasoning or None, content or None
 
     def extract_reasoning_streaming(
@@ -61,14 +59,6 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        # Drop the immediate newline that models often emit after </think>.
-        if previous_text.endswith(self.end_token) and delta_text:
-            if delta_text == "\n":
-                return None
-            elif delta_text.startswith("\n"):
-                remaining = delta_text.removeprefix("\n")
-                return DeltaMessage(content=remaining) if remaining else None
-
         ret = super().extract_reasoning_streaming(
             previous_text,
             current_text,
