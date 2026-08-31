@@ -17,7 +17,10 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
+    FunctionCall,
+)
 from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
@@ -393,6 +396,35 @@ _GEMMA4_THOUGHT_PREFIX = "thought\n"
 _GEMMA4_THOUGHT_TOKEN = "thought"
 
 
+class ToolChoiceRequiredNotEnforcedError(ValueError):
+    """Raised when ``tool_choice='required'`` produced no tool call.
+
+    gemma4 emits its native ``<|tool_call>`` syntax, which is extracted
+    directly instead of being constrained by JSON structured output (see
+    ``Gemma4EngineToolParser.adjust_request``). If the model free-generates
+    prose instead of a tool call, the request must fail loudly rather than
+    return a prose-only success that a client would treat as a tool call.
+    """
+
+
+def enforce_required_tool_call(
+    request: ChatCompletionRequest | ResponsesRequest,
+    tool_calls: Sequence[object] | None,
+) -> None:
+    """Enforce ``tool_choice='required'`` for gemma4.
+
+    Raises :class:`ToolChoiceRequiredNotEnforcedError` when the request asks
+    for a required tool call but *tool_calls* is empty or None.
+    """
+    if not request.tools or request.tool_choice != "required":
+        return
+    if tool_calls:
+        return
+    raise ToolChoiceRequiredNotEnforcedError(
+        "tool_choice='required' did not produce a tool call"
+    )
+
+
 class Gemma4Parser(ParserEngine):
     """Gemma4 parser: ``<|channel>`` reasoning + ``<|tool_call>``
     tool calls in a single engine.
@@ -590,3 +622,40 @@ class Gemma4Parser(ParserEngine):
             elif reasoning == _GEMMA4_THOUGHT_PREFIX.rstrip():
                 reasoning = None
         return reasoning or None, content
+
+    def parse(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        enable_auto_tools: bool = False,
+        model_output_token_ids: Sequence[int] = (),
+    ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        reasoning, content, tool_calls = super().parse(
+            model_output,
+            request,
+            enable_auto_tools,
+            model_output_token_ids,
+        )
+        enforce_required_tool_call(request, tool_calls)
+        return reasoning, content, tool_calls
+
+    def parse_delta(
+        self,
+        delta_text: str,
+        delta_token_ids: list[int],
+        request: ChatCompletionRequest | ResponsesRequest,
+        prompt_token_ids: list[int] | None = None,
+        *,
+        finished: bool,
+    ) -> DeltaMessage | None:
+        result = super().parse_delta(
+            delta_text,
+            delta_token_ids,
+            request,
+            prompt_token_ids=prompt_token_ids,
+            finished=finished,
+        )
+        if finished:
+            saw_tool_call = any(slot.name or slot.args for slot in self._tool_slots)
+            enforce_required_tool_call(request, [1] if saw_tool_call else [])
+        return result

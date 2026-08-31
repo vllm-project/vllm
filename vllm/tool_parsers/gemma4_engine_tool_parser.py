@@ -7,8 +7,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
+from vllm.entrypoints.openai.engine.protocol import ExtractedToolCallInformation
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.engine.registered_adapters import Gemma4ParserToolAdapter
+from vllm.parser.gemma4 import enforce_required_tool_call
 
 
 class Gemma4EngineToolParser(Gemma4ParserToolAdapter):  # type: ignore[valid-type, misc]
@@ -34,3 +36,12 @@ class Gemma4EngineToolParser(Gemma4ParserToolAdapter):  # type: ignore[valid-typ
                 request.skip_special_tokens = False
                 return request
         return super().adjust_request(request)
+
+    def extract_tool_calls(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+    ) -> ExtractedToolCallInformation:
+        result = super().extract_tool_calls(model_output, request)
+        enforce_required_tool_call(request, result.tool_calls)
+        return result
