@@ -31,16 +31,12 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.generate.base.serving import (
-    GenerateBaseServing,
-    GenerationError,
-)
-from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
-    ErrorResponse,
     RequestResponseMetadata,
 )
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     build_harmony_preamble,
@@ -89,9 +85,10 @@ from vllm.entrypoints.openai.responses.utils import (
     extract_function_tool_names,
     extract_tool_types,
 )
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
@@ -487,6 +484,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                         response_parser=response_parser,
                     )
 
+            reasoning_parser_kwargs = None
             if (
                 context.response_parser is not None
                 and context.response_parser.reasoning_parser is not None
@@ -518,9 +516,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 priority=self._get_priority(request, raw_request),
                 trace_headers=trace_headers,
                 session_id=session_id,
-                reasoning_parser_kwargs=reasoning_parser_kwargs
-                if self.parser and self.parser.reasoning_parser_cls is not None
-                else None,
+                reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
             generators.append(generator)
 
@@ -873,6 +869,8 @@ class OpenAIServingResponses(GenerateBaseServing):
             if final_output.finish_reason == "length":
                 status = "incomplete"
 
+            # TODO: Build final response items from the accumulated streaming
+            # parser results instead of reparsing the complete output.
             output = self._make_response_output_items(
                 request,
                 final_output,
@@ -901,13 +899,10 @@ class OpenAIServingResponses(GenerateBaseServing):
             num_reasoning_tokens == 0
             and isinstance(context, (SimpleContext, ParsableContext))
             and context.response_parser is not None
-            and context.response_parser.reasoning_parser is not None
         ):
             accumulated = getattr(context, "_accumulated_token_ids", []) or []
-            num_reasoning_tokens = (
-                context.response_parser.reasoning_parser.count_reasoning_tokens(
-                    accumulated
-                )
+            num_reasoning_tokens = context.response_parser.count_reasoning_tokens(
+                accumulated
             )
 
         usage = ResponseUsage(

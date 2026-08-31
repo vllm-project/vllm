@@ -15,15 +15,15 @@ from vllm.entrypoints.chat_utils import (
     get_tool_call_id_type,
     make_tool_call_id,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
     FunctionDefinition,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
@@ -366,6 +366,10 @@ class Parser:
         """Parse a single streaming delta, orchestrating reasoning then
         tool call extraction via internal stream state.
         """
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Return the number of reasoning tokens in generated token IDs."""
+        return 0
 
 
 class DelegatingParser(Parser):
@@ -938,6 +942,12 @@ class DelegatingParser(Parser):
                 delta_message = None
 
         return delta_message
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count reasoning tokens through the configured reasoning parser."""
+        if self._reasoning_parser is None:
+            return 0
+        return self._reasoning_parser.count_reasoning_tokens(token_ids)
 
     def _flush_engine_parsers(
         self, delta_message: DeltaMessage | None

@@ -17,6 +17,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -275,7 +276,7 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [1, 64]
+        return [1, MultipleOf(16)]
 
     @staticmethod
     def get_name() -> str:
@@ -292,16 +293,6 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["ROCMAiterMLASparseImpl"]:
         return ROCMAiterMLASparseImpl
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -422,9 +413,11 @@ class ROCMAiterMLASparseMetadataBuilder(
         # so the buffers are large enough for any decode shape we might see.
         from aiter import dtypes, get_mla_metadata_info_v1
 
-        # Aiter sparse MLA also requires num_heads >= 16 (will be padded by
-        # AiterMLAHelper.get_mla_padded_q in forward).
-        self._num_attention_heads = max(16, self.num_heads)
+        # Keep metadata sizing consistent with the padded tensor shape passed
+        # to the sparse decode kernel.
+        self._num_attention_heads = AiterMLAHelper.get_actual_mla_num_heads(
+            self.num_heads
+        )
 
         q_dtype = self.model_dtype
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
@@ -523,7 +516,7 @@ class ROCMAiterMLASparseMetadataBuilder(
         self._prev_req_extent = new_req_extent
         self._prev_indices_extent = new_indices_extent
         self.req_id_per_token_buffer[:new_req_extent].copy_(
-            torch.from_numpy(req_id_per_token), non_blocking=True
+            np_to_pinned_tensor(req_id_per_token), non_blocking=True
         )
         query_lens = (
             common_attn_metadata.query_start_loc[1:]
