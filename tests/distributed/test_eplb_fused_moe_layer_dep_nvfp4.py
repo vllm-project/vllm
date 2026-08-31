@@ -270,6 +270,8 @@ def test_eplb_fml(
 ):
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    if torch.xpu.is_available():
+        pytest.skip("NVFP4 quantization and flashinfer backends are CUDA-only")
 
     num_local_experts = num_experts // world_size
     num_topk = 4
