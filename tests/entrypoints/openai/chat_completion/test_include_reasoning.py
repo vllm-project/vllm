@@ -45,7 +45,8 @@ async def test_include_reasoning_true_non_streaming(client: openai.AsyncOpenAI):
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
-        max_tokens=200,
+        max_tokens=512,
+        temperature=0,
         extra_body={"include_reasoning": True},
     )
 
@@ -63,7 +64,8 @@ async def test_include_reasoning_false_non_streaming(client: openai.AsyncOpenAI)
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
-        max_tokens=200,
+        max_tokens=512,
+        temperature=0,
         extra_body={"include_reasoning": False},
     )
 
@@ -83,7 +85,8 @@ async def test_include_reasoning_true_streaming(client: openai.AsyncOpenAI):
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
-        max_tokens=200,
+        max_tokens=512,
+        temperature=0,
         stream=True,
         extra_body={"include_reasoning": True},
     )
@@ -114,7 +117,8 @@ async def test_include_reasoning_false_streaming(client: openai.AsyncOpenAI):
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
-        max_tokens=200,
+        max_tokens=512,
+        temperature=0,
         stream=True,
         extra_body={"include_reasoning": False},
     )
