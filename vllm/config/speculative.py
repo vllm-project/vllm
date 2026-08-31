@@ -662,6 +662,12 @@ class SpeculativeConfig:
                 }
             )
         if hf_config.model_type == "deepseek_v4":
+            if getattr(hf_config, "vision_n_layers", 0) > 0:
+                raise ValueError(
+                    "Speculative decoding is not supported for the DeepSeek-V4 "
+                    "vision variant (DeepseekV4ForConditionalGeneration): "
+                    "image sentinel token ids are out of the drafter's vocab."
+                )
             hf_config.model_type = "deepseek_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(

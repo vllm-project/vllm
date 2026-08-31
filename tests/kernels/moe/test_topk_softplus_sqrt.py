@@ -26,18 +26,45 @@ def _torch_topk_softplus_sqrt(
     e_score_correction_bias: torch.Tensor | None = None,
     input_ids: torch.Tensor | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    bias_vl: torch.Tensor | None = None,
+    vocab_size: int = 0,
 ):
     scores = F.softplus(gating_output.float()).sqrt()
     original_scores = scores
-    if e_score_correction_bias is not None:
-        scores_for_choice = scores + e_score_correction_bias.unsqueeze(0)
-    else:
-        scores_for_choice = scores
+    if bias_vl is not None:
+        # Image tokens carry sentinel ids >= vocab_size and select experts
+        # with bias_vl instead of the regular bias / hash table.
+        assert input_ids is not None
 
     if hash_indices_table is not None:
         assert input_ids is not None
-        topk_ids = hash_indices_table[input_ids.long()]
+        if bias_vl is None:
+            topk_ids = hash_indices_table[input_ids.long()]
+        else:
+            # Sentinel ids are out of range for the hash table; clamp them
+            # (their rows are overwritten below) to avoid OOB reads.
+            image_mask = input_ids.long() >= vocab_size
+            safe_ids = torch.where(image_mask, 0, input_ids.long())
+            topk_ids = hash_indices_table[safe_ids]
+            vl_ids = (scores + bias_vl).topk(topk, dim=-1).indices
+            topk_ids = torch.where(
+                image_mask.unsqueeze(-1), vl_ids.to(topk_ids.dtype), topk_ids
+            )
     else:
+        if bias_vl is not None:
+            assert input_ids is not None
+            assert e_score_correction_bias is not None
+            image_mask = (input_ids.long() >= vocab_size).unsqueeze(-1)
+            row_bias = torch.where(
+                image_mask,
+                bias_vl.unsqueeze(0),
+                e_score_correction_bias.unsqueeze(0),
+            )
+            scores_for_choice = scores + row_bias
+        elif e_score_correction_bias is not None:
+            scores_for_choice = scores + e_score_correction_bias.unsqueeze(0)
+        else:
+            scores_for_choice = scores
         topk_ids = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=True)[1]
 
     topk_weights = original_scores.gather(1, topk_ids.long())
@@ -348,3 +375,210 @@ def test_fused_topk_softplus_sqrt_padding(
     sorted_w_ref = topk_weights_ref[rows_to_compare].gather(1, idx_ref)
     sorted_w = topk_weights[rows_to_compare].gather(1, idx_ops)
     torch.testing.assert_close(sorted_w_ref, sorted_w, atol=2e-2, rtol=1e-2)
+
+
+def _make_mixed_input_ids(
+    num_tokens: int, vocab_size: int, dtype: torch.dtype = torch.long
+) -> torch.Tensor:
+    """Text ids below vocab_size; every third token is an image sentinel id."""
+    input_ids = torch.randint(
+        0, vocab_size, (num_tokens,), dtype=torch.long, device="cuda"
+    )
+    image_rows = torch.arange(num_tokens, device="cuda") % 3 == 0
+    input_ids[image_rows] = (
+        vocab_size + 1 + torch.arange(image_rows.sum().item(), device="cuda")
+    )
+    return input_ids.to(dtype)
+
+
+def _assert_topk_matches(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights_ref: torch.Tensor,
+    topk_ids_ref: torch.Tensor,
+) -> None:
+    # Different kernels may return the topk experts in different orders when
+    # scores tie; sort by expert id before comparing.
+    sorted_ref_ids, idx_ref = topk_ids_ref.sort(dim=-1)
+    sorted_ids, idx_ops = topk_ids.sort(dim=-1)
+    torch.testing.assert_close(
+        sorted_ref_ids, sorted_ids.to(sorted_ref_ids.dtype), atol=0, rtol=0
+    )
+
+    sorted_w_ref = topk_weights_ref.gather(1, idx_ref)
+    sorted_w = topk_weights.gather(1, idx_ops.to(torch.long))
+    torch.testing.assert_close(sorted_w_ref, sorted_w, atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize(
+    ("num_experts", "topk", "renormalize", "dtype"),
+    [
+        (256, 6, True, torch.float32),  # Triton dsv4 fast path
+        (256, 8, True, torch.bfloat16),  # CUDA topk kernel
+        (384, 6, False, torch.half),
+        (512, 16, True, torch.float32),
+    ],
+)
+def test_fused_topk_softplus_sqrt_bias_vl(
+    num_experts: int,
+    topk: int,
+    renormalize: bool,
+    dtype: torch.dtype,
+):
+    """Image tokens (ids >= vocab_size) must select experts with bias_vl."""
+    torch.manual_seed(0)
+    num_tokens = 64
+    hidden_size = 1024
+    vocab_size = 128
+    hidden_states = torch.randn((num_tokens, hidden_size), dtype=dtype, device="cuda")
+    gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
+    e_score_correction_bias = torch.randn(
+        (num_experts,), dtype=torch.float32, device="cuda"
+    )
+    bias_vl = torch.randn((num_experts,), dtype=torch.float32, device="cuda")
+    input_ids = _make_mixed_input_ids(num_tokens, vocab_size)
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=renormalize,
+        routed_scaling_factor=1.5,
+        e_score_correction_bias=e_score_correction_bias,
+        input_ids=input_ids,
+        bias_vl=bias_vl,
+        vocab_size=vocab_size,
+    )
+
+    topk_weights, topk_ids = fused_topk_bias(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=e_score_correction_bias,
+        topk=topk,
+        renormalize=renormalize,
+        routed_scaling_factor=1.5,
+        input_tokens=input_ids,
+        bias_vl=bias_vl,
+        vocab_size=vocab_size,
+    )
+
+    _assert_topk_matches(topk_weights, topk_ids, topk_weights_ref, topk_ids_ref)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize(
+    ("num_experts", "topk", "renormalize", "dtype", "indices_dtype"),
+    [
+        (256, 6, True, torch.float32, torch.long),  # specialized hash kernel
+        (384, 6, True, torch.float32, torch.int32),  # specialized hash kernel
+        (384, 8, False, torch.bfloat16, torch.long),  # generic hash kernel
+        (512, 6, True, torch.float32, torch.long),  # generic hash kernel
+    ],
+)
+def test_fused_topk_softplus_sqrt_hash_bias_vl(
+    num_experts: int,
+    topk: int,
+    renormalize: bool,
+    dtype: torch.dtype,
+    indices_dtype: torch.dtype,
+):
+    """Hash MoE: text rows use tid2eid, image rows use topk(score + bias_vl).
+
+    Image sentinel ids are out of range for the hash table, so this also
+    verifies image rows never index tid2eid.
+    """
+    torch.manual_seed(0)
+    num_tokens = 64
+    hidden_size = 1024
+    vocab_size = 64
+    hidden_states = torch.randn((num_tokens, hidden_size), dtype=dtype, device="cuda")
+    gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
+    hash_indices_table = torch.stack(
+        [torch.randperm(num_experts)[:topk] for _ in range(vocab_size)]
+    ).to(device="cuda", dtype=indices_dtype)
+    bias_vl = torch.randn((num_experts,), dtype=torch.float32, device="cuda")
+    input_ids = _make_mixed_input_ids(num_tokens, vocab_size)
+    image_rows = input_ids >= vocab_size
+    assert image_rows.any() and (~image_rows).any()
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=renormalize,
+        routed_scaling_factor=2.5,
+        input_ids=input_ids,
+        hash_indices_table=hash_indices_table,
+        bias_vl=bias_vl,
+        vocab_size=vocab_size,
+    )
+
+    topk_weights, topk_ids = fused_topk_bias(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=None,
+        topk=topk,
+        renormalize=renormalize,
+        input_tokens=input_ids,
+        hash_indices_table=hash_indices_table,
+        routed_scaling_factor=2.5,
+        bias_vl=bias_vl,
+        vocab_size=vocab_size,
+    )
+
+    _assert_topk_matches(topk_weights, topk_ids, topk_weights_ref, topk_ids_ref)
+
+    # Text rows must come straight from the hash table, image rows from
+    # topk(score + bias_vl).
+    text_ids = hash_indices_table[input_ids[~image_rows].long()]
+    torch.testing.assert_close(
+        topk_ids[~image_rows].to(text_ids.dtype), text_ids, atol=0, rtol=0
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="The DeepSeek V4 fast path is CUDA-only.",
+)
+def test_dsv4_fast_topk_bias_vl():
+    torch.manual_seed(0)
+    num_tokens = 33
+    num_experts = 256
+    vocab_size = 128
+    gating_output = torch.randn(
+        (num_tokens, num_experts), dtype=torch.float32, device="cuda"
+    )
+    correction_bias = torch.randn(num_experts, dtype=torch.float32, device="cuda")
+    bias_vl = torch.randn(num_experts, dtype=torch.float32, device="cuda")
+    input_ids = _make_mixed_input_ids(num_tokens, vocab_size)
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=6,
+        renormalize=True,
+        routed_scaling_factor=1.5,
+        e_score_correction_bias=correction_bias,
+        input_ids=input_ids,
+        bias_vl=bias_vl,
+        vocab_size=vocab_size,
+    )
+    topk_weights, topk_ids = dsv4_topk(
+        gating_output,
+        correction_bias,
+        torch.int64,
+        1.5,
+        input_ids=input_ids,
+        bias_vl=bias_vl,
+        vocab_size=vocab_size,
+    )
+
+    assert topk_ids.dtype == torch.int64
+    torch.testing.assert_close(topk_ids_ref.to(torch.int64), topk_ids, atol=0, rtol=0)
+    torch.testing.assert_close(topk_weights_ref, topk_weights, atol=2e-5, rtol=2e-5)

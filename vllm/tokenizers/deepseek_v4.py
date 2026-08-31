@@ -76,6 +76,13 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         def num_special_tokens_to_add(self) -> int:
             return len(self.encode(""))
 
+        @property
+        def max_token_id(self) -> int:
+            # The vision variant (DeepSeek-V4-Flash-Vision-Exp) expands image
+            # placeholders into out-of-vocab sentinel ids (vocab_size + 0..4).
+            base = getattr(super(), "max_token_id", 0)
+            return max(base, self.vocab_size + 4)
+
         def get_added_vocab(self) -> dict[str, int]:
             return added_vocab.copy()
 
@@ -92,4 +99,6 @@ class DeepseekV4Tokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(cls, *args, **kwargs) -> HfTokenizer:
         tokenizer = TokenizersBackend.from_pretrained(*args, **kwargs)
-        return get_cached_tokenizer(get_deepseek_v4_tokenizer(tokenizer))
+        # Wrap after caching so the DSV4 overrides (apply_chat_template,
+        # max_token_id) shadow the CachedTokenizer properties.
+        return get_deepseek_v4_tokenizer(get_cached_tokenizer(tokenizer))

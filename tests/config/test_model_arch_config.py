@@ -465,3 +465,24 @@ def test_draft_model_arch_config(
     _assert_model_config_methods(
         model_config, expected, check_head_size=check_head_size
     )
+
+
+def test_deepseek_v4_convertor_splits_vision_architecture():
+    """The vision checkpoint shares model_type/architectures with the
+    text-only DeepSeek-V4; the convertor routes it to the VL wrapper class."""
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+    from vllm.transformers_utils.model_arch_config_convertor import (
+        DeepseekV4ModelArchConfigConvertor,
+    )
+
+    text_cfg = DeepseekV4Config(architectures=["DeepseekV4ForCausalLM"])
+    assert DeepseekV4ModelArchConfigConvertor(
+        text_cfg, text_cfg
+    ).get_architectures() == ["DeepseekV4ForCausalLM"]
+
+    vl_cfg = DeepseekV4Config(
+        architectures=["DeepseekV4ForCausalLM"], vision_n_layers=32
+    )
+    assert DeepseekV4ModelArchConfigConvertor(vl_cfg, vl_cfg).get_architectures() == [
+        "DeepseekV4ForConditionalGeneration"
+    ]

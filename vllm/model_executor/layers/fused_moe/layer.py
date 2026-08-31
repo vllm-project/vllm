@@ -131,6 +131,8 @@ def FusedMoEFactory(
     apply_routed_scale_to_output: bool = False,
     zero_expert_type: str | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    bias_vl: torch.Tensor | None = None,
+    vocab_size: int = 0,
     runner_cls: type[MoERunner] | None = None,
     runner_args: dict[str, Any] | None = None,
     routed_experts_cls: type[RoutedExperts] | None = None,
@@ -199,6 +201,8 @@ def FusedMoEFactory(
                                       output instead of topk_weights
         zero_expert_type: Type of zero expert handling
         hash_indices_table: Hash table for expert indices
+        bias_vl: Vision routing bias for image tokens (Deepseek V4)
+        vocab_size: Text vocab size; input_ids >= vocab_size are image tokens
         runner_cls: Custom MoERunner class (None = use default MoERunner)
         runner_args: Additional arguments for runner constructor
         routed_experts_cls: Custom RoutedExperts class (None = use default)
@@ -313,6 +317,8 @@ def FusedMoEFactory(
             zero_expert_type=zero_expert_type,
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,
+            bias_vl=bias_vl,
+            vocab_size=vocab_size,
         )
 
     if params_dtype is None:

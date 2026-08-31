@@ -44,8 +44,12 @@ if current_platform.is_cuda():
         topk_weights_ptr,
         topk_ids_ptr,
         routed_scaling_factor,
+        input_ids_ptr,
+        bias_vl_ptr,
+        vocab_size,
         NUM_EXPERTS: tl.constexpr,
         BLOCK_N: tl.constexpr,
+        HAS_VL: tl.constexpr,
         launch_pdl: tl.constexpr,
     ):
         row = tl.program_id(0)
@@ -54,6 +58,14 @@ if current_platform.is_cuda():
         bias = tl.load(
             correction_bias_ptr + expert_offsets, mask=expert_mask, other=0.0
         ).to(tl.float32)
+        if HAS_VL:
+            # Image tokens carry sentinel ids >= vocab_size and use bias_vl
+            # for expert selection instead of the regular correction bias.
+            token_id = tl.load(input_ids_ptr + row).to(tl.int64)
+            bias_vl = tl.load(
+                bias_vl_ptr + expert_offsets, mask=expert_mask, other=0.0
+            ).to(tl.float32)
+            bias = tl.where(token_id >= vocab_size, bias_vl, bias)
 
         if launch_pdl:
             tl.extra.cuda.gdc_wait()
@@ -101,8 +113,17 @@ def dsv4_topk(
     correction_bias: torch.Tensor,
     indices_dtype: torch.dtype,
     routed_scaling_factor: float,
+    input_ids: torch.Tensor | None = None,
+    bias_vl: torch.Tensor | None = None,
+    vocab_size: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens, num_experts = gating_output.shape
+    has_vl = bias_vl is not None
+    if bias_vl is not None:
+        assert input_ids is not None, "bias_vl routing requires input_ids"
+        assert bias_vl.dtype == torch.float32 and bias_vl.is_contiguous()
+        assert bias_vl.shape == (num_experts,)
+        assert input_ids.is_contiguous()
     shape = (num_tokens, _TOPK)
     topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
     topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
@@ -113,8 +134,12 @@ def dsv4_topk(
             topk_weights,
             topk_ids,
             routed_scaling_factor,
+            input_ids,
+            bias_vl,
+            vocab_size,
             NUM_EXPERTS=num_experts,
             BLOCK_N=triton.next_power_of_2(num_experts),
+            HAS_VL=has_vl,
             num_warps=1,
             launch_pdl=current_platform.is_arch_support_pdl(),
         )

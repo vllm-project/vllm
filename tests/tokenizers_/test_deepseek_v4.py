@@ -427,3 +427,30 @@ def test_deepseek_v4_encode_messages_rejects_invalid_arguments(kwargs):
 
     with pytest.raises(ValueError):
         encode_messages([{"role": "user", "content": "Hello"}], **kwargs)
+
+
+def test_deepseek_v4_image_blocks_become_placeholders():
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "first:"},
+                    {"type": "image_url", "image_url": {"url": "file:///a.png"}},
+                    {"type": "text", "text": "second:"},
+                    {"type": "image", "source": {"data": "AAAA"}},
+                ],
+            }
+        ],
+        tokenize=False,
+        thinking=False,
+    )
+
+    assert "<｜User｜>first:<｜deepseek_image｜>second:<｜deepseek_image｜>" in prompt
+
+
+def test_deepseek_v4_max_token_id_covers_image_sentinels():
+    tok = _tokenizer()
+    # The vision variant expands image placeholders into out-of-vocab sentinel
+    # ids (vocab_size + 0..4); input validation relies on max_token_id.
+    assert tok.max_token_id >= tok.vocab_size + 4

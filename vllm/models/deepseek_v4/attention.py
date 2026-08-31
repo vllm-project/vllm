@@ -205,6 +205,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
         self.window_size = config.sliding_window
+        # Vision variant: image spans are visible bidirectionally, widening
+        # prefill SWA index rows by up to max_image_tokens columns.
+        self.max_image_tokens = (
+            getattr(config, "vision_max_n_token", 0)
+            if getattr(config, "vision_n_layers", 0) > 0
+            else 0
+        )
         # NOTE(zyongye) Compress ratio can't be 0
         # we do this for because MTP layer is not included
         # in the compress ratio list

@@ -693,7 +693,10 @@ class ModelConfig:
                 self.tokenizer_mode = "kimi_k3"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
-            elif arch == "DeepseekV4ForCausalLM":
+            elif arch in (
+                "DeepseekV4ForCausalLM",
+                "DeepseekV4ForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "deepseek_v4"
             elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
                 self.tokenizer_mode = "inkling"
