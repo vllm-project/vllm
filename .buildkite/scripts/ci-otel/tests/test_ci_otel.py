@@ -434,6 +434,29 @@ def test_ci_otel_run_fail_open_when_tracing_unavailable(tmp_path):
     assert result.stdout.strip() == "ran"
 
 
+def test_ci_otel_run_handles_assignment_prefixed_commands(tmp_path):
+    shell = (
+        f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; '
+        f"ci_otel_run 1 {_quoted('MY_VAR=hello env')} "
+        "MY_VAR=hello env"
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_SPOOL_DIR": str(tmp_path),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "MY_VAR=hello" in result.stdout
+
+
 def test_missing_helpers_do_not_block_the_test_command(tmp_path):
     output = tmp_path / "ran"
     shell = (

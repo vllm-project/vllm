@@ -5,7 +5,7 @@
 # No-op fallbacks keep every generated wrapper safe when setup is unavailable.
 ci_otel_start() { :; }
 ci_otel_finish() { :; }
-ci_otel_run() { shift 2; "$@"; return $?; }
+ci_otel_run() { shift 2; env "$@"; return $?; }
 
 if [ -z "${CI_INFRA_OTEL_DIR:-}" ]; then
   echo "vLLM CI OTel: helper directory is unset; tracing disabled" >&2 || :
@@ -100,12 +100,14 @@ ci_otel_finish() {
 
 # Run a simple command with tracing. Only for commands that do not modify
 # shell state (export, cd, etc.) — those need the explicit start/finish pair.
+# Assignment-prefixed arguments (VAR=value) are routed through env so the
+# shell does not try to execute the assignment as a program.
 ci_otel_run() {
   _CI_INFRA_OTEL_RUN_INDEX="$1"
   _CI_INFRA_OTEL_RUN_LABEL="$2"
   shift 2
   ci_otel_start "${_CI_INFRA_OTEL_RUN_INDEX}" "${_CI_INFRA_OTEL_RUN_LABEL}" || :
-  "$@"
+  env "$@"
   _CI_INFRA_OTEL_RUN_STATUS=$?
   ci_otel_finish "${_CI_INFRA_OTEL_RUN_STATUS}" || :
   return "${_CI_INFRA_OTEL_RUN_STATUS}"

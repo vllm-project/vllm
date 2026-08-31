@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import secrets
 import struct
 import sys
@@ -22,7 +21,29 @@ ENDPOINT = os.getenv("CI_INFRA_OTEL_ENDPOINT", "https://ci.vllm.ai/api/otel/v1/t
 AUDIENCE = os.getenv("CI_INFRA_OTEL_AUDIENCE", "https://ci.vllm.ai/api/otel")
 MAX_BATCH_SIZE = 2_000
 TEST_SPOOL_BATCH_SIZE = 100
-DOCKERFILE_STEP = re.compile(r"^\[(.+?)\s+(\d+)/(\d+)\]\s+(.+)$")
+
+
+def _parse_dockerfile_step(name: str) -> tuple[str, int, int, str] | None:
+    """Parse "[stage index/total] label" without regex."""
+    if not name.startswith("["):
+        return None
+    close = name.find("]")
+    if close == -1:
+        return None
+    header = name[1:close]
+    label = name[close + 1 :].lstrip()
+    if not label:
+        return None
+    parts = header.rsplit(None, 1)
+    if len(parts) != 2:
+        return None
+    stage, step = parts
+    if "/" not in step:
+        return None
+    index_str, total_str = step.split("/", 1)
+    if not index_str.isdigit() or not total_str.isdigit():
+        return None
+    return stage, int(index_str), int(total_str), label
 
 
 @dataclass(frozen=True)
@@ -279,10 +300,10 @@ def buildkit_spans(payload: dict) -> list[Span]:
             name = span.get("operationName")
             if not isinstance(name, str) or name.startswith("cache request: "):
                 continue
-            match = DOCKERFILE_STEP.match(name)
+            step = _parse_dockerfile_step(name)
             is_internal = name.startswith("[internal] ")
             is_export = name.startswith(("exporting to ", "export to "))
-            if not (match or is_internal or is_export):
+            if not (step or is_internal or is_export):
                 continue
             try:
                 start_ns, end_ns = envelope(span)
@@ -296,14 +317,13 @@ def buildkit_spans(payload: dict) -> list[Span]:
 
         for span, start_ns, end_ns in selected.values():
             name = span["operationName"]
-            match = DOCKERFILE_STEP.match(name)
+            step = _parse_dockerfile_step(name)
             tags = _buildkit_tags(span)
             failed = (
                 tags.get("error") is True or tags.get("otel.status_code") == "ERROR"
             )
-            if match:
-                stage, index, total, label = match.groups()
-                step_index, step_total = int(index), int(total)
+            if step:
+                stage, step_index, step_total, label = step
             else:
                 stage = "BuildKit internals"
                 label = name.removeprefix("[internal] ")
