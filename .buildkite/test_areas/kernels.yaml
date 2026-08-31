@@ -103,6 +103,8 @@ steps:
 
 - label: ":nvidia: (L4) Attention Kernels Shard %N"
   key: kernels-attention-test
+  device: l4
+  num_devices: 1
   timeout_in_minutes: 65
   source_file_dependencies:
   - csrc/attention/
@@ -164,6 +166,8 @@ steps:
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
+  device: l4
+  num_devices: 1
   timeout_in_minutes: 60
   source_file_dependencies:
   - csrc/quantization/
@@ -193,6 +197,8 @@ steps:
 
 - label: ":nvidia: (L4) MoE Kernels Shard %N"
   key: kernels-moe-test
+  device: l4
+  num_devices: 1
   timeout_in_minutes: 50
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
