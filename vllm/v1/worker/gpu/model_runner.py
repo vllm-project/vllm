@@ -20,6 +20,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from copy import deepcopy
 from typing import Any, NamedTuple
@@ -43,11 +44,13 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
+from vllm.model_executor.layers.logits_processor import LocalLogits
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
+from vllm.model_executor.models.interfaces_base import SupportsLocalLogits
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -168,6 +171,23 @@ from vllm.v1.worker.utils import (
 from vllm.v1.worker.workspace import use_workspace_lane
 
 logger = init_logger(__name__)
+
+
+def _get_prompt_logprobs_local_logits_fn(
+    model: nn.Module, dcp_size: int
+) -> Callable[[torch.Tensor], LocalLogits | None] | None:
+    """Return the narrow GLM local-logits capability for V2 prompt scores."""
+    if dcp_size != 1:
+        return None
+    local_logits_fn = getattr(model, "compute_local_logits", None)
+    if not callable(local_logits_fn):
+        return None
+    if isinstance(model, SupportsLocalLogits):
+        return local_logits_fn
+    config = getattr(model, "config", None)
+    if getattr(config, "model_type", None) == "glm_moe_dsa":
+        return local_logits_fn
+    return None
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -1872,8 +1892,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         assert self.prompt_logprobs_worker is not None
+        model = self.get_model()
+        local_logits_fn = _get_prompt_logprobs_local_logits_fn(model, self.dcp_size)
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
-            self.model.compute_logits,
+            model.compute_logits,
+            local_logits_fn,
             hidden_states,
             input_batch,
             self.req_states.all_token_ids.gpu,

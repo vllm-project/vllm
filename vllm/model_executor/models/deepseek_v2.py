@@ -71,7 +71,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.logits_processor import LocalLogits, LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -1980,4 +1980,5 @@ class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
 
 
 class GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM):
-    pass
+    def compute_local_logits(self, hidden_states: torch.Tensor) -> LocalLogits | None:
+        return self.logits_processor.get_local_logits(self.lm_head, hidden_states)
