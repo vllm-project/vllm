@@ -312,6 +312,9 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
         if not can_implement_base:
             return can_implement_base, reason
 
+        if config.weight_quant_key.scale.dtype == torch.float8_e8m0fnu:
+            return False, "does not support float8_e8m0fnu weight scales."
+
         act_group_shape = config.activation_quant_key.scale.group_shape
         if act_group_shape != GroupShape(1, 128):
             return (
