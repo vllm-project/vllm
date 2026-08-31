@@ -15,6 +15,7 @@ if not current_platform.is_rocm():
 
 from vllm.v1.attention.backends.mla import rocm_aiter_mla  # noqa: E402
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
+    AiterMLAHelper,
     AiterMLAMetadataBuilder,
 )
 
@@ -39,7 +40,6 @@ class _ExpandPageIndicesKernel:
         block_table_tensor,
         stride,
         paged_kv_indptr,
-        seq_lens_for_kernel,
         *,
         KERNEL_BLOCK_SIZE,
         BLOCK_SIZE,
@@ -47,7 +47,9 @@ class _ExpandPageIndicesKernel:
         self.kernel_block_size = KERNEL_BLOCK_SIZE
         for req_idx in range(self.grid[0]):
             out_start = int(paged_kv_indptr[req_idx].item())
-            seq_len = int(seq_lens_for_kernel[req_idx].item())
+            seq_len = int(
+                (paged_kv_indptr[req_idx + 1] - paged_kv_indptr[req_idx]).item()
+            )
             for token_idx in range(seq_len):
                 block_id = int(
                     block_table_tensor[req_idx, token_idx // KERNEL_BLOCK_SIZE].item()
@@ -83,7 +85,7 @@ def _builder(
         _uniform_padded_mtp_qo_len=(AiterMLAMetadataBuilder._uniform_padded_mtp_qo_len),
         _use_persistent_metadata=False,
         kernel_block_size=kernel_block_size,
-        _num_attention_heads=16,
+        _num_attention_heads=AiterMLAHelper.get_actual_mla_num_heads(num_heads),
         _mla_work_meta_data=torch.empty(1, dtype=torch.int32),
         _mla_work_info_set=torch.empty(1, dtype=torch.int32),
         _mla_work_indptr=torch.empty(1, dtype=torch.int32),
@@ -109,7 +111,7 @@ def test_backend_declares_uniform_batch_support():
     )
 
 
-@pytest.mark.parametrize("num_heads", [8, 16, 32, 64, 128])
+@pytest.mark.parametrize("num_heads", [8, 16, 24, 32, 64, 128])
 @pytest.mark.parametrize(
     "spec_method, parallel_drafting",
     [
@@ -127,8 +129,8 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
 ):
     """Aiter init sizes the metadata for every query length decode can be handed.
 
-    Sweeping num_heads asserts the max(16, num_heads) clamp is what sizes the
-    metadata, covering the fp8 nhead=32 (TP4) fold path.
+    Sweeping num_heads asserts metadata is sized for the padded decode shape,
+    covering Kimi-K3 TP4's 24 -> 32 head path and native fp8 nhead=32 folding.
     """
 
     dtypes = SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16")
@@ -207,7 +209,7 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
         {
             "max_batch_size": config.scheduler_config.max_num_seqs,
             "max_qo_len": builder.reorder_batch_threshold,
-            "num_attention_heads": max(16, num_heads),
+            "num_attention_heads": AiterMLAHelper.get_actual_mla_num_heads(num_heads),
             "q_dtype": dtypes.fp8,
             "kv_dtype": dtypes.fp8,
             "is_sparse": False,
@@ -246,6 +248,51 @@ def test_mtp_decode_qlen4_keeps_uniform_rows_with_metadata(monkeypatch):
     assert metadata.has_persistent_metadata
     assert get_mla_metadata_v1.call_args.kwargs["max_seqlen_qo"] == 4
     assert get_mla_metadata_v1.call_args.kwargs["uni_seqlen_qo"] == 4
+
+
+def test_min_kv_seq_len_ignores_cudagraph_padding_rows(monkeypatch):
+    """min_kv_seq_len must not be driven by padded dummy requests.
+
+    Full-CG verify pins zero-qo rows to max_qo_len for paged_kv metadata; taking
+    per_req_len.min() over all rows then reports qlen instead of a real KV length
+    and collapses Gluon KV-split parallelism on single-request decode.
+    """
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=mock.MagicMock()),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+    monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
+
+    mtp_qlen = 8
+    num_reqs = 8
+    active_seq_len = 1032
+    seq_lens = torch.tensor([active_seq_len] + [0] * (num_reqs - 1), dtype=torch.int32)
+    query_start_loc = torch.tensor(
+        [0, mtp_qlen] + [mtp_qlen] * (num_reqs - 1), dtype=torch.int32
+    )
+
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        _builder(
+            mtp_decode_qlen=mtp_qlen,
+            has_full_cudagraphs=True,
+            max_decode_rows=num_reqs,
+            num_heads=12,
+        ),
+        block_table_tensor=torch.zeros(num_reqs, active_seq_len, dtype=torch.int32),
+        seq_lens_device=seq_lens,
+        max_seq_len=active_seq_len,
+        query_start_loc_cpu=query_start_loc,
+        query_start_loc_device=query_start_loc,
+        num_decode_tokens=num_reqs * mtp_qlen,
+        dcp_tot_seq_lens_device=None,
+    )
+
+    assert metadata.min_kv_seq_len == active_seq_len
 
 
 def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
@@ -381,6 +428,7 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
         (1, 1, 16, "auto", True),  # non-MTP decode
         (4, 2, 16, "auto", True),  # MTP deployment, in-range step
         (4, 4, 16, "auto", True),  # MTP deployment, full-qlen verification step
+        (1, 1, 24, "auto", True),  # unaligned H24 pads to H32 persistent decode
         (2, 4, 16, "auto", False),  # step demand exceeds provisioned K -> fallback
         (1, 1, 8, "auto", False),  # divisor head count -> Gluon decode owns qlen==1
         (4, 4, 8, "auto", False),  # small head count -> Gluon flatten owns qlen>1
@@ -410,7 +458,8 @@ def test_persistent_metadata_gate(
     K = _mtp_decode_qlen sizes the metadata buffers at init; a decode step gets
     the pre-built schedule only when its qlen fits those buffers, otherwise it
     falls back to the kernel computing its own. qlen==1 (non-MTP) must stay
-    in-range -- dropping it is the regression this guards.
+    in-range -- dropping it is the regression this guards. This includes
+    unaligned H24, whose padded H32 decode uses persistent metadata.
 
     Only the Gluon paths ignore the schedule, so the gate follows the routing
     predicates rather than the raw head count. Reading `num_heads >= 16` instead

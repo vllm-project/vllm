@@ -269,14 +269,6 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
     double eps, int64_t cache_block_size);
 
-void fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out(
-    torch::stable::Tensor const& q_in, torch::stable::Tensor const& kv,
-    torch::stable::Tensor& q_out, torch::stable::Tensor& k_cache,
-    torch::stable::Tensor const& slot_mapping,
-    torch::stable::Tensor const& position_ids,
-    torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
-    double eps, int64_t cache_block_size);
-
 void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
     torch::stable::Tensor& q, torch::stable::Tensor const& kv,
     torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
@@ -401,6 +393,9 @@ void fused_kda_decode(
     std::optional<torch::stable::Tensor> output_gate,
     std::optional<torch::stable::Tensor> norm_weight, double norm_eps);
 
+#endif
+
+#ifdef VLLM_ENABLE_FUSED_GDN_DECODE
 void fused_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& mixed_qkv, torch::stable::Tensor const& a,
     torch::stable::Tensor const& b, torch::stable::Tensor const& a_log,
@@ -410,7 +405,7 @@ void fused_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& num_accepted_tokens,
     torch::stable::Tensor& state, torch::stable::Tensor const& output_gate,
     torch::stable::Tensor const& norm_weight, torch::stable::Tensor& out,
-    double scale, double norm_eps);
+    double scale, double norm_eps, const std::string& output_gate_activation);
 
 #endif
 
@@ -534,8 +529,16 @@ void fatrelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                      double threshold);
 void swigluoai_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                        double alpha = 1.702, double limit = 7.0);
-void situ_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
-                  double beta = 1.0, double linear_beta = -1.0);
+void situ_and_mul(
+    torch::stable::Tensor& out, torch::stable::Tensor& input, double beta = 1.0,
+    double linear_beta = -1.0,
+    std::optional<torch::stable::Tensor> valid_rows = std::nullopt);
+void situ_and_mul_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor& scale,
+    torch::stable::Tensor& input, double beta = 1.0, double linear_beta = -1.0,
+    int64_t group_size = 0,
+    std::optional<torch::stable::Tensor> valid_rows = std::nullopt,
+    int64_t topk = 1);
 void masked_situ_and_mul(torch::stable::Tensor& out,
                          torch::stable::Tensor& input,
                          const torch::stable::Tensor& expert_num_tokens,
@@ -693,6 +696,14 @@ void cp_gather_indexer_k_quant_cache(
                                                 // quant_block_size * 4]
     const torch::stable::Tensor& block_table,   // [batch_size, num_blocks]
     const torch::stable::Tensor& cu_seq_lens);  // [batch_size + 1]
+
+// Fused vocab-parallel embedding lookup (see
+// vocab_parallel_embedding_kernels.cu).
+void vocab_parallel_embedding(
+    torch::stable::Tensor& out, const torch::stable::Tensor& input_ids,
+    const torch::stable::Tensor& weight, int64_t org_vocab_start_index,
+    int64_t org_vocab_end_index, int64_t num_org_vocab_padding,
+    int64_t added_vocab_start_index, int64_t added_vocab_end_index);
 
 // LongCat n-gram embedding index kernel (see ngram_embedding_kernels.cu).
 void ngram_compute_n_gram_ids(

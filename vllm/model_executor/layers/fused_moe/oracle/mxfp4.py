@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Literal, Union
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.config.quantization import QuantizationConfigArgs
@@ -100,6 +101,9 @@ def _pack_deepgemm_mxfp4_scales(
 
 class Mxfp4MoeBackend(Enum):
     NONE = "None"
+    # b12x backends
+    B12X_MXFP4_MXFP8 = "B12X_MXFP4_MXFP8"
+    B12X_MXFP4_BF16 = "B12X_MXFP4_BF16"
     # DeepGEMM FP8xFP4 backend (SM100+)
     DEEPGEMM_MXFP4 = "DEEPGEMM_MXFP4"
     # FlashInfer TRTLLM backends
@@ -130,14 +134,6 @@ class Mxfp4MoeBackend(Enum):
     HUMMING = "HUMMING"
 
 
-# AITER backends group
-AITER_BACKENDS = (
-    Mxfp4MoeBackend.AITER_MXFP4_BF16,
-    Mxfp4MoeBackend.AITER_MXFP4_FP8,
-    Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
-)
-
-
 # Backends that share the same TRTLLM weight format
 TRTLLM_BACKENDS = (
     Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
@@ -149,11 +145,21 @@ TRITON_BACKENDS = (
     Mxfp4MoeBackend.TRITON_UNFUSED,
 )
 
+B12X_BACKENDS = (
+    Mxfp4MoeBackend.B12X_MXFP4_MXFP8,
+    Mxfp4MoeBackend.B12X_MXFP4_BF16,
+)
+
 
 def backend_to_kernel_cls(
     backend: Mxfp4MoeBackend,
 ) -> list[type[mk.FusedMoEExperts]]:
-    if backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
+    if backend in B12X_BACKENDS:
+        from vllm.model_executor.layers.fused_moe.b12x import B12xExperts
+
+        return [B12xExperts]
+
+    elif backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
             DeepGemmFP4Experts,
         )
@@ -277,6 +283,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
     via ``activation_key`` and ``is_supported_config``.
     """
     mapping: dict[str, list[Mxfp4MoeBackend]] = {
+        "b12x": list(B12X_BACKENDS),
         "deep_gemm": [Mxfp4MoeBackend.DEEPGEMM_MXFP4],
         "flashinfer_trtllm": [
             Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
@@ -363,6 +370,8 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     """Map backend to its activation key (FP8, MXFP8, or None for BF16)."""
     if backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         return kFp8Dynamic128Sym
+    if backend == Mxfp4MoeBackend.B12X_MXFP4_MXFP8:
+        return kMxfp8Dynamic
     if backend in (
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
@@ -449,6 +458,55 @@ def _filter_by_activation(
     return bf16 if bf16 else backends
 
 
+def _get_requested_backends(
+    runner_backend: MoEBackend,
+    requested_activation_key: QuantKey | None,
+) -> list[Mxfp4MoeBackend]:
+    backends = map_mxfp4_backend(runner_backend)
+    if runner_backend == "b12x":
+        if envs.VLLM_B12X_MOE_FP4_FORCE_A16:
+            return [Mxfp4MoeBackend.B12X_MXFP4_BF16]
+        # W4A8 is the high-throughput b12x path and is preferred when the
+        # model does not request an activation format. Keep this as backend
+        # policy instead of exposing a separate backend name per precision.
+        if requested_activation_key is None:
+            return backends
+    return _filter_by_activation(backends, requested_activation_key)
+
+
+def _requires_qwen38_tep8_emulation(
+    config: FusedMoEConfig,
+    activation_key: QuantKey | None,
+) -> bool:
+    """Avoid the inaccurate native gfx950 kernel for Qwen3.8 TEP8.
+
+    Qwen3.8 Flash Next's routed experts use the distinctive
+    ``E=512, H=2560, N=640`` W4A4 shape. With eight-way expert parallelism,
+    AITER operates on 64 local experts and pads ``N`` to 768. That native path
+    is not numerically reliable on gfx950, while OCP MX emulation preserves
+    model accuracy. Keep this guard exact so other MXFP4 shapes and smaller EP
+    configurations retain the native backend.
+    """
+    parallel = config.moe_parallel_config
+    if not (
+        activation_key == kMxfp4Dynamic
+        and parallel.use_ep
+        and parallel.ep_size == 8
+        and config.num_experts == 512
+        and config.num_local_experts == 64
+        and config.hidden_dim == 2560
+        and config.intermediate_size == 640
+    ):
+        return False
+
+    if not current_platform.is_rocm():
+        return False
+
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
 def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
@@ -464,6 +522,7 @@ def select_mxfp4_moe_backend(
 
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    runner_backend = config.moe_backend
     requested_activation_key = _resolve_activation_key(activation_key)
 
     activation_format = (
@@ -472,26 +531,25 @@ def select_mxfp4_moe_backend(
         else mk.FusedMoEActivationFormat.Standard
     )
 
-    runner_backend = config.moe_backend
     if runner_backend != "auto":
-        requested_backends = map_mxfp4_backend(runner_backend)
+        requested_backends = _get_requested_backends(
+            runner_backend, requested_activation_key
+        )
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
                 for b in requested_backends
             ]
-        candidates = _filter_by_activation(requested_backends, requested_activation_key)
-        if not candidates:
+        if not requested_backends:
             raise ValueError(
                 f"moe_backend={runner_backend!r} does not support "
-                f"activation={requested_activation_key}; supported variants: "
-                f"{[b.name for b in requested_backends]}"
+                f"activation={requested_activation_key}"
             )
         last_error: Exception | None = None
-        for requested_backend in candidates:
+        for requested_backend in requested_backends:
             act_key = (
                 requested_activation_key
-                if requested_activation_key is not None
+                if requested_backend == Mxfp4MoeBackend.EMULATION
                 else _backend_activation_key(requested_backend)
             )
             try:
@@ -506,6 +564,21 @@ def select_mxfp4_moe_backend(
                 last_error = e
         assert last_error is not None
         raise last_error
+
+    if _requires_qwen38_tep8_emulation(config, requested_activation_key):
+        backend = Mxfp4MoeBackend.EMULATION
+        logger.warning_once(
+            "Using OCP MX emulation for the Qwen3.8 Flash Next TEP8 routed "
+            "experts on gfx950 because the native AITER W4A4 kernel is not "
+            "numerically reliable for this shape. Performance will be lower."
+        )
+        return _return_or_raise(
+            backend,
+            config,
+            kMxfp4Static,
+            requested_activation_key,
+            activation_format,
+        )
 
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _filter_by_activation(
@@ -585,7 +658,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
     # falling back to the auto priority list.
     runner_backend = config.moe_backend
     if runner_backend != "auto":
-        requested_backends = map_mxfp4_backend(runner_backend)
+        requested_backends = _get_requested_backends(runner_backend, None)
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
@@ -644,6 +717,10 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     activation: MoEActivation | None = None,
 ) -> tuple[int, int]:
     """Round up hidden_size and intermediate_size based on backend requirements."""
+    if backend in B12X_BACKENDS:
+        # b12x plans for the exact model dimensions. B12xExperts validates the
+        # required MXFP4 block alignment before selecting the backend.
+        return hidden_size, intermediate_size
     if backend == Mxfp4MoeBackend.EMULATION:
         # Emulation has no kernel tile; it only needs OCP MX block alignment so the
         # per-block scale buffers (`dim // OCP_MX_BLOCK_SIZE`) aren't floor-truncated
@@ -1296,6 +1373,16 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
         is_gfx1250 = on_gfx1250()
 
+    if mxfp4_backend in B12X_BACKENDS:
+        return (
+            w13_weight.data,
+            w2_weight.data,
+            w13_weight_scale.data,
+            w2_weight_scale.data,
+            w13_bias,
+            w2_bias,
+        )
+
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
             w13_weight,
@@ -1719,6 +1806,16 @@ def make_mxfp4_moe_quant_config(
     layer: "RoutedExperts | None" = None,
 ) -> FusedMoEQuantConfig | None:
     """Create a FusedMoEQuantConfig for the given MXFP4 backend."""
+    if mxfp4_backend == Mxfp4MoeBackend.B12X_MXFP4_MXFP8:
+        return mxfp4_mxfp8_moe_quant_config(
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+        )
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         from vllm.model_executor.layers.quantization.utils.quant_utils import (
             GroupShape,
@@ -1786,6 +1883,7 @@ def make_mxfp4_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
     elif mxfp4_backend in (
+        Mxfp4MoeBackend.B12X_MXFP4_BF16,
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.TRITON,

@@ -430,6 +430,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/cuda_utils_kernels.cu"
     "csrc/libtorch_stable/activation_kernels.cu"
     "csrc/libtorch_stable/ngram_embedding_kernels.cu"
+    "csrc/libtorch_stable/vocab_parallel_embedding_kernels.cu"
     "csrc/libtorch_stable/quantization/activation_kernels.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu"
@@ -1180,14 +1181,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   # HIP counterpart of the FUSED_KDA_DECODE block above: same `fused_kda_decode`
-  # op, same VLLM_ENABLE_FUSED_KDA_DECODE guard in torch_bindings.cpp. Only
-  # measured on gfx950, so it is only built when gfx950 is in the arch list.
-  # A multi-arch build that includes gfx950 still emits this source for every
-  # arch in that list. The runtime gate in kda_decode.py keeps the kernel off
-  # non-gfx950 devices.
+  # op, same VLLM_ENABLE_FUSED_KDA_DECODE guard in torch_bindings.cpp. Built for
+  # the CDNA archs the kernel supports (gfx942 / gfx950), so it is only emitted
+  # when one of those is in the arch list. A multi-arch build that includes them
+  # still emits this source for every arch in that list. The runtime gate in
+  # kda_decode.py keeps the kernel off unsupported devices.
   if(VLLM_GPU_LANG STREQUAL "HIP")
     set(FUSED_KDA_DECODE_HIP_ARCHS ${VLLM_GPU_ARCHES})
-    list(FILTER FUSED_KDA_DECODE_HIP_ARCHS INCLUDE REGEX "gfx950")
+    list(FILTER FUSED_KDA_DECODE_HIP_ARCHS INCLUDE REGEX "gfx942|gfx950")
     if(FUSED_KDA_DECODE_HIP_ARCHS)
       set(FUSED_KDA_DECODE_HIP_SRC
         "csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel_rocm.cu")
@@ -1416,25 +1417,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
                    " in CUDA target architectures")
-  endif()
-
-  # DeepSeek V3 router GEMM kernel requires SM90+ and CUDA >= 12.0.
-  # (fp32_router_gemm has been migrated to _C_stable_libtorch above.)
-  cuda_archs_sm90plus(SM90PLUS_ROUTER_GEMM_ARCHS "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND SM90PLUS_ROUTER_GEMM_ARCHS)
-    set(DSV3_ROUTER_GEMM_SRC
-      "csrc/libtorch_stable/moe/dsv3_router_gemm_entry.cu"
-      "csrc/libtorch_stable/moe/dsv3_router_gemm_float_out.cu"
-      "csrc/libtorch_stable/moe/dsv3_router_gemm_bf16_out.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${DSV3_ROUTER_GEMM_SRC}"
-      CUDA_ARCHS "${SM90PLUS_ROUTER_GEMM_ARCHS}")
-    list(APPEND VLLM_MOE_EXT_SRC "${DSV3_ROUTER_GEMM_SRC}")
-
-    message(STATUS "Building DSV3 router GEMM kernels for archs: ${SM90PLUS_ROUTER_GEMM_ARCHS}")
-  else()
-    message(STATUS "Not building DSV3 router GEMM kernels as no compatible archs found"
-                   " (requires SM90+ and CUDA >= 12.0)")
   endif()
 endif()
 
