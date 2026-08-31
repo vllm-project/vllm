@@ -186,10 +186,8 @@ def test_dcp_decode_leaves_gluon(
 ):
     """DCP decode must not take Gluon, which returns no LSE.
 
-    These are exactly the shapes that keep Gluon without DCP, so the head count
-    is not what excludes them. The cross-shard combine needs an LSE per partial
-    output, and the Gluon single-token branch has none to give -- without this
-    the layer hits a bare assertion at the first decoded token.
+    These shapes keep Gluon without DCP, so the head count is not what
+    excludes them.
     """
     assert AiterMLAHelper.use_gluon_decode(num_heads, 1, kv_cache_dtype)
     assert not AiterMLAHelper.use_gluon_decode(
@@ -216,8 +214,7 @@ def test_neither_gluon_entry_point_serves_dcp(
 ):
     """Both Gluon entry points are closed to DCP, at every query length.
 
-    Verify already excluded it; decode now matches. DCP is served by the asm
-    persistent decode and, for multi-token verification, by segmented MLA.
+    DCP is served by the asm persistent decode, and verify by segmented MLA.
     """
     for max_qo_len in (1, 2, 8):
         assert not AiterMLAHelper.use_gluon_decode(

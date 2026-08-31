@@ -190,11 +190,8 @@ def _segmented_mla_decode_supported() -> bool:
 def _decode_lse_supported() -> bool:
     """Whether AITER's MLA decode can return the LSE the DCP merge needs.
 
-    ``mla_decode_fwd(..., return_lse=True)`` is what lets a DCP rank hand its
-    partial output to the cross-shard combine. Older AITER builds have no such
-    keyword, and the resulting failure is a bare assertion at the first decode
-    step rather than at startup, so probe the signature once at configuration
-    time instead.
+    Older builds lack the keyword and fail on an assert at the first decode
+    step, so probe the signature at configuration time instead.
     """
     try:
         return "return_lse" in inspect.signature(_get_aiter_mla_decode()).parameters
@@ -1359,13 +1356,10 @@ class AiterMLAHelper:
         # the padded asm persistent decode, selected by
         # VLLM_ROCM_AITER_MLA_ASM_PADDING and the arch (Gluon is gfx950 only).
         #
-        # DCP decode is excluded: the Gluon branch in forward_mqa returns no
-        # LSE, and the cross-rank combine needs one. Today this is also true
-        # arithmetically -- the caller passes the gathered head count, which is
-        # >= 16 for every realistic DCP layout -- but that is a coincidence of
-        # head counts, not a guarantee, and the failure mode without this guard
-        # is a bare `assert lse is not None` in the MLA layer. Mirrors the same
-        # exclusion in use_gluon_verify.
+        # DCP is excluded: the Gluon branch in forward_mqa returns no LSE, and
+        # the cross-rank combine needs one. The head check below also excludes
+        # it at every realistic gathered head count, but that is a coincidence,
+        # not a guarantee. Mirrors use_gluon_verify.
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
         if num_heads >= m or max_qo_len != 1 or dcp_world_size > 1:
             return False
@@ -1464,16 +1458,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         """Reject a DCP config whose AITER build cannot return a decode LSE.
 
         Every DCP decode step merges partial attention across shards, which
-        needs the LSE. Raising here costs a config check; discovering it at the
-        first decoded token costs a model load and surfaces as an assertion
-        inside the attention layer that names nothing useful.
+        needs the LSE. Raising here beats asserting after a model load.
         """
         if dcp_world_size > 1 and not _decode_lse_supported():
             raise ValueError(
-                "Decode context parallelism on the AITER MLA backend requires "
-                "an AITER build whose mla_decode_fwd accepts return_lse=True; "
-                "the installed build does not. Upgrade AITER, or select a "
-                "different MLA attention backend."
+                "AITER MLA with decode context parallelism needs an AITER "
+                "build whose mla_decode_fwd accepts return_lse=True. Upgrade "
+                "AITER, or pick another MLA backend."
             )
 
     def __init__(

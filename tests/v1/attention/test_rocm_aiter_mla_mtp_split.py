@@ -975,11 +975,7 @@ def test_decode_lse_probe_reads_the_aiter_signature(monkeypatch):
 
 
 def test_decode_lse_probe_survives_a_broken_aiter(monkeypatch):
-    """An aiter that cannot even be imported reads as unsupported, not a crash.
-
-    The probe runs at configuration time on hosts where the import may fail for
-    reasons unrelated to DCP, so it must degrade rather than propagate.
-    """
+    """An aiter that cannot be imported reads as unsupported, not a crash."""
 
     def explode():
         raise ImportError("no aiter here")
@@ -994,12 +990,7 @@ def test_decode_lse_probe_survives_a_broken_aiter(monkeypatch):
 
 @pytest.mark.parametrize("dcp_world_size", [2, 8])
 def test_dcp_without_decode_lse_fails_at_startup(monkeypatch, dcp_world_size):
-    """An aiter build with no decode LSE must be rejected while it is cheap.
-
-    Reaching the first decoded token instead costs a whole model load and
-    surfaces as a bare assertion inside the attention layer, which says nothing
-    about the aiter build being the cause.
-    """
+    """An aiter build with no decode LSE must be rejected before a model load."""
 
     def without_lse(q, kv, out, *args, **kwargs):
         return None
