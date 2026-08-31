@@ -400,6 +400,76 @@ class ChunkGatedDeltaRule(CustomOp):
         return o, final_state
 
 
+def gdn_deinterleave_qkvz_enabled() -> bool:
+    """C9: row-permute in_proj_qkvz/in_proj_ba weights at load so the
+    projection output is already in flat [q, k, v, z] / [b, a] layout and
+    the interleaved-GQA unpack glue kernels are not needed. Bit-exact by
+    construction (pure row permutation of the GEMM output). Default on;
+    "0" restores the exact old interleaved path."""
+    return os.environ.get("VLLM_GDN_DEINTERLEAVE_QKVZ", "1") != "0"
+
+
+def gdn_concat_tiny_gemms_enabled() -> bool:
+    """C6: fold the tiny in_proj_ba GEMM rows into the in_proj_qkvz GEMM
+    (N 12288 -> 12352 at TP1) at weight load. Kills the splitK GEMM +
+    splitKreduce partner; measured in-graph on B200 the fused GEMM also
+    beats the separate qkvz GEMM (-3.1 us at ntok=16 / -4.5 us at 128 for
+    the projection). Output columns are torch.equal-bit-exact on B200.
+    Default on; "0" restores the exact old two-GEMM path."""
+    return os.environ.get("VLLM_GDN_CONCAT_TINY_GEMMS", "1") != "0"
+
+
+def gdn_concat_router_gate_enabled() -> bool:
+    """C6 router-gate fold: fold the 1-row shared_expert_gate into the MoE
+    router gate GEMM (padded N 512 -> 528; see MoERunner). DEFAULT OFF:
+    measured in-graph on B200 the unpadded N=513 GEMM is a cuBLAS cliff
+    (+17..+22 us/layer vs the separate pair) and even the padded variant
+    nets only -0.8..-1.5 us/layer after the contiguous router-logits
+    slice, while introducing ULP-class drift on the routing logits
+    (~0.5-0.8% of logit scale) that can flip near-tie top-k picks.
+    Set "1" to opt in."""
+    return os.environ.get("VLLM_GDN_CONCAT_ROUTER_GATE", "0") != "0"
+
+
+def build_qkvz_deinterleave_perm(
+    num_groups: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    v_heads_per_group: int,
+    device=None,
+) -> torch.Tensor:
+    """Row permutation taking the interleaved-GQA in_proj_qkvz output
+    layout [g0:(q k v z), g1:(q k v z), ...] to flat [q_all, k_all, v_all,
+    z_all] (the Qwen3.5 layout `prepare_gdn_attention_core_inputs`
+    expects). Flattened per-group order matches the order the old unpack
+    produced, so outputs are bit-identical element-for-element."""
+    group = 2 * head_k_dim + 2 * v_heads_per_group * head_v_dim
+    idx = torch.arange(num_groups * group, dtype=torch.long, device=device)
+    idx = idx.view(num_groups, group)
+    q = idx[:, :head_k_dim]
+    k = idx[:, head_k_dim : 2 * head_k_dim]
+    v = idx[:, 2 * head_k_dim : 2 * head_k_dim + v_heads_per_group * head_v_dim]
+    z = idx[:, 2 * head_k_dim + v_heads_per_group * head_v_dim :]
+    return torch.cat(
+        [q.reshape(-1), k.reshape(-1), v.reshape(-1), z.reshape(-1)], dim=0
+    )
+
+
+def build_ba_deinterleave_perm(
+    num_groups: int,
+    v_heads_per_group: int,
+    device=None,
+) -> torch.Tensor:
+    """Row permutation taking the interleaved in_proj_ba output layout
+    [b_g0, a_g0, b_g1, a_g1, ...] to flat [b_all, a_all]."""
+    idx = torch.arange(num_groups * 2 * v_heads_per_group, dtype=torch.long,
+                       device=device)
+    idx = idx.view(num_groups, 2 * v_heads_per_group)
+    b = idx[:, :v_heads_per_group]
+    a = idx[:, v_heads_per_group:]
+    return torch.cat([b.reshape(-1), a.reshape(-1)], dim=0)
+
+
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_state_shape(
@@ -540,6 +610,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
+        # Post-load weight-layout transforms (see
+        # apply_traffic_opt_weight_transforms). Both default False until the
+        # model's load_weights applies them.
+        self._qkvz_deinterleaved = False
+        self._in_proj_concat = False
+        self._in_proj_fused_weight: torch.Tensor | None = None
+        self._qkvz_local_rows = 0
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
@@ -657,6 +734,77 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and not self.gqa_interleaved_layout
             and isinstance(quant_config, (AutoAWQConfig, AutoGPTQConfig, INCConfig))
         )
+
+    def apply_traffic_opt_weight_transforms(self) -> None:
+        """Accuracy-neutral post-load weight-layout transforms.
+
+        Must be called after every full checkpoint load (a reload rewrites
+        the raw interleaved layout, so this re-applies from scratch).
+
+        C9 (VLLM_GDN_DEINTERLEAVE_QKVZ): row-permute the local
+        in_proj_qkvz / in_proj_ba weight shards from the interleaved-GQA
+        checkpoint layout to flat [q, k, v, z] / [b, a]. The projection
+        output then splits into kernel inputs with views only -- the
+        interleaved unpack's cat+slice forced copy disappears. Bit-exact:
+        each output element is the same dot product, just at a different
+        output position.
+
+        C6 (VLLM_GDN_CONCAT_TINY_GEMMS): place both weight shards in one
+        [qkvz_rows + ba_rows, hidden] buffer and run a single GEMM in
+        forward; the parameters become views into the fused buffer so
+        weight reloading still works. Kills the tiny in_proj_ba splitK
+        GEMM + its splitKreduce partner.
+
+        Only applied on CUDA for the interleaved (Qwen3-Next) layout with
+        unquantized in_proj weights (the NVFP4 checkpoint excludes
+        in_proj_qkvz/in_proj_ba from quantization).
+        """
+        self._qkvz_deinterleaved = False
+        self._in_proj_concat = False
+        self._in_proj_fused_weight = None
+        if not (current_platform.is_cuda() and self.gqa_interleaved_layout):
+            return
+        qkvz_w = getattr(self.in_proj_qkvz, "weight", None)
+        ba_w = getattr(self.in_proj_ba, "weight", None)
+        if qkvz_w is None or ba_w is None:
+            return
+        if qkvz_w.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+            # quantized/packed in_proj: layouts are backend-owned, skip.
+            return
+        if qkvz_w.dtype != ba_w.dtype or qkvz_w.shape[1] != ba_w.shape[1]:
+            return
+
+        ng = self.num_k_heads // self.tp_size
+        nvg = self.num_v_heads // self.num_k_heads
+        qkvz_rows = ng * (2 * self.head_k_dim + 2 * nvg * self.head_v_dim)
+        ba_rows = ng * 2 * nvg
+        if qkvz_w.shape[0] != qkvz_rows or ba_w.shape[0] != ba_rows:
+            return
+
+        if gdn_deinterleave_qkvz_enabled():
+            perm_qkvz = build_qkvz_deinterleave_perm(
+                ng, self.head_k_dim, self.head_v_dim, nvg, device=qkvz_w.device
+            )
+            perm_ba = build_ba_deinterleave_perm(ng, nvg, device=ba_w.device)
+            qkvz_w.data = qkvz_w.data[perm_qkvz].contiguous()
+            ba_w.data = ba_w.data[perm_ba].contiguous()
+            self._qkvz_deinterleaved = True
+
+        if gdn_concat_tiny_gemms_enabled():
+            fused = torch.empty(
+                (qkvz_rows + ba_rows, qkvz_w.shape[1]),
+                dtype=qkvz_w.dtype,
+                device=qkvz_w.device,
+            )
+            fused[:qkvz_rows].copy_(qkvz_w.data)
+            fused[qkvz_rows:].copy_(ba_w.data)
+            # Keep the parameter objects (and their weight_loader attrs)
+            # alive as views into the fused buffer so reloads write through.
+            qkvz_w.data = fused[:qkvz_rows]
+            ba_w.data = fused[qkvz_rows:]
+            self._in_proj_fused_weight = fused
+            self._qkvz_local_rows = qkvz_rows
+            self._in_proj_concat = True
 
     def split_ba(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         b, a = ba.chunk(2, dim=-1)
@@ -943,11 +1091,25 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        if self._in_proj_concat:
+            # C6: single fused GEMM over [qkvz_rows + ba_rows, hidden];
+            # slice views replace the second (splitK) GEMM.
+            qkvzba = torch.nn.functional.linear(
+                hidden_states, self._in_proj_fused_weight
+            )
+            mixed_qkvz = qkvzba[:, : self._qkvz_local_rows]
+            ba = qkvzba[:, self._qkvz_local_rows :]
+        else:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
 
+        # Upstream's fused norm-packed decode consumes the raw interleaved
+        # GEMM output; it cannot run over de-interleaved weights. The
+        # de-interleave transform (measured win on the packed path) takes
+        # precedence when enabled; interplay to be re-benchmarked.
         use_fused_gdn_decode = (
             self.enable_fused_gdn_decode
+            and not self._qkvz_deinterleaved
             and hidden_states.dtype == torch.bfloat16
             and self.norm.weight.dtype in (torch.bfloat16, torch.float32)
         )
@@ -966,7 +1128,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             output, _ = self.out_proj(core_attn_out.flatten(-2))
             return output
 
-        if self.gqa_interleaved_layout:
+        if self.gqa_interleaved_layout and not self._qkvz_deinterleaved:
             # Qwen3-Next: unpack the interleaved GQA layout
             query, key, value, z, b, a = self.fix_query_key_value_ordering(
                 mixed_qkvz, ba
@@ -976,7 +1138,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             mixed_qkv = torch.cat((query, key, value), dim=-1)
         else:
-            # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
+            # Qwen3.5 checkpoint layout, or Qwen3-Next after the C9
+            # de-interleave weight transform: [q, k, v, z] and [b, a]
+            # order. mixed_qkv stays a row-strided view (stride(-1) == 1);
+            # the conv/gating kernels take a token-row stride.
             qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
             z_size = self.value_dim // self.tp_size
             mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)

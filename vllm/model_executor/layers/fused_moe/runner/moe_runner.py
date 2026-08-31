@@ -272,13 +272,31 @@ class MoERunner(MoERunnerInterface):
         self.routed_experts = routed_experts
         self.enable_dbo = enable_dbo
 
-        # When both gates are present and FSE is enabled, fuse their
+        # When both gates are present and FSE is enabled (shared experts
+        # fused into the routed experts, no separate module), fuse their
         # weight matrices into [num_experts + num_shared, hidden] so one
         # F.linear produces combined logits. The topk kernel can then
         # apply routing softmax and shared expert activation (sigmoid)
         # in a single launch.
-        self._fse_fuse_gate = gate is not None and shared_expert_gate is not None
+        self._fse_fuse_gate = (
+            gate is not None
+            and shared_expert_gate is not None
+            and shared_experts is None
+        )
+        # When a separate shared-experts module AND its 1-row sigmoid gate
+        # are both handed to the runner, fold the gate rows into the router
+        # gate GEMM (one [num_experts + 1, hidden] F.linear instead of a
+        # tiny splitK GEMM) and apply sigmoid scaling to the shared expert
+        # output in _forward_impl. The shared-experts module must NOT apply
+        # its own expert gate in this mode.
+        self._concat_shared_gate = (
+            gate is not None
+            and shared_expert_gate is not None
+            and shared_experts is not None
+        )
         self._combined_gate_weight: torch.Tensor | None = None
+        self._gate_out_features: int | None = None
+        self._shared_gate_out_features: int | None = None
 
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
@@ -353,10 +371,24 @@ class MoERunner(MoERunnerInterface):
         """
         if self._combined_gate_weight is None:
             assert self.gate is not None and self.shared_expert_gate is not None
-            self._combined_gate_weight = torch.cat(
+            self._gate_out_features = self.gate.weight.shape[0]
+            self._shared_gate_out_features = self.shared_expert_gate.weight.shape[0]
+            combined = torch.cat(
                 [self.gate.weight, self.shared_expert_gate.weight],
                 dim=0,
             )
+            if self._concat_shared_gate:
+                # Pad N to a multiple of 16: odd-N bf16 GEMMs hit a cuBLAS
+                # cliff on B200 (N=513 is 3-5x the N=528 kernel in-graph).
+                # The FSE path must NOT be padded (its topk kernel consumes
+                # exactly num_experts + num_shared columns).
+                pad = (-combined.shape[0]) % 16
+                if pad:
+                    combined = torch.cat(
+                        [combined, combined.new_zeros(pad, combined.shape[1])],
+                        dim=0,
+                    )
+            self._combined_gate_weight = combined
 
     @property
     def _quant_method(self) -> FusedMoEMethodBase:
@@ -894,10 +926,24 @@ class MoERunner(MoERunnerInterface):
         # If the Runner holds the gate, apply it after the stream sync,
         # so it can run overlapped with the
         # NOTE: in future PR, MoE runner will always hold the gate.
+        shared_gate_logit: torch.Tensor | None = None
         if self.gate is not None:
             if self._fse_fuse_gate:
                 self._maybe_fuse_gate_weights()
                 router_logits = F.linear(hidden_states, self._combined_gate_weight)
+            elif self._concat_shared_gate:
+                # Folded router + shared-expert gate GEMM: the original
+                # router columns are sliced back out (contiguous for the
+                # routing kernels); the extra column scales the shared
+                # expert output below.
+                self._maybe_fuse_gate_weights()
+                fused_logits = F.linear(hidden_states, self._combined_gate_weight)
+                router_logits = fused_logits[:, : self._gate_out_features].contiguous()
+                shared_gate_logit = fused_logits[
+                    :,
+                    self._gate_out_features : self._gate_out_features
+                    + self._shared_gate_out_features,
+                ]
             else:
                 router_logits, _ = self.gate(hidden_states)
 
@@ -917,6 +963,11 @@ class MoERunner(MoERunnerInterface):
                 input_ids=input_ids,
                 shared_experts_overlapping=shared_experts_overlapping,
             )
+
+            if shared_gate_logit is not None and shared_output is not None:
+                # Sigmoid expert gate relocated from the shared-experts
+                # module (main stream, after the aux-stream join).
+                shared_output = torch.sigmoid(shared_gate_logit) * shared_output
 
             return self._maybe_combine(
                 shared_output,

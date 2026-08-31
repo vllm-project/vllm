@@ -57,6 +57,15 @@ def create_fp4_scale_tensor(
         rounded_m = round_up(m, 128)
         scale_n = n // block_size
         rounded_n = round_up(scale_n, 4)
+        if rounded_m == m and rounded_n == scale_n:
+            # No padding: the quant kernel writes one scale per 16-element
+            # block of every row, i.e. every element the downstream NVFP4
+            # GEMM reads. Zero-init would be pure overhead (a FillFunctor
+            # launch per quant call; ~3/layer in decode graphs whose token
+            # count is a multiple of 128).
+            return torch.empty(
+                (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
+            )
         # Must be zero-initialized: the swizzled scale buffer is padded to
         # (round_up(m, 128), round_up(scale_n, 4) // 4) but the NVFP4 quant
         # kernel does not write every padded element that the downstream
