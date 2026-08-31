@@ -30,6 +30,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.engine.arg_utils import EngineArgs
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
@@ -101,6 +102,28 @@ def test_default_ep_communicator_uses_platform_all2all_backend(
         )
     else:
         assert isinstance(device_communicator.all2all_manager, AgRsAll2AllManager)
+
+
+@pytest.mark.parametrize(
+    ("is_cuda", "expected_backend"),
+    [
+        (True, "flashinfer_nvlink_one_sided"),
+        (False, "allgather_reducescatter"),
+    ],
+)
+def test_engine_args_resolves_all2all_backend_default(
+    monkeypatch, is_cuda, expected_backend
+):
+    """`EngineArgs` mirrors this field from `ParallelConfig`, and
+    `create_engine_config()` passes the value straight back. The default must
+    therefore arrive as a resolved string; leaking a `FieldInfo` through makes
+    every launch without `--all2all-backend` fail config validation."""
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: is_cuda)
+
+    backend = EngineArgs().all2all_backend
+
+    assert backend == expected_backend
+    assert ParallelConfig(all2all_backend=backend).all2all_backend == expected_backend
 
 
 # ---------------------------------------------------------------------------
