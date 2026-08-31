@@ -56,7 +56,7 @@ _HF_MODALITY_PROCESSOR_KWARGS = {
 def overlay_modality_mm_kwargs(
     kwargs: Mapping[str, object],
     modality: str | None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Overlay HF-style nested processor kwargs onto the flat namespace.
 
     Overlay only the requested modality so a video ``size`` bump does not leak
@@ -298,7 +298,7 @@ class InputProcessingContext:
         kwargs: Mapping[str, object],
         *,
         modality: str | None = None,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         """Merge configured and request ``mm_processor_kwargs``.
 
         When ``modality`` is set, HF-style nested
