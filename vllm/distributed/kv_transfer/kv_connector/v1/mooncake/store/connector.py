@@ -280,34 +280,15 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
-        if self._layerwise_enabled:
-            # Phase 1: build per-layer tasks before model forward so that
-            # wait_for_layer_load() / save_kv_layer() (called during the
-            # forward pass) have tasks to consume.
-            assert self.connector_worker is not None
-            metadata = self._get_connector_metadata()
-            assert isinstance(metadata, MooncakeStoreConnectorMetadata)
-            self.connector_worker.start_load_kv(metadata)
-        else:
-            # Non-layerwise path: simply forward to the worker.
-            assert self.connector_worker is not None
-            metadata = self._get_connector_metadata()
-            assert isinstance(metadata, MooncakeStoreConnectorMetadata)
-            self.connector_worker.start_load_kv(metadata)
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        self.connector_worker.start_load_kv(metadata)
 
     @property
     def _layerwise_enabled(self) -> bool:
         """Check if layerwise mode is enabled."""
         extra_config = self._kv_transfer_config.kv_connector_extra_config
-        return str(extra_config.get("use_layerwise", "False")).lower() == "true"
-
-    @classmethod
-    def requires_piecewise_for_cudagraph(cls, extra_config: dict) -> bool:
-        """Layerwise mode requires PIECEWISE cudagraph mode.
-
-        Because wait_for_layer_load() and save_kv_layer() contain blocking
-        Python synchronization that cannot be captured in CUDA graphs.
-        """
         return str(extra_config.get("use_layerwise", "False")).lower() == "true"
 
     def wait_for_layer_load(self, layer_name: str) -> None:

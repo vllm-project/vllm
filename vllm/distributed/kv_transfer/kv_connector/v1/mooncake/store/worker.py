@@ -106,12 +106,7 @@ _MOONCAKE_SESSION_METHODS = (
 
 
 def _mooncake_supports_session_api(store: Any) -> bool:
-    """Return True if the Mooncake store exposes all Session API methods.
-
-    Uses ``hasattr`` (which maps to ``__getattr__`` + catch), not ``getattr``,
-    because the real Mooncake client will raise AttributeError for unknown
-    methods rather than silently returning None.
-    """
+    # Return True if the Mooncake store exposes all Session API methods.
     for method in _MOONCAKE_SESSION_METHODS:
         try:
             attr = getattr(store, method)
@@ -2271,7 +2266,6 @@ class MooncakeStoreWorker:
         self._layer_load_tasks: dict[int, list[LayerTransferTask]] = {}
         self._layer_save_finished_events: dict[int, threading.Event] = {}
         self._layer_load_finished_events: dict[int, threading.Event] = {}
-        self._current_save_layer: int = 0
         self._current_load_layer: int = 0
         self._next_load_layer_to_submit: int = 0
         self._num_prefetch_layers: int = 1
@@ -3116,7 +3110,6 @@ class MooncakeStoreWorker:
 
         # Reset counters at the last layer — events stay alive.
         if layer_id == self._num_layers - 1:
-            self._current_save_layer = 0
             self._current_load_layer = 0
             self._next_load_layer_to_submit = 0
 
