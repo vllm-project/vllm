@@ -93,19 +93,6 @@ class LLMEngine:
         # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
-        # Launch the multimodal warmup in the background so it overlaps
-        # engine-core initialization (model loading, started below). Must be
-        # after InputProcessor: its MultiModalBudget runs a synchronous MM
-        # processing pass (get_dummy_mm_inputs -> processor.apply), and the HF
-        # processor's Numba parallel kernels (e.g. Kimi-K2.5 vision fused) are
-        # not thread-safe — launching the warmup thread any earlier would run
-        # it concurrently with that pass and abort. The MM warmup is
-        # frontend-only (sends no engine_core requests) and only needs the
-        # renderer. Joined by reset_mm_cache / warmup / shutdown so the
-        # mm_processor_cache is never touched concurrently by the warmup and
-        # the serving path.
-        renderer.start_mm_warmup_in_background()
-
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
             renderer.tokenizer,
@@ -142,7 +129,7 @@ class LLMEngine:
             model = self._get_driver_model_for_cleanup()
             if model is not None:
                 self._finalizer = weakref.finalize(
-                    self, LLMEngine._cleanup_instance_caches, model
+                    self, LLMEngine._cleanup_instance_caches, weakref.ref(model)
                 )
 
         if self.external_launcher_dp:
@@ -356,10 +343,6 @@ class LLMEngine:
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
-        # Join any background MM warmup before clearing: the mm_processor_cache
-        # is not designed for concurrent access, so the warmup's apply/clear
-        # must have finished before we clear here.
-        self.renderer._join_mm_warmup()
         self.renderer.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
@@ -461,10 +444,13 @@ class LLMEngine:
         return getattr(model_runner, "model", None)
 
     @staticmethod
-    def _cleanup_instance_caches(model) -> None:
+    def _cleanup_instance_caches(model_ref: "weakref.ref[nn.Module]") -> None:
         """Remove the bytecode hooks that pin the compiled model."""
         from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 
+        model = model_ref()
+        if model is None:
+            return
         for module in model.modules():
             if isinstance(module, TorchCompileWithNoGuardsWrapper):
                 module.cleanup()
