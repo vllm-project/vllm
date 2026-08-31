@@ -4,6 +4,7 @@
 
 import pytest
 
+import vllm.envs as envs
 from vllm.v1.metrics.reader import Counter
 
 from ...models.utils import check_logprobs_close
@@ -38,10 +39,17 @@ def _check_replayssm_parity(
     tensor_parallel_size=1,
     mamba_backend: str = "triton",
     name_1: str = "replayssm",
+    require_v2: bool = False,
+    monkeypatch: pytest.MonkeyPatch | None = None,
 ):
     # Compare logprobs, not greedy ids: ReplaySSM's fp arithmetic can flip a
     # near-tie. Baseline and ReplaySSM run at the same TP, so TP numerics are
     # common-mode and only ReplaySSM varies.
+    if require_v2:
+        assert monkeypatch is not None
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+        envs.disable_envs_cache()
+
     common = dict(
         max_model_len=1024,
         trust_remote_code=True,
@@ -51,10 +59,14 @@ def _check_replayssm_parity(
         mamba_backend=mamba_backend,
     )
     with vllm_runner(model_name, **common) as llm:
+        if require_v2:
+            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
         baseline = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
     with vllm_runner(
         model_name, use_replayssm=True, replayssm_buffer_len=16, **common
     ) as llm:
+        if require_v2:
+            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
         replay = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
 
     check_logprobs_close(
@@ -89,6 +101,24 @@ def test_replayssm_flashinfer_decode_matches_baseline(vllm_runner, model_name):
         model_name,
         mamba_backend="flashinfer",
         name_1="replayssm_flashinfer",
+    )
+
+
+@pytest.mark.skipif(
+    not HAS_FLASHINFER_CHECKPOINTING_SSU,
+    reason="flashinfer.mamba.checkpointing_ssu not available",
+)
+@pytest.mark.parametrize("model_name", MODELS)
+def test_replayssm_flashinfer_decode_matches_baseline_v2(
+    vllm_runner, model_name, monkeypatch
+):
+    _check_replayssm_parity(
+        vllm_runner,
+        model_name,
+        mamba_backend="flashinfer",
+        name_1="replayssm_flashinfer_v2",
+        require_v2=True,
+        monkeypatch=monkeypatch,
     )
 
 
@@ -138,6 +168,37 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_na
         outputs_1_lst=replay,
         name_0="baseline_spec",
         name_1="replayssm_flashinfer_spec",
+    )
+
+
+@pytest.mark.skipif(
+    not HAS_FLASHINFER_CHECKPOINTING_SSU,
+    reason="flashinfer.mamba.checkpointing_ssu not available",
+)
+@pytest.mark.parametrize("model_name", MODELS)
+def test_replayssm_flashinfer_matches_triton_replayssm(vllm_runner, model_name):
+    # Both backends implement ReplaySSM; compare them directly on V1 because
+    # Triton ReplaySSM is not supported on Model Runner V2.
+    common = dict(
+        max_model_len=1024,
+        trust_remote_code=True,
+        enable_prefix_caching=False,
+        mamba_cache_mode="none",
+        use_replayssm=True,
+        replayssm_buffer_len=16,
+    )
+    with vllm_runner(model_name, mamba_backend="triton", **common) as llm:
+        triton = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+    with vllm_runner(model_name, mamba_backend="flashinfer", **common) as llm:
+        flashinfer = llm.generate_greedy_logprobs(
+            PROMPTS, max_tokens=32, num_logprobs=5
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=triton,
+        outputs_1_lst=flashinfer,
+        name_0="replayssm_triton",
+        name_1="replayssm_flashinfer",
     )
 
 

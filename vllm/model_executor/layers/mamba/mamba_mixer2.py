@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Sequence
+
 import torch
 from torch import nn
 
@@ -17,6 +19,7 @@ from vllm.distributed import (
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, PluggableLayer
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -64,6 +67,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
 logger = init_logger(__name__)
 
@@ -721,7 +725,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         attn_metadata: AttentionMetadata | None = None
         if attn_metadata_raw is not None:
             assert isinstance(attn_metadata_raw, dict)
-            attn_metadata = attn_metadata_raw[self.prefix]
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is not None:
             assert isinstance(attn_metadata, Mamba2AttentionMetadata)
             # conv_state must be (..., dim, width-1) for the conv kernels.
             # DS layout stores it that way directly; SD layout needs a
@@ -1263,7 +1268,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
 
 def share_replayssm_ring_trackers(
-    mixer_groups: list[list[MambaMixer2]],
+    ordered_layer_names: list[str],
+    forward_context: dict[str, Attention],
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
 ) -> None:
     """Share ring cursors within each cache-slot index namespace.
 
@@ -1274,32 +1281,57 @@ def share_replayssm_ring_trackers(
     for standard decode, the final local layer advances after all layers consume
     the previous values.
     """
-    for mixers in mixer_groups:
-        if not mixers:
-            continue
 
-        first_state = mixers[0].kv_cache[1]
-        expected = (first_state.shape[0], first_state.device)
-        for mixer in mixers:
-            state = mixer.kv_cache[1]
-            actual = (state.shape[0], state.device)
-            if actual != expected:
+    replayssm_mixers: dict[str, MambaMixer2] = {}
+    for layer_name in ordered_layer_names:
+        layer = forward_context[layer_name]
+        if (
+            isinstance(layer, MambaMixer2)
+            and layer.use_replayssm
+            and layer.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        ):
+            replayssm_mixers[layer_name] = layer
+
+    layer_to_group: dict[str, int] = {}
+    if kv_cache_groups:
+        for group_idx, group in enumerate(kv_cache_groups):
+            for layer_name in group.layer_names:
+                layer_to_group[layer_name] = group_idx
+
+    groups_by_namespace: dict[int | str, list[str]] = {}
+    for layer_name in ordered_layer_names:
+        if layer_name not in replayssm_mixers:
+            continue
+        namespace = layer_to_group.get(layer_name, layer_name)
+        groups_by_namespace.setdefault(namespace, []).append(layer_name)
+
+    for group_layer_names in groups_by_namespace.values():
+        first_layer_name = group_layer_names[0]
+        last_layer_name = group_layer_names[-1]
+
+        first_mixer = replayssm_mixers[first_layer_name]
+        first_state = first_mixer.kv_cache[1]
+        num_blocks, device = first_state.shape[0], first_state.device
+        for layer_name in group_layer_names:
+            state = replayssm_mixers[layer_name].kv_cache[1]
+            if (state.shape[0], state.device) != (num_blocks, device):
                 raise ValueError(
                     "ReplaySSM layers in one cache group must share cache capacity"
                 )
 
-        ring_start = torch.zeros(expected[0], dtype=torch.int32, device=expected[1])
+        ring_start = torch.zeros(num_blocks, dtype=torch.int32, device=device)
         prev_num_accepted = torch.zeros_like(ring_start)
         prev_query_len = torch.zeros_like(ring_start)
-        for mixer in mixers:
+        for layer_name in group_layer_names:
+            mixer = replayssm_mixers[layer_name]
             mixer._replayssm_ring_start = ring_start
             mixer._replayssm_prev_num_accepted = prev_num_accepted
             mixer._replayssm_prev_query_len = prev_query_len
             mixer._commits_replayssm_trackers = False
             mixer._updates_replayssm_trackers = False
 
-        mixers[0]._commits_replayssm_trackers = True
-        mixers[-1]._updates_replayssm_trackers = True
+        replayssm_mixers[first_layer_name]._commits_replayssm_trackers = True
+        replayssm_mixers[last_layer_name]._updates_replayssm_trackers = True
 
 
 def mamba_mixer2(

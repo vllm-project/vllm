@@ -47,10 +47,11 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
     mixers = [_TestReplaySSMMixer() for _ in range(3)]
     layer_names = [f"layers.{i}.mixer" for i in range(3)]
     ctx = dict(zip(layer_names, mixers))
+    # Reverse insertion order: updater must follow layer index, not dict order.
     kv_cache = {
-        layer_names[0]: _packed_replayssm_cache(4),
-        layer_names[1]: _packed_replayssm_cache(4),
         layer_names[2]: _packed_replayssm_cache(4),
+        layer_names[1]: _packed_replayssm_cache(4),
+        layer_names[0]: _packed_replayssm_cache(4),
     }
     kv_cache_groups = [
         SimpleNamespace(layer_names=[layer_names[0], layer_names[2]]),
