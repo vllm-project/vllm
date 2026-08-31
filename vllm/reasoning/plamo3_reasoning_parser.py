@@ -183,10 +183,10 @@ class Plamo3ReasoningParser(ReasoningParser):
                 return False
         return True
 
+    @staticmethod
     def _find_seq(
-        self,
         seq: Sequence[int],
-        target: list[int],
+        target: Sequence[int],
         start: int = 0,
         reverse: bool = False,
     ) -> int:
@@ -197,7 +197,7 @@ class Plamo3ReasoningParser(ReasoningParser):
             range(len(seq) - n, -1, -1) if reverse else range(start, len(seq) - n + 1)
         )
         for i in search_range:
-            if self._tokens_match_at(seq, target, i):
+            if Plamo3ReasoningParser._tokens_match_at(seq, target, i):
                 return i
         return -1
 
