@@ -816,7 +816,10 @@ def test_ubatching_rejects_unsupported_all2all_backend():
             "allgather_reducescatter is not supported"
         ),
     ):
-        VllmConfig(parallel_config=ParallelConfig(enable_dbo=True))
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=ParallelConfig(enable_dbo=True),
+        )
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])
