@@ -687,6 +687,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
         seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
+        is_prefilling=common_attn_metadata.is_prefilling,
         _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
         _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
     )

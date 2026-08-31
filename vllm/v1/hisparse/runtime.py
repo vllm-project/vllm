@@ -431,7 +431,9 @@ class HiSparseRuntime:
         seq_lens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather referenced host context blocks into a compact GPU cache."""
-        block_size = kv_cache.shape[1]
+        # Pools are [B, H, N, C] (H == 1 for MLA) or [B, N, C]; the token dim
+        # is always second to last.
+        block_size = kv_cache.shape[-2]
         plan = build_hisparse_prefill_staging_plan(
             block_table,
             seq_lens,
@@ -445,10 +447,10 @@ class HiSparseRuntime:
         plan: HiSparsePrefillStagingPlan,
     ) -> torch.Tensor:
         """Gather this runtime's host cache using a shared staging plan."""
-        if kv_cache.shape[1] != plan.block_size:
+        if kv_cache.shape[-2] != plan.block_size:
             raise ValueError(
                 f"HiSparse staging block size {plan.block_size} does not match "
-                f"the KV cache block size {kv_cache.shape[1]}."
+                f"the KV cache block size {kv_cache.shape[-2]}."
             )
         row_width = kv_cache.shape[-1]
 
@@ -803,6 +805,18 @@ def create_hisparse_cache_handle(
         vllm_config.scheduler_config.max_num_batched_tokens,
         max_num_reqs * max_decode_query_len,
     )
+    # CUDAGraph capture warms up with dummy batches whose token count can
+    # exceed max_num_reqs * max_decode_query_len: num_tokens > max_num_seqs is
+    # split evenly across max_num_reqs dummy requests and classified as
+    # multi-token decodes, so the step loop needs one plan row per decode
+    # token. Worst case is max_reqs * ceil(num_tokens / max_reqs), bounded by
+    # the largest capture size plus max_num_reqs.
+    capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or ()
+    if capture_sizes:
+        max_swap_rows = max(
+            max_swap_rows,
+            max(capture_sizes) + max_num_reqs,
+        )
     if device is None:
         device = torch.device(
             current_platform.device_type, torch.accelerator.current_device_index()

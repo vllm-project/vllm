@@ -1996,7 +1996,11 @@ def test_hisparse_mixed_batch_bf16_row_split(
     block_size = 64
 
     # Long decode contexts + a short prefill chunk (router shortcut shape).
-    batch_spec = BatchSpec(seq_lens=[2048, 2048, 192], query_lens=[2, 2, 64])
+    batch_spec = BatchSpec(
+        seq_lens=[2048, 2048, 192],
+        query_lens=[2, 2, 64],
+        is_prefilling=[False, False, True],
+    )
     max_seqlen = max(batch_spec.seq_lens)
     total_cache_tokens = sum(batch_spec.seq_lens)
     total_tokens = batch_spec.compute_num_tokens()
@@ -2195,7 +2199,9 @@ def test_hisparse_mixed_batch_bf16_row_split(
         spy_stage, cache_handle.runtime
     )
 
-    backend_output, _ = impl._forward_bf16_kv(q, kv_pool, sparse_indices, metadata)
+    backend_output, _ = impl._forward_bf16_kv(
+        q, kv_pool, sparse_indices, metadata, q.shape[1]
+    )
     torch.accelerator.synchronize()
 
     # Only the prefill rows' blocks were staged: the decode rows' 2048-token
@@ -2265,8 +2271,9 @@ def test_hisparse_mixed_mha_returns_decode_only_mqa_slice():
     def swap_in(self, indices, metadata, **kwargs):
         return torch.empty(1), indices, torch.full((2,), 4, dtype=torch.int32)
 
-    def run_kernel(self, query, cache, indices, lengths):
+    def run_kernel(self, query, cache, indices, lengths, actual_num_heads):
         assert query.shape == q.shape
+        assert actual_num_heads == q.shape[1]
         return expected, None
 
     def unexpected_stage(*args, **kwargs):
@@ -2283,7 +2290,7 @@ def test_hisparse_mixed_mha_returns_decode_only_mqa_slice():
         block_table=torch.zeros(2, 1, dtype=torch.int32),
         req_id_per_token=torch.arange(5, dtype=torch.int32),
     )
-    output, _ = impl._forward_bf16_kv(q, source_cache, topk, metadata)
+    output, _ = impl._forward_bf16_kv(q, source_cache, topk, metadata, q.shape[1])
     torch.testing.assert_close(output, expected)
 
 

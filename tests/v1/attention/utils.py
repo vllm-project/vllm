@@ -48,6 +48,7 @@ class BatchSpec:
 
     seq_lens: list[int]
     query_lens: list[int]
+    is_prefilling: list[bool] | None = None
 
     name: str = "unnamed"
 
@@ -117,6 +118,12 @@ def create_common_attn_metadata(
     # Calculate max query length
     max_query_len = max(batch_spec.query_lens)
 
+    is_prefilling = (
+        None
+        if batch_spec.is_prefilling is None
+        else torch.tensor(batch_spec.is_prefilling, dtype=torch.bool)
+    )
+
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
@@ -130,6 +137,7 @@ def create_common_attn_metadata(
         max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        is_prefilling=is_prefilling,
         causal=True,
     )
 

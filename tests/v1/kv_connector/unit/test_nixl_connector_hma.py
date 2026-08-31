@@ -3,12 +3,9 @@
 """Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
 
 import gc
-from collections import defaultdict
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import msgspec
-import numpy as np
 import pytest
 import torch
 
@@ -16,13 +13,8 @@ from tests.v1.attention.utils import MockMambaBuilder
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.hisparse import (
-    HiSparseNixlAdapter,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
-    RemoteMeta,
-    ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
@@ -33,8 +25,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupRole,
     KVCacheGroupSpec,
@@ -124,14 +114,13 @@ def test_logical_to_kernel_block_ids_with_hma():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "is_rocm,is_cuda,has_mamba,has_hisparse,use_host_buffer,done_recving,"
-    "expected_syncs",
+    "is_rocm,is_cuda,has_mamba,use_host_buffer,done_recving,expected_syncs",
     [
-        (True, False, True, False, False, {"req"}, 1),
-        (False, True, False, True, False, {"req"}, 1),
-        (False, True, True, False, False, {"req"}, 0),
-        (False, True, False, True, True, {"req"}, 0),
-        (False, True, False, True, False, set(), 0),
+        (True, False, True, False, {"req"}, 1),
+        (False, True, True, False, {"req"}, 0),
+        (True, True, False, False, {"req"}, 0),
+        (True, False, True, True, {"req"}, 0),
+        (True, False, True, False, set(), 0),
     ],
 )
 def test_sync_device_after_direct_recv_gates(
@@ -139,7 +128,6 @@ def test_sync_device_after_direct_recv_gates(
     is_rocm,
     is_cuda,
     has_mamba,
-    has_hisparse,
     use_host_buffer,
     done_recving,
     expected_syncs,
@@ -153,10 +141,6 @@ def test_sync_device_after_direct_recv_gates(
     worker = object.__new__(NixlConnectorWorker)
     worker._has_mamba = has_mamba
     worker.use_host_buffer = use_host_buffer
-    worker.kv_cache_config = SimpleNamespace(
-        hisparse_host_num_blocks=1 if has_hisparse else None
-    )
-    worker._nixl_adapter = bw.make_hisparse_nixl_adapter(worker.kv_cache_config)
 
     sync_calls = []
     monkeypatch.setattr(base_worker.current_platform, "is_rocm", lambda: is_rocm)
@@ -289,6 +273,89 @@ def test_read_blocks_for_req_expands_remote_ids(
     assert meta.remote.block_ids == expected_remote_block_ids, (
         f"Expected {expected_remote_block_ids}, got {meta.remote.block_ids}"
     )
+
+
+@pytest.mark.cpu_test
+def test_read_blocks_for_req_region_mode_expands_remote_ids(monkeypatch):
+    """Region-mode reads must expand remote logical ids to kernel pages.
+
+    When decode splits latent and indexer caches into separate transfer
+    groups while the stock prefill keeps one merged group, the read runs in
+    per-region mode. Remote ids arrive at the prefill's logical granularity;
+    without expansion, decode's kernel-granularity pages outnumber the
+    prefill's logical blocks and the per-region pairing rejects the read.
+    """
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+        TPMapping,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker._engine_last_active = {}
+    worker._bidirectional_kv_xfer_enabled = False
+    worker.use_mla = True
+    worker._has_mamba = False
+    # Two local groups; the remote merged them into one.
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, swa_enabled=True)
+    worker.region_group_ids = [0, 1]
+
+    remote_engine_id = "remote-engine"
+    worker.dst_region_group_ids = {remote_engine_id: [0, 0]}
+    worker.dst_region_split_ratios = {remote_engine_id: [1, 1]}
+
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.tp_ratio.return_value = 1
+    remote_info = MagicMock()
+    remote_info.remote_physical_blocks_per_logical = 2
+    remote_info.remote_block_size = 16
+    worker.transfer_topo.get_engine_info.return_value = remote_info
+
+    mock_plan = MagicMock(spec=TPMapping)
+    mock_plan.all_source_ranks = (0,)
+    worker.tp_mappings = {remote_engine_id: mock_plan}
+    worker.src_xfer_handles_by_block_size = {16: "local-handle"}
+    worker.dst_xfer_side_handles = {remote_engine_id: {0: "remote-handle"}}
+
+    captured = {}
+
+    def fake_read_blocks(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(worker, "_read_blocks", fake_read_blocks)
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="test-req",
+        # 8 kernel pages per group (logical == kernel on decode).
+        local_block_ids=[list(range(8)), list(range(16, 24))],
+        kv_transfer_params={
+            # 4 logical blocks on the merged prefill group; 2 kernel pages
+            # each expand to the 8 decode pages.
+            "remote_block_ids": [list(range(4))],
+            "remote_engine_id": remote_engine_id,
+            "remote_request_id": "prefill-test-req",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "tp_size": 1,
+        },
+    )
+
+    meta = metadata.reqs_to_recv["test-req"]
+    worker._read_blocks_for_req("test-req", meta)
+
+    spec = captured["read_spec"]
+    assert spec.block_ids_by_region
+    expanded = list(range(8))
+    assert meta.remote.block_ids == [expanded]
+    assert spec.remote_block_ids == [expanded, expanded]
+    assert spec.local_block_ids == [list(range(8)), list(range(16, 24))]
+    # The expanded per-region counts must pair without rejection.
+    worker._apply_prefix_caching_by_region(spec.local_block_ids, spec.remote_block_ids)
 
 
 @pytest.mark.cpu_test
@@ -1797,162 +1864,105 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
 
 
 @pytest.mark.cpu_test
-def test_hisparse_host_import_metadata_keeps_source_blocks_separate():
-    """The CPU destination IDs must not enter the ordinary GPU transfer list."""
-    source_spec = make_kv_cache_config(block_size=16).kv_cache_groups[0].kv_cache_spec
-    sched = make_nixl_scheduler(heartbeat=True)
-    sched._is_hma_required = False
-    sched.kv_cache_config = KVCacheConfig(
-        num_blocks=32,
-        num_blocks_by_pool=[32],
-        hisparse_host_num_blocks=16,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["source"],
-                source_spec,
-                block_pool_id=None,
-                enable_kv_transfer=False,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
+def test_nixl_registers_per_layer_regions_for_subrow_shared_pool():
+    """Layers whose pages are narrower than the storage row keep their own region.
+
+    HiSparse decode views the indexer layers into a shared GPU pool whose
+    block rows also hold the resident and hot pages. A whole-storage region
+    would collapse those layers into one region spanning every pool byte, so
+    the P/D region count and block lengths would no longer match the prefill
+    side, which registers one region per layer.
+    """
+    num_blocks = 6
+    latent_spec = MLAAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16
+    )
+    indexer_spec = MLAAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=8, dtype=torch.float16
+    )
+    page = indexer_spec.page_size_bytes
+    row_stride = 2 * page
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        num_blocks_by_pool=[num_blocks],
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * latent_spec.page_size_bytes,
+                layers=["latent"],
+                layer_stride=num_blocks * latent_spec.page_size_bytes,
+                block_stride=latent_spec.page_size_bytes,
             ),
-            KVCacheGroupSpec(
-                ["indexer"],
-                source_spec,
-                role=KVCacheGroupRole.HISPARSE_INDEXER,
+            # The shared pool declares one tensor per layer at its own byte
+            # offset, exactly like the HiSparse GPU pool: each row holds both
+            # layers' pages, but no single layer's group tiles the storage.
+            KVCacheTensor(
+                size=num_blocks * row_stride,
+                layers=["idx.a"],
+                layer_stride=0,
+                offset=0,
+                block_stride=row_stride,
             ),
-            KVCacheGroupSpec(
-                ["resident"],
-                HiSparseResidentSpec(block_size=16, page_size=32),
-            ),
-            KVCacheGroupSpec(
-                ["hot"],
-                HiSparseHotSpec(block_size=16, page_size=32, blocks_per_request=2),
-                enable_kv_transfer=False,
+            KVCacheTensor(
+                size=num_blocks * row_stride,
+                layers=["idx.b"],
+                layer_stride=0,
+                offset=page,
+                block_stride=row_stride,
             ),
         ],
-    )
-    request = create_request(do_remote_prefill=True)
-    request.hisparse_host_import = True
-    assert request.kv_transfer_params is not None
-    request.kv_transfer_params["remote_block_ids"] = ([1, 2],)
-    blocks = MagicMock()
-    blocks.get_unhashed_block_ids_all_groups.return_value = (
-        [5, 6],
-        [10, 11],
-        [20],
-        [30, 31],
-    )
-
-    sched.update_state_after_alloc(request, blocks, num_external_tokens=32)
-    metadata = sched.build_connector_meta(MagicMock())
-    req_meta = metadata.reqs_to_recv[request.request_id]
-
-    assert req_meta.hisparse_host_block_ids == [5, 6]
-    assert req_meta.local_block_ids == ([10, 11], [20])
-    assert not sched._hisparse_host_blocks_to_recv
-
-
-@pytest.mark.cpu_test
-def test_hisparse_full_local_hit_does_not_index_empty_import_blocks():
-    """A full local hit must not index an empty external-import block tuple."""
-    source_spec = make_kv_cache_config(block_size=16).kv_cache_groups[0].kv_cache_spec
-    sched = make_nixl_scheduler(heartbeat=True)
-    sched._is_hma_required = False
-    sched.kv_cache_config = KVCacheConfig(
-        num_blocks=32,
-        hisparse_host_num_blocks=16,
-        kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["source"],
-                source_spec,
-                block_pool_id=None,
-                enable_kv_transfer=False,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
-            ),
-            KVCacheGroupSpec(["indexer"], source_spec),
+            KVCacheGroupSpec(["idx.a", "idx.b"], indexer_spec),
+            KVCacheGroupSpec(["latent"], latent_spec),
         ],
     )
-    request = create_request(do_remote_prefill=True)
-    request.hisparse_host_import = True
-    assert request.kv_transfer_params is not None
-    request.kv_transfer_params["remote_block_ids"] = ([1, 2],)
-    blocks = MagicMock()
-    blocks.get_unhashed_block_ids_all_groups.return_value = ()
+    vllm_config = create_vllm_config(block_size=16)
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [16]
+    fake_backend.get_name.return_value = "FLASHMLA"
+    fake_backend.full_cls_name.return_value = "fake.FLASHMLA"
+    fake_backend.get_kv_cache_shape.return_value = (1, 16, 1, 1)
+    fake_platform = MagicMock()
+    fake_platform.device_type = "cuda"
+    fake_platform.get_nixl_memory_type.return_value = "VRAM"
+    latent_cache = torch.zeros(
+        num_blocks, latent_spec.page_size_bytes, dtype=torch.uint8
+    )
+    pool = torch.zeros(num_blocks, row_stride, dtype=torch.uint8)
+    idx_a, idx_b = pool[:, :page], pool[:, page:]
 
-    sched.update_state_after_alloc(request, blocks, num_external_tokens=0)
+    with (
+        patch.object(bw, "NixlWrapper"),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(bw, "current_platform", fake_platform),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = NixlConnectorWorker(vllm_config, "test-engine", kv_cache_config)
+        worker.use_mla = True
+        worker.nixl_wrapper.get_agent_metadata.return_value = b"metadata"
+        worker.register_kv_caches(
+            {"latent": latent_cache, "idx.a": idx_a, "idx.b": idx_b}
+        )
 
-    assert sched._hisparse_host_blocks_to_recv[request.request_id] == []
-
-
-@pytest.mark.cpu_test
-def test_hisparse_host_import_reads_host_pages_and_device_mirrors():
-    """Cross-node imports read history to host and the resident tail to GPU."""
-    worker = object.__new__(NixlConnectorWorker)
-    worker._has_mamba = False
-    worker.use_mla = True
-    worker.num_regions = 2
-    worker.region_group_ids = [0, 1]
-    worker.dst_region_split_ratios = {"prefill": [4, 4]}
-    worker.dst_region_num_blocks = {"prefill": [300, 400]}
-    worker.dst_num_blocks = {"decode": 400, "prefill": 400}
-    adapter = HiSparseNixlAdapter(SimpleNamespace(hisparse_host_num_blocks=16))
-    adapter.host_regions = [
-        (1_000, 10, 64),
-        (2_000, 20, 64),
+    assert worker.num_regions == 3
+    assert worker.block_len_per_layer == [page, page, latent_spec.page_size_bytes]
+    assert worker.block_stride_per_layer == [
+        row_stride,
+        row_stride,
+        latent_spec.page_size_bytes,
     ]
-    adapter._host_desc_offsets = [0, 64]
-    adapter._host_xfer_handle = 88
-    worker.block_len_per_layer = [10, 20]
-    worker.region_num_blocks = [300, 400]
-    worker.engine_id = "decode"
-    worker._physical_blocks_per_logical_kv_block = 1
-    worker.world_size = 1
-    worker._remote_agents = {"prefill": {(0, 0): "prefill-agent"}}
-    worker._pending_recv_notifs = {}
-    worker.dst_xfer_side_handles = {"prefill": {0: 77}}
-    worker.src_xfer_handles_by_block_size = {16: 66}
-    worker._recving_transfers = defaultdict(list)
-    worker.nixl_wrapper = MagicMock()
-    worker.nixl_wrapper.make_prepped_xfer.side_effect = [101, 102]
-    worker.transfer_topo = MagicMock()
-    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
-        remote_physical_blocks_per_logical=4,
-        remote_block_size=16,
-    )
-    worker.transfer_topo.tp_ratio.return_value = 1
-    worker.transfer_topo.block_size_ratio.return_value = 1
-    worker._nixl_adapter = adapter
-    plan = SimpleNamespace(all_source_ranks=(0,))
-    meta = ReqMeta(
-        local_block_ids=([20, 21, 22, 23, 24, 25, 26, 27], [99]),
-        local_physical_block_ids=(
-            [20, 21, 22, 23, 24, 25, 26, 27],
-            [99],
-        ),
-        tp_size=1,
-        remote=RemoteMeta(
-            block_ids=([10, 11],),
-            engine_id="prefill",
-            request_id="remote-request",
-            host="prefill-host",
-            port=1234,
-        ),
-        hisparse_host_block_ids=[2, 3],
-    )
-
-    adapter.read_host_blocks(worker, "request", meta, plan, [0, 0])
-
-    host_call, device_call = worker.nixl_wrapper.make_prepped_xfer.call_args_list
-    operation, local_handle, local_ids, remote_handle, remote_ids = host_call.args
-    assert (operation, local_handle, remote_handle) == ("READ", 88, 77)
-    np.testing.assert_array_equal(local_ids, [*range(8, 16), *range(72, 80)])
-    np.testing.assert_array_equal(remote_ids, [*range(40, 48), *range(340, 348)])
-    operation, local_handle, local_ids, remote_handle, remote_ids = device_call.args
-    assert (operation, local_handle, remote_handle) == ("READ", 66, 77)
-    np.testing.assert_array_equal(local_ids, [*range(20, 28), 399])
-    np.testing.assert_array_equal(remote_ids, [*range(40, 48), 347])
-    assert worker._recving_transfers["request"] == [101, 102]
+    assert worker.region_strides == [
+        row_stride,
+        row_stride,
+        latent_spec.page_size_bytes,
+    ]
+    assert worker.kv_caches_base_addr["test-engine"][0] == [
+        idx_a.data_ptr(),
+        idx_b.data_ptr(),
+        latent_cache.data_ptr(),
+    ]
 
 
 @pytest.mark.cpu_test

@@ -160,6 +160,13 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     "pure MLA models"
                 )
             assert len(plan.all_source_ranks) == 1
+            # Remote ids arrive at the producer's logical granularity; expand
+            # them to its kernel pages (the group-matched branch does the
+            # same) so per-region counts pair with our kernel-granularity ids.
+            meta.remote.block_ids = self._logical_to_kernel_block_ids(
+                meta.remote.block_ids,
+                remote_info.remote_physical_blocks_per_logical,
+            )
             remote_by_region = self._block_ids_by_region(
                 meta.remote.block_ids, remote_region_groups
             )

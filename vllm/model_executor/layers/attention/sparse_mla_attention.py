@@ -334,10 +334,17 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
     ) -> T:
         req_id_per_token = self._build_req_id_per_token(common_attn_metadata)
 
+        # HiSparse resolves decode rows through the host-cache swap plan,
+        # which is sized for decode queries only; prefilling rows must stay
+        # on the prefill staging path regardless of query length.
+        treat_short_extends_as_decodes = (
+            not self.use_pcp
+            and self.vllm_config.attention_config.hisparse_config is None
+        )
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold or 1,
-            treat_short_extends_as_decodes=not self.use_pcp,
+            treat_short_extends_as_decodes=treat_short_extends_as_decodes,
             require_uniform=self.require_uniform_decodes,
         )
         (

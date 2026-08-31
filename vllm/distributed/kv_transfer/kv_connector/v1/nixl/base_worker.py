@@ -1224,8 +1224,29 @@ class NixlBaseConnectorWorker:
                     and cache.stride(2) == cache.shape[3]
                     and cache.stride(1) == cache.shape[2] * cache.shape[3]
                 )
+                # A whole-storage region moves one full block row per block id.
+                # That is only group-exact when this group's pages alone tile
+                # the storage. When the row also carries other groups' bytes
+                # (e.g. the HiSparse shared GPU pool packs indexer, resident
+                # and hot pages into one row), each layer must instead own a
+                # region of exactly its own page. Configs without a tensor
+                # declaration cannot prove either way, so keep the legacy
+                # whole-storage region.
+                if tensor_config is None:
+                    group_tiles_storage = True
+                else:
+                    same_group_layers = sum(
+                        self.kv_cache_config.transfer_group_index_by_layer.get(name)
+                        == group_id
+                        for name in tensor_config.layers
+                    )
+                    group_tiles_storage = (
+                        num_blocks * physical_page_size * same_group_layers
+                        == registration_len
+                    )
                 if storage_is_block_major and (
-                    (packed_storage and is_mla_region) or not hnc_contiguous
+                    (packed_storage and is_mla_region)
+                    or (not hnc_contiguous and group_tiles_storage)
                 ):
                     # TODO(Lucas): handle TP slicing for packed_storage; for now
                     # restrict to MLA (DSv4) where kv is replicated.
@@ -1316,6 +1337,12 @@ class NixlBaseConnectorWorker:
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(seen_base_addresses)
         self.region_mem_types = region_mem_types
+        logger.info(
+            "Registered %d NIXL regions across %d layers: block_lens=%s",
+            self.num_regions,
+            len(xfer_buffers),
+            sorted(set(self.block_len_per_layer)),
+        )
         if self._has_mamba:
             self.region_num_blocks = [self.num_blocks] * self.num_regions
 
@@ -2101,7 +2128,11 @@ class NixlBaseConnectorWorker:
             )
         elif not self._has_mamba:
             assert len(self.block_len_per_layer) == len(nixl_agent_meta.block_lens), (
-                "Number of KV layers must match between prefill and decode"
+                "Number of KV layers must match between prefill and decode "
+                f"(local={len(self.block_len_per_layer)}, "
+                f"remote={len(nixl_agent_meta.block_lens)}; "
+                f"local_block_lens={self.block_len_per_layer}, "
+                f"remote_block_lens={nixl_agent_meta.block_lens})."
             )
             model_replicated = self.use_mla or self.transfer_topo.is_kv_replicated(
                 remote_engine_id
@@ -2439,7 +2470,18 @@ class NixlBaseConnectorWorker:
                 remote_info.remote_physical_blocks_per_logical
                 != self._physical_blocks_per_logical_kv_block
             )
-            if block_size_ratio > 1 or self.enable_permute_local_kv or hetero_ppl:
+            # Group-indexed pairing below requires both sides to lay out
+            # transfer groups identically. When they differ (e.g. decode
+            # splits latent and indexer layers into separate groups while the
+            # stock prefill keeps one merged group), the read ran in per-region
+            # mode, whose _apply_prefix_caching_by_region pairing covers every
+            # local block, so there is no clipped tail to zero.
+            remote_region_groups = self.dst_region_group_ids[meta.remote.engine_id]
+            local_region_groups = self.region_group_ids or remote_region_groups
+            groups_differ = local_region_groups != remote_region_groups
+            if (
+                block_size_ratio > 1 or self.enable_permute_local_kv or hetero_ppl
+            ) and not groups_differ:
                 for g, local_group in enumerate(meta.local_physical_block_ids):
                     if not local_group or _is_ssm_spec(self._group_spec_types[g]):
                         continue

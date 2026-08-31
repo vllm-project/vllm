@@ -16,6 +16,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadata,
     SparseMLACommonMetadataBuilder,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
@@ -421,9 +422,23 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         topk_tokens = self.topk_indices_buffer.shape[1]
         self._prepare_mqa_kernel(layer, kv_cache.device)
 
+        # The trtllm-gen MLA kernel receives queries already expanded to
+        # kv_lora_rank + qk_rope_head_dim (mla_attention.py projects q_nope
+        # through W_UK_T before forward_mqa), so the dummy query must match.
+        # Quantized KV caches are stored in a uint8 container; the real decode
+        # path views the cache as fp8 and passes an fp8-quantized query, so the
+        # dummy query must use the true fp8 dtype (the kernel reads uint8 as
+        # FP4-packed and doubles the head dim).
+        q_dtype = kv_cache.dtype
+        if (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.kv_cache_dtype != "fp8_ds_mla"
+            and self.supports_quant_query_input
+        ):
+            q_dtype = current_platform.fp8_dtype()
         q = torch.zeros(
-            (num_tokens, self.num_heads, self.qk_head_dim),
-            dtype=kv_cache.dtype,
+            (num_tokens, self.num_heads, self.kv_lora_rank + self.qk_rope_head_dim),
+            dtype=q_dtype,
             device=kv_cache.device,
         )
         topk_indices = (

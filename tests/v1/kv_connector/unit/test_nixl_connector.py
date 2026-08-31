@@ -679,6 +679,7 @@ class TestNixlHandshake:
             device_id=0,
             num_blocks=2,
             block_lens=[remote_block_len],
+            block_strides=[remote_block_len],
             kv_cache_layout=worker.kv_cache_layout,
             block_size=worker.block_size,
             ssm_sizes=(0, 0),
