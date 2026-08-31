@@ -40,6 +40,15 @@ logger = init_logger(__name__)
 _MIN_WORK_PER_SPLIT = 512
 _SPLIT_OCCUPANCY_MULTIPLIER = 2
 
+# Triton MLA can serve a non-causal multi-token block while the MLA cache is
+# DCP-sharded: forward_mqa flattens the block to one decode row per query token
+# and every row sees the same committed prefix, so a rank-local seq_len is the
+# whole story. Only ROCm has been validated end to end (DSpark draft against a
+# DCP-sharded target), so the capability stays scoped to it until another
+# platform is measured. One constant keeps the backend eligibility gate and the
+# reorder threshold from disagreeing.
+_SUPPORTS_NONCAUSAL_MULTITOKEN_DCP = current_platform.is_rocm()
+
 
 def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
     # Power of 2 to avoid excessive kernel instantiations, capped by an SM-based
@@ -77,6 +86,9 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = (
+        _SUPPORTS_NONCAUSAL_MULTITOKEN_DCP
+    )
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
