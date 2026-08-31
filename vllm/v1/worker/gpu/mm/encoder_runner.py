@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -36,7 +35,6 @@ class EncoderRunner:
     def __init__(
         self,
         model: SupportsMultiModal,
-        vllm_config: VllmConfig,
         max_num_tokens: int,
         hidden_size: int,
         encoder_cache: EncoderCache,
