@@ -119,6 +119,25 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         return hidden_states, residual
 
 
+def _resolve_num_aux_hidden_states(config: LlamaConfig) -> int:
+    """How many target hidden states the draft head concatenates.
+
+    Resolution order follows how configs actually carry it: an explicit
+    ``num_aux_hidden_states`` count, then nested ``eagle_config`` (the legacy
+    layout), then a top-level ``eagle_aux_hidden_state_layer_ids`` list, which
+    is what Speculators writes and what the speculators config loader carries
+    through. Falls back to the historical default of 3.
+    """
+    num_aux = getattr(config, "num_aux_hidden_states", None)
+    if num_aux is not None:
+        return num_aux
+    eagle_config = getattr(config, "eagle_config", None) or {}
+    layer_ids = eagle_config.get("eagle_aux_hidden_state_layer_ids")
+    if layer_ids is None:
+        layer_ids = getattr(config, "eagle_aux_hidden_state_layer_ids", None)
+    return len(layer_ids) if layer_ids else 3
+
+
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -173,13 +192,7 @@ class LlamaModel(nn.Module):
             ]
         )
         if self.use_aux_hidden_state:
-            self.num_aux_hidden_states = getattr(
-                self.config, "num_aux_hidden_states", None
-            )
-            if self.num_aux_hidden_states is None:
-                eagle_config = getattr(self.config, "eagle_config", None) or {}
-                layer_ids = eagle_config.get("eagle_aux_hidden_state_layer_ids")
-                self.num_aux_hidden_states = len(layer_ids) if layer_ids else 3
+            self.num_aux_hidden_states = _resolve_num_aux_hidden_states(self.config)
 
             target_hidden_size = getattr(
                 self.config, "target_hidden_size", self.config.hidden_size
