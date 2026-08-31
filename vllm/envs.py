@@ -1706,7 +1706,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")
     ),
     # Timeout in seconds for execute_model RPC calls in multiprocessing
-    # executor (only applies when TP > 1).
+    # executor (only applies when TP > 1). Also used as the warning
+    # interval of the worker-side wedged-kernel watchdog
+    # (vllm/v1/worker/kernel_watchdog.py).
     "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "300")
     ),

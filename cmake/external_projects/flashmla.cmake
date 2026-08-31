@@ -164,6 +164,12 @@ if(FLASH_MLA_ARCHS)
     # _flashmla_C is now ABI-stable torch 2.11+
     target_compile_definitions(_flashmla_C PRIVATE
         TORCH_TARGET_VERSION=0x020B000000000000ULL)
+
+    # Keep line info in the device code so cuda-gdb captures of resident
+    # kernels can be mapped back to FlashMLA/CUTLASS source lines (FlashMLA's
+    # own setup.py passes -lineinfo; vLLM's flags previously dropped it).
+    target_compile_options(_flashmla_C PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
     if(VLLM_GPU_LANG STREQUAL "CUDA")
         target_compile_definitions(_flashmla_C PRIVATE USE_CUDA)
     endif()
