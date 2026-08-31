@@ -11,6 +11,7 @@ import importlib
 import importlib.util
 import os
 import shutil
+import time
 from collections.abc import Callable
 from typing import Any, NoReturn
 
@@ -51,6 +52,17 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "FLASHINFER_CUBINS_REPOSITORY",
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
 )
+
+
+@functools.cache
+def has_flashinfer_jit_cache() -> bool:
+    """Return `True` if the flashinfer-jit-cache package is available.
+
+    The package ships pre-compiled FlashInfer kernels. Without it, kernels
+    are JIT-compiled on first use, which can take several minutes without
+    any output (see vllm-project/vllm#38246).
+    """
+    return importlib.util.find_spec("flashinfer_jit_cache") is not None
 
 
 @functools.cache
@@ -161,7 +173,10 @@ def _get_submodule(module_name: str) -> Any | None:
 
 # General lazy import wrapper
 def _lazy_import_wrapper(
-    module_name: str, attr_name: str, fallback_fn: Callable[..., Any] = _missing
+    module_name: str,
+    attr_name: str,
+    fallback_fn: Callable[..., Any] = _missing,
+    log_jit_compile: bool = True,
 ):
     """Create a lazy import wrapper for a specific function."""
 
@@ -172,10 +187,36 @@ def _lazy_import_wrapper(
         mod = _get_submodule(module_name)
         return getattr(mod, attr_name, None) if mod else None
 
+    qualname = f"{module_name}.{attr_name}"
+    first_call_logged = False
+
     def wrapper(*args, **kwargs):
+        nonlocal first_call_logged
         impl = _get_impl()
         if impl is None:
             return fallback_fn(*args, **kwargs)
+        # Without flashinfer-jit-cache, FlashInfer may JIT-compile kernels on
+        # first use, which can take several minutes without emitting any log
+        # (see vllm-project/vllm#38246). Log around the first call so users
+        # don't mistake the compilation for a hang; keep the warm path quiet.
+        if log_jit_compile and not first_call_logged and not has_flashinfer_jit_cache():
+            logger.info_once(
+                "FlashInfer %s may JIT-compile kernels on first use; this "
+                "can take several minutes without further output. Install "
+                "flashinfer-jit-cache to download pre-compiled kernels "
+                "instead (e.g. `pip install flashinfer-jit-cache --index-url "
+                "https://flashinfer.ai/whl/cu<CUDA_VERSION>`).",
+                qualname,
+            )
+            start = time.perf_counter()
+            result = impl(*args, **kwargs)
+            first_call_logged = True
+            logger.info_once(
+                "FlashInfer %s finished first use in %.2f seconds.",
+                qualname,
+                time.perf_counter() - start,
+            )
+            return result
         return impl(*args, **kwargs)
 
     return wrapper
@@ -242,6 +283,9 @@ autotune = _lazy_import_wrapper(
     "flashinfer.autotuner",
     "autotune",
     fallback_fn=lambda *args, **kwargs: contextlib.nullcontext(),
+    # The context manager returns instantly; kernel tuning inside it is
+    # covered by flashinfer-ai/flashinfer#2942.
+    log_jit_compile=False,
 )
 
 
@@ -1170,6 +1214,7 @@ __all__ = [
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "flashinfer_xqa_batch_decode_with_kv_cache",
     "autotune",
+    "has_flashinfer_jit_cache",
     "has_flashinfer_moe",
     "has_flashinfer_comm",
     "has_flashinfer_nvlink_two_sided",
