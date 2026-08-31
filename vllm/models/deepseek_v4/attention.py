@@ -360,7 +360,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
 
             _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
-            _COMPUTE_SWA_INDICES_AND_LENS_KERNEL.register_warmup()
+            _COMPUTE_SWA_INDICES_AND_LENS_KERNEL.register_warmup(
+                window_size=self.window_size,
+                block_size=self.swa_cache_layer.block_size,
+            )
 
             if self.compress_ratio > 1:
                 from vllm.v1.attention.backends.mla.compressor_utils import (
@@ -384,7 +387,18 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL,
                 )
 
-                _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL.register_warmup()
+                _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL.register_warmup(
+                    window_size=self.window_size,
+                    num_speculative_tokens=spec_config.num_speculative_tokens,
+                    block_size=self.swa_cache_layer.block_size,
+                )
+
+            if self.backend_cls.get_name() == "FLASHMLA_SPARSE_DSV4":
+                from vllm.models.deepseek_v4.common.ops.cache_utils import (
+                    _COMBINE_TOPK_SWA_INDICES_KERNEL,
+                )
+
+                _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
 
     def forward(
         self,

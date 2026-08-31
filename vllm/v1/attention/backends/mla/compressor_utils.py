@@ -5,11 +5,13 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-)
+from vllm.model_executor.warmup.jit_warmup import zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+    triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -27,19 +29,18 @@ def get_dspark_swa_index_width(
 
 
 class CompressedSlotMappingKernel(
-    VllmJitKernel["CompressedSlotMappingKernel.CompileKey"]
+    VllmTritonJitKernel["CompressedSlotMappingKernel.CompileKey"]
 ):
-    def __init__(self) -> None:
-        self.triton_block_size = 1024
-        super().__init__()
+    TRITON_BLOCK_SIZE = 1024
 
     @dataclass(frozen=True)
     class CompileKey:
         compress_ratio: int
         triton_block_size: int
+        block_size: int
 
     @staticmethod
-    @triton.jit
+    @triton.jit(do_not_specialize=["block_table_stride"])
     def kernel(
         # [num_tokens]
         slot_mapping_ptr,
@@ -87,10 +88,12 @@ class CompressedSlotMappingKernel(
         self,
         *,
         compress_ratio: int,
+        block_size: int,
     ) -> CompileKey:
         return self.CompileKey(
             compress_ratio=compress_ratio,
-            triton_block_size=self.triton_block_size,
+            triton_block_size=self.TRITON_BLOCK_SIZE,
+            block_size=triton_scalar_specialization_rep(block_size),
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -100,26 +103,29 @@ class CompressedSlotMappingKernel(
         if not compress_ratios:
             return []
         return self._trace_dispatch(self.dispatch)(
-            compress_ratio=compress_ratios,
+            zip_inputs(
+                *(
+                    dict(
+                        compress_ratio=ratio,
+                        block_size=vllm_config.cache_config.block_size // ratio,
+                    )
+                    for ratio in compress_ratios
+                )
+            )
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            TritonWarmupTensor(torch.int64),
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
-            1,
-            1,
-            compile_key.compress_ratio,
-            PAD_ID=-1,
-            TRITON_BLOCK_SIZE=compile_key.triton_block_size,
-            grid=(1,),
+        return dict(
+            slot_mapping=TritonWarmupTensor(torch.int64),
+            query_start_loc=int32_ptr,
+            seq_lens=int32_ptr,
+            block_table=int32_ptr,
+            block_size=compile_key.block_size,
+            compress_ratio=compile_key.compress_ratio,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         slot_mapping: torch.Tensor,
@@ -128,17 +134,12 @@ class CompressedSlotMappingKernel(
         block_table: torch.Tensor,
         block_size: int,
         compress_ratio: int,
-    ) -> None:
-        self.kernel[(block_table.shape[0],)](
-            slot_mapping,
-            query_start_loc,
-            seq_lens,
-            block_table,
-            block_table.stride(0),
-            block_size,
-            compress_ratio,
+    ) -> LaunchSpec:
+        return (block_table.shape[0],), dict(
+            block_table_stride=block_table.stride(0),
+            COMPRESS_RATIO=compress_ratio,
             PAD_ID=-1,
-            TRITON_BLOCK_SIZE=self.triton_block_size,
+            TRITON_BLOCK_SIZE=self.TRITON_BLOCK_SIZE,
         )
 
 
