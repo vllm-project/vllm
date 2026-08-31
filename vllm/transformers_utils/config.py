@@ -131,6 +131,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_5_moe_text="Qwen3_5MoeTextConfig",
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
+    longcat_flash="LongcatFlashConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
@@ -156,6 +157,10 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "internvl_chat": {"has_no_defaults_at_init": True},
     "Llama_Nemotron_Nano_VL": {"attn_implementation": "eager"},
     "NVLM_D": {"has_no_defaults_at_init": True},
+}
+
+_ARCHITECTURE_MODEL_TYPE_OVERRIDES = {
+    "LongcatFlashForCausalLM": "longcat_flash",
 }
 
 
@@ -259,12 +264,17 @@ class HFConfigParser(ConfigParserBase):
         )
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
+        inferred_model_type = None
         if model_type is None:
-            model_type = (
-                "speculators"
-                if config_dict.get("speculators_config") is not None
-                else model_type
-            )
+            if config_dict.get("speculators_config") is not None:
+                model_type = "speculators"
+            else:
+                architectures = config_dict.get("architectures") or []
+                if architectures:
+                    model_type = _ARCHITECTURE_MODEL_TYPE_OVERRIDES.get(
+                        architectures[0]
+                    )
+                    inferred_model_type = model_type
         # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
         if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
             if isinstance(hf_overrides, dict) and "model_type" in hf_overrides:
@@ -277,6 +287,9 @@ class HFConfigParser(ConfigParserBase):
                 dummy_config = PretrainedConfig(**dummy_kwargs)
                 dummy_model_type = hf_overrides(dummy_config).model_type
                 model_type = dummy_model_type.removeprefix("dummy_")
+        use_inferred_model_type = (
+            inferred_model_type is not None and model_type == inferred_model_type
+        )
 
         if model_type in _PATCH_HF_VALIDATE_ROPE:
             _patch_hf_transformers_validate_rope()
@@ -311,30 +324,42 @@ class HFConfigParser(ConfigParserBase):
                     config_class.model_type = model_type
                 # Now that it is registered, it is not considered remote code anymore
                 trust_remote_code = False
-            try:
-                kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
-                config = AutoConfig.from_pretrained(
-                    model,
-                    trust_remote_code=trust_remote_code,
-                    revision=revision,
-                    code_revision=code_revision,
-                    **kwargs,
-                )
-            except ValueError as e:
-                if (
-                    not trust_remote_code
-                    and "requires you to execute the configuration file" in str(e)
-                ):
-                    err_msg = (
-                        "Failed to load the model config. If the model "
-                        "is a custom model not yet available in the "
-                        "HuggingFace transformers library, consider setting "
-                        "`trust_remote_code=True` in LLM or using the "
-                        "`--trust-remote-code` flag in the CLI."
+                if use_inferred_model_type:
+                    config = config_class.from_pretrained(
+                        model,
+                        revision=revision,
+                        code_revision=code_revision,
+                        trust_remote_code=False,
+                        **kwargs,
                     )
-                    raise RuntimeError(err_msg) from e
-                else:
-                    raise e
+                    config.auto_map = {}
+            if not use_inferred_model_type:
+                try:
+                    kwargs = _maybe_update_auto_config_kwargs(
+                        kwargs, model_type=model_type
+                    )
+                    config = AutoConfig.from_pretrained(
+                        model,
+                        trust_remote_code=trust_remote_code,
+                        revision=revision,
+                        code_revision=code_revision,
+                        **kwargs,
+                    )
+                except ValueError as e:
+                    if (
+                        not trust_remote_code
+                        and "requires you to execute the configuration file" in str(e)
+                    ):
+                        err_msg = (
+                            "Failed to load the model config. If the model "
+                            "is a custom model not yet available in the "
+                            "HuggingFace transformers library, consider setting "
+                            "`trust_remote_code=True` in LLM or using the "
+                            "`--trust-remote-code` flag in the CLI."
+                        )
+                        raise RuntimeError(err_msg) from e
+                    else:
+                        raise e
         config = _maybe_remap_hf_config_attrs(config)
         return config_dict, config
 
@@ -620,6 +645,9 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
             if not hasattr(config, new_attr):
                 config.update({new_attr: getattr(config, old_attr)})
             logger.debug("Remapped config attribute '%s' to '%s'", old_attr, new_attr)
+    if config.model_type in ("longcat_flash", "longcat_flash_ngram"):
+        config.num_hidden_layers = 2 * config.num_layers
+        config.moe_intermediate_size = config.expert_ffn_hidden_size
     return config
 
 

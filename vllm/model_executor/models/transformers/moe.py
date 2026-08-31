@@ -184,6 +184,7 @@ class MoEMixin(MixtureOfExperts):
 
         # Common kwargs
         norm_topk_prob = getattr(text_config, "norm_topk_prob", None)
+        zero_expert_type = getattr(text_config, "zero_expert_type", None)
 
         # Routed scaling factor kwargs
         routed_scaling_factor = getattr(text_config, "routed_scaling_factor", 1.0)
@@ -326,6 +327,15 @@ class MoEMixin(MixtureOfExperts):
                         # Prefer config, otherwise read it from fuser.
                         router_dtype = config_router_dtype or fuser.router_dtype
                         gate = fuser.gate(moe_block, prefix, router_dtype)
+                        if fuser.gate_linear_name:
+                            old_prefix = maybe_prefix(
+                                maybe_prefix(prefix, fuser.gate_name),
+                                fuser.gate_linear_name,
+                            )
+                            new_prefix = maybe_prefix(prefix, fuser.gate_name)
+                            self.hf_to_vllm_mapper.orig_to_new_substr[
+                                f"{old_prefix}."
+                            ] = f"{new_prefix}."
                         kwargs |= dict(
                             scoring_func=fuser.scoring_func,
                             is_sequence_parallel=(
@@ -334,6 +344,8 @@ class MoEMixin(MixtureOfExperts):
                             gate=gate,
                             shared_experts=shared_experts,
                         )
+                        if zero_expert_type is not None:
+                            kwargs["zero_expert_type"] = zero_expert_type
                         if router_dtype is not None:
                             kwargs["router_logits_dtype"] = router_dtype
                         if use_grouped_topk:

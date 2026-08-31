@@ -143,19 +143,27 @@ class MoEBlockFuser:
     """Fuser for MoE block `experts`, `gate` and `shared_experts` (optional)."""
 
     gate_name: str
+    gate_linear_name: str
     scoring_func: str
     shared_name: str | None
     shared_gate_name: str | None
     router_dtype: torch.dtype | None = None
 
     @staticmethod
-    def _match_router(gate: nn.Module) -> tuple[str, torch.dtype | None] | None:
+    def _match_router(
+        gate: nn.Module,
+    ) -> tuple[str, torch.dtype | None, str] | None:
         """Matches `topk(score(linear(x)))`, `score` being `softmax`/`sigmoid`.
 
         Returns the scoring function and the dtype the router computes in."""
         state = {name for name, _ in named_state(gate)}
-        if "weight" not in state or state - {"weight", "e_score_correction_bias"}:
+        weight_names = [name for name in state if name.endswith("weight")]
+        if len(weight_names) != 1:
             return None
+        weight_name = weight_names[0]
+        if state - {weight_name, "e_score_correction_bias"}:
+            return None
+        gate_linear_name = weight_name.removesuffix(".weight")
         graph = trace(gate)
         if graph is None:
             return None
@@ -177,7 +185,7 @@ class MoEBlockFuser:
         if not any(is_op(n, "linear") for n in logits_cone):
             return None
         scoring_func = "softmax" if is_op(scorer, "softmax") else "sigmoid"
-        return scoring_func, _forced_dtype(logits_cone)
+        return scoring_func, _forced_dtype(logits_cone), gate_linear_name
 
     @staticmethod
     def _match_shared_experts(
@@ -221,16 +229,16 @@ class MoEBlockFuser:
         if _returns_tuple(type(moe_block)):
             return None
         # Router: the child that scores + top-k selects.
-        gate_name = scoring_func = router_dtype = None
+        gate_name = gate_linear_name = scoring_func = router_dtype = None
         for name, child in moe_block.named_children():
             if (
                 name != experts_name
                 and (router := cls._match_router(child)) is not None
             ):
                 gate_name = name
-                scoring_func, router_dtype = router
+                scoring_func, router_dtype, gate_linear_name = router
                 break
-        if gate_name is None or scoring_func is None:
+        if gate_name is None or gate_linear_name is None or scoring_func is None:
             return None
         # Shared expert: a child the block adds to the experts' output.
         shared_name = shared_gate_name = None
@@ -256,20 +264,34 @@ class MoEBlockFuser:
         for name, child in moe_block.named_children():
             if name not in accounted and next(named_state(child), None) is not None:
                 return None
-        return cls(gate_name, scoring_func, shared_name, shared_gate_name, router_dtype)
+        return cls(
+            gate_name,
+            gate_linear_name,
+            scoring_func,
+            shared_name,
+            shared_gate_name,
+            router_dtype,
+        )
 
     def gate(
         self, moe_block: nn.Module, prefix: str, out_dtype: torch.dtype | None = None
     ) -> GateLinear:
         """Rebuild the HF gate as a `GateLinear` for vLLM's fused MoE."""
         hf_gate = getattr(moe_block, self.gate_name)
-        num_experts, hidden_size = hf_gate.weight.shape
+        hf_linear = (
+            hf_gate.get_submodule(self.gate_linear_name)
+            if self.gate_linear_name
+            else hf_gate
+        )
+        num_experts, hidden_size = hf_linear.weight.shape
+        gate_prefix = maybe_prefix(prefix, self.gate_name)
+        gate_prefix = maybe_prefix(gate_prefix, self.gate_linear_name)
         gate = GateLinear(
             hidden_size,
             num_experts,
             bias=False,
             out_dtype=out_dtype or self.router_dtype,
-            prefix=maybe_prefix(prefix, self.gate_name),
+            prefix=gate_prefix,
         )
         if (bias := getattr(hf_gate, "e_score_correction_bias", None)) is not None:
             gate.register_buffer("e_score_correction_bias", bias)

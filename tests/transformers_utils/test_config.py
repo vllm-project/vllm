@@ -6,6 +6,7 @@ only get the `eos_token_id` from the tokenizer as defined by
 `BaseRenderer.get_eos_token_id`.
 """
 
+import json
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -16,9 +17,37 @@ from vllm.config.model import ModelConfig
 from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils import config as config_module
 from vllm.transformers_utils.config import (
+    get_config,
     get_safetensors_params_metadata,
     try_get_generation_config,
 )
+
+
+def test_longcat_config_without_model_type_uses_builtin_transformers(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "architectures": ["LongcatFlashForCausalLM"],
+                "expert_ffn_hidden_size": 1024,
+                "num_hidden_layers": 56,
+                "num_layers": 14,
+                "auto_map": {
+                    "AutoConfig": "configuration_longcat_flash.LongcatFlashConfig",
+                    "AutoModel": "modeling_longcat_flash.LongcatFlashModel",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = get_config(tmp_path, trust_remote_code=False)
+
+    assert type(config).__name__ == "LongcatFlashConfig"
+    assert config.model_type == "longcat_flash"
+    assert config.auto_map == {}
+    assert config.num_hidden_layers == 28
+    assert config.moe_intermediate_size == 1024
 
 
 def test_get_llama3_eos_token():
