@@ -568,8 +568,7 @@ class Scheduler(SchedulerInterface):
         if (
             not defer_prefills
             and self.local_prefill_interval > 1
-            and self.current_step - self.last_prefill_step
-            < self.local_prefill_interval
+            and self.current_step - self.last_prefill_step < self.local_prefill_interval
             and any(not r.is_prefill_chunk for r in self.running)
         ):
             defer_prefills = True
