@@ -71,36 +71,11 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
 
     @classmethod
     def is_available(cls) -> bool:
-        # Requires:
-        # 1. gfx950
-        # 2. AITER with MLA PS kernels
-        # 3. AITER with the aiter#3606 fix, which corrects the LSE bug required
-        #    for correct non-causal attn and adds the `max_kvlen` kwarg to
-        #    get_ps_metadata_info_v1. We use that kwarg as a proxy for whether
-        #    the fix is available.
-        import inspect
-
         try:
             from vllm.platforms.rocm import on_gfx950
         except Exception:  # noqa: BLE001
             return False
-        if not on_gfx950():
-            return False
-        try:
-            from aiter import (  # noqa: F401
-                get_ps_metadata_info_v1,
-                get_ps_metadata_v1,
-                mla_prefill_ps_asm_fwd,
-                mla_reduce_v1,
-            )
-        except Exception:  # noqa: BLE001
-            return False
-
-        try:
-            params = inspect.signature(get_ps_metadata_info_v1).parameters
-        except (ValueError, TypeError):
-            return False
-        return "max_kvlen" in params
+        return on_gfx950()
 
     @classmethod
     def validate_configuration(
@@ -245,7 +220,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         is_causal: bool,
         device: torch.device,
         max_qlen: int,
-        max_kvlen: int | None = None,
     ) -> dict:
         """Build persistent-scheduling metadata buffers for this chunk.
 
@@ -257,10 +231,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         Note: this is an expensive call because get_ps_metadata_v1 involves several
         host-to-device syncs/copies. Same for num_partial_tiles. Hence we build
         it once per forward and re-use across layers.
-
-        max_kvlen=None means causal: i.e. num K tokens == num Q tokens.
         """
-        assert is_causal == (max_kvlen is None)
         num_head_k = self.num_heads
 
         (
@@ -275,8 +246,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             num_head_k=num_head_k,
             max_qlen=max_qlen,
             qlen_granularity=_FP8_PREFILL_TILE_Q,
-            max_kvlen=max_kvlen,
-            kvlen_granularity=_KVLEN_GRANULARITY,
         )
 
         work_metadata = torch.empty(
@@ -382,7 +351,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
                     is_causal=False,
                     device=device,
                     max_qlen=chunk.max_query_len,
-                    max_kvlen=chunk.max_seq_len,
                 )
                 chunk_ps["qo_indptr"] = chunk_qo_indptr
                 chunk_ps["kv_indptr"] = kv_indptr
