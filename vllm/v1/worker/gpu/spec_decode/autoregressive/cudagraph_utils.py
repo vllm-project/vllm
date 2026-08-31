@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from copy import copy
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -26,6 +28,40 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
     the batch descriptor being captured. Reusing metadata built during an
     earlier capture would execute kernels with stale buffer contents.
     """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+        lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool = False,
+    ) -> None:
+        # Autoregressive draft decode always processes exactly one token per
+        # request. Its graph shapes must therefore stay fixed at query length 1
+        # instead of following the target model's Dynamic-SD verification
+        # schedule. Use a shallow config copy only while candidates are built;
+        # keep the original config on the manager for capture/runtime behavior.
+        candidate_config = vllm_config
+        speculative_config = vllm_config.speculative_config
+        if (
+            decode_query_len == 1
+            and speculative_config
+            and speculative_config.uses_dynamic_speculative_decoding()
+        ):
+            candidate_config = copy(vllm_config)
+            candidate_config.speculative_config = None
+
+        super().__init__(
+            candidate_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+            lora_capture_cases=lora_capture_cases,
+            varlen_decode=varlen_decode,
+        )
+        self.vllm_config = vllm_config
 
     def capture(
         self,
