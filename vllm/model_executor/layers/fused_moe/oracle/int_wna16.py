@@ -142,21 +142,28 @@ def _backend_incompatibility_reason(
     if backend == WNA16MoEBackend.FLASHINFER_TRTLLM and (may_have_zp or may_have_bias):
         return "zero points and bias are not supported"
 
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+    from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
+
     if backend == WNA16MoEBackend.ZEN_CPU:
         if not envs.VLLM_CPU_INT4_W4A8:
             return "VLLM_CPU_INT4_W4A8=0 disables the DA8W4 path"
-        if may_have_zp or may_have_bias:
-            return "zero points and expert bias are not supported"
+        if may_have_zp:
+            return "zero points are not supported"
+        if isinstance(quant_config, AutoGPTQConfig) and quant_config.desc_act:
+            return "GPTQ activation ordering is not supported"
+        if (
+            isinstance(quant_config, QuantizationArgs)
+            and quant_config.actorder == "group"
+        ):
+            return "group activation ordering is not supported"
         group_size = getattr(quant_config, "group_size", None)
         if group_size is None or group_size <= 0:
             return "DA8W4 requires group-quantized weights"
         # AOCL sym_quant requires the group size to be a multiple of 4.
         if group_size % 4 != 0:
             return f"group size {group_size} is not a multiple of 4"
-
-    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
-    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
-    from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
     if backend == WNA16MoEBackend.TRITON:
         if may_have_bias:

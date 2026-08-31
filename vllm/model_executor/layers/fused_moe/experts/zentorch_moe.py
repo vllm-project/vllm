@@ -28,6 +28,10 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
     int8 on ZenDNN.
     """
 
+    # swiglu_oai_mul reads gate/up interleaved, not in the half-split order the
+    # weight loader leaves behind.
+    requires_interleaved_w13 = True
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
@@ -67,9 +71,8 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        # SWIGLUOAI is left out: the kernel expects its gate/up rows
-        # interleaved rather than half-split, which needs a w13 permutation.
         return activation in (
+            MoEActivation.SWIGLUOAI,
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
