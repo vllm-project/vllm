@@ -28,7 +28,6 @@ def _qsa_mqa_paged_uniform_kernel(
     stride_cache_token,
     stride_table_req,
     stride_logits_row,
-    num_pages,
     PAGE_SIZE: tl.constexpr,
     PAGE_TABLE_WIDTH: tl.constexpr,
     NUM_HEADS: tl.constexpr,
@@ -81,16 +80,14 @@ def _qsa_mqa_paged_uniform_kernel(
         physical_page = tl.load(
             page_table_ptr + request * stride_table_req + logical_page,
             mask=live,
-            other=-1,
+            other=0,
         )
-        page_valid = live & (physical_page >= 0) & (physical_page < num_pages)
-        safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
         keys = tl.load(
             k_cache_ptr
-            + safe_physical_page[:, None] * stride_cache_block
+            + physical_page[:, None].to(tl.int64) * stride_cache_block
             + page_offset[:, None] * stride_cache_token
             + dims[None, :],
-            mask=page_valid[:, None] & (dims[None, :] < HEAD_DIM),
+            mask=live[:, None] & (dims[None, :] < HEAD_DIM),
             other=0.0,
             eviction_policy="evict_first",
         )
@@ -101,10 +98,9 @@ def _qsa_mqa_paged_uniform_kernel(
             (BLOCK_N, DECODE_QUERY_LEN_PADDED, NUM_HEADS_PADDED),
         )
         score = tl.sum(scores, axis=2) / HEAD_DIM**0.5
-        valid = (columns[:, None] < visible[None, :]) & page_valid[:, None]
         tl.store(
             logits_ptr + rows[None, :] * stride_logits_row + columns[:, None],
-            tl.where(valid, score, -float("inf")),
+            score,
             mask=valid_query_offsets[None, :]
             & (columns[:, None] < NUM_COLUMNS)
             & (columns[:, None] < visible[None, :]),
@@ -126,7 +122,6 @@ def _qsa_mqa_paged_prefill_kernel(
     stride_table_req,
     stride_logits_row,
     num_rows,
-    num_pages,
     query_offset,
     PAGE_SIZE: tl.constexpr,
     PAGE_TABLE_WIDTH: tl.constexpr,
@@ -194,16 +189,14 @@ def _qsa_mqa_paged_prefill_kernel(
         physical_page = tl.load(
             page_table_ptr + request * stride_table_req + logical_page,
             mask=live,
-            other=-1,
+            other=0,
         )
-        page_valid = live & (physical_page >= 0) & (physical_page < num_pages)
-        safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
         keys = tl.load(
             k_cache_ptr
-            + safe_physical_page[:, None] * stride_cache_block
+            + physical_page[:, None].to(tl.int64) * stride_cache_block
             + page_offset[:, None] * stride_cache_token
             + dims[None, :],
-            mask=page_valid[:, None] & (dims[None, :] < HEAD_DIM),
+            mask=live[:, None] & (dims[None, :] < HEAD_DIM),
             other=0.0,
             eviction_policy="evict_first",
         )
@@ -217,7 +210,7 @@ def _qsa_mqa_paged_prefill_kernel(
         )
         tl.store(
             logits_ptr + rows[None, :] * stride_logits_row + columns[:, None],
-            tl.where(page_valid[:, None], score, -float("inf")),
+            score,
             mask=store_mask,
         )
 
@@ -341,7 +334,6 @@ def warmup_qsa_mqa_paged_decode(
             *k_cache_ptr.stride()[:2],
             *page_table_ptr.stride()[:-1],
             *logits_ptr.stride()[:-1],
-            k_cache.shape[0],
             PAGE_SIZE=page_size,
             PAGE_TABLE_WIDTH=page_table_width,
             NUM_HEADS=num_heads,
@@ -395,7 +387,6 @@ def _prefill_logits(
         *page_table.stride()[:-1],
         *logits.stride()[:-1],
         num_queries,
-        k_cache.shape[0],
         query_offset,
         PAGE_SIZE=k_cache.shape[1],
         PAGE_TABLE_WIDTH=page_table.shape[1],
@@ -521,7 +512,6 @@ def qsa_select_paged_decode(
         *k_cache.stride()[:2],
         *page_table.stride()[:-1],
         *logits.stride()[:-1],
-        k_cache.shape[0],
         PAGE_SIZE=k_cache.shape[1],
         PAGE_TABLE_WIDTH=page_table.shape[1],
         NUM_HEADS=q.shape[1],
