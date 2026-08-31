@@ -59,13 +59,14 @@ from vllm.forward_context import (
 )
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
-from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -132,7 +133,6 @@ from vllm.utils.torch_utils import (
     PIN_MEMORY,
     async_tensor_h2d,
     current_stream,
-    is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
@@ -750,6 +750,9 @@ class GPUModelRunner(
         self._init_kernel_block_sizes = [placeholder_block_size]
         self._init_max_num_blocks = [placeholder_max_num_blocks]
         self._init_slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT]
+        self.cp_kv_cache_interleave_size = (
+            self.parallel_config.cp_kv_cache_interleave_size
+        )
         # Capture warmup providers registered by the initial placeholder InputBatch
         with self.jit_warmup_registry.activate():
             self.input_batch = InputBatch(
@@ -995,6 +998,7 @@ class GPUModelRunner(
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
+        self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
         if self.cache_config.mamba_cache_mode == "all" and self.num_spec_tokens > 0:
             self.mamba_prev_last_scheduled_idx = self._make_buffer(
@@ -1027,60 +1031,6 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         self.late_interaction_runner.clear()
 
-    def post_kv_cache_wake_up(self) -> None:
-        self.init_fp8_kv_scales()
-
-    @torch.inference_mode()
-    def init_fp8_kv_scales(self) -> None:
-        """
-        Re-initialize the KV cache and FP8 scales after waking from sleep.
-        1. Zero out the KV cache tensors to remove garbage data from re-allocation.
-        2. Reset Attention layer scaling factors (_k_scale, _v_scale) to 1.0.
-          If these are left at 0.0 (default after wake_up), all KV cache values
-          become effectively zero, causing gibberish output.
-        """
-        if not is_quantized_kv_cache(self.cache_config.cache_dtype):
-            return
-
-        kv_caches = getattr(self, "kv_caches", [])
-        for cache_entry in kv_caches:
-            if cache_entry is None:
-                continue
-            # Hybrid models (Mamba, DeltaNet) store per-layer state as a
-            # list of tensors rather than a single tensor.
-            if isinstance(cache_entry, list):
-                for t in cache_entry:
-                    t.zero_()
-            else:
-                cache_entry.zero_()
-
-        k_attr_names = ("_k_scale", "k_scale")
-        v_attr_names = ("_v_scale", "v_scale")
-
-        attn_layers = self.compilation_config.static_forward_context
-        for name, module in attn_layers.items():
-            if isinstance(module, (Attention, MLAAttention)):
-                # TODO: Generally, scale is 1.0 if user uses on-the-fly fp8
-                # kvcache quant. However, to get better accuracy, compression
-                # frameworks like llm-compressors allow users to tune the
-                # scale. We may need to restore the specific calibrated scales
-                # here in the future.
-                k_scale_val, v_scale_val = 1.0, 1.0
-
-                # Processing K Scale
-                for attr in k_attr_names:
-                    if hasattr(module, attr):
-                        param = getattr(module, attr)
-                        if isinstance(param, torch.Tensor):
-                            param.fill_(k_scale_val)
-
-                # Processing V Scale
-                for attr in v_attr_names:
-                    if hasattr(module, attr):
-                        param = getattr(module, attr)
-                        if isinstance(param, torch.Tensor):
-                            param.fill_(v_scale_val)
-
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
             if self.uses_mrope:
@@ -1105,6 +1055,15 @@ class GPUModelRunner(
             with_numpy=numpy,
         )
 
+    def _get_mamba_state_copy_funcs(self) -> MambaStateCopyFuncsByType:
+        if self._mamba_state_copy_funcs is None:
+            mamba_groups = mamba_utils.get_mamba_groups(self.kv_cache_config)
+            mamba_types = {spec.mamba_type for spec in mamba_groups}
+            copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
+            mamba_utils.validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
+            self._mamba_state_copy_funcs = copy_funcs
+        return self._mamba_state_copy_funcs
+
     def _get_mamba_bufs(self) -> mamba_utils.MambaBuffers:
         # Only reachable on the ``mamba_cache_mode == "align"`` path.
         # The postprocess sub-object is additionally gated on spec
@@ -1114,7 +1073,7 @@ class GPUModelRunner(
             self._mamba_bufs = mamba_utils.MambaBuffers.create(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=self.kv_cache_config,
-                copy_funcs=self.model.get_mamba_state_copy_func(),
+                copy_funcs=self._get_mamba_state_copy_funcs(),
                 make_buffer=self._make_buffer,
                 device=self.device,
                 with_postprocess_align=(
@@ -1651,7 +1610,7 @@ class GPUModelRunner(
                 input_batch=self.input_batch,
                 kv_cache_config=self.kv_cache_config,
                 forward_context=self.compilation_config.static_forward_context,
-                mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+                mamba_state_copy_funcs=self._get_mamba_state_copy_funcs(),
             )
 
             assert self.num_accepted_tokens_event is not None
@@ -2282,11 +2241,18 @@ class GPUModelRunner(
                     non_blocking=True,
                 )
         elif self.uses_xdrope_dim > 0:
-            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
+            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL).
+            # xdrope_positions is allocated as [uses_xdrope_dim, max_num_tokens
+            # + 1] with the same trailing-column trick as mrope_positions above,
+            # so cpu[:, :N] is a strided view of the pinned buffer and the
+            # single-slice copy_() runs into the same pageable-fallback silent
+            # sync described in PR #51841. Split into per-row copies for the
+            # same reason.
+            for row in range(self.xdrope_positions.gpu.shape[0]):
+                self.xdrope_positions.gpu[row, :total_num_scheduled_tokens].copy_(
+                    self.xdrope_positions.cpu[row, :total_num_scheduled_tokens],
+                    non_blocking=True,
+                )
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
@@ -4449,7 +4415,7 @@ class GPUModelRunner(
                     self.input_batch,
                     self.requests,
                     self.compilation_config.static_forward_context,
-                    self.model.get_mamba_state_copy_func(),
+                    self._get_mamba_state_copy_funcs(),
                     mamba_bufs.preprocess,
                     align_ctx=mamba_bufs.postprocess_align,
                 )
@@ -5803,7 +5769,7 @@ class GPUModelRunner(
                 scores = logits.to(torch.float32)
             else:
                 scores = self.sampler.compute_logprobs(logits)
-            token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
+            token_ids, logprobs, ranks, *_ = self.sampler.gather_logprobs(
                 scores, num_prompt_logprobs, tgt_token_ids
             )
 
@@ -7398,11 +7364,16 @@ class GPUModelRunner(
             or kernel_block_sizes != self._init_kernel_block_sizes
             or max_num_blocks != self._init_max_num_blocks
             or slot_mapping_modes != self._init_slot_mapping_modes
+            or self.cp_kv_cache_interleave_size
+            != self.parallel_config.cp_kv_cache_interleave_size
         ):
             self._init_block_sizes = block_sizes
             self._init_kernel_block_sizes = kernel_block_sizes
             self._init_max_num_blocks = max_num_blocks
             self._init_slot_mapping_modes = slot_mapping_modes
+            self.cp_kv_cache_interleave_size = (
+                self.parallel_config.cp_kv_cache_interleave_size
+            )
             # Capture warmup providers registered after final KV-cache geometry is known
             with self.jit_warmup_registry.activate():
                 self.input_batch = InputBatch(
@@ -7443,7 +7414,10 @@ class GPUModelRunner(
             yield from attn_groups
 
     def initialize_kv_cache_tensors(
-        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int],
+        kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Initialize the memory buffer for KV cache.
@@ -7457,12 +7431,14 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
 
-        kv_caches = allocate_kv_cache(
-            kv_cache_config,
-            self.device,
-            self.cache_config.get_resolved_kv_cache_layout(),
-            kernel_block_sizes,
-        )
+        allocation_context = kv_cache_allocation_context or nullcontext()
+        with allocation_context:
+            kv_caches = allocate_kv_cache(
+                kv_cache_config,
+                self.device,
+                self.cache_config.get_resolved_kv_cache_layout(),
+                kernel_block_sizes,
+            )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
@@ -7512,6 +7488,7 @@ class GPUModelRunner(
         self,
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -7522,6 +7499,7 @@ class GPUModelRunner(
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self._mamba_bufs = None
+        self._mamba_state_copy_funcs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
@@ -7544,7 +7522,9 @@ class GPUModelRunner(
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         kv_caches = self.initialize_kv_cache_tensors(
-            kv_cache_config, kernel_block_sizes
+            kv_cache_config,
+            kernel_block_sizes,
+            kv_cache_allocation_context=kv_cache_allocation_context,
         )
 
         if (
