@@ -51,6 +51,21 @@ class KVConnectorStats:
 
 
 class KVConnectorLogging:
+    """Handles periodic logging and telemetry aggregation for KV connectors.
+
+    Pipeline Overview:
+    1. **observe()**: Periodically called when the connector syncs with the scheduler.
+       Receives raw transfer telemetry (`transfer_stats_data`) pre-aggregated across
+       all worker ranks, instantiates connector stats via `build_kv_connector_stats()`,
+       and accumulates them into `self.transfer_stats_accumulator` via `aggregate()`.
+    2. **aggregate()**: Accumulates observations across intervals by extending
+       telemetry lists in the stats container.
+    3. **reduce()**: Called by :meth:`log` to compute summary metrics (averages,
+       percentiles, throughput) over the accumulated observations.
+    4. **log()**: Periodically formats and logs the reduced summary metrics line,
+       then clears the accumulator for the next logging window.
+    """
+
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
         # Instantiate the connector's stats class.
         if kv_transfer_config and kv_transfer_config.kv_connector:
