@@ -64,6 +64,13 @@ def _get_mla_prefill_backend_priorities(
     """
     from vllm.platforms import current_platform
 
+    if current_platform.is_rocm():
+        return [
+            MLAPrefillBackendEnum.AITER_ASM,
+            MLAPrefillBackendEnum.ROCM_AITER_FA,
+            MLAPrefillBackendEnum.FLASH_ATTN,
+        ]
+
     if device_capability.major == 10:  # Blackwell
         if mla_dimensions == MLADimensions(
             qk_nope_head_dim=192,
@@ -82,16 +89,10 @@ def _get_mla_prefill_backend_priorities(
             MLAPrefillBackendEnum.FLASHINFER,
             MLAPrefillBackendEnum.TOKENSPEED_MLA,
         ]
-    elif current_platform.is_rocm():
+    else:  # Hopper (SM90) and older
         return [
-            MLAPrefillBackendEnum.AITER_ASM,
-            MLAPrefillBackendEnum.ROCM_AITER_FA,
             MLAPrefillBackendEnum.FLASH_ATTN,
         ]
-    # Hopper (SM90) and older
-    return [
-        MLAPrefillBackendEnum.FLASH_ATTN,
-    ]
 
 
 def get_mla_prefill_backend(
