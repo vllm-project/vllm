@@ -259,16 +259,27 @@ async def _handle_single_prompt_completions(
     prompt_token_ids = choice.get("prompt_token_ids")
     output_token_ids = choice.get("token_ids")
 
+    prefill_token_appended = False
     if prompt_token_ids is not None and output_token_ids is not None:
         # Fast path: feed the decoder pre-tokenized ids (full prompt plus the
         # one token already sampled by the prefiller). This avoids re-tokenizing
         # the whole prompt on the decoder, which otherwise dominates TTFT for
         # long prompts.
         decode_req_data["prompt"] = list(prompt_token_ids) + list(output_token_ids)
+        prefill_token_appended = True
     elif "prompt" in decode_req_data and "text" in choice:
         # Fallback: append the one prefilled token as text so the decoder
         # continues from there (requires re-tokenization on the decoder).
         decode_req_data["prompt"] = decode_req_data["prompt"] + choice["text"]
+        prefill_token_appended = True
+
+    if prefill_token_appended and decode_req_data.get("kv_transfer_params"):
+        # Tell the decoder that its prompt already carries the prefiller's first
+        # sampled token. When the prefiller prompt is an exact multiple of the
+        # block size, that extra token opens a fresh local block with no remote
+        # counterpart, which the NIXL connector must recompute locally instead
+        # of pairing against a remote block.
+        decode_req_data["kv_transfer_params"]["prefill_token_appended"] = True
 
     # The decoder does not need to echo token ids back.
     decode_req_data.pop("return_token_ids", None)
