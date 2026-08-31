@@ -25,6 +25,29 @@ for i, v in enumerate(test_sizes):
 
 
 @pytest.mark.parametrize(
+    ("dtype", "expected"),
+    [
+        (torch.float32, True),
+        (torch.float16, True),
+        (torch.bfloat16, True),
+        (torch.int8, False),
+        (torch.float8_e4m3fn, False),
+    ],
+)
+def test_custom_allreduce_filters_dtype(
+    dtype: torch.dtype,
+    expected: bool,
+) -> None:
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator.world_size = 2
+    communicator.max_size = 1024
+    communicator._ptr = 0
+
+    assert communicator.should_custom_ar(torch.empty(16, dtype=dtype)) is expected
+
+
+@pytest.mark.parametrize(
     ("major", "local_multicast", "expected"),
     [
         (8, True, False),

@@ -161,6 +161,16 @@ class QuarkOCP_MX(QuarkScheme):
         weight_loader: Callable,
         **kwargs,
     ):
+        if input_size_per_partition % OCP_MX_BLOCK_SIZE != 0:
+            layer_name = getattr(layer, "prefix", "") or type(layer).__name__
+            raise ValueError(
+                f"OCP MX linear layer {layer_name!r} has an input size per "
+                f"partition of {input_size_per_partition}, which must be "
+                f"divisible by the OCP MX group size {OCP_MX_BLOCK_SIZE}. "
+                "Choose a compatible tensor-parallel size or avoid "
+                "tensor-parallel sharding for this layer."
+            )
+
         if self.dynamic_mxfp4_quant:
             weight = ModelWeightParameter(
                 data=torch.empty(

@@ -154,6 +154,9 @@ def _make_mock_worker_for_splits(group_spec_types):
     worker.block_len_per_layer = []
     worker.num_regions = 0
     worker._region_is_mla = []
+    worker._conv_decomp = SimpleNamespace(local_conv_offsets=())
+    worker._ssm_region_indices = [0] if MambaSpec in group_spec_types else []
+    worker._ple_region_index = None
     return worker
 
 
@@ -282,3 +285,31 @@ class TestMambaPlanSplitHandles:
 
         with pytest.raises(AssertionError, match="Head-sharded"):
             list(worker._build_local_splits_from_plan(plan, src_blocks_data, 2, 2))
+
+
+@pytest.mark.parametrize(
+    ("total_kv_heads", "local_tp", "remote_tp", "compatible"),
+    [
+        # 2 heads: TP1 packs both heads into a page, TP >= 2 packs one.
+        (2, 1, 2, False),
+        (2, 2, 1, False),
+        (2, 1, 1, True),
+        (2, 2, 4, True),
+        (2, 4, 2, True),
+        # 4 heads: the boundary moves with the head count.
+        (4, 2, 4, False),
+        (4, 2, 2, True),
+        (4, 4, 8, True),
+    ],
+)
+def test_csa_linear_tp_layout_boundary(total_kv_heads, local_tp, remote_tp, compatible):
+    worker = object.__new__(NixlConnectorWorker)
+    worker.world_size = local_tp
+    worker._is_csa_linear = True
+    worker.transfer_topo = SimpleNamespace(total_num_kv_heads=total_kv_heads)
+
+    if compatible:
+        worker._validate_csa_linear_tp_layout(remote_tp)
+    else:
+        with pytest.raises(ValueError, match="KV-head sharding boundary"):
+            worker._validate_csa_linear_tp_layout(remote_tp)

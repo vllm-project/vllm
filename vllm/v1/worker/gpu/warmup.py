@@ -18,7 +18,13 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    CrossAttentionSpec,
+    KVCacheSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -39,6 +45,11 @@ def _reserved_block_count(
     `KVCacheManager.allocate_slots` reserves: the token range plus
     `num_lookahead_tokens`, where the speculator writes the KV of its drafts.
     """
+    if isinstance(kvcache_spec, UniformTypeKVCacheSpecs):
+        kvcache_spec = kvcache_spec.first_spec
+    if isinstance(kvcache_spec, CircularBufferSpec):
+        # Circular caches keep one physical ring block for the request lifetime.
+        return 1
     if isinstance(kvcache_spec, CrossAttentionSpec):
         # Cross-attention blocks cover the encoder sequence only.
         return cdiv(max_encoder_len, kvcache_spec.block_size)

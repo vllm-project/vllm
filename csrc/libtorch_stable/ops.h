@@ -405,7 +405,7 @@ void fused_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& num_accepted_tokens,
     torch::stable::Tensor& state, torch::stable::Tensor const& output_gate,
     torch::stable::Tensor const& norm_weight, torch::stable::Tensor& out,
-    double scale, double norm_eps);
+    double scale, double norm_eps, const std::string& output_gate_activation);
 
 #endif
 

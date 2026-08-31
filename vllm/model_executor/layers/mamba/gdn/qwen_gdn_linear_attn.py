@@ -519,7 +519,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.gqa_interleaved_layout
             or self.head_k_dim != 128
             or self.head_v_dim != 128
-            or self.norm.activation != "silu"
+            or self.norm.activation not in ("silu", "sigmoid")
             or vllm_config.model_config.dtype != torch.bfloat16
             or conv_state_dtype != torch.bfloat16
             or recurrent_state_dtype not in FUSED_GDN_STATE_DTYPES
@@ -527,9 +527,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ):
             return (
                 "the fused CUDA kernel requires a BF16 GDN model with "
-                "K=V=128, SiLU gating, non-interleaved GQA layout, BF16 "
-                "convolution cache, BF16 or FP32 recurrent state, and a "
-                "GPU with compute capability 8.0+"
+                "K=V=128, SiLU or sigmoid gating, non-interleaved GQA "
+                "layout, BF16 convolution cache, BF16 or FP32 recurrent "
+                "state, and a GPU with compute capability 8.0+"
             )
         if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
@@ -1766,6 +1766,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             out=core_attn_out,
             scale=self.head_k_dim**-0.5,
             norm_eps=self.layer_norm_epsilon,
+            output_gate_activation=self.norm.activation,
         )
 
     def _forward_core_fused_norm_packed(

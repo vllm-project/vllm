@@ -2817,6 +2817,7 @@ def fused_gdn_decode_post_conv_mtp(
     out: torch.Tensor | None = None,
     scale: float = 128**-0.5,
     norm_eps: float = 1e-5,
+    output_gate_activation: str = "silu",
 ) -> torch.Tensor:
     if out is None:
         out = torch.empty_like(output_gate)
@@ -2835,6 +2836,7 @@ def fused_gdn_decode_post_conv_mtp(
         out,
         scale,
         norm_eps,
+        output_gate_activation,
     )
     return out
 
