@@ -414,3 +414,17 @@ def test_auto_selection_excludes_rocm_attn_for_kv_connector(
     )
 
     assert backend_path != AttentionBackendEnum.ROCM_ATTN.get_path()
+
+
+def test_unified_attn_prefers_block_contiguous_layout():
+    """Unified attn prefers a block-first KV layout, making PR #53695 safe."""
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionBackend,
+    )
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
+
+    unified_preferred = RocmAiterUnifiedAttentionBackend.supported_kv_cache_layouts()[0]
+    rocm_attn_preferred = RocmAttentionBackend.supported_kv_cache_layouts()[0]
+
+    assert unified_preferred.is_block_contiguous is True
+    assert rocm_attn_preferred.is_block_contiguous is False
