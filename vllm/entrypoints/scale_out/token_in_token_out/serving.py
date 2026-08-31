@@ -12,6 +12,7 @@ from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
+from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     clamp_prompt_logprobs,
@@ -21,16 +22,15 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
-    GenerationError,
     PromptTokenUsageInfo,
-    RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -137,7 +137,13 @@ class ServingTokens(GenerateBaseServing):
                 f"({max_num_seqs}), got {sampling_params.n}."
             )
         try:
-            msgspec.msgpack.encode(sampling_params)
+            msgspec.msgpack.encode(
+                (
+                    sampling_params,
+                    request.kv_transfer_params,
+                    request.ec_transfer_params,
+                )
+            )
         except (OverflowError, TypeError, ValueError) as e:
             return self.create_error_response(e)
 
@@ -157,6 +163,8 @@ class ServingTokens(GenerateBaseServing):
                     mm_parser.parse_video(url, uuid)
             mm_data, mm_uuids = await tracker.resolve_items()
             prompt = TokensPrompt(prompt_token_ids=request.token_ids)
+            if request.cache_salt is not None:
+                prompt["cache_salt"] = request.cache_salt
             if mm_data:
                 prompt["multi_modal_data"] = mm_data
             if mm_uuids:
@@ -202,6 +210,16 @@ class ServingTokens(GenerateBaseServing):
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
+
+        # Pass disaggregated-serving parameters through to the engine.
+        if request.kv_transfer_params is not None:
+            extra = sampling_params.extra_args or {}
+            extra["kv_transfer_params"] = request.kv_transfer_params
+            sampling_params.extra_args = extra
+        if request.ec_transfer_params is not None:
+            extra = sampling_params.extra_args or {}
+            extra["ec_transfer_params"] = request.ec_transfer_params
+            sampling_params.extra_args = extra
 
         # Apply server-side ``max_tokens`` defaulting when the client did
         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``

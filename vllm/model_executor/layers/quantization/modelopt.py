@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
@@ -1080,6 +1081,22 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
     ) -> "ModelOptNvFp4Config":
         is_checkpoint_nvfp4_serialized = "NVFP4" in quant_method
 
+        # A checkpoint can declare quant_algo "NVFP4" yet quantize weights
+        # only (input_activations is null in every config group). The W4A4
+        # MoE path then folds an uninitialized input_scale that was never
+        # loaded and can zero every expert, so route it through W4A16.
+        if quant_method == "NVFP4":
+            config_groups = original_config.get("config_groups")
+            if (
+                isinstance(config_groups, dict)
+                and config_groups
+                and all(
+                    isinstance(group, dict) and group.get("input_activations") is None
+                    for group in config_groups.values()
+                )
+            ):
+                quant_method = "W4A16_NVFP4"
+
         if group_size is None:
             group_size = 16  # Default value
 
@@ -1624,7 +1641,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
