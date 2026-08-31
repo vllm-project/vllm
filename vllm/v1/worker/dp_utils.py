@@ -9,7 +9,7 @@ import torch.distributed as dist
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import (
     get_dp_group,
-    get_moe_dp_pcp_group,
+    get_moe_non_sp_group,
     get_pcp_group,
 )
 from vllm.logger import init_logger
@@ -30,7 +30,7 @@ def _get_device_and_group(parallel_config: ParallelConfig):
         parallel_config.enable_expert_parallel
         and parallel_config.prefill_context_parallel_size > 1
     ):
-        group_coordinator = get_moe_dp_pcp_group()
+        group_coordinator = get_moe_non_sp_group()
         pcp_size = parallel_config.prefill_context_parallel_size
         pcp_rank = get_pcp_group().rank_in_group
 
@@ -151,8 +151,8 @@ def _synchronize_dp_ranks(
     """
     assert num_tokens_padded >= num_tokens_unpadded
 
-    # Coordinate the batch with one all-reduce. MoE with PCP uses the combined
-    # DP-PCP group so the result can also drive expert dispatch metadata.
+    # Coordinate the batch with one all-reduce. MoE with PCP uses the non-SP
+    # group so the result can also drive expert dispatch metadata.
     tensor, pcp_size, pcp_rank = _run_ar(
         should_ubatch=should_attempt_ubatching,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
@@ -189,17 +189,17 @@ def _synchronize_dp_ranks(
         # should_dp_pad is True
         synchronized_token_counts = _post_process_dp_padding(tensor, should_dp_pad)
 
-        num_tokens_across_dp_pcp = None
+        moe_non_sp_token_counts = None
         num_tokens_after_padding = synchronized_token_counts
         if pcp_size > 1:
-            num_tokens_across_dp_pcp = synchronized_token_counts
+            moe_non_sp_token_counts = synchronized_token_counts
             num_tokens_after_padding = synchronized_token_counts[pcp_rank::pcp_size]
             assert len(num_tokens_after_padding) == parallel_config.data_parallel_size
 
     return (
         should_ubatch,
         num_tokens_after_padding,
-        num_tokens_across_dp_pcp,
+        moe_non_sp_token_counts,
         synced_cudagraph_mode,
     )
 
@@ -233,9 +233,9 @@ def coordinate_batch_across_dp(
         num_tokens_after_padding: A tensor containing the total number of
         tokens per-microbatch for each DP rank including padding. Will be
         padded up to the max value across all DP ranks when cudagraph is enabled.
-        num_tokens_across_dp_pcp: A DP -> PCP ordered tensor containing token
-            counts when MoE PCP participates in batch coordination. The DP
-            result contains the ranks at this rank's PCP coordinate.
+        moe_non_sp_token_counts: Token counts indexed by rank_in_group of
+            get_moe_non_sp_group() when PCP participates in batch coordination.
+            The DP result contains the ranks at this rank's PCP coordinate.
         synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
     ]
 
@@ -261,7 +261,7 @@ def coordinate_batch_across_dp(
     (
         should_ubatch,
         num_tokens_after_padding,
-        num_tokens_across_dp_pcp,
+        moe_non_sp_token_counts,
         synced_cudagraph_mode,
     ) = _synchronize_dp_ranks(
         num_tokens_unpadded,
@@ -274,6 +274,6 @@ def coordinate_batch_across_dp(
     return (
         should_ubatch,
         num_tokens_after_padding,
-        num_tokens_across_dp_pcp,
+        moe_non_sp_token_counts,
         synced_cudagraph_mode,
     )

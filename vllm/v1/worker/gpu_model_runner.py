@@ -4065,12 +4065,12 @@ class GPUModelRunner(
         # across ranks
         should_ubatch = False
         num_tokens_across_dp = None
-        num_tokens_across_dp_pcp = None
+        moe_non_sp_token_counts = None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
             (
                 should_ubatch,
                 num_tokens_across_dp,
-                num_tokens_across_dp_pcp,
+                moe_non_sp_token_counts,
                 synced_cudagraph_mode,
             ) = coordinate_batch_across_dp(
                 num_tokens_unpadded=num_tokens,
@@ -4108,7 +4108,7 @@ class GPUModelRunner(
             batch_descriptor,
             should_ubatch,
             num_tokens_across_dp,
-            num_tokens_across_dp_pcp,
+            moe_non_sp_token_counts,
             cudagraph_stats,
         )
 
@@ -4332,7 +4332,7 @@ class GPUModelRunner(
                 batch_desc,
                 should_ubatch,
                 num_tokens_across_dp,
-                num_tokens_across_dp_pcp,
+                moe_non_sp_token_counts,
                 cudagraph_stats,
             ) = self._determine_batch_execution_and_padding(
                 num_tokens=num_tokens_unpadded,
@@ -4497,7 +4497,7 @@ class GPUModelRunner(
                 self.vllm_config,
                 num_tokens=num_tokens_padded,
                 num_tokens_across_dp=num_tokens_across_dp,
-                num_tokens_across_dp_pcp=num_tokens_across_dp_pcp,
+                moe_non_sp_token_counts=moe_non_sp_token_counts,
                 cudagraph_runtime_mode=cudagraph_mode,
                 batch_descriptor=batch_desc,
                 ubatch_slices=ubatch_slices_padded,
@@ -5991,7 +5991,7 @@ class GPUModelRunner(
             batch_desc,
             should_ubatch,
             num_tokens_across_dp,
-            num_tokens_across_dp_pcp,
+            moe_non_sp_token_counts,
             _,
         ) = self._determine_batch_execution_and_padding(
             num_tokens=num_tokens_unpadded,
@@ -6195,8 +6195,8 @@ class GPUModelRunner(
                 num_tokens_padded = ubatch_slices_padded[0].num_tokens
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
-                if num_tokens_across_dp_pcp is not None:
-                    num_tokens_across_dp_pcp[:] = num_tokens_padded
+                if moe_non_sp_token_counts is not None:
+                    moe_non_sp_token_counts[:] = num_tokens_padded
 
             with (
                 self.maybe_randomize_inputs(
@@ -6207,7 +6207,7 @@ class GPUModelRunner(
                     self.vllm_config,
                     num_tokens=num_tokens_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    num_tokens_across_dp_pcp=num_tokens_across_dp_pcp,
+                    moe_non_sp_token_counts=moe_non_sp_token_counts,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,

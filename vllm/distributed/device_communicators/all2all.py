@@ -11,7 +11,7 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
-    get_moe_dp_pcp_group,
+    get_moe_non_sp_group,
 )
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
@@ -56,7 +56,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
     def _get_comm_group(self, is_sequence_parallel: bool) -> Any:
         if is_sequence_parallel:
             return get_ep_group()
-        return get_moe_dp_pcp_group()
+        return get_moe_non_sp_group()
 
     def _get_sizes(self, num_local_tokens: int, comm_group: Any) -> list[int]:
         if self.dp_world_size == 1:

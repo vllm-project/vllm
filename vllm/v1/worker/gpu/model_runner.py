@@ -1741,8 +1741,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens_across_dp=(
                     dp_sync.num_tokens_across_dp if dp_sync is not None else None
                 ),
-                num_tokens_across_dp_pcp=(
-                    dp_sync.num_tokens_across_dp_pcp if dp_sync is not None else None
+                moe_non_sp_token_counts=(
+                    dp_sync.moe_non_sp_token_counts if dp_sync is not None else None
                 ),
                 batch_descriptor=batch_descriptor,
                 slot_mapping=slot_mappings_by_layer,
