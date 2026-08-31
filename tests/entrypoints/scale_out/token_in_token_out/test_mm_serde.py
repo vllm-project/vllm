@@ -7,6 +7,7 @@ token_in_token_out generate endpoint.
 
 import torch
 
+from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     decode_mm_kwargs_item,
     encode_mm_kwargs_item,
@@ -15,12 +16,15 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
+from vllm.inputs import mm_input
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFieldElem,
     MultiModalFlatField,
     MultiModalKwargsItem,
+    MultiModalKwargsItems,
     MultiModalSharedField,
+    PlaceholderRange,
 )
 
 
@@ -112,3 +116,76 @@ def test_mm_features_with_kwargs_data():
 
     decoded = decode_mm_kwargs_item(features2.kwargs_data["image"][0])
     assert torch.equal(elem.data, decoded["pixel_values"].data)
+
+
+def test_render_features_preserve_is_embed():
+    """A sparse `is_embed` mask must reach the generate side intact.
+
+    The model runner branches on `PlaceholderRange.is_embed`: with a mask a
+    span consumes only `is_embed.sum()` rows of encoder output and only those
+    positions are marked as embeddings; without one it consumes the whole span
+    and every position in it is overwritten. Dropping the mask on the wire
+    therefore corrupts the prompt for models that use sparse placeholders
+    (Gemma 3, Phi-3-V, the Qwen omni thinkers).
+    """
+    is_embed = torch.tensor([True, False, True, True], dtype=torch.bool)
+    engine_input = mm_input(
+        prompt_token_ids=[1, 2, 3, 4, 5],
+        mm_kwargs=MultiModalKwargsItems({}),
+        mm_hashes={"image": ["hash-0"]},
+        mm_placeholders={
+            "image": [PlaceholderRange(offset=1, length=4, is_embed=is_embed)]
+        },
+    )
+
+    features = ServingRender._extract_mm_features(engine_input)
+    assert features is not None
+
+    # Assert on the serialized form: this is what actually crosses the wire
+    # to the generate service.
+    dumped = features.model_dump()["mm_placeholders"]["image"][0]
+    assert dumped.get("is_embed") == [True, False, True, True]
+
+
+def test_rebuild_mm_placeholders_restores_is_embed():
+    from vllm.entrypoints.scale_out.token_in_token_out.serving import (
+        rebuild_mm_placeholders,
+    )
+
+    is_embed = [True, False, True, True]
+    features = MultiModalFeatures(
+        mm_hashes={"image": ["hash-0"]},
+        mm_placeholders={
+            "image": [PlaceholderRangeInfo(offset=1, length=4, is_embed=is_embed)]
+        },
+    )
+    features = MultiModalFeatures.model_validate(features.model_dump())
+
+    (placeholder,) = rebuild_mm_placeholders(features.mm_placeholders)["image"]
+    assert placeholder.offset == 1
+    assert placeholder.length == 4
+    assert placeholder.is_embed is not None
+    assert torch.equal(placeholder.is_embed, torch.tensor(is_embed, dtype=torch.bool))
+    # The row count the model runner slices the encoder output by.
+    assert placeholder.get_num_embeds() == 3
+
+
+def test_placeholder_without_is_embed_roundtrips_as_none():
+    from vllm.entrypoints.scale_out.token_in_token_out.serving import (
+        rebuild_mm_placeholders,
+    )
+
+    engine_input = mm_input(
+        prompt_token_ids=[1, 2, 3],
+        mm_kwargs=MultiModalKwargsItems({}),
+        mm_hashes={"image": ["hash-0"]},
+        mm_placeholders={"image": [PlaceholderRange(offset=0, length=3)]},
+    )
+
+    features = ServingRender._extract_mm_features(engine_input)
+    assert features is not None
+    assert features.mm_placeholders["image"][0].is_embed is None
+
+    (placeholder,) = rebuild_mm_placeholders(features.mm_placeholders)["image"]
+    assert placeholder.is_embed is None
+    assert placeholder.get_num_embeds() == 3

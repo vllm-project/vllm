@@ -38,9 +38,13 @@ class PlaceholderRangeInfo(BaseModel):
     length: int
     """Number of placeholder tokens."""
 
-    # TODO: add ``is_embed: list[bool] | None`` once the /generate side
-    # consumes features — some models (e.g. Qwen-VL) use sparse
-    # placeholder masks that cannot be recomputed from offset+length alone.
+    is_embed: list[bool] | None = None
+    """Which positions in the span actually receive embeddings.
+
+    ``None`` means every position does. Models with sparse placeholder
+    masks (Gemma 3, Phi-3-V, the Qwen omni thinkers) mark only a subset,
+    and the mask cannot be recomputed from offset and length alone.
+    """
 
 
 class MultiModalFeatures(BaseModel):

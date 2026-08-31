@@ -4,10 +4,11 @@
 
 import asyncio
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from collections.abc import Sequence as GenericSequence
 
 import msgspec
+import torch
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -52,9 +53,35 @@ from .protocol import (
     GenerateResponseChoice,
     GenerateResponseStreamChoice,
     GenerateStreamResponse,
+    PlaceholderRangeInfo,
 )
 
 logger = init_logger(__name__)
+
+
+def rebuild_mm_placeholders(
+    mm_placeholders: Mapping[str, list[PlaceholderRangeInfo]],
+) -> dict[str, list[PlaceholderRange]]:
+    """Convert rendered `PlaceholderRangeInfo` back into `PlaceholderRange`.
+
+    `is_embed` has to survive the round trip: the model runner branches on it
+    to decide how much of the encoder output a span consumes and which
+    positions to overwrite, and it cannot be recomputed from offset and
+    length alone.
+    """
+    return {
+        modality: [
+            PlaceholderRange(
+                offset=p.offset,
+                length=p.length,
+                is_embed=None
+                if p.is_embed is None
+                else torch.tensor(p.is_embed, dtype=torch.bool),
+            )
+            for p in ranges
+        ]
+        for modality, ranges in mm_placeholders.items()
+    }
 
 
 class ServingTokens(GenerateBaseServing):
@@ -173,13 +200,7 @@ class ServingTokens(GenerateBaseServing):
                 [prompt]
             )
         elif features := request.features:
-            # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
-            mm_placeholders: dict[str, list[PlaceholderRange]] = {
-                modality: [
-                    PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
-                ]
-                for modality, ranges in features.mm_placeholders.items()
-            }
+            mm_placeholders = rebuild_mm_placeholders(features.mm_placeholders)
 
             # Deserialize tensor data when present; None → cache hit.
             mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
