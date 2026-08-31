@@ -290,10 +290,11 @@ def get_quant_config(
     # hf_overrides
     hf_overrides = model_config.hf_overrides
     if not isinstance(hf_overrides, dict):
-        raise ValueError(
-            "hf_overrides must be a dict for get_quant_config "
-            "to get the quantization config from it."
-        )
+        # A non-dict hf_overrides (e.g. a callable draft-config transform used
+        # by DSpark/EAGLE speculative drafts) carries no quantization_config_file
+        # or _dict_json to read; treat it as no quant override so unquantized
+        # draft models resolve to None here instead of raising.
+        hf_overrides = {}
     quantization_config_file = hf_overrides.get("quantization_config_file", None)
     if quantization_config_file is not None:
         if hasattr(quant_cls, "from_config_file"):
