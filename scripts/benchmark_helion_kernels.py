@@ -10,7 +10,7 @@ its latency against a chosen performance baseline, then reports the speedup.
 Use ``--numerics-with-perf-baseline`` to check numerics against the performance
 baseline instead.
 
-Two baselines are supported (``--baseline``):
+Three baselines are supported (``--baseline``):
 
 - ``autotune`` (default): the kernel's autotuning baseline
   (``helion_settings.autotune_baseline_fn``), wrapped in ``torch.compile``
@@ -20,6 +20,10 @@ Two baselines are supported (``--baseline``):
   mapping from Helion kernel name to CUDA op lives in ``CUDA_BASELINE_OPS``
   below. Every Helion kernel shares the same argument interface as its CUDA
   counterpart, so inputs are forwarded verbatim.
+- ``custom``: a hand-written reference registered per kernel in
+  ``CUSTOM_BASELINE_FNS`` below (e.g. a production vLLM op such as DeepGEMM).
+  The custom function shares the kernel's argument interface, so inputs are
+  forwarded verbatim.
 
 Usage:
     # List available kernels
@@ -66,6 +70,7 @@ try:
 
     from vllm.benchmarks.lib.utils import default_vllm_config
     from vllm.kernels.helion import get_kernel_by_name, get_registered_kernels
+    from vllm.kernels.helion.custom_baselines import CUSTOM_BASELINE_FNS
     from vllm.logger import init_logger
     from vllm.utils.import_utils import has_helion
 except ImportError as e:
@@ -224,6 +229,26 @@ def make_cuda_baseline(kernel_name: str) -> Callable:
         sys.exit(1)
 
     return cuda_op
+
+
+def make_custom_baseline(kernel_name: str) -> Callable:
+    """Return the hand-written custom reference mapped to ``kernel_name``.
+
+    The custom function shares the kernel's argument interface, so the input
+    tuple is forwarded verbatim.
+    """
+    custom_fn = CUSTOM_BASELINE_FNS.get(kernel_name)
+    if custom_fn is None:
+        logger.error(
+            "No custom baseline mapping for kernel '%s'. Add an entry to "
+            "CUSTOM_BASELINE_FNS in vllm/kernels/helion/custom_baselines.py "
+            "(mapping the kernel name to a callable sharing the kernel's "
+            "argument interface), or benchmark with --baseline autotune.",
+            kernel_name,
+        )
+        sys.exit(1)
+
+    return custom_fn
 
 
 def make_eager_baseline(kernel_name: str) -> Callable:
@@ -559,12 +584,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--baseline",
-        choices=["cuda", "autotune"],
+        choices=["cuda", "autotune", "custom"],
         default="autotune",
         help=(
             "Performance baseline: 'autotune' uses the kernel's "
             "autotune_baseline_fn under torch.compile; 'cuda' uses the mapped "
-            "torch.ops._C op (default: autotune)"
+            "torch.ops._C op; 'custom' uses the mapped CUSTOM_BASELINE_FNS "
+            "reference (default: autotune)"
         ),
     )
     parser.add_argument(
@@ -626,6 +652,8 @@ def main() -> None:
     with default_vllm_config():
         if args.baseline == "cuda":
             baseline_fn = make_cuda_baseline(args.kernel)
+        elif args.baseline == "custom":
+            baseline_fn = make_custom_baseline(args.kernel)
         else:
             baseline_fn = make_autotune_baseline(args.kernel)
         correctness_fn = make_correctness_baseline(
