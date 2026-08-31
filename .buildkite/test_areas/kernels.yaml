@@ -2,7 +2,7 @@ group: Kernels
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) vLLM IR"
+- label: ":nvidia: (H200 MIG 18GB) vLLM IR"
   key: vllm-ir-tests
   timeout_in_minutes: 35
   device: h200_18gb
@@ -14,7 +14,7 @@ steps:
     - pytest -v -s tests/ir
     - pytest -v -s tests/kernels/ir
 
-- label: ":nvidia: (H200) Core Operation Kernels Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Core Operation Kernels Shard %N"
   device: h200_35gb
   key: kernels-core-operation-test
   timeout_in_minutes: 120
@@ -229,7 +229,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Mamba Kernels"
+- label: ":nvidia: (H200 MIG 35GB) Mamba Kernels"
   device: h200_35gb
   key: kernels-mamba-test
   timeout_in_minutes: 60

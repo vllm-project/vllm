@@ -910,17 +910,12 @@ ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
-# FlashInfer is installed separately from release assets below for regular
-# CUDA images. Rubin prerelease images retain their pinned requirements.
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && \
         [ ! -f /tmp/vllm-requirements/rubin-prerelease.txt ]; then \
         echo "INSTALL_RUBIN_PRERELEASE=true requires requirements/rubin-prerelease.txt" >&2; \
         exit 1; \
-    fi && \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
-        sed -i '/^flashinfer-\(python\|cubin\)==/d' /tmp/requirements-cuda.txt; \
     fi && \
     if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' /tmp/requirements-cuda.txt; \
@@ -945,25 +940,14 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
-# Install FlashInfer from release assets.
+# Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
-ARG FLASHINFER_VERSION=0.6.18rc10
-ARG FLASHINFER_RELEASE_TAG=v0.6.18rc10
-ARG TARGETARCH
+# From versions.json: .flashinfer.version
+ARG FLASHINFER_VERSION=0.6.18
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
-        set -eux; \
-        case "${TARGETARCH}" in \
-          amd64) FLASHINFER_WHEEL_ARCH="x86_64" ;; \
-          arm64) FLASHINFER_WHEEL_ARCH="aarch64" ;; \
-          *) echo "Unsupported FlashInfer wheel architecture: ${TARGETARCH}" >&2; exit 1 ;; \
-        esac; \
-        FLASHINFER_CUDA_VERSION="cu$(echo "$CUDA_VERSION" | cut -d. -f1,2 | tr -d '.')"; \
-        FLASHINFER_RELEASE_URL="https://github.com/flashinfer-ai/flashinfer/releases/download/${FLASHINFER_RELEASE_TAG}"; \
-        uv pip install --system --no-deps \
-            "${FLASHINFER_RELEASE_URL}/flashinfer_python-${FLASHINFER_VERSION}-py3-none-any.whl" \
-            "${FLASHINFER_RELEASE_URL}/flashinfer_cubin-${FLASHINFER_VERSION}-py3-none-any.whl" \
-            "${FLASHINFER_RELEASE_URL}/flashinfer_jit_cache-${FLASHINFER_VERSION}%2B${FLASHINFER_CUDA_VERSION}-cp39-abi3-manylinux_2_28_${FLASHINFER_WHEEL_ARCH}.whl"; \
+        uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
+            --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
 # ============================================================
@@ -1036,14 +1020,6 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
         echo "Installing vLLM..." \
         && uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
-    fi
-
-# The vLLM wheel still pins the stable FlashInfer Python package. Restore the
-# release candidate after installing vLLM so it matches the cubin and JIT cache.
-RUN --mount=type=cache,target=/opt/uv/cache \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
-        uv pip install --system --no-deps --reinstall \
-            "https://github.com/flashinfer-ai/flashinfer/releases/download/${FLASHINFER_RELEASE_TAG}/flashinfer_python-${FLASHINFER_VERSION}-py3-none-any.whl"; \
     fi
 
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -1161,13 +1137,6 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
         echo "Installing vLLM..." \
         && uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
-    fi
-
-# Keep FlashInfer Python aligned with the release-candidate runtime packages.
-RUN --mount=type=cache,target=/opt/uv/cache \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
-        uv pip install --system --no-deps --reinstall \
-            "https://github.com/flashinfer-ai/flashinfer/releases/download/${FLASHINFER_RELEASE_TAG}/flashinfer_python-${FLASHINFER_VERSION}-py3-none-any.whl"; \
     fi
 
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
