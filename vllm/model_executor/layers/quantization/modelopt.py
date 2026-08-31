@@ -1763,6 +1763,7 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
         self._deep_gemm: Any = None
         self._symm_buffer: Any = None
 
+        vllm_config = get_current_vllm_config()
         parallel = moe_config.moe_parallel_config
         if not parallel.use_ep or parallel.ep_size <= 1:
             raise ValueError(
@@ -1785,6 +1786,15 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
             )
         if moe_config.is_lora_enabled:
             raise NotImplementedError("NVFP4 deep_gemm_mega_moe does not support LoRA.")
+        if moe_config.skip_final_all_reduce:
+            raise NotImplementedError(
+                "NVFP4 deep_gemm_mega_moe returns an already-combined output "
+                "and does not support skip_final_all_reduce."
+            )
+        if getattr(vllm_config, "weight_transfer_config", None) is not None:
+            raise NotImplementedError(
+                "NVFP4 deep_gemm_mega_moe does not support runtime weight transfer."
+            )
         if moe_config.hidden_dim % 256 or moe_config.intermediate_size % 256:
             raise ValueError(
                 "NVFP4 deep_gemm_mega_moe requires hidden and intermediate "
@@ -1892,6 +1902,26 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
         self._routed_scaling_factor = routed_scaling_factor
 
     @staticmethod
+    def _require_positive_finite_scale(name: str, scale: torch.Tensor) -> None:
+        values = scale.detach().float().reshape(-1)
+        if (
+            values.numel() == 0
+            or not bool(torch.isfinite(values).all().item())
+            or not bool((values > 0).all().item())
+        ):
+            raise ValueError(f"{name} must contain finite positive values.")
+
+    @classmethod
+    def _require_uniform_positive_scale(
+        cls, name: str, scale: torch.Tensor
+    ) -> torch.Tensor:
+        cls._require_positive_finite_scale(name, scale)
+        values = scale.detach().float().reshape(-1)
+        if not torch.equal(values, values[:1].expand_as(values)):
+            raise ValueError(f"{name} must be identical across all experts and shards.")
+        return values[0].reshape(())
+
+    @staticmethod
     def _pack_e4m3_scales(scale: torch.Tensor) -> torch.Tensor:
         if scale.dtype != torch.float8_e4m3fn:
             raise TypeError(f"Expected E4M3 block scales, got {scale.dtype}.")
@@ -1996,13 +2026,17 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
             layer._deep_gemm_mega_l1_weights = l1_weights
             layer._deep_gemm_mega_l2_weights = l2_weights
 
-            a1_scale = layer.w13_input_scale.data.max().float().reshape(())
-            if not bool(torch.isfinite(a1_scale).item()) or a1_scale.item() <= 0:
-                raise ValueError(
-                    "NVFP4 MegaMoE activation scale must be positive and finite."
-                )
+            a1_scale = self._require_uniform_positive_scale(
+                "w13_input_scale", layer.w13_input_scale.data
+            )
             layer._deep_gemm_mega_a1_scale = a1_scale
             layer._deep_gemm_mega_a1_gscale = a1_scale.reciprocal()
+            self._require_positive_finite_scale(
+                "w13_weight_scale_2", layer.w13_weight_scale_2.data
+            )
+            self._require_positive_finite_scale(
+                "w2_weight_scale_2", layer.w2_weight_scale_2.data
+            )
             layer._deep_gemm_mega_l1_alphas = (
                 layer.w13_weight_scale_2.data.float().reshape(-1, 2).contiguous()
                 * a1_scale
@@ -2010,7 +2044,9 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
             layer._deep_gemm_mega_l2_alphas = (
                 layer.w2_weight_scale_2.data.float().reshape(-1).contiguous()
             )
-            a2_scale = layer.w2_input_scale.data.max().float().reshape(())
+            a2_scale = self._require_uniform_positive_scale(
+                "w2_input_scale", layer.w2_input_scale.data
+            )
             layer._deep_gemm_mega_a2_scales = layer._deep_gemm_mega_l2_alphas.new_full(
                 layer._deep_gemm_mega_l2_alphas.shape,
                 a2_scale,

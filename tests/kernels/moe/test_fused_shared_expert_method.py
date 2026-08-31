@@ -37,6 +37,7 @@ def _runner_with_fused_shared_method() -> tuple[MoERunner, MagicMock]:
         moe_config=moe_config,
         enable_dbo=False,
         mk_can_overlap_shared_experts=lambda: True,
+        is_multistream_safe=lambda: True,
     )
     runner.routed_experts = MagicMock()
     runner.routed_experts.quant_method = quant_method

@@ -240,7 +240,9 @@ class KernelConfig:
     - "batched_triton": Use batched Triton experts (moe_mmk) on the batched
       activation format ([E_local, max_num_tokens, K])
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
-    - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
+    - "deep_gemm_mega_moe": Use DeepGEMM expert-parallel mega-MoE kernels on
+      SM100-family GPUs. DeepSeek-V4 and Kimi K3 use model-specific adapters;
+      ModelOpt NVFP4 checkpoints use the generic RoutedExperts adapter.
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels

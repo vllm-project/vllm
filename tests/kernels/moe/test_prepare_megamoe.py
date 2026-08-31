@@ -136,3 +136,69 @@ def test_prepare_nvfp4_megamoe_inputs_cuda_graph_replay() -> None:
     )
     torch.testing.assert_close(staged_ids, ids.to(torch.int64), rtol=0, atol=0)
     torch.testing.assert_close(staged_weights, weights, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("global_scale_value", [0.0078125, 1.0, 128.0])
+@torch.inference_mode()
+def test_prepare_nvfp4_megamoe_inputs_reciprocal_boundaries(
+    global_scale_value: float,
+) -> None:
+    hidden_size, top_k = 128, 8
+    finfo = torch.finfo(torch.bfloat16)
+    values = torch.tensor(
+        [
+            0.0,
+            finfo.tiny / 2,
+            finfo.tiny,
+            -finfo.tiny,
+            2**-14,
+            -(2**-14),
+            0.5,
+            -0.5,
+            1.0,
+            -1.0,
+            5.875,
+            6.0,
+            6.125,
+            -6.125,
+            448.0,
+            -448.0,
+        ],
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    hidden_states = values.repeat(hidden_size // values.numel()).reshape(1, -1)
+    global_scale = torch.tensor(global_scale_value, dtype=torch.float32, device="cuda")
+    topk_ids = torch.arange(top_k, dtype=torch.int32, device="cuda").reshape(1, -1)
+    topk_weights = torch.full(
+        (1, top_k), 1.0 / top_k, dtype=torch.float32, device="cuda"
+    )
+
+    expected_x, expected_sf = ops.scaled_fp4_quant(
+        hidden_states,
+        global_scale,
+        is_sf_swizzled_layout=False,
+    )
+    x = torch.empty_like(expected_x)
+    x_sf = torch.empty((1, hidden_size // 64), dtype=torch.int32, device="cuda")
+    staged_ids = torch.empty_like(topk_ids, dtype=torch.int64)
+    staged_weights = torch.empty_like(topk_weights)
+
+    prepare_nvfp4_megamoe_inputs(
+        hidden_states,
+        global_scale,
+        topk_weights,
+        topk_ids,
+        x,
+        x_sf,
+        staged_ids,
+        staged_weights,
+    )
+
+    torch.testing.assert_close(x, expected_x, rtol=0, atol=0)
+    torch.testing.assert_close(
+        x_sf,
+        expected_sf.contiguous().view(torch.uint8).view(torch.int32),
+        rtol=0,
+        atol=0,
+    )

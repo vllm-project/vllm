@@ -9,6 +9,10 @@ from vllm.triton_utils import tl, triton
 
 @triton.jit
 def _reciprocal_approximate_ftz(x):
+    # Keep this operation identical to the reciprocal used by
+    # scaled_fp4_quant. The direct-staging path has a bit-exact contract with
+    # that op, including rcp.approx's flush-to-zero behavior for denormals;
+    # boundary values are covered by a dedicated GPU regression test.
     return tl.inline_asm_elementwise(
         "rcp.approx.ftz.f32 $0, $1;",
         constraints="=f,f",

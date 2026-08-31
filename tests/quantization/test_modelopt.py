@@ -105,6 +105,27 @@ def _compatible_shared_experts() -> SimpleNamespace:
     )
 
 
+def _valid_mega_moe_config(**overrides) -> SimpleNamespace:
+    values = {
+        "moe_parallel_config": SimpleNamespace(
+            use_ep=True,
+            ep_size=2,
+            tp_size=1,
+            enable_eplb=False,
+        ),
+        "activation": SimpleNamespace(value="silu"),
+        "in_dtype": torch.bfloat16,
+        "has_bias": False,
+        "is_lora_enabled": False,
+        "skip_final_all_reduce": False,
+        "hidden_dim": 256,
+        "intermediate_size": 256,
+        "num_experts": 4,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionConfig:
     return ModelOptMixedPrecisionConfig(
         kv_cache_quant_method=None,
@@ -198,6 +219,57 @@ def test_modelopt_nvfp4_mega_moe_rejects_router_weight_on_input():
 
     with pytest.raises(NotImplementedError, match="apply_router_weight_on_input"):
         config.get_quant_method(layer, prefix="model.layers.3.mlp.experts")
+
+
+@pytest.mark.parametrize(
+    "moe_overrides,weight_transfer_config,error",
+    [
+        (
+            {"skip_final_all_reduce": True},
+            None,
+            "skip_final_all_reduce",
+        ),
+        ({}, object(), "runtime weight transfer"),
+    ],
+)
+def test_modelopt_nvfp4_mega_moe_rejects_unsupported_runtime_config(
+    moe_overrides: dict[str, object],
+    weight_transfer_config: object | None,
+    error: str,
+):
+    quant_config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.get_current_vllm_config",
+            return_value=SimpleNamespace(weight_transfer_config=weight_transfer_config),
+        ),
+        pytest.raises(NotImplementedError, match=error),
+    ):
+        ModelOptNvFp4MegaMoE(
+            quant_config=quant_config,
+            moe_config=_valid_mega_moe_config(**moe_overrides),
+        )
+
+
+@pytest.mark.parametrize(
+    "values,error",
+    [
+        ([1.0, 2.0], "identical across all experts"),
+        ([1.0, float("nan")], "finite positive"),
+        ([1.0, 0.0], "finite positive"),
+    ],
+)
+def test_modelopt_nvfp4_mega_moe_rejects_invalid_global_input_scale(
+    values: list[float], error: str
+):
+    with pytest.raises(ValueError, match=error):
+        ModelOptNvFp4MegaMoE._require_uniform_positive_scale(
+            "w13_input_scale", torch.tensor(values)
+        )
 
 
 def test_modelopt_nvfp4_mega_moe_does_not_fuse_shared_before_output_transform():
