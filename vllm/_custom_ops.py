@@ -2384,21 +2384,6 @@ def moe_wna16_gemm(
     )
 
 
-def dsv3_router_gemm(
-    hidden_states: torch.Tensor,
-    router_weight: torch.Tensor,
-    output_dtype: torch.dtype,
-) -> torch.Tensor:
-    output = torch.empty(
-        hidden_states.shape[0],
-        router_weight.shape[0],
-        device=hidden_states.device,
-        dtype=output_dtype,
-    )
-    torch.ops._moe_C.dsv3_router_gemm(output, hidden_states, router_weight)
-    return output
-
-
 def fp32_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
@@ -2817,6 +2802,7 @@ def fused_gdn_decode_post_conv_mtp(
     out: torch.Tensor | None = None,
     scale: float = 128**-0.5,
     norm_eps: float = 1e-5,
+    output_gate_activation: str = "silu",
 ) -> torch.Tensor:
     if out is None:
         out = torch.empty_like(output_gate)
@@ -2835,6 +2821,7 @@ def fused_gdn_decode_post_conv_mtp(
         out,
         scale,
         norm_eps,
+        output_gate_activation,
     )
     return out
 
