@@ -65,7 +65,7 @@ def to_key(int_hash: int) -> OffloadKey:
     return make_offload_key(str(int_hash).encode(), 0)
 
 
-def to_keys(int_hashes: list[int]) -> list[OffloadKey]:
+def to_keys(int_hashes: Iterable[int]) -> list[OffloadKey]:
     return [to_key(i) for i in int_hashes]
 
 
