@@ -44,6 +44,27 @@ steps:
       pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
       pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
       pytest -x -v -s tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp"
+# Smoke test for the developer local-build workflow (`pip install -e .`):
+# the wheel-based vllm-test image used above never exercises an editable
+# source build, so build system regressions that only break local builds
+# are caught here instead (#9129).
+- label: CPU-Source Build Test
+  key: cpu-source-build-test
+  depends_on: []
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - CMakeLists.txt
+  - cmake/
+  - csrc/
+  - setup.py
+  - pyproject.toml
+  - requirements/
+  - .buildkite/hardware_tests/cpu.yaml
+  - .buildkite/scripts/hardware_ci/run-cpu-source-build-test.sh
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-source-build-test.sh
 
 # Note: SDE can't be downloaded from CI host because of AWS WAF
 # - label: CPU-Compatibility Tests
