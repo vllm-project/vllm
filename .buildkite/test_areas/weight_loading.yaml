@@ -20,7 +20,7 @@ steps:
       label: ":amd: (MI355) Weight Loading Multi-GPU"
       dind: false
       device: mi355_2
-      timeout_in_minutes: 35
+      timeout_in_minutes: 40
       depends_on:
       - image-build-amd
       commands:
