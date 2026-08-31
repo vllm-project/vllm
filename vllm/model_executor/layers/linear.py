@@ -213,6 +213,17 @@ class UnquantizedLinearMethod(LinearMethodBase):
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+        elif current_platform.is_xpu():
+            # Opt-in: F.linear on XPU is faster with an N-contiguous (N, K) weight
+            # when K > N, but oneDNN's ab-weights matmul is not run-to-run bitwise
+            # bitwise reproducible. Off by default.
+            weight = layer.weight.data
+            if (
+                envs.VLLM_XPU_FORCE_N_CONTIG_WEIGHT
+                and weight.ndim == 2
+                and weight.stride(0) != 1
+            ):
+                layer.weight.data = weight.t().contiguous().t()
 
     def apply(
         self,
