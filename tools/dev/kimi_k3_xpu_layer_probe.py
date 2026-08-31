@@ -89,6 +89,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--save-output", type=Path)
     parser.add_argument(
+        "--save-mla-decode-output",
+        type=Path,
+        help="Save the latent MLA decode output and LSE for differential tests.",
+    )
+    parser.add_argument(
         "--report",
         type=Path,
         default=Path("/tmp/kimi_k3_xpu_layer_probe.json"),
@@ -700,7 +705,7 @@ def main() -> int:
             sequence_length,
         )
         cache_config = CacheConfig(
-            block_size=16,
+            block_size=64,
             cache_dtype="auto",
             enable_prefix_caching=False,
             mamba_block_size=model_config.max_model_len,
@@ -762,6 +767,26 @@ def main() -> int:
                 layer.self_attn.mla_attn.mla_attn.process_weights_after_loading(
                     torch.bfloat16
                 )
+            mla_decode_state: dict[str, torch.Tensor | None] = {}
+            if args.save_mla_decode_output is not None:
+                if is_kda:
+                    raise ProbeError(
+                        "--save-mla-decode-output requires an MLA layer"
+                    )
+                mla = layer.self_attn.mla_attn.mla_attn
+                original_forward_mqa = mla.impl.forward_mqa
+
+                def capture_forward_mqa(*call_args, **call_kwargs):
+                    latent_output, lse = original_forward_mqa(
+                        *call_args, **call_kwargs
+                    )
+                    mla_decode_state["latent_output"] = latent_output.detach().clone()
+                    mla_decode_state["lse"] = (
+                        None if lse is None else lse.detach().clone()
+                    )
+                    return latent_output, lse
+
+                mla.impl.forward_mqa = capture_forward_mqa
             (
                 metadata,
                 slot_mapping,
@@ -917,6 +942,19 @@ def main() -> int:
             if args.save_output is not None:
                 args.save_output.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(output_state, args.save_output)
+            if args.save_mla_decode_output is not None:
+                if "latent_output" not in mla_decode_state:
+                    raise ProbeError("MLA decode output was not captured")
+                args.save_mla_decode_output.parent.mkdir(
+                    parents=True, exist_ok=True
+                )
+                torch.save(
+                    {
+                        name: None if value is None else value.cpu()
+                        for name, value in mla_decode_state.items()
+                    },
+                    args.save_mla_decode_output,
+                )
             report.update(
                 status="passed",
                 ordinal_layer=args.layer_index + 1,
