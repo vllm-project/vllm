@@ -77,7 +77,7 @@ class _TestGatedNorm:
         )
 
 
-def _make_vllm_config():
+def _make_vllm_config(num_spec: int = NUM_SPEC):
     config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
@@ -86,7 +86,7 @@ def _make_vllm_config():
     config.additional_config = {"gdn_prefill_backend": "cutedsl"}
     config.cache_config.mamba_cache_mode = "none"
     config.speculative_config = SpeculativeConfig(
-        method="ngram", num_speculative_tokens=NUM_SPEC
+        method="ngram", num_speculative_tokens=num_spec
     )
     return config
 
@@ -181,6 +181,42 @@ def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "state_width,expected",
+    [
+        pytest.param(8, True, id="width8"),
+        pytest.param(9, True, id="width9-dspark-k8"),
+        pytest.param(10, False, id="width10"),
+    ],
+)
+def test_fused_mtp_token_width_guard(state_width: int, expected: bool) -> None:
+    if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
+        pytest.skip("fused GDN decode MTP op is not built")
+
+    layer = types.SimpleNamespace(
+        num_k_heads=2,
+        num_v_heads=4,
+        kv_cache=(None, torch.empty(1, dtype=torch.float32, device="cuda")),
+        gdn_decode_kernel="cuda",
+    )
+    attn_metadata = types.SimpleNamespace(
+        spec_state_indices_tensor=torch.ones(
+            1, state_width, dtype=torch.int32, device="cuda"
+        ),
+        spec_sequence_masks=object(),
+        num_decodes=0,
+        num_spec_decodes=1,
+    )
+
+    assert (
+        QwenGatedDeltaNetAttention._can_use_fused_gdn_mtp_decode(
+            cast(QwenGatedDeltaNetAttention, layer),
+            cast(GDNAttentionMetadata, attn_metadata),
+        )
+        is expected
+    )
+
+
 @torch.inference_mode()
 def test_fused_forward_uses_packed_entrypoint() -> None:
     """Fused mode keeps projected QKVZ and BA packed through the model op."""
@@ -236,22 +272,32 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
 
 
 @pytest.mark.parametrize(
-    "seq_lens,query_lens,draft_tokens,expected_fused_calls",
+    "num_spec,seq_lens,query_lens,draft_tokens,expected_fused_calls",
     [
-        pytest.param([128], [SPEC_TOKENS], [NUM_SPEC], 1, id="pure-mtp"),
+        pytest.param(NUM_SPEC, [128], [SPEC_TOKENS], [NUM_SPEC], 1, id="pure-mtp"),
         pytest.param(
+            NUM_SPEC,
             [128, 96],
             [SPEC_TOKENS, 64],
             [NUM_SPEC, -1],
             0,
             id="mixed-mtp-falls-back",
         ),
-        pytest.param([96], [64], [-1], 0, id="pure-prefill"),
-        pytest.param([128], [1], [-1], 0, id="pure-decode"),
+        pytest.param(NUM_SPEC, [96], [64], [-1], 0, id="pure-prefill"),
+        pytest.param(NUM_SPEC, [128], [1], [-1], 0, id="pure-decode"),
+        pytest.param(
+            8,
+            [128],
+            [9],
+            [8],
+            1,
+            id="pure-width9-target-verification",
+        ),
     ],
 )
 @torch.inference_mode()
 def test_fused_model_path_matches_reference(
+    num_spec: int,
     seq_lens: list[int],
     query_lens: list[int],
     draft_tokens: list[int],
@@ -260,13 +306,13 @@ def test_fused_model_path_matches_reference(
     """Fused MTP and its mixed/prefill/decode fallbacks match the reference."""
     torch.manual_seed(1)
     device = torch.device("cuda")
-    vllm_config = _make_vllm_config()
+    vllm_config = _make_vllm_config(num_spec)
     builder = GDNAttentionMetadataBuilder(
         kv_cache_spec=MambaSpec(
             block_size=BLOCK_SIZE,
             shapes=((16, 64),),
             dtypes=(torch.float16,),
-            num_speculative_blocks=NUM_SPEC,
+            num_speculative_blocks=num_spec,
         ),
         layer_names=[PREFIX],
         vllm_config=vllm_config,
@@ -276,6 +322,20 @@ def test_fused_model_path_matches_reference(
     common = create_common_attn_metadata(
         batch, BLOCK_SIZE, device, arange_block_indices=True
     )
+    # The generic attention fixture sizes block tables from sequence length.
+    # Production Mamba allocation reserves one state slot per verification token.
+    missing_state_slots = num_spec + 1 - common.block_table_tensor.size(1)
+    if missing_state_slots > 0:
+        next_block = int(common.block_table_tensor.max().item()) + 1
+        extra_blocks = torch.arange(
+            next_block,
+            next_block + batch.batch_size * missing_state_slots,
+            dtype=common.block_table_tensor.dtype,
+            device=device,
+        ).view(batch.batch_size, missing_state_slots)
+        common.block_table_tensor = torch.cat(
+            (common.block_table_tensor, extra_blocks), dim=1
+        )
     common.block_table_tensor.add_(1)
     with set_current_vllm_config(vllm_config):
         metadata = builder.build(
@@ -298,7 +358,7 @@ def test_fused_model_path_matches_reference(
     pool_size = max(int(indices.max().item()) for indices in state_indices) + 1
     conv_state_shape, temporal_state_shape = (
         MambaStateShapeCalculator.gated_delta_net_state_shape(
-            1, H, HV, K, V, CONV_KERNEL, NUM_SPEC
+            1, H, HV, K, V, CONV_KERNEL, num_spec
         )
     )
     conv_state_seed = 0.05 * torch.randn(
