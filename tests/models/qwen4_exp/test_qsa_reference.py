@@ -164,7 +164,7 @@ def _expand_qsa_indices_reference(
     return result.gather(1, torch.argsort(sort_key, dim=1, stable=True)).to(torch.int32)
 
 
-def _qsa_select_paged_tokens_reference(
+def _qsa_select_paged_reference(
     q: torch.Tensor,
     k_cache: torch.Tensor,
     page_table: torch.Tensor,
@@ -174,36 +174,6 @@ def _qsa_select_paged_tokens_reference(
     token_topk: int,
     compress_ratio: int,
 ) -> torch.Tensor:
-    blocks, visible_blocks = _qsa_select_paged_blocks_reference(
-        q,
-        k_cache,
-        page_table,
-        token_to_req,
-        query_positions,
-        sequence_lengths,
-        token_topk,
-        compress_ratio,
-    )
-    row_sequence_lengths = sequence_lengths.index_select(0, token_to_req.long())
-    return _expand_qsa_indices_reference(
-        blocks,
-        query_positions,
-        row_sequence_lengths,
-        compress_ratio,
-        token_topk,
-    )
-
-
-def _qsa_select_paged_blocks_reference(
-    q: torch.Tensor,
-    k_cache: torch.Tensor,
-    page_table: torch.Tensor,
-    token_to_req: torch.Tensor,
-    query_positions: torch.Tensor,
-    sequence_lengths: torch.Tensor,
-    token_topk: int,
-    compress_ratio: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
     row_sequence_lengths = sequence_lengths.index_select(0, token_to_req.long())
     visible_blocks = torch.minimum(
         (query_positions + 1) // compress_ratio,
@@ -217,14 +187,11 @@ def _qsa_select_paged_blocks_reference(
         visible_blocks,
     )
     starts = torch.zeros_like(visible_blocks)
-    return (
-        _qsa_relative_topk_reference(
-            logits,
-            starts,
-            visible_blocks,
-            token_topk // compress_ratio,
-        ),
+    return _qsa_relative_topk_reference(
+        logits,
+        starts,
         visible_blocks,
+        token_topk // compress_ratio,
     )
 
 
@@ -691,7 +658,7 @@ def test_qsa_decode_selection_matches_test_reference(
         decode_query_len,
         actual,
     )
-    expected, _ = _qsa_select_paged_blocks_reference(
+    expected = _qsa_select_paged_reference(
         q,
         cache,
         page_table,
@@ -706,7 +673,7 @@ def test_qsa_decode_selection_matches_test_reference(
 
 
 @requires_qsa_kernels
-def test_qsa_prefill_scoring_matches_test_reference() -> None:
+def test_qsa_prefill_selection_matches_test_reference() -> None:
     torch.manual_seed(2)
     query_lens = [3, 33]
     rows, heads, head_dim = sum(query_lens), 4, 128
@@ -727,28 +694,38 @@ def test_qsa_prefill_scoring_matches_test_reference() -> None:
             )
         ]
     )
+    token_topk, compress_ratio = 2048, 4
     visible_blocks = torch.minimum(
-        (query_positions + 1) // 4,
-        sequence_lengths.index_select(0, token_to_req.long()) // 4,
+        (query_positions + 1) // compress_ratio,
+        sequence_lengths.index_select(0, token_to_req.long()) // compress_ratio,
     )
 
-    actual = qsa_indexer_ops._prefill_logits(
+    actual = torch.empty(
+        (rows, token_topk // compress_ratio), device="cuda", dtype=torch.int32
+    )
+    qsa_indexer_ops.qsa_select_paged_prefill(
         q,
         cache,
         page_table,
         query_start_loc,
         visible_blocks,
-        max_query_len=max(query_lens),
-        query_offset=0,
-        num_queries=rows,
+        token_topk,
+        compress_ratio,
+        max(query_lens),
+        actual,
     )
-    expected = _qsa_mqa_paged_reference(
-        q, cache, page_table, token_to_req, visible_blocks
+    expected = _qsa_select_paged_reference(
+        q,
+        cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        token_topk,
+        compress_ratio,
     )
 
-    columns = torch.arange(actual.shape[1], device=actual.device)
-    visible = columns[None, :] < visible_blocks[:, None]
-    torch.testing.assert_close(actual[visible], expected[visible], rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(actual.sort().values, expected.sort().values)
 
 
 @requires_qsa_kernels
@@ -895,43 +872,6 @@ def test_qsa_sparse_paged_attention_matches_test_reference(
 
 
 @requires_qsa_kernels
-def test_qsa_prefill_scoring_matches_reference_across_query_chunks() -> None:
-    rows, heads, head_dim = 65, 4, 16
-    torch.manual_seed(3)
-    q = torch.randn(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
-    cache = torch.randn(80, 16, 1, head_dim, device="cuda", dtype=torch.bfloat16)
-    page_table = torch.randperm(80, device="cuda", dtype=torch.int32).reshape(2, 40)
-    token_to_req = torch.tensor([0] * 17 + [1] * 48, device="cuda", dtype=torch.int32)
-    visible_blocks = torch.full((rows,), 640, device="cuda", dtype=torch.int32)
-    query_start_loc = torch.tensor([0, 17, rows], device="cuda", dtype=torch.int32)
-
-    actual = torch.cat(
-        [
-            qsa_indexer_ops._prefill_logits(
-                q,
-                cache,
-                page_table,
-                query_start_loc,
-                visible_blocks,
-                max_query_len=48,
-                query_offset=query_start,
-                num_queries=min(32, rows - query_start),
-            )
-            for query_start in range(0, rows, 32)
-        ]
-    )
-    expected = _qsa_mqa_paged_reference(
-        q,
-        cache,
-        page_table,
-        token_to_req,
-        visible_blocks,
-    )
-
-    torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3)
-
-
-@requires_qsa_kernels
 @pytest.mark.parametrize("decode_query_len", [1, 2, 3, 4])
 def test_qsa_split_selection_matches_test_reference(
     workspace_init, decode_query_len: int
@@ -1005,7 +945,7 @@ def test_qsa_split_selection_matches_test_reference(
         token_topk,
         actual,
     )
-    expected = _qsa_select_paged_tokens_reference(
+    expected_blocks = _qsa_select_paged_reference(
         q,
         cache,
         page_table,
@@ -1014,6 +954,13 @@ def test_qsa_split_selection_matches_test_reference(
         sequence_lengths,
         token_topk,
         compress_ratio,
+    )
+    expected = _expand_qsa_indices_reference(
+        expected_blocks,
+        query_positions,
+        sequence_lengths.index_select(0, token_to_req.long()),
+        compress_ratio,
+        token_topk,
     )
 
     torch.testing.assert_close(actual.sort().values, expected.sort().values)
