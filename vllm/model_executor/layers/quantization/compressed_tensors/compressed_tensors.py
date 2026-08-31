@@ -407,17 +407,54 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_tensor_group_quant = (
             quant_args.strategy == QuantizationStrategy.TENSOR_GROUP.value
         )
+        # Widened 2026-08-15: several published NVFP4 checkpoints (e.g.
+        # nm-testing/TinyLlama-1.1B-Chat-v1.0-FP4, miike-ai/Llama-3.1-8B-Instruct-FP4,
+        # miike-ai/Deepseek-R1-Distill-Llama-8B-FP4) declare strategy="group"
+        # rather than "tensor_group", with format="nvfp4-pack-quantized" and
+        # otherwise-identical group_size=16 / type=float / num_bits=4 /
+        # symmetric=true fields. Before this, such checkpoints failed BOTH
+        # this detector (wrong strategy) and _is_mxfp4 (which requires
+        # group_size=32), and fell all the way through
+        # _get_scheme_from_parts to
+        # `raise NotImplementedError("No compressed-tensors compatible
+        # scheme was found ...")` -- a loud failure at scheme resolution,
+        # NOT a silent misroute. Traced through every intervening predicate
+        # in _get_scheme_from_parts, not assumed:
+        # _is_wNa16_group_channel DOES match strategy=GROUP + static +
+        # input_quant=None, but its compound guard also requires
+        # format == CompressionFormat.pack_quantized.value specifically,
+        # which "nvfp4-pack-quantized" (CompressionFormat.nvfp4_pack_quantized)
+        # is not -- so CompressedTensorsWNA16, which would have silently
+        # misdecoded these 4-bit float codes as int4, was never actually
+        # reached. Separately (not fixed here, flagged): _is_fp8_w8a16
+        # does not check num_bits at all, only type/symmetric/static/strategy
+        # in {TENSOR, CHANNEL, BLOCK} -- a 4-bit float weight-only checkpoint
+        # using TENSOR or CHANNEL strategy (not GROUP) would silently match
+        # it and get routed to the 8-bit CompressedTensorsW8A16Fp8 scheme.
+        # No such checkpoint is known to exist; worth its own audit item.
+        is_group_quant = quant_args.strategy == QuantizationStrategy.GROUP.value
         is_symmetric = quant_args.symmetric
 
         is_group_size_16 = quant_args.group_size == 16
         is_float_type = quant_args.type == QuantizationType.FLOAT
         is_4_bits = quant_args.num_bits == 4
+        # scale_dtype is an optional additional discriminator, checked only
+        # when the checkpoint actually populates it.
+        # nm-testing/TinyLlama-1.1B-Chat-v1.0-FP4's own config.json omits
+        # the field entirely (confirmed directly against the real
+        # checkpoint, not assumed) -- requiring it unconditionally would
+        # reject the exact checkpoints this widening exists for.
+        scale_dtype = getattr(quant_args, "scale_dtype", None)
+        is_e4m3_scale_or_unset = (
+            scale_dtype is None or "e4m3" in str(scale_dtype).lower()
+        )
         return (
-            is_tensor_group_quant
+            (is_tensor_group_quant or is_group_quant)
             and is_float_type
             and is_4_bits
             and is_group_size_16
             and is_symmetric
+            and is_e4m3_scale_or_unset
         )
 
     @staticmethod
