@@ -4,6 +4,7 @@ import gc
 import os
 import queue
 import signal
+import sys
 import threading
 import time
 from collections import defaultdict, deque
@@ -1382,7 +1383,34 @@ class EngineCoreProc(EngineCore):
             if signal_callback is not None:
                 signal_callback.stop()
             if engine_core is not None:
-                engine_core.shutdown()
+                # On the fatal-error path the engine is already dead, so the
+                # only correct next state is a clean process exit that lets a
+                # supervisor / container restart policy recover the service.
+                # Graceful teardown can block indefinitely when a worker is
+                # wedged (e.g. a Level-Zero/SYCL kernel that never returns
+                # after a GPU engine reset and SIGKILL cannot reap), so we
+                # bound the graceful shutdown and hard-exit when the budget
+                # is exceeded. os._exit() intentionally skips the remaining
+                # cleanup: the process must die NOW.
+                if isinstance(sys.exception(), Exception):
+                    _shutdown_thread = threading.Thread(
+                        target=engine_core.shutdown,
+                        name="EngineCoreGracefulShutdown",
+                        daemon=True,
+                    )
+                    _shutdown_thread.start()
+                    _shutdown_thread.join(
+                        timeout=envs.VLLM_ENGINE_SHUTDOWN_TIMEOUT_SECONDS
+                    )
+                    if _shutdown_thread.is_alive():
+                        logger.critical(
+                            "[shutdown] EngineCore: graceful shutdown exceeded "
+                            "%ss (wedged worker?); forcing exit.",
+                            envs.VLLM_ENGINE_SHUTDOWN_TIMEOUT_SECONDS,
+                        )
+                        os._exit(1)
+                else:
+                    engine_core.shutdown()
             if clean_shutdown:
                 from vllm.platforms import current_platform
 
