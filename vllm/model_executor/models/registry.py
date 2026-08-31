@@ -74,7 +74,6 @@ _TEXT_GENERATION_MODELS = {
     "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
     "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
-    "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "AXK1ForCausalLM": ("AXK1", "AXK1ForCausalLM"),
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
     "BailingMoeV2ForCausalLM": ("bailing_moe", "BailingMoeV2ForCausalLM"),
@@ -92,18 +91,19 @@ _TEXT_GENERATION_MODELS = {
     "DeepseekForCausalLM": ("deepseek_v2", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "DeepseekV3ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
-    "DeepseekV32ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
+    "DeepseekV32ForCausalLM": (
+        "vllm.models.deepseek_v32",
+        "DeepseekV32ForCausalLM",
+    ),
     "DeepseekV4ForCausalLM": ("vllm.models.deepseek_v4", "DeepseekV4ForCausalLM"),
     "Ernie4_5ForCausalLM": ("ernie45", "Ernie4_5ForCausalLM"),
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
     "ExaoneMoeForCausalLM": ("exaone_moe", "ExaoneMoeForCausalLM"),
-    "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconH1ForCausalLM": ("falcon_h1", "FalconH1ForCausalLM"),
-    "FlexOlmoForCausalLM": ("flex_olmo", "FlexOlmoForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
@@ -111,11 +111,15 @@ _TEXT_GENERATION_MODELS = {
     "Gemma3nForCausalLM": ("gemma3n", "Gemma3nForCausalLM"),
     "Gemma4ForCausalLM": ("gemma4", "Gemma4ForCausalLM"),
     "Qwen3NextForCausalLM": ("qwen3_next", "Qwen3NextForCausalLM"),
+    "Qwen4ExpForCausalLM": (
+        "vllm.models.qwen4_exp",
+        "Qwen4ExpForCausalLM",
+    ),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
     "Glm4MoeForCausalLM": ("glm4_moe", "Glm4MoeForCausalLM"),
     "Glm4MoeLiteForCausalLM": ("glm4_moe_lite", "Glm4MoeLiteForCausalLM"),
-    "GlmMoeDsaForCausalLM": ("deepseek_v2", "GlmMoeDsaForCausalLM"),
+    "GlmMoeDsaForCausalLM": ("vllm.models.deepseek_v32", "GlmMoeDsaForCausalLM"),
     "GptOssForCausalLM": ("gpt_oss", "GptOssForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
@@ -124,12 +128,11 @@ _TEXT_GENERATION_MODELS = {
     "GraniteMoeForCausalLM": ("granitemoe", "GraniteMoeForCausalLM"),
     "GraniteMoeHybridForCausalLM": ("granitemoehybrid", "GraniteMoeHybridForCausalLM"),
     "GraniteMoeSharedForCausalLM": ("granitemoeshared", "GraniteMoeSharedForCausalLM"),
-    "GritLM": ("gritlm", "GritLM"),
+    "GraniteMoeSWAForCausalLM": ("granitemoeshared", "GraniteMoeSharedForCausalLM"),
+    "GraniteSWAForCausalLM": ("granite", "GraniteForCausalLM"),
     "HrmTextForCausalLM": ("hrm_text", "HrmTextForCausalLM"),
-    "HunYuanMoEV1ForCausalLM": ("hunyuan_v1", "HunYuanMoEV1ForCausalLM"),
-    "HunYuanDenseV1ForCausalLM": ("hunyuan_v1", "HunYuanDenseV1ForCausalLM"),
     "HYV3ForCausalLM": ("hy_v3", "HYV3ForCausalLM"),
-    "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
+    "HYV4ForCausalLM": ("vllm.models.hy_v4", "HYV4ForCausalLM"),
     "HCXVisionV2ForCausalLM": ("hyperclovax_vision_v2", "HCXVisionV2ForCausalLM"),
     "HyperCLOVAXForCausalLM": ("hyperclovax", "HyperCLOVAXForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
@@ -173,16 +176,13 @@ _TEXT_GENERATION_MODELS = {
     "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralLarge3ForCausalLM": ("mistral_large_3", "MistralLarge3ForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
-    # transformers's mpt class has lower case
-    "MptForCausalLM": ("mpt", "MPTForCausalLM"),
-    "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
     "MiMoForCausalLM": ("mimo", "MiMoForCausalLM"),
     "MiMoV2FlashForCausalLM": ("mimo_v2", "MiMoV2FlashForCausalLM"),
     "MiMoV2ForCausalLM": ("mimo_v2", "MiMoV2ForCausalLM"),
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "NemotronHForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "NemotronHPuzzleForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
-    "Olmo3ForCausalLM": ("olmo3", "Olmo3ForCausalLM"),
+    "MuseGlimmerForCausalLM": ("muse_glimmer", "MuseGlimmerForCausalLM"),
     "OlmoHybridForCausalLM": ("olmo_hybrid", "OlmoHybridForCausalLM"),
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
@@ -201,14 +201,12 @@ _TEXT_GENERATION_MODELS = {
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
     "Qwen3_5ForCausalLM": ("qwen3_5", "Qwen3_5ForCausalLM"),
     "Qwen3_5MoeForCausalLM": ("qwen3_5", "Qwen3_5MoeForCausalLM"),
-    "RWForCausalLM": ("falcon", "FalconForCausalLM"),
     "SarvamMoEForCausalLM": ("sarvam", "SarvamMoEForCausalLM"),
     "SarvamMLAForCausalLM": ("sarvam", "SarvamMLAForCausalLM"),
     "SeedOssForCausalLM": ("seed_oss", "SeedOssForCausalLM"),
     "Step1ForCausalLM": ("step1", "Step1ForCausalLM"),
     "Step3TextForCausalLM": ("step3_text", "Step3TextForCausalLM"),
     "Step3p5ForCausalLM": ("step3p5", "Step3p5ForCausalLM"),
-    "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
@@ -224,10 +222,10 @@ _EMBEDDING_MODELS = {
     "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
     "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
+    "DeepseekV3BidirectionalModel": ("deepseek_v2", "DeepseekV3ForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3TextModel": ("gemma3", "Gemma3Model"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
-    "GritLM": ("gritlm", "GritLM"),
     "GteModel": ("bert_with_rope", "SnowflakeGteNewModel"),
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
     "JinaEmbeddingsV5Model": ("jina", "JinaEmbeddingsV5Model"),
@@ -267,7 +265,6 @@ _EMBEDDING_MODELS = {
     # Technically Terratorch models work on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
-    "PrithviGeoSpatialMAE": ("terratorch", "Terratorch"),
     "Terratorch": ("terratorch", "Terratorch"),
 }
 
@@ -353,12 +350,6 @@ _MULTIMODAL_MODELS = {
     "BagelForConditionalGeneration": ("bagel", "BagelForConditionalGeneration"),
     "BeeForConditionalGeneration": ("bee", "BeeForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
-    "ChameleonForConditionalGeneration": (
-        "chameleon",
-        "ChameleonForConditionalGeneration",
-    ),
-    "Cheers": ("cheers", "CheersForConditionalGeneration"),
-    "CheersForConditionalGeneration": ("cheers", "CheersForConditionalGeneration"),
     "Cohere2VisionForConditionalGeneration": (
         "cohere2_vision",
         "Cohere2VisionForConditionalGeneration",
@@ -394,10 +385,6 @@ _MULTIMODAL_MODELS = {
         "FireRedASR2ForConditionalGeneration",
     ),
     "FunASRForConditionalGeneration": ("funasr", "FunASRForConditionalGeneration"),
-    "FireRedLIDForConditionalGeneration": (
-        "fireredlid",
-        "FireRedLIDForConditionalGeneration",
-    ),
     "FunAudioChatForConditionalGeneration": (
         "funaudiochat",
         "FunAudioChatForConditionalGeneration",
@@ -434,10 +421,6 @@ _MULTIMODAL_MODELS = {
         "Granite4VisionForConditionalGeneration",
     ),
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
-    "HunYuanVLForConditionalGeneration": (
-        "hunyuan_vision",
-        "HunYuanVLForConditionalGeneration",
-    ),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "InternS1ForConditionalGeneration": (
         "interns1",
@@ -529,7 +512,9 @@ _MULTIMODAL_MODELS = {
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NemotronH_Nano_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NemotronH_Super_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "NemotronH_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
+    "MuseGlimmerForConditionalGeneration": ("muse_glimmer", "MuseGlimmerForCausalLM"),
     "OpenCUAForConditionalGeneration": ("opencua", "OpenCUAForConditionalGeneration"),
     "OpenPanguVLForConditionalGeneration": (
         "openpangu_vl",
@@ -592,6 +577,10 @@ _MULTIMODAL_MODELS = {
         "qwen3_5",
         "Qwen3_5MoeForConditionalGeneration",
     ),
+    "Qwen4ExpForConditionalGeneration": (
+        "vllm.models.qwen4_exp",
+        "Qwen4ExpForConditionalGeneration",
+    ),
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
     "SmolVLMForConditionalGeneration": ("smolvlm", "SmolVLMForConditionalGeneration"),
@@ -623,8 +612,18 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "DFlashDraftModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
+    "DFlash2DraftModel": ("qwen3_dflash2", "DFlash2Qwen3ForCausalLM"),
+    # Muse Glimmer's DFlash draft head, reusing the generic qwen3_dflash
+    # implementation. EAGLEConfig rewrites a dflash draft's architecture to
+    # DFlash{arch} unless it already starts or ends with "DFlash" (see
+    # transformers_utils/configs/eagle.py), so the name the registry is asked
+    # for is DFlashMuseGlimmerAssistantModel -- same convention as
+    # DFlashLagunaForCausalLM. The bare name is kept as a defensive alias.
+    "MuseGlimmerAssistantModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
+    "DFlashMuseGlimmerAssistantModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "DSparkDraftModel": ("vllm.models.deepseek_v4", "DSparkDeepseekV4ForCausalLM"),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
+    "Qwen3OmniDSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "K3DSparkModel": (
         "vllm.models.kimi_k3.nvidia.dspark_mla",
         "K3DSparkForCausalLM",
@@ -649,6 +648,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "Eagle3DeepseekV3ForCausalLM": ("deepseek_eagle3", "Eagle3DeepseekV2ForCausalLM"),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
+    "DeepseekV32MTPModel": ("vllm.models.deepseek_v32", "DeepseekV32MTP"),
     "Dots3NoteMTPModel": ("vllm.models.dots3_note", "Dots3NoteMTP"),
     "DeepSeekV4MTPModel": ("vllm.models.deepseek_v4", "DeepSeekV4MTP"),
     "BailingMoeV3MTPModel": ("bailing_moe_v3_mtp", "BailingMoeV3MTPModel"),
@@ -667,11 +667,13 @@ _SPECULATIVE_DECODING_MODELS = {
     "MedusaModel": ("medusa", "Medusa"),
     "OpenPanguMTPModel": ("openpangu_mtp", "OpenPanguMTP"),
     "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
+    "Qwen4ExpMTP": ("vllm.models.qwen4_exp", "Qwen4ExpMTP"),
     "Step3p5MTP": ("step3p5_mtp", "Step3p5MTP"),
     "Qwen3_5MTP": ("qwen3_5_mtp", "Qwen3_5MTP"),
     "Qwen3_5MoeMTP": ("qwen3_5_mtp", "Qwen3_5MoeMTP"),
     "InternS2MobiusMTP": ("interns2_mobius", "InternS2MobiusMTP"),
     "HYV3MTPModel": ("hy_v3_mtp", "HYV3MTP"),
+    "HYV4MTPModel": ("vllm.models.hy_v4", "HYV4MTP"),
     "KimiK3MTPModel": ("vllm.models.kimi_k3", "KimiK3MTP"),
     # Temporarily disabled.
     # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
@@ -680,14 +682,22 @@ _SPECULATIVE_DECODING_MODELS = {
 
 _TRANSFORMERS_SUPPORTED_MODELS = {
     # Text generation models
+    "FlexOlmoForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "GPTBigCodeForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "HunYuanDenseV1ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "HunYuanMoEV1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Olmo2ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "Olmo3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
     "Emu3ForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
+    ),
+    "HunYuanVLForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForCausalLM",
     ),
@@ -791,6 +801,20 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "FuyuForCausalLM": "0.25.0",
     "Plamo2ForCausalLM": "0.26.0",
     "OuroForCausalLM": "0.26.0",
+    "ArcticForCausalLM": "0.28.0",
+    "ChameleonForConditionalGeneration": "0.28.0",
+    "Cheers": "0.28.0",
+    "CheersForConditionalGeneration": "0.28.0",
+    "Fairseq2LlamaForCausalLM": "0.28.0",
+    "FireRedLIDForConditionalGeneration": "0.28.0",
+    "GritLM": "0.28.0",
+    "HCXVisionForCausalLM": "0.28.0",
+    "MPTForCausalLM": "0.28.0",
+    "MptForCausalLM": "0.28.0",
+    "RWForCausalLM": "0.28.0",
+    "StableLMEpochForCausalLM": "0.28.0",
+    # Superseded by the generic "Terratorch" architecture
+    "PrithviGeoSpatialMAE": "0.28.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
@@ -988,9 +1012,10 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         # hardware-isolated ``vllm.models.<name>`` layout) live outside
         # ``vllm/model_executor/models``. Resolve the module spec directly
         # so the file-hash cache stays warm for them.
+        model_path: Path | None = None
         if self.module_name.startswith("vllm.model_executor.models."):
             model_path = Path(__file__).parent / f"{self.module_name.split('.')[-1]}.py"
-        else:
+        if model_path is None or not model_path.exists():
             try:
                 spec = importlib.util.find_spec(self.module_name)
             except (ImportError, ValueError):
