@@ -7,8 +7,9 @@ from unittest.mock import MagicMock
 import pytest
 
 import vllm.envs as envs
-from vllm.entrypoints.generate.base.serving import GenerateBaseServing, GenerationError
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.envs import disable_envs_cache
+from vllm.exceptions import GenerationError
 
 
 @pytest.mark.asyncio

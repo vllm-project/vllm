@@ -6,9 +6,10 @@ use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
 
 use super::types::CompletionRequest;
-use crate::error::ApiError;
+use crate::error::{ApiError, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::validate;
+use crate::routes::openai::utils::resolve_generation_prompt_truncation;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
 use crate::utils::{
     ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
@@ -61,6 +62,12 @@ pub(super) fn prepare_completion_request(
     tokenizer: &dyn Tokenizer,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+
+    let prompt_truncation = resolve_generation_prompt_truncation(
+        request.truncate_prompt_tokens,
+        request.truncation_side,
+    )
+    .map_err(|error| text_submit_error("invalid prompt truncation", error))?;
 
     let request_id = format!("cmpl-{}", ctx.request_id);
     let response_model = lora_resolution
@@ -141,6 +148,7 @@ pub(super) fn prepare_completion_request(
             min_tokens: request.min_tokens.unwrap_or(0),
         },
         intermediate: request.stream,
+        prompt_truncation,
         priority: ctx.priority.or(request.priority).unwrap_or(0),
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
@@ -200,7 +208,7 @@ mod tests {
     use axum::http::HeaderMap;
     use serde_json::json;
     use validator::Validate;
-    use vllm_text::Prompt;
+    use vllm_text::{Prompt, PromptTruncation, PromptTruncationLimit, TruncationSide};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::prepare_completion_request;
@@ -321,6 +329,31 @@ mod tests {
 
             assert_eq!(prepared.text_request.sampling_params.top_k, expected);
         }
+    }
+
+    #[test]
+    fn prepare_completion_request_uses_left_when_side_is_omitted() {
+        let mut value = base_request_json();
+        value
+            .as_object_mut()
+            .expect("request object")
+            .insert("truncate_prompt_tokens".to_string(), json!(-1));
+        let request = serde_json::from_value(value).expect("parse truncation");
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_tokenizer(),
+        )
+        .expect("prepare truncation");
+
+        assert_eq!(
+            prepared.text_request.prompt_truncation,
+            Some(PromptTruncation {
+                limit: PromptTruncationLimit::InputBudget,
+                side: TruncationSide::Left,
+            })
+        );
     }
 
     #[test]
