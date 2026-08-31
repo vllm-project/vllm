@@ -3,9 +3,10 @@
 
 from argparse import Namespace
 
+import pytest
 from fastapi import FastAPI
 
-from vllm.entrypoints.scale_out.factories import register_scale_out_api_routers
+from vllm.entrypoints.launchers.api_server.routers import register_api_routers
 from vllm.tasks import SupportedTask
 
 RENDER_PATHS = {
@@ -16,37 +17,44 @@ RENDER_PATHS = {
     "/v1/messages/render",
 }
 GENERATE_PATH = "/inference/v1/generate"
+SCALE_OUT_PATHS = RENDER_PATHS | {GENERATE_PATH}
 
 
 def registered_paths(supported_tasks: tuple[SupportedTask, ...]) -> set[str]:
     app = FastAPI()
-    app.state.args = Namespace(tokens_only=False)
-    register_scale_out_api_routers(app, supported_tasks)
+    args = Namespace(tokens_only=False, enable_fault_tolerance=False)
+    app.state.args = args
+    register_api_routers(args, app, supported_tasks)
     return {route.path for route in app.routes}
 
 
-def test_render_routes_are_disabled_by_default(monkeypatch):
-    monkeypatch.delenv("VLLM_ENABLE_RENDER_ENDPOINTS", raising=False)
+def test_scale_out_routes_are_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", raising=False)
 
     paths = registered_paths(("generate",))
 
-    assert RENDER_PATHS.isdisjoint(paths)
-    assert GENERATE_PATH in paths
+    assert SCALE_OUT_PATHS.isdisjoint(paths)
 
 
-def test_render_routes_can_be_enabled_for_generate_server(monkeypatch):
-    monkeypatch.setenv("VLLM_ENABLE_RENDER_ENDPOINTS", "1")
+def test_scale_out_routes_can_be_enabled_for_generate_server(monkeypatch):
+    monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "1")
 
     paths = registered_paths(("generate",))
 
-    assert paths >= RENDER_PATHS
-    assert GENERATE_PATH in paths
+    assert paths >= SCALE_OUT_PATHS
 
 
 def test_render_routes_remain_enabled_for_render_server(monkeypatch):
-    monkeypatch.delenv("VLLM_ENABLE_RENDER_ENDPOINTS", raising=False)
+    monkeypatch.delenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", raising=False)
 
     paths = registered_paths(("render",))
 
     assert paths >= RENDER_PATHS
     assert GENERATE_PATH not in paths
+
+
+def test_render_server_rejects_explicitly_disabled_scale_out_routes(monkeypatch):
+    monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "0")
+
+    with pytest.raises(ValueError, match="VLLM_ENABLE_SCALE_OUT_ENDPOINTS=0"):
+        registered_paths(("render",))

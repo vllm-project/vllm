@@ -7,11 +7,16 @@ Our renderer API is designed to disaggregate the render phase(preprocessing) and
 - Tokens-in / tokens-out engine: Make the engine a pure token-in / token-out service, decoupled from request preprocessing.
 
 The dedicated `vllm launch render` server always exposes the `/render` and
-`/derender` endpoints. They are disabled by default on a standard inference
+`/derender` endpoints when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS` is unset or set to
+`1`. An explicit value of `0` conflicts with the renderer command and is
+rejected at startup.
+
+Scale-out endpoints, including `/render`, `/derender`, and
+`/inference/v1/generate`, are disabled by default on a standard inference
 server. To expose them with `vllm serve`, opt in explicitly:
 
 ```bash
-VLLM_ENABLE_RENDER_ENDPOINTS=1 vllm serve <model>
+VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 vllm serve <model>
 ```
 
 ## API Reference

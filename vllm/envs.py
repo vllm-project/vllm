@@ -260,7 +260,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_ENABLE_COHERE_API: bool = False
-    VLLM_ENABLE_RENDER_ENDPOINTS: bool = False
+    VLLM_ENABLE_SCALE_OUT_ENDPOINTS: bool = False
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
@@ -1853,10 +1853,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_COHERE_API": lambda: bool(
         int(os.getenv("VLLM_ENABLE_COHERE_API", "0"))
     ),
-    # If set to 1, expose the render and derender endpoints on `vllm serve`.
-    # The dedicated `vllm launch render` server always exposes these endpoints.
-    "VLLM_ENABLE_RENDER_ENDPOINTS": lambda: bool(
-        int(os.getenv("VLLM_ENABLE_RENDER_ENDPOINTS", "0"))
+    # If set to 1, expose the scale-out endpoints on `vllm serve`.
+    # The dedicated `vllm launch render` server exposes render and derender
+    # endpoints when this variable is unset or set to 1.
+    "VLLM_ENABLE_SCALE_OUT_ENDPOINTS": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "0"))
     ),
     # If set, use the fp8 mfma in rocm paged attention.
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(
@@ -2279,7 +2280,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CONFIG_ROOT",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
-        "VLLM_ENABLE_RENDER_ENDPOINTS",
+        "VLLM_ENABLE_SCALE_OUT_ENDPOINTS",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",

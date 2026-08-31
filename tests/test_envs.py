@@ -43,11 +43,11 @@ def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     assert "VLLM_API_KEY" not in envs.compile_factors()
 
 
-def test_render_endpoints_flag_is_runtime_only(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_ENABLE_RENDER_ENDPOINTS", "1")
+def test_scale_out_endpoints_flag_is_runtime_only(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "1")
 
-    assert envs.VLLM_ENABLE_RENDER_ENDPOINTS is True
-    assert "VLLM_ENABLE_RENDER_ENDPOINTS" not in envs.compile_factors()
+    assert envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is True
+    assert "VLLM_ENABLE_SCALE_OUT_ENDPOINTS" not in envs.compile_factors()
 
 
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):

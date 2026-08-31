@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
-from vllm import envs
 from vllm.engine.protocol import EngineClient
 from vllm.tasks import SupportedTask
 
@@ -63,14 +62,13 @@ def register_scale_out_api_routers(
     app: FastAPI,
     supported_tasks: tuple["SupportedTask", ...],
 ):
-    if "render" in supported_tasks or envs.VLLM_ENABLE_RENDER_ENDPOINTS:
-        from .render.api_router import router as render_render
+    from .render.api_router import router as render_render
 
-        app.include_router(render_render)
+    app.include_router(render_render)
 
-        from .derender.api_router import router as derender_render
+    from .derender.api_router import router as derender_render
 
-        app.include_router(derender_render)
+    app.include_router(derender_render)
 
     if "generate" in supported_tasks:
         from .token_in_token_out.api_router import (
