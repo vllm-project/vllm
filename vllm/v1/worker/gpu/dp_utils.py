@@ -9,7 +9,7 @@ import torch.distributed as dist
 
 from vllm.config import ParallelConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import get_dp_group, get_moe_dp_pcp_group
+from vllm.distributed.parallel_state import get_dp_group, get_moe_non_sp_group
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
@@ -30,9 +30,9 @@ class DPSyncState:
     # Token counts for the DP ranks at this rank's PCP coordinate. All entries
     # hold the agreed padded count, unless `eager`, where nothing was padded.
     num_tokens_across_dp: torch.Tensor
-    # DP -> PCP ordered token counts when PCP participates in batch
-    # coordination.
-    num_tokens_across_dp_pcp: torch.Tensor | None
+    # Token counts indexed by rank_in_group of get_moe_non_sp_group() when PCP
+    # participates in batch coordination.
+    moe_non_sp_token_counts: torch.Tensor | None
     # Agreed uniform decode length. None means the ranks disagreed, which is an
     # answer, not "unknown".
     uniform_token_count: int | None
@@ -71,7 +71,7 @@ def sync_cudagraph_and_dp_padding(
     assert dp_size > 1, "DP size must be greater than 1"
     group_coordinator = get_dp_group()
     if enable_expert_parallel and pcp_size > 1:
-        group_coordinator = get_moe_dp_pcp_group()
+        group_coordinator = get_moe_non_sp_group()
     sync_size = group_coordinator.world_size
     sync_rank = group_coordinator.rank_in_group
     group = group_coordinator.cpu_group
@@ -88,10 +88,10 @@ def sync_cudagraph_and_dp_padding(
         dist.all_reduce(tensor, group=group)
 
     synchronized_token_counts = tensor[0]
-    num_tokens_across_dp_pcp = None
+    moe_non_sp_token_counts = None
     num_tokens_across_dp = synchronized_token_counts
     if enable_expert_parallel and pcp_size > 1:
-        num_tokens_across_dp_pcp = synchronized_token_counts
+        moe_non_sp_token_counts = synchronized_token_counts
         pcp_rank = sync_rank % pcp_size
         num_tokens_across_dp = synchronized_token_counts[pcp_rank::pcp_size]
         assert len(num_tokens_across_dp) == dp_size
@@ -183,7 +183,7 @@ def sync_cudagraph_and_dp_padding(
             ),
             DPSyncState(
                 num_tokens_across_dp=num_tokens_across_dp,
-                num_tokens_across_dp_pcp=num_tokens_across_dp_pcp,
+                moe_non_sp_token_counts=moe_non_sp_token_counts,
                 uniform_token_count=synced_uniform_token_count,
                 eager=True,
                 num_reqs=int(num_reqs_across_dp.max()),
@@ -218,7 +218,7 @@ def sync_cudagraph_and_dp_padding(
 
     return synced_desc, DPSyncState(
         num_tokens_across_dp=num_tokens_across_dp,
-        num_tokens_across_dp_pcp=num_tokens_across_dp_pcp,
+        moe_non_sp_token_counts=moe_non_sp_token_counts,
         uniform_token_count=synced_uniform_token_count,
         eager=False,
         num_reqs=(
@@ -322,12 +322,12 @@ def dispatch_cg_and_sync_dp(
                 num_tokens_across_dp=torch.full_like(
                     dp_sync.num_tokens_across_dp, batch_desc.num_tokens
                 ),
-                num_tokens_across_dp_pcp=(
+                moe_non_sp_token_counts=(
                     torch.full_like(
-                        dp_sync.num_tokens_across_dp_pcp,
+                        dp_sync.moe_non_sp_token_counts,
                         batch_desc.num_tokens,
                     )
-                    if dp_sync.num_tokens_across_dp_pcp is not None
+                    if dp_sync.moe_non_sp_token_counts is not None
                     else None
                 ),
             )

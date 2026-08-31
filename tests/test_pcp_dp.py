@@ -50,7 +50,7 @@ def test_ep_dispatch_sizes_include_pcp_and_sequence_parallel_ranks():
 def test_ep_dispatch_sizes_preserve_dp_pcp_order_without_sp():
     metadata = DPMetadata(
         num_tokens_across_dp_cpu=torch.tensor([17, 8]),
-        num_tokens_across_dp_pcp_cpu=torch.tensor([10, 7, 5, 3]),
+        moe_non_sp_token_counts_cpu=torch.tensor([10, 7, 5, 3]),
     )
 
     with metadata.sp_local_sizes(
@@ -60,7 +60,7 @@ def test_ep_dispatch_sizes_preserve_dp_pcp_order_without_sp():
         assert sizes == [10, 7, 5, 3]
 
 
-def test_batch_coordination_returns_dp_and_dp_pcp_token_counts(monkeypatch):
+def test_batch_coordination_returns_dp_and_moe_non_sp_token_counts(monkeypatch):
     config = ParallelConfig(
         prefill_context_parallel_size=2,
         data_parallel_size=2,
@@ -90,7 +90,7 @@ def test_batch_coordination_returns_dp_and_dp_pcp_token_counts(monkeypatch):
 
     monkeypatch.setattr("vllm.v1.worker.dp_utils.dist.all_reduce", fake_all_reduce)
 
-    _, num_tokens_across_dp, num_tokens_across_dp_pcp, _ = coordinate_batch_across_dp(
+    _, num_tokens_across_dp, moe_non_sp_token_counts, _ = coordinate_batch_across_dp(
         num_tokens_unpadded=10,
         allow_microbatching=False,
         parallel_config=config,
@@ -98,15 +98,15 @@ def test_batch_coordination_returns_dp_and_dp_pcp_token_counts(monkeypatch):
 
     assert collective_calls == 1
     assert num_tokens_across_dp.tolist() == [10, 5]
-    assert num_tokens_across_dp_pcp.tolist() == [10, 7, 5, 3]
+    assert moe_non_sp_token_counts.tolist() == [10, 7, 5, 3]
 
 
-def test_v2_batch_coordination_returns_dp_and_dp_pcp_token_counts(monkeypatch):
+def test_v2_batch_coordination_returns_dp_and_moe_non_sp_token_counts(monkeypatch):
     collective_calls = 0
     group = SimpleNamespace(world_size=4, rank_in_group=1, cpu_group=object())
     monkeypatch.setattr("vllm.v1.worker.gpu.dp_utils.get_dp_group", lambda: group)
     monkeypatch.setattr(
-        "vllm.v1.worker.gpu.dp_utils.get_moe_dp_pcp_group", lambda: group
+        "vllm.v1.worker.gpu.dp_utils.get_moe_non_sp_group", lambda: group
     )
 
     def fake_all_reduce(tensor, group):
@@ -145,18 +145,18 @@ def test_v2_batch_coordination_returns_dp_and_dp_pcp_token_counts(monkeypatch):
     assert collective_calls == 1
     assert sync is not None
     assert sync.num_tokens_across_dp.tolist() == [7, 3]
-    assert sync.num_tokens_across_dp_pcp is not None
-    assert sync.num_tokens_across_dp_pcp.tolist() == [10, 7, 5, 3]
+    assert sync.moe_non_sp_token_counts is not None
+    assert sync.moe_non_sp_token_counts.tolist() == [10, 7, 5, 3]
 
 
-def test_ag_rs_selects_moe_dp_pcp_group_for_non_sp(monkeypatch):
-    moe_dp_pcp_group = object()
+def test_ag_rs_selects_moe_non_sp_group(monkeypatch):
+    moe_non_sp_group = object()
     manager = AgRsAll2AllManager.__new__(AgRsAll2AllManager)
     monkeypatch.setattr(
-        "vllm.distributed.device_communicators.all2all.get_moe_dp_pcp_group",
-        lambda: moe_dp_pcp_group,
+        "vllm.distributed.device_communicators.all2all.get_moe_non_sp_group",
+        lambda: moe_non_sp_group,
     )
-    assert manager._get_comm_group(is_sequence_parallel=False) is moe_dp_pcp_group
+    assert manager._get_comm_group(is_sequence_parallel=False) is moe_non_sp_group
 
 
 def test_ag_rs_selects_ep_group_for_sp(monkeypatch):
@@ -169,28 +169,28 @@ def test_ag_rs_selects_ep_group_for_sp(monkeypatch):
     assert manager._get_comm_group(is_sequence_parallel=True) is ep_group
 
 
-def test_ag_rs_moe_dp_pcp_uses_one_collective_for_each_direction(monkeypatch):
+def test_ag_rs_moe_non_sp_uses_one_collective_for_each_direction(monkeypatch):
     calls = []
 
-    class FakeMoeDpPcpGroup:
+    class FakeMoeNonSpGroup:
         world_size = 4
         rank_in_group = 2
 
         def all_gatherv(self, tensors, dim, sizes):
-            calls.append(("moe_dp_pcp_ag", sizes))
+            calls.append(("moe_non_sp_ag", sizes))
             assert tensors[0].tolist() == [20, 21]
             return [torch.tensor([10, 11, 12, 20, 21, 22]) for _ in tensors]
 
         def reduce_scatterv(self, tensor, dim, sizes):
-            calls.append(("moe_dp_pcp_rs", sizes))
+            calls.append(("moe_non_sp_rs", sizes))
             assert tensor.tolist() == [10, 11, 12, 20, 21, 22]
             return tensor[3:5]
 
     manager = AgRsAll2AllManager.__new__(AgRsAll2AllManager)
     sizes = [1, 2, 2, 1]
-    group = FakeMoeDpPcpGroup()
+    group = FakeMoeNonSpGroup()
     monkeypatch.setattr(
-        "vllm.distributed.device_communicators.all2all.get_moe_dp_pcp_group",
+        "vllm.distributed.device_communicators.all2all.get_moe_non_sp_group",
         lambda: group,
     )
     manager._get_sizes = lambda num_local_tokens, comm_group: sizes
@@ -204,6 +204,6 @@ def test_ag_rs_moe_dp_pcp_uses_one_collective_for_each_direction(monkeypatch):
     assert hidden_states.tolist() == [10, 11, 12, 20, 21, 22]
     assert combined.tolist() == [20, 21]
     assert calls == [
-        ("moe_dp_pcp_ag", [1, 2, 2, 1]),
-        ("moe_dp_pcp_rs", [1, 2, 2, 1]),
+        ("moe_non_sp_ag", [1, 2, 2, 1]),
+        ("moe_non_sp_rs", [1, 2, 2, 1]),
     ]
