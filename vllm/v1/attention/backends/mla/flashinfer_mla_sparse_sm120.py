@@ -23,9 +23,8 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
 
-# Every writer of the packed fp8_ds_mla cache stores tile scales as raw fp32
-# ``amax / 448``, so they must be read back as such; ``pow2_fp32`` would keep
-# only the exponent bits.
+# vLLM's 656-byte V3.2-style fp8_ds_mla writers store tile scales as raw fp32
+# ``amax / 448``. Read the full values; ``pow2_fp32`` would drop the mantissas.
 _KV_SCALE_FORMAT = "arbitrary_fp32"
 
 

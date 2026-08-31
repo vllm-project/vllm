@@ -101,7 +101,7 @@ def _make_sm120_impl(
 def test_sm120_impl_reads_fp8_ds_mla_scales_as_arbitrary_fp32(
     monkeypatch, model_type: str
 ) -> None:
-    """Every fp8_ds_mla writer stores raw fp32 tile scales, whatever the model."""
+    """The vLLM 656-byte writer contract does not depend on the model label."""
     impl = _make_sm120_impl(monkeypatch, model_type=model_type)
     assert impl.kv_scale_format == "arbitrary_fp32"
 
