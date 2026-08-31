@@ -111,7 +111,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             weight_key=weight_key,
             quant_config=self.weight_quant,
             may_have_zp=not self.symmetric,
-            may_have_bias=False,
+            may_have_bias=self.moe.has_bias,
             allow_tile_padding=not is_actorder,
         )
 
@@ -296,6 +296,27 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         )
         layer.register_parameter("w2_weight_packed", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # Per-expert biases, as gpt-oss carries.
+        if self.moe.has_bias:
+            w13_num_shards = 2 if self.moe.is_act_and_mul else 1
+            w13_bias = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    w13_num_shards * intermediate_size_per_partition,
+                    dtype=params_dtype,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(
+                torch.zeros(num_experts, hidden_size, dtype=params_dtype),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
 
         load_full_w2, w2_scales_size, self.is_k_full = self._w2_scale_sharding(
             self.actorder,
@@ -505,6 +526,35 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            swigluoai_w13_interleave_perm,
+        )
+
+        # Reorder before the conversion below, which repacks w13 for the kernel.
+        # 2I is the last, unpacked dim of both the transposed weights and their
+        # group scales, so this stays a plain gather.
+        perm = swigluoai_w13_interleave_perm(
+            self.experts_cls,
+            getattr(layer, "activation", None),
+            layer.w13_weight_packed.size(2),
+            layer.w13_weight_packed.device,
+        )
+        if perm is not None:
+            replace_parameter(
+                layer,
+                "w13_weight_packed",
+                layer.w13_weight_packed.data[..., perm].contiguous(),
+            )
+            replace_parameter(
+                layer,
+                "w13_weight_scale",
+                layer.w13_weight_scale.data[..., perm].contiguous(),
+            )
+            if self.moe.has_bias:
+                replace_parameter(
+                    layer, "w13_bias", layer.w13_bias.data[:, perm].contiguous()
+                )
+
         # Process weights using the shared oracle infrastructure
         converted = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_backend,
@@ -519,6 +569,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             w2_g_idx=layer.w2_weight_g_idx,
             w13_qzeros=getattr(layer, "w13_weight_zero_point", None),
             w2_qzeros=getattr(layer, "w2_weight_zero_point", None),
+            w13_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
         )
 
         if converted is None:
@@ -538,8 +590,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             w2_qzeros,
             w13_input_global_scale,
             w2_input_global_scale,
-            _,  # w13_bias
-            _,  # w2_bias
+            w13_bias,
+            w2_bias,
         ) = converted
 
         # Replace common parameters
@@ -547,6 +599,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w2_weight_packed", w2_qweight)
         replace_parameter(layer, "w13_weight_scale", w13_scales)
         replace_parameter(layer, "w2_weight_scale", w2_scales)
+
+        if w13_bias is not None:
+            replace_parameter(layer, "w13_bias", w13_bias)
+        if w2_bias is not None:
+            replace_parameter(layer, "w2_bias", w2_bias)
 
         # CPU fused_experts_cpu requires zero points even for symmetric quant.
         # EMULATION bakes ZP into the dequantized bf16 weights — ZP is None.
@@ -621,6 +678,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             num_bits=self.num_bits,
             w1_zp=getattr(layer, "w13_weight_zero_point", None),
             w2_zp=getattr(layer, "w2_weight_zero_point", None),
+            w1_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
             gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),

@@ -132,6 +132,20 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     ]
 
 
+def _act_order_reason(
+    quant_config: QuantizationConfig | QuantizationArgs,
+) -> str | None:
+    """Reason to refuse an activation-ordered checkpoint, for the backends that
+    carry no g_idx through to their kernel."""
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+
+    if isinstance(quant_config, AutoGPTQConfig) and quant_config.desc_act:
+        return "GPTQ activation ordering is not supported"
+    if isinstance(quant_config, QuantizationArgs) and quant_config.actorder == "group":
+        return "group activation ordering is not supported"
+    return None
+
+
 def _backend_incompatibility_reason(
     backend: WNA16MoEBackend,
     moe_config: FusedMoEConfig,
@@ -146,8 +160,10 @@ def _backend_incompatibility_reason(
     if backend == WNA16MoEBackend.ZEN_CPU:
         if not envs.VLLM_CPU_INT4_W4A8:
             return "VLLM_CPU_INT4_W4A8=0 disables the DA8W4 path"
-        if may_have_zp or may_have_bias:
-            return "zero points and expert bias are not supported"
+        if may_have_zp:
+            return "zero points are not supported"
+        if (reason := _act_order_reason(quant_config)) is not None:
+            return reason
         group_size = getattr(quant_config, "group_size", None)
         if group_size is None or group_size <= 0:
             return "DA8W4 requires group-quantized weights"
@@ -164,13 +180,8 @@ def _backend_incompatibility_reason(
             return "expert bias is not supported"
         if isinstance(quant_config, AutoAWQConfig):
             return "the AutoAWQ weight layout is not supported"
-        if isinstance(quant_config, AutoGPTQConfig) and quant_config.desc_act:
-            return "GPTQ activation ordering is not supported"
-        if (
-            isinstance(quant_config, QuantizationArgs)
-            and quant_config.actorder == "group"
-        ):
-            return "group activation ordering is not supported"
+        if (reason := _act_order_reason(quant_config)) is not None:
+            return reason
 
     # Marlin only supports certain problem/group sizes.
     allow_marlin = not isinstance(quant_config, MoeWNA16Config)

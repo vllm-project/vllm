@@ -413,18 +413,23 @@ def test_zen_cpu_group_size_gating(group_size, expected_ok):
     assert (reason is None) == expected_ok
 
 
-def test_zen_cpu_rejects_zero_points_and_bias():
+@pytest.mark.parametrize(
+    "may_have_zp,may_have_bias,expected_ok",
+    [(True, False, False), (False, True, True), (True, True, False)],
+)
+def test_zen_cpu_rejects_zero_points_but_takes_bias(
+    may_have_zp, may_have_bias, expected_ok
+):
     quant_config = type("Args", (), {"group_size": 128})()
-    for may_have_zp, may_have_bias in ((True, False), (False, True)):
-        reason = int_wna16._backend_incompatibility_reason(
-            WNA16MoEBackend.ZEN_CPU,
-            moe_config=None,
-            quant_config=quant_config,
-            may_have_zp=may_have_zp,
-            may_have_bias=may_have_bias,
-            allow_tile_padding=True,
-        )
-        assert reason is not None
+    reason = int_wna16._backend_incompatibility_reason(
+        WNA16MoEBackend.ZEN_CPU,
+        moe_config=None,
+        quant_config=quant_config,
+        may_have_zp=may_have_zp,
+        may_have_bias=may_have_bias,
+        allow_tile_padding=True,
+    )
+    assert (reason is None) == expected_ok
 
 
 def test_zen_cpu_disabled_by_env(monkeypatch):
@@ -466,6 +471,57 @@ def test_zen_experts_support_predicates():
     assert ZentorchExpertsInt4._supports_quant_scheme(kInt4Static32, None)
     assert not ZentorchExpertsInt4._supports_quant_scheme(kInt8StaticChannelSym, None)
     assert ZentorchExpertsInt4._supports_activation(MoEActivation.SILU)
-    # SWIGLUOAI needs an interleaved w13 layout that this path does not build.
-    assert not ZentorchExpertsInt4._supports_activation(MoEActivation.SWIGLUOAI)
+    assert ZentorchExpertsInt4._supports_activation(MoEActivation.SWIGLUOAI)
+    assert ZentorchExpertsInt4.requires_interleaved_w13
     assert not ZentorchExpertsInt4._supports_no_act_and_mul()
+
+
+def _swigluoai_perm(activation, experts_cls=None):
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        swigluoai_w13_interleave_perm,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
+        ZentorchExpertsInt4,
+    )
+
+    return swigluoai_w13_interleave_perm(
+        experts_cls or ZentorchExpertsInt4,
+        activation,
+        2 * INTERMEDIATE,
+        torch.device("cpu"),
+    )
+
+
+def test_swigluoai_perm_only_for_zen_swigluoai():
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+    assert _swigluoai_perm(MoEActivation.SWIGLUOAI) is not None
+    # Other activations keep the half-split layout the loader leaves.
+    assert _swigluoai_perm(MoEActivation.SILU) is None
+    # object stands in for any kernel that never set requires_interleaved_w13.
+    assert _swigluoai_perm(MoEActivation.SWIGLUOAI, experts_cls=object) is None
+
+
+def test_swigluoai_perm_interleaves_weights_scales_and_bias(mock_zentorch_ops):
+    """The permutation is a gather on w13's output-channel axis, which is the
+    last dim for the packed weights and their group scales."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+    group_size = 32
+    w13, w2, w13_scale, w2_scale = _make_moe_weights(group_size)
+    bias = torch.randn(NUM_EXPERTS, 2 * INTERMEDIATE, dtype=torch.bfloat16)
+    perm = _swigluoai_perm(MoEActivation.SWIGLUOAI)
+
+    baseline = int_wna16._process_weights_zen_cpu(w13, w2, w13_scale, w2_scale)[0]
+    permuted = int_wna16._process_weights_zen_cpu(
+        w13[..., perm].contiguous(), w2, w13_scale[..., perm].contiguous(), w2_scale
+    )[0]
+
+    for expert in range(NUM_EXPERTS):
+        before = _unpack_s4(baseline[expert], HIDDEN)
+        after = _unpack_s4(permuted[expert], HIDDEN)
+        torch.testing.assert_close(after[0::2], before[:INTERMEDIATE])
+        torch.testing.assert_close(after[1::2], before[INTERMEDIATE:])
+
+    torch.testing.assert_close(bias[:, perm][:, 0::2], bias[:, :INTERMEDIATE])
+    torch.testing.assert_close(bias[:, perm][:, 1::2], bias[:, INTERMEDIATE:])
