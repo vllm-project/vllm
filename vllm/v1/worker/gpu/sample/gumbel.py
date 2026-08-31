@@ -4,8 +4,8 @@ import torch
 
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
-# Smallest positive value produced by Triton's fp32 `tl.rand`. Used to clamp
-# zero draws before the flipped Gumbel transform below.
+# Smallest positive value produced by Triton's fp32 `tl.rand`. Used by the
+# retained Philox helper for rejection sampling.
 #
 # Triton requires globals accessed from `@triton.jit` functions to be wrapped
 # in `tl.constexpr(...)`. We can only do that when Triton is actually
@@ -116,7 +116,8 @@ def murmur3_hash32(seed, pos, offset, domain: tl.constexpr = 0):
     seed = seed.to(tl.int64)
     pos = pos.to(tl.int64)
     offset = offset.to(tl.uint32)
-    h = offset ^ offset
+    # Keep the request-wide prefix scalar until the token offset is mixed in.
+    h = (seed ^ seed).to(tl.uint32)
     h ^= domain
     h = _murmur3_mix(h, (seed & 0xFFFFFFFF).to(tl.uint32))
     h = _murmur3_mix(h, ((seed >> 32) & 0xFFFFFFFF).to(tl.uint32))
@@ -142,11 +143,18 @@ def murmur3_uniform32(seed, pos, offset):
 
 
 @triton.jit
+def _uniform64_from_random53(random53):
+    uniform = (random53.to(tl.float64) + 0.5) * 1.1102230246251565e-16
+    # The largest midpoint rounds to 1.0 in fp64; keep the uniform open.
+    return tl.minimum(uniform, 0.9999999999999999)
+
+
+@triton.jit
 def murmur3_uniform64(seed, pos, offset):
     lo = murmur3_hash32(seed, pos, offset).to(tl.uint64)
     hi = murmur3_hash32(seed, pos, offset, domain=0x9E3779B9).to(tl.uint64)
     random53 = ((hi << 32) | lo) >> 11
-    return (random53.to(tl.float64) + 0.5) * 1.1102230246251565e-16
+    return _uniform64_from_random53(random53)
 
 
 @triton.jit
