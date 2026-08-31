@@ -98,8 +98,13 @@ class CompressedSlotMappingKernel(
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         hf_config = vllm_config.model_config.hf_config
-        compress_ratios = getattr(hf_config, "compress_ratios", None) or ()
-        compress_ratios = [int(ratio) for ratio in compress_ratios if int(ratio) > 1]
+        configured_ratios = (
+            *(getattr(hf_config, "compress_ratios", None) or ()),
+            getattr(hf_config, "index_kpool", 1) or 1,
+        )
+        compress_ratios = tuple(
+            dict.fromkeys(int(ratio) for ratio in configured_ratios if int(ratio) > 1)
+        )
         if not compress_ratios:
             return []
         return self._trace_dispatch(self.dispatch)(

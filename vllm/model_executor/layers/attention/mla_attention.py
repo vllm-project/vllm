@@ -619,12 +619,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
                     _PREPARE_UNIFORM_DECODE_KERNEL,
                 )
-                from vllm.v1.attention.backends.mla.sparse_utils import (
-                    _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL,
-                )
 
                 _COMPRESSED_SLOT_MAPPING_KERNEL.register_warmup()
-                _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL.register_warmup()
                 _PREPARE_UNIFORM_DECODE_KERNEL.register_warmup()
                 _BUILD_PREFILL_CHUNK_METADATA_KERNEL.register_warmup()
 
@@ -683,6 +679,26 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
+        if (
+            self._vllm_config.kernel_config.enable_jit_warmup
+            and self.attn_backend.get_name()
+            in (
+                "FLASHMLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE_SM120",
+                "DEEPSEEK_V32_INDEXER",
+            )
+        ):
+            from vllm.v1.attention.backends.mla.sparse_utils import (
+                _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL,
+            )
+
+            row_width = self.kv_cache.shape[-1]
+            assert self.kv_cache.stride(0) % row_width == 0
+            _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL.register_warmup(
+                self._vllm_config,
+                block_stride_rows=self.kv_cache.stride(0) // row_width,
+            )
 
     @property
     def chunked_prefill_workspace_size(self) -> int:
