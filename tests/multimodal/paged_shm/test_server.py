@@ -11,7 +11,7 @@ import torch
 
 from vllm.multimodal.paged_shm.client import PagedShmClient
 from vllm.multimodal.paged_shm.server import PagedShmServerProc
-from vllm.multimodal.paged_shm.types import ShmWriteRequest, ShmAllocation
+from vllm.multimodal.paged_shm.types import ShmAllocation, ShmWriteRequest
 from vllm.utils import random_uuid
 
 # ---------------------------------------------------------------------------

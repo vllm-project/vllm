@@ -52,6 +52,7 @@ from vllm.transformers_utils.repo_utils import resolve_revision
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
@@ -782,7 +783,9 @@ class ModelConfig:
             )
 
             if mm_processor_cache_type == "paged_shm":
-                paged_shm_size = mm_processor_cache_gb * 1024 * 1024 * 1024
+                paged_shm_size = mm_processor_cache_gb * GiB_bytes
+            else:
+                paged_shm_size = 0
 
             mm_config_kwargs = dict(
                 language_model_only=language_model_only,

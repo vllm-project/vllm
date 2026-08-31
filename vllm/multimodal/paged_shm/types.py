@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TypedDict
+
+from vllm.multimodal.inputs import MultiModalKwargsItem
+from vllm.multimodal.processing.processor import ResolvedPromptUpdate
 
 
 @dataclass
@@ -40,10 +45,15 @@ class ShmSlot:
         return len(self.blocks)
 
 
+class PagedShmTensorShmSlot(TypedDict):
+    token: str
+    meta_size: int
+    meta_block: int
+    data_size: int
+    data_blocks: list[int]
+
+
 @dataclass
-class PagedShmTensor:
-    uuid: str
-    size: int
-    blocks: list[int]
-    dtype: str
-    shape: tuple[int, ...]
+class ShmItem:
+    kwargs_item: MultiModalKwargsItem
+    prompt_updates: Sequence["ResolvedPromptUpdate"]
