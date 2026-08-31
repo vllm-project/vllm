@@ -80,6 +80,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/kernels/
   commands:
     - pytest -v -s kernels/
