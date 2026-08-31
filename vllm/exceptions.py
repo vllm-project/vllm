@@ -3,6 +3,7 @@
 
 """Custom exceptions for vLLM."""
 
+from http import HTTPStatus
 from typing import Any
 
 
@@ -116,3 +117,11 @@ class VLLMUnprocessableEntityError(VLLMClientError):
         if self.value is not None:
             extras.append(f"value={self.value}")
         return f"{base} ({', '.join(extras)})" if extras else base
+
+
+class GenerationError(VLLMServerError):
+    """raised when finish_reason indicates internal server error (500)"""
+
+    def __init__(self, message: str = "Internal server error"):
+        super().__init__(message)
+        self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
