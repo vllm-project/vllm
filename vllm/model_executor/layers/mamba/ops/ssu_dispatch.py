@@ -597,27 +597,6 @@ def _cuda_i64_slot_strides(tensors: list[torch.Tensor]) -> torch.Tensor:
     )
 
 
-def _drop_over_window_rows(
-    copied: torch.Tensor,
-    flush_count: torch.Tensor,
-    max_window: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Drop rows the materialize kernel would refuse to write.
-
-    ``replayssm_materialize`` returns without touching the destination when
-    ``flush_count > max_window``. Masking those rows out of ``copied`` (and
-    forcing their ``flush_count`` to the -1 no-op sentinel) keeps the
-    ring-tracker resets in sync with what the kernel actually wrote, so a slot
-    that was not materialized is never left marked as an exact checkpoint.
-    The mask is computed on device: this runs on the per-step postprocess path,
-    where a host-side check would cost a CPU-GPU sync.
-    """
-    over = copied & (flush_count > max_window)
-    return copied & ~over, torch.where(
-        over, torch.full_like(flush_count, -1), flush_count
-    )
-
-
 def _flashinfer_replayssm_mixers_by_group(
     kv_cache_config: KVCacheConfig,
     mamba_group_ids: Sequence[int],
@@ -736,9 +715,6 @@ def _materialize_replayssm_prefix_group(
         mixers[0]._replayssm_prev_num_accepted[src_clamped],
         torch.tensor(-1, dtype=torch.int32, device=device),
     )
-    copied, flush_count = _drop_over_window_rows(
-        copied, flush_count, int(mixers[0].replayssm_buffer_len)
-    )
     _launch_replayssm_materialize(
         mixers, src_row, src_row, flush_count, replayssm_materialize
     )
@@ -804,9 +780,6 @@ def materialize_replayssm_prefix_gpu(
             mixers[0]._replayssm_prev_num_accepted[src_clamped],
             torch.tensor(-1, dtype=torch.int32, device=src_row.device),
         )
-        copied, flush_count = _drop_over_window_rows(
-            copied, flush_count, int(mixers[0].replayssm_buffer_len)
-        )
         _launch_replayssm_materialize(
             mixers,
             src_row.to(dtype=torch.int32),
@@ -860,14 +833,36 @@ def materialize_replayssm_prefix_mtp_gpu(
         src_clamped = src_row.clamp(
             min=0, max=mixers[0]._replayssm_ring_start.numel() - 1
         )
+        prev_count = mixers[0]._replayssm_prev_num_accepted[src_clamped]
+        query_count = mixers[0]._replayssm_prev_query_len[src_clamped]
+        boundary_count = token_counts[:num_reqs]
+        is_spec_decode = query_count > 0
+        # Spec-decode trackers describe the history before the current query.
+        # When that query forced a checkpoint, the source state already includes
+        # the old history and the current query starts after it in the ring.
+        checkpointed = (
+            copied
+            & is_spec_decode
+            & (prev_count + query_count > mixers[0].replayssm_buffer_len)
+        )
+
+        ring_start = mixers[0]._replayssm_ring_start[src_clamped]
+        ring_start = torch.where(
+            checkpointed,
+            (ring_start + prev_count) % mixers[0].kv_cache[2].size(2),
+            ring_start,
+        )
+        flush_count = torch.where(
+            is_spec_decode,
+            torch.where(checkpointed, boundary_count, prev_count + boundary_count),
+            # STP advances its tracker after the forward call, so prev_count
+            # already includes the current token.
+            prev_count,
+        )
         flush_count = torch.where(
             copied,
-            mixers[0]._replayssm_prev_num_accepted[src_clamped]
-            + token_counts[:num_reqs],
+            flush_count,
             torch.tensor(-1, dtype=torch.int32, device=src_row.device),
-        )
-        copied, flush_count = _drop_over_window_rows(
-            copied, flush_count, int(mixers[0].replayssm_buffer_len)
         )
         _launch_replayssm_materialize(
             mixers,
@@ -875,6 +870,7 @@ def materialize_replayssm_prefix_mtp_gpu(
             dst_row.to(dtype=torch.int32),
             flush_count,
             replayssm_materialize,
+            ring_start=ring_start,
         )
         reset_replayssm_ring_trackers(
             mixers[0]._replayssm_ring_start,
@@ -921,6 +917,8 @@ def _launch_replayssm_materialize(
     dst_row: torch.Tensor,
     flush_count: torch.Tensor,
     replayssm_materialize: Callable[..., None],
+    *,
+    ring_start: torch.Tensor | None = None,
 ) -> None:
     ssm = mixers[0].kv_cache[1]
     x_cache = mixers[0].kv_cache[2]
@@ -928,6 +926,8 @@ def _launch_replayssm_materialize(
 
     slot_hi = ring_start_full.numel() - 1
     src_clamped = src_row.clamp(min=0, max=slot_hi)
+    if ring_start is None:
+        ring_start = ring_start_full[src_clamped]
     num_layers = len(mixers)
     src_slots = src_row.unsqueeze(0).expand(num_layers, -1).contiguous()
     dst_slots = dst_row.unsqueeze(0).expand(num_layers, -1).contiguous()
@@ -959,7 +959,7 @@ def _launch_replayssm_materialize(
         zero_table,
         src_slots,
         dst_slots,
-        ring_start_full[src_clamped],
+        ring_start,
         flush_count,
         state_dtype=ssm.dtype,
         input_dtype=x_cache.dtype,

@@ -489,7 +489,13 @@ def _flashinfer_replayssm_mixer() -> Mock:
     mixer = Mock()
     mixer.use_replayssm = True
     mixer.mamba_config.backend = MambaBackendEnum.FLASHINFER
-    mixer.kv_cache = [object()] * 5
+    mixer.kv_cache = [
+        object(),
+        object(),
+        torch.empty(32, 1, 20, 1),
+        object(),
+        object(),
+    ]
     mixer._replayssm_ring_start = torch.zeros(32, dtype=torch.int32)
     mixer._replayssm_prev_num_accepted = torch.zeros(32, dtype=torch.int32)
     mixer._replayssm_prev_query_len = torch.zeros(32, dtype=torch.int32)
@@ -575,19 +581,37 @@ def test_materialize_replayssm_prefix_mtp_gpu_uses_committed_boundary(
     monkeypatch,
 ):
     mixer = _flashinfer_replayssm_mixer()
+    mixer.replayssm_buffer_len = 12
+    mixer.kv_cache[2] = torch.empty(32, 1, 16, 1)
     mixer._replayssm_prev_num_accepted[10] = 4
     mixer._replayssm_prev_num_accepted[21] = 5
+    mixer._replayssm_prev_num_accepted[23] = 12
+    mixer._replayssm_prev_num_accepted[25] = 10
+    mixer._replayssm_prev_num_accepted[27] = 8
+    mixer._replayssm_prev_num_accepted[29] = 3
+    mixer._replayssm_prev_query_len[10] = 4
+    mixer._replayssm_prev_query_len[21] = 4
+    mixer._replayssm_prev_query_len[23] = 4
+    mixer._replayssm_prev_query_len[25] = 4
+    mixer._replayssm_prev_query_len[27] = 4
+    mixer._replayssm_ring_start[23] = 3
+    mixer._replayssm_ring_start[25] = 5
+    mixer._replayssm_ring_start[27] = 7
+    mixer._replayssm_ring_start[29] = 9
     kv_cache_config = Mock()
     kv_cache_config.kv_cache_groups = [Mock(layer_names=["mixer"])]
     launches: list[dict[str, list]] = []
     resets: list[list[int]] = []
 
-    def fake_launch(mixers, src_row, dst_row, flush_count, _kernel):
+    def fake_launch(
+        mixers, src_row, dst_row, flush_count, _kernel, *, ring_start=None
+    ):
         launches.append(
             {
                 "src_row": src_row.tolist(),
                 "dst_row": dst_row.tolist(),
                 "flush_count": flush_count.tolist(),
+                "ring_start": ring_start.tolist(),
             }
         )
 
@@ -617,21 +641,30 @@ def test_materialize_replayssm_prefix_mtp_gpu_uses_committed_boundary(
         {"mixer": mixer},
         [
             torch.tensor(
-                [[10, 11, 12], [0, 0, 0], [20, 21, 22]],
+                [
+                    [10, 11, 12],
+                    [0, 0, 0],
+                    [20, 21, 22],
+                    [23, 24, 0],
+                    [25, 26, 0],
+                    [27, 28, 0],
+                    [29, 30, 0],
+                ],
                 dtype=torch.int32,
             )
         ],
-        torch.tensor([0, -1, 1], dtype=torch.int32),
-        torch.tensor([1, 0, 2], dtype=torch.int32),
-        torch.tensor([2, 0, 3], dtype=torch.int32),
-        num_reqs=3,
+        torch.tensor([0, -1, 1, 0, 0, 0, 0], dtype=torch.int32),
+        torch.tensor([1, 0, 2, 1, 1, 1, 1], dtype=torch.int32),
+        torch.tensor([2, 0, 3, 4, 2, 2, 1], dtype=torch.int32),
+        num_reqs=7,
     )
 
     assert launches == [
         {
-            "src_row": [10, 0, 21],
-            "dst_row": [11, 0, 22],
-            "flush_count": [6, -1, 8],
+            "src_row": [10, 0, 21, 23, 25, 27, 29],
+            "dst_row": [11, 0, 22, 24, 26, 28, 30],
+            "flush_count": [6, -1, 8, 4, 2, 10, 3],
+            "ring_start": [0, 0, 0, 15, 15, 7, 9],
         }
     ]
-    assert resets == [[11, 22]]
+    assert resets == [[11, 22, 24, 26, 28, 30]]
