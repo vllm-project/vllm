@@ -659,6 +659,11 @@ class LayerTransferTask:
     # True → Mooncake session API path (batch_put/get_*_ranges);
     # False → legacy per-layer-key path (batch_put/get_from_multi_buffers).
     use_key_major_ranges: bool = False
+    # The store_job_id assigned by the scheduler for this save batch.
+    # Only meaningful when is_save=True. It lets the sending thread finish
+    # the store job on the last layer so the scheduler can release pinned
+    # GPU blocks via build_connector_worker_meta().
+    store_job_id: int | None = None
 
 
 class MooncakeStoreConnectorMetadata(KVConnectorMetadata):

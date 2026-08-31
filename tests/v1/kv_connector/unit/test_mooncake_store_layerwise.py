@@ -67,6 +67,15 @@ def _make_layerwise_bare_worker(
     worker._next_load_layer_to_submit = 0
     worker._num_prefetch_layers = 1
 
+    # Session API shared state (FUNC-FIX 2/3/4).
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.mooncake_session_tracker import (  # noqa: E501
+        MooncakeSessionTracker,
+    )
+    worker._session_tracker = MooncakeSessionTracker()
+    worker._put_started_keys = set()
+    worker._put_started_keys_lock = threading.Lock()
+    worker._current_mooncake_last_chunk_req_ids = set()
+
     # Create token databases
     worker.token_dbs = []
     for g_idx in range(num_groups):
@@ -164,53 +173,29 @@ class TestSubmitReadyLayerLoads:
         assert total_calls == 2, f"Expected 2 total calls, got {total_calls}"
 
 
-class TestLayerwiseStateReset:
-    """Test _reset_layer_state event and state management."""
+class TestLayerwiseEventReuse:
+    """FUNC-FIX 5/6: events are cleared (not rebuilt) across chunks."""
 
-    def test_reset_creates_new_events(self):
-        """_reset_layer_state replaces Event objects."""
+    def test_events_reused_not_rebuilt(self):
+        """_init_layerwise_config builds events once; they survive a round."""
         worker = _make_layerwise_bare_worker(num_layers=3)
-        old_save_events = {
+        save_events = {
             l: worker._layer_save_finished_events[l] for l in range(3)
         }
-        old_load_events = {
+        load_events = {
             l: worker._layer_load_finished_events[l] for l in range(3)
         }
 
-        worker._reset_layer_state()
+        # Simulate a round: set + clear some events.
+        worker._layer_save_finished_events[0].set()
+        worker._layer_load_finished_events[1].set()
 
+        # The save_kv_layer / wait_for_layer_load close events they use, but
+        # the worker must keep the same event objects so transfer threads (which
+        # hold references) stay in sync.
         for l in range(3):
-            assert worker._layer_save_finished_events[l] is not old_save_events[l]
-            assert worker._layer_load_finished_events[l] is not old_load_events[l]
-
-    def test_reset_syncs_events_to_threads(self):
-        """Layerwsie: new events are synced to transfer threads after reset."""
-        worker = _make_layerwise_bare_worker(num_layers=2)
-
-        # Create layerwise-enabled mock threads
-        worker.kv_send_thread = MagicMock()
-        worker.kv_send_thread._layerwise_enabled = True
-        worker.kv_recv_threads = [
-            MagicMock(_layerwise_enabled=True),
-            MagicMock(_layerwise_enabled=False),  # one non-layerwise
-        ]
-
-        worker._reset_layer_state()
-
-        # Sending thread: should receive 2 set_layer_finished_event calls (is_save=True)
-        assert worker.kv_send_thread.set_layer_finished_event.call_count == 2
-        for call_args in worker.kv_send_thread.set_layer_finished_event.call_args_list:
-            assert call_args.args[1] is True  # is_save=True
-
-        # Only the layerwise-enabled recv thread should receive calls
-        thread0 = worker.kv_recv_threads[0]
-        assert thread0.set_layer_finished_event.call_count == 2
-        for call_args in thread0.set_layer_finished_event.call_args_list:
-            assert call_args.args[1] is False  # is_save=False
-
-        # Non-layerwise thread should not receive calls
-        thread1 = worker.kv_recv_threads[1]
-        assert thread1.set_layer_finished_event.call_count == 0
+            assert worker._layer_save_finished_events[l] is save_events[l]
+            assert worker._layer_load_finished_events[l] is load_events[l]
 
 
 # ============================================================================
@@ -340,8 +325,8 @@ class TestSaveKvLayer:
             assert isinstance(task, LayerTransferTask)
             assert task.physical_layer_id == i
 
-    def test_save_kv_layer_last_layer_triggers_reset(self):
-        """Last layer must call _wait_for_all_layer_saves and _reset_layer_state."""
+    def test_save_kv_layer_last_layer_clears_events(self):
+        """Last layer waits then clears (not rebuilds) the save events (FUNC-FIX 5)."""
         worker = _make_layerwise_bare_worker(num_layers=2)
         worker.kv_send_thread = MagicMock()
         worker.kv_send_thread._layerwise_enabled = True
@@ -359,19 +344,14 @@ class TestSaveKvLayer:
             worker._layer_save_finished_events[layer_id].set()
 
         old_save_events = {l: worker._layer_save_finished_events[l] for l in range(2)}
-        old_load_events = {l: worker._layer_load_finished_events[l] for l in range(2)}
 
         # Save the last layer.
         worker.save_kv_layer("model.layers.1.self_attn", None, None)
 
-        # The last layer must trigger a reset: events are replaced ...
+        # FUNC-FIX 5: events are reused (same object) and CLEARED, not rebuilt.
         for l in range(2):
-            assert worker._layer_save_finished_events[l] is not old_save_events[l]
-            assert worker._layer_load_finished_events[l] is not old_load_events[l]
-        # ... and task lists are cleared.
-        for l in range(2):
-            assert worker._layer_save_tasks[l] == []
-            assert worker._layer_load_tasks[l] == []
+            assert worker._layer_save_finished_events[l] is old_save_events[l]
+            assert not worker._layer_save_finished_events[l].is_set()
 
 
 class TestWaitForLayerLoad:
@@ -579,6 +559,96 @@ class TestLayerwiseRecvHandleLayerTask:
         assert 20 in failed_blocks
 
 
+class TestLayerwiseStoreJobLedger:
+    """Test layerwise save tasks participate in the store_job_id ledger."""
+
+    def test_store_job_id_passed_to_save_tasks(self):
+        """_build_layer_tasks_from_requests copies ReqMeta.store_job_id to tasks."""
+        worker = _make_layerwise_bare_worker(num_layers=2)
+        req = _make_test_reqmeta()
+        req.store_job_id = 42
+        worker._build_layer_tasks_from_requests([req])
+
+        for layer_id in range(2):
+            tasks = worker._layer_save_tasks[layer_id]
+            assert len(tasks) == 1
+            for task in tasks:
+                assert task.store_job_id == 42
+
+    def test_save_kv_layer_layer0_registers_store_job_id(self):
+        """save_kv_layer layer 0 enters the store_job_id into the ledger."""
+        worker = _make_layerwise_bare_worker(num_layers=2)
+        send_thread = _make_layerwise_send_thread(MagicMock(), num_layers=2)
+        worker.kv_send_thread = send_thread
+
+        req = _make_test_reqmeta()
+        req.store_job_id = 7
+        worker._build_layer_tasks_from_requests([req])
+
+        worker.save_kv_layer("model.layers.0.self_attn", None, None)
+
+        assert "test_req" in send_thread.stored_requests
+        assert 7 in send_thread.stored_requests["test_req"]
+
+    def test_handle_layer_task_finishes_job_on_last_layer(self):
+        """Sending thread finishes the store_job_id on the last layer."""
+        store = MagicMock()
+        store.batch_is_exist.return_value = [False]
+        store.batch_put_from_multi_buffers.return_value = True
+        thread = _make_layerwise_send_thread(store, num_layers=2)
+
+        task = LayerTransferTask(
+            req_id="test_finish",
+            group_id=0,
+            layer_idx_in_group=1,
+            physical_layer_id=1,  # last layer
+            key_list=["k"],
+            addr_list=[[0x3000]],
+            size_list=[[256]],
+            block_ids=[1],
+            is_save=True,
+            store_job_id=5,
+        )
+        thread.stored_requests["test_finish"] = {5}
+
+        thread._handle_layer_task(task)
+
+        assert thread._completed_saves.get(5) == 1
+        completed = thread.take_completed_saves()
+        assert completed[5] == 1
+
+    def test_handle_layer_range_task_finishes_job_on_last_layer(self):
+        """Session-API sending thread finishes the store_job_id on the last layer."""
+        store = MagicMock()
+        store.batch_put_from_multi_buffer_ranges.return_value = [0]
+        store.batch_put_session_end.return_value = [0]
+        thread = _make_layerwise_send_thread(store, num_layers=2)
+        thread._use_session_api = True
+        thread._active_put_keys = {"k1"}
+
+        task = LayerTransferTask(
+            req_id="test_range_finish",
+            group_id=0,
+            layer_idx_in_group=1,
+            physical_layer_id=1,  # last layer
+            key_list=["k1"],
+            addr_list=[[0x3000]],
+            size_list=[[256]],
+            dst_offset_list=[[512]],
+            block_ids=[10],
+            is_save=True,
+            use_key_major_ranges=True,
+            store_job_id=6,
+        )
+        thread.stored_requests["test_range_finish"] = {6}
+
+        thread._handle_layer_range_task(task)
+
+        assert thread._completed_saves.get(6) == 1
+        completed = thread.take_completed_saves()
+        assert completed[6] == 1
+
+
 class TestSaveKvLayerIntegration:
     """Integration tests: worker.save_kv_layer -> send thread _handle_request."""
 
@@ -726,8 +796,8 @@ class TestSendingThreadSessionApi:
         # Successfully-started keys seed the per-layer range-put filter.
         assert thread._active_put_keys == {"key_a", "key_b"}
 
-    def test_start_put_sessions_partial_failure_revokes(self):
-        """Failed session starts are revoked."""
+    def test_start_put_sessions_partial_failure_degrades(self):
+        """Failed session starts are degraded (not revoked - FUNC-FIX 2)."""
         store = MagicMock()
         store.batch_put_session_start.return_value = [0, -1]  # second fails
         thread = _make_layerwise_send_thread(store, num_layers=1)
@@ -735,10 +805,13 @@ class TestSendingThreadSessionApi:
 
         thread.start_put_sessions(["ok_key", "fail_key"], 4096)
 
-        # Failed key should be revoked
-        store.batch_put_session_revoke.assert_called_once_with(["fail_key"])
+        # Failed key is degraded, NOT revoked (revoking would delete committed KV)
+        store.batch_put_session_revoke.assert_not_called()
         # Only the successful key remains writable.
         assert thread._active_put_keys == {"ok_key"}
+        # The successful key enters the dedup set.
+        assert "ok_key" in thread._put_started_keys
+        assert "fail_key" not in thread._put_started_keys
 
     def test_handle_request_dispatches_session_path(self):
         """use_key_major_ranges=True dispatches to session handler."""
@@ -767,8 +840,8 @@ class TestSendingThreadSessionApi:
         store.batch_put_from_multi_buffer_ranges.assert_called_once()
         assert thread._layer_save_finished_events[0].is_set()
 
-    def test_handle_request_session_revokes_failed_keys(self):
-        """Failed range-put keys are revoked and excluded from next layers."""
+    def test_handle_request_session_drops_failed_keys(self):
+        """Failed range-put keys are dropped from the active set (not revoked - FUNC-FIX 2)."""
         store = MagicMock()
         # key_1 succeeds, key_2 fails
         store.batch_put_from_multi_buffer_ranges.return_value = [256, -5]
@@ -792,9 +865,9 @@ class TestSendingThreadSessionApi:
 
         thread._handle_request(task)
 
-        # key_2 should be revoked
-        store.batch_put_session_revoke.assert_called_once_with(["key_2"])
-        # key_2 removed from active set
+        # key_2 is NOT revoked (could delete committed KV from earlier layers)
+        store.batch_put_session_revoke.assert_not_called()
+        # key_2 removed from active set for this step
         assert "key_2" not in thread._active_put_keys
         assert "key_1" in thread._active_put_keys
 

@@ -82,6 +82,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from .metrics import MooncakeStoreConnectorStats
+from .mooncake_session_tracker import MooncakeSessionTracker
 
 logger = init_logger(__name__)
 
@@ -601,6 +602,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # Keys whose put session opened this step (set by start_put_sessions,
         # consumed by the per-layer range-put handler). None/empty until then.
         self._active_put_keys: set[str] | None = None
+        # Process-wide dedup set + lock
+        self._put_started_keys: set[str] = set()
+        self._put_started_keys_lock = threading.Lock()
+        self._session_tracker: Any = None
 
     def add_request(self, request: ReqMeta | LayerTransferTask) -> None:
         # Layerwise per-layer tasks carry no store_job_id; enqueue them directly
@@ -654,6 +659,26 @@ class KVCacheStoreSendingThread(KVTransferThread):
             completed = self._completed_saves
             self._completed_saves = {}
         return completed
+
+    def _finish_layer_store_job(self, task: LayerTransferTask) -> None:
+        """Retire the store_job_id ledger entry for a layerwise save task.
+
+        Layerwise save tasks are dispatched per layer but share the same
+        store_job_id assigned by the scheduler to the whole batch. Finishing it
+        on the last layer lets build_connector_worker_meta() report completion
+        so the scheduler can release the GPU blocks it pinned.
+        """
+        store_job_id = task.store_job_id
+        if store_job_id is None or not task.is_save:
+            return
+        finish_meta = ReqMeta(
+            req_id=task.req_id,
+            token_len_chunk=0,
+            block_ids=(),
+            block_hashes=[],
+            store_job_id=store_job_id,
+        )
+        self.finish_store_job(finish_meta)
 
     def _record_saved(self, req_meta: ReqMeta, token_len: int) -> None:
         # Guard on job liveness so neither a concurrent finish/preempt pop nor a
@@ -967,14 +992,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
     ) -> None:
         """Start put sessions for save keys (one Master RPC per batch).
 
-        Called by ``MooncakeStoreWorker._start_layerwise_sessions()`` before
-        per-layer tasks are constructed.  Once a session is open, subsequent
-        ``batch_put_from_multi_buffer_ranges()`` calls can write data at
-        layer offsets without additional Master communication.
+        Process-wide dedup (``_put_started_keys``, shared with the worker):
+        only ``new_keys`` (never PutStart'd before) are issued
+        ``batch_put_session_start``. Keys a prior chunk already started remain
+        writable this step so the per-layer range-put can continue writing them.
 
-        The set of keys whose session actually opened is recorded in
-        ``_active_put_keys`` so the per-layer range-put handler only writes
-        live sessions and skips any whose start failed.
         """
         if not self._use_session_api:
             return
@@ -982,35 +1004,64 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._active_put_keys = set()
             return
 
-        sizes = [object_size] * len(keys)
-        try:
-            results = self.store.batch_put_session_start(
-                keys, sizes, self.replicate_config
-            )
-        except Exception as exc:
-            logger.error("batch_put_session_start failed: %s", exc)
-            self._revoke_range_keys(keys)
-            self._active_put_keys = set()
+        with self._put_started_keys_lock:
+            previously_started = set(keys) & self._put_started_keys
+            new_keys = [k for k in keys if k not in self._put_started_keys]
+
+        started: set[str] = set(previously_started)
+
+        if new_keys:
+            sizes = [object_size] * len(new_keys)
+            session_start_time = time.perf_counter()
+            try:
+                results = self.store.batch_put_session_start(
+                    new_keys, sizes, self.replicate_config
+                )
+            except Exception as exc:
+                self._record_operation(
+                    "save_put_session_start",
+                    session_start_time,
+                    len(new_keys),
+                    status="error",
+                    num_failed_keys=len(new_keys),
+                )
+                logger.error("batch_put_session_start failed: %s", exc)
+            else:
+                self._record_operation(
+                    "save_put_session_start",
+                    session_start_time,
+                    len(new_keys),
+                )
+                newly_started = {k for k, r in zip(new_keys, results) if r == 0}
+                with self._put_started_keys_lock:
+                    self._put_started_keys.update(newly_started)
+                started |= newly_started
+
+        self._active_put_keys = started
+
+    def _remove_put_started_keys(self, keys: list[str]) -> None:
+        """Drop committed/revoked keys from the process-wide dedup set."""
+        if not keys:
             return
-
-        failed = [k for k, r in zip(keys, results) if r != 0]
-        if failed:
-            logger.warning(
-                "batch_put_session_start failed for keys: %s", failed
-            )
-            self._revoke_range_keys(failed)
-
-        # Only keys whose session opened are writable this batch.
-        self._active_put_keys = {k for k, r in zip(keys, results) if r == 0}
+        with self._put_started_keys_lock:
+            for k in keys:
+                self._put_started_keys.discard(k)
 
     def _revoke_range_keys(self, keys: list[str]) -> None:
-        """Cancel unfinished put sessions (cleanup on failure)."""
+        """Cancel unfinished put sessions (cleanup on failure).
+
+        Only call for keys PutStart'd this step that have NOT been committed —
+        never for keys committed by an earlier chunk. ``finally``
+        removes them from the dedup set so a later chunk can retry.
+        """
         if not keys:
             return
         try:
             self.store.batch_put_session_revoke(keys)
         except Exception as exc:
             logger.error("batch_put_session_revoke failed: %s", exc)
+        finally:
+            self._remove_put_started_keys(keys)
 
     def _handle_layer_task(self, task: LayerTransferTask) -> None:
         """Legacy per-layer-key save path (Phase 1)."""
@@ -1077,6 +1128,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 e,
             )
         finally:
+            if task.physical_layer_id == self._num_layers - 1:
+                self._finish_layer_store_job(task)
             self.request_queue.task_done()
 
     def _handle_layer_range_task(self, task: LayerTransferTask) -> None:
@@ -1132,12 +1185,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     status="ok",
                 )
 
-                # Revoke failed keys — they are dropped from subsequent layers
+                # Failed range-put keys — only drop from this step's writable set.
+                # Do NOT revoke: a key opened by Start may already hold prior
+                # layers' data; revoking would delete it.
                 failed_keys = [
                     k for k, r in zip(active_keys, results) if r < 0
                 ]
                 if failed_keys:
-                    self._revoke_range_keys(failed_keys)
                     self._active_put_keys.difference_update(failed_keys)
                     logger.warning(
                         "Layer %d save: %d/%d range-put keys failed, req=%s",
@@ -1153,10 +1207,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     k for k in keys if k in self._active_put_keys
                 ]
                 if commit_keys:
+                    commit_start = time.perf_counter()
                     try:
                         commit_results = self.store.batch_put_session_end(
                             commit_keys
                         )
+                        committed_keys = [
+                            k
+                            for k, r in zip(commit_keys, commit_results)
+                            if r == 0
+                        ]
                         failed_commit = [
                             k
                             for k, r in zip(commit_keys, commit_results)
@@ -1164,7 +1224,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         ]
                         if failed_commit:
                             self._revoke_range_keys(failed_commit)
+                        if self._session_tracker is not None and committed_keys:
+                            self._session_tracker.commit_put_keys(committed_keys)
+                        self._remove_put_started_keys(committed_keys)
+                        self._record_operation(
+                            "save_put_session_end",
+                            commit_start,
+                            len(commit_keys),
+                        )
                     except Exception as exc:
+                        self._record_operation(
+                            "save_put_session_end",
+                            commit_start,
+                            len(commit_keys),
+                            status="error",
+                            num_failed_keys=len(commit_keys),
+                        )
                         logger.error(
                             "batch_put_session_end failed: %s", exc
                         )
@@ -1193,10 +1268,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 req_id,
                 e,
             )
-            # On catastrophic failure, revoke all keys for this batch
-            self._revoke_range_keys(keys)
+            # Do NOT revoke the full key set: it may include keys
+            # whose KV was committed by an earlier chunk.
+            # Just abandon this step's active set.
             self._active_put_keys = None
         finally:
+            if layer_id == self._num_layers - 1:
+                self._finish_layer_store_job(task)
             self.request_queue.task_done()
 
     def _handle_request(self, req_meta: ReqMeta | LayerTransferTask):
@@ -1592,7 +1670,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
     def end_get_sessions(self, keys: list[str]) -> None:
         """Release get sessions (one shot per step).
 
-        Called by ``MooncakeStoreWorker._close_load_sessions_once()``.
+        Called by ``MooncakeStoreWorker.wait_for_layer_load()`` (release_terminal, last chunk only).
         """
         if not self._use_session_api or not keys:
             return
@@ -2197,7 +2275,6 @@ class MooncakeStoreWorker:
         self._current_load_layer: int = 0
         self._next_load_layer_to_submit: int = 0
         self._num_prefetch_layers: int = 1
-        self._save_finalized: bool = False
 
         # Read layerwise parameters from the extra config.
         kvc_extra = vllm_config.kv_transfer_config.kv_connector_extra_config
@@ -2265,10 +2342,12 @@ class MooncakeStoreWorker:
             self._load_sessions_closed = False
             self._load_session_lock = threading.Lock()
             self._opened_load_keys: list[str] = []
-            # Placeholder: block_len is empty at __init__ time (it is filled
-            # later in register_kv_caches), so _compute_page_size_bytes() would
-            # return 0 here. The real value is (re)computed in register_kv_caches
-            # once the kv-cache layout is known.
+            # Process-wide dedup of keys whose PutStart already succeeded
+            # (across chunks/requests).
+            self._put_started_keys: set[str] = set()
+            self._put_started_keys_lock = threading.Lock()
+            self._session_tracker = MooncakeSessionTracker()
+            self._current_mooncake_last_chunk_req_ids: set[str] = set()
             self._page_size_bytes = 0
 
         logger.info(
@@ -2296,55 +2375,63 @@ class MooncakeStoreWorker:
         return sum(db.block_len[:caches_per_layer])
 
     def _start_layerwise_sessions(self, requests: list[ReqMeta]) -> None:
-        """Start put/get sessions before per-layer tasks are built.
-
-        Called from ``start_load_kv()`` *before* ``_build_layer_tasks_from_requests()``
-        so that subsequent per-layer ``batch_put_from_multi_buffer_ranges`` /
-        ``batch_get_into_multi_buffer_ranges`` calls operate on open sessions (zero
-        additional Master RPCs).
-
-        Put session:
-          Reserve object space on the store side via ``batch_put_session_start``.
-          The object size is ``page_size_bytes × num_layers`` — one linear region
-          with layer i at byte offset ``i × page_size_bytes``.
-
-        Get session:
-          Query replica location + acquire lease via ``batch_get_session_start``.
-        """
+        """Start put/get sessions before per-layer tasks are built."""
         if not self._use_session_api:
             return
 
         object_size = self._page_size_bytes * self._num_layers
 
-        # ---- Collect save keys (deduplicated across requests) ----
+        # Requests whose current chunk is the last prefill chunk. get sessions
+        # are only closed (release_terminal) for these — intermediate chunks
+        # keep their sessions open for cross-chunk continuity.
+        last_chunk_req_ids: set[str] = set()
+        for r in requests:
+            npt = r.num_prompt_tokens
+            if npt is None:
+                continue
+            block_aligned_prefill_end = npt // self.block_size * self.block_size
+            if r.token_len_chunk >= block_aligned_prefill_end:
+                last_chunk_req_ids.add(r.req_id)
+        self._current_mooncake_last_chunk_req_ids = last_chunk_req_ids
+
+        # ---- Collect save keys (incremental, this chunk only) ----
         save_keys: list[str] = []
         save_keys_set: set[str] = set()
+        save_entries_by_req: dict[str, list[tuple[str, int]]] = {}
         for req_meta in requests:
             if not req_meta.can_save:
                 continue
+            entries: list[tuple[str, int]] = []
             for group_id in range(len(req_meta.block_ids)):
                 db = self.token_dbs[group_id]
                 put_step = self._group_tp_replication_factors[group_id]
                 put_step_rank = (self.tp_rank + group_id) % put_step
-                for _, _, block_hash in db.process_tokens(
-                    req_meta.token_len_chunk,
+                save_start = req_meta.token_ids_start
+                save_end = req_meta.token_len_chunk
+                for start_idx, _, block_hash in db.process_tokens(
+                    save_end,
                     req_meta.block_hashes,
+                    mask_num=save_start,
                     put_step=put_step,
                     put_step_rank=put_step_rank,
                 ):
                     key = db.key_for(block_hash)
+                    entries.append((key, start_idx // self.block_size))
                     if key not in save_keys_set:
                         save_keys.append(key)
                         save_keys_set.add(key)
-
+            if entries:
+                save_entries_by_req[req_meta.req_id] = entries
         if save_keys and self.kv_send_thread is not None:
             self.kv_send_thread.start_put_sessions(save_keys, object_size)
         elif self.kv_send_thread is not None:
-            # No session phase this step — clear any stale active-key set so
-            # the range-put handler cannot reuse keys from a previous step.
             self.kv_send_thread._active_put_keys = set()
 
-        # ---- Collect load keys (deduplicated across requests) ----
+        if self._session_tracker is not None:
+            for req_id, entries in save_entries_by_req.items():
+                self._session_tracker.register_put_keys(req_id, entries)
+
+        # ---- Collect load keys (merge with prior-chunk committed keys) ----
         load_keys: list[str] = []
         load_keys_set: set[str] = set()
         for req_meta in requests:
@@ -2355,32 +2442,49 @@ class MooncakeStoreWorker:
                 load_spec.vllm_cached_tokens
                 // self.block_size * self.block_size
             )
+            current_entries: list[tuple[str, int]] = []
             for group_id in range(len(req_meta.block_ids)):
                 db = self.token_dbs[group_id]
-                for _, _, block_hash in db.process_tokens(
+                for start_idx, _, block_hash in db.process_tokens(
                     load_spec.token_len,
                     req_meta.block_hashes,
                     mask_num,
                 ):
                     key = db.key_for(block_hash)
-                    if key not in load_keys_set:
-                        load_keys.append(key)
-                        load_keys_set.add(key)
+                    current_entries.append((key, start_idx // self.block_size))
+            if self._session_tracker is not None and current_entries:
+                current_entries = self._session_tracker.prepare_load_entries(
+                    req_meta.req_id, current_entries
+                )
+            for key, _ in current_entries:
+                if key not in load_keys_set:
+                    load_keys.append(key)
+                    load_keys_set.add(key)
 
         if load_keys:
-            for recv_thread in self.kv_recv_threads:
-                recv_thread.start_get_sessions(load_keys)
+            opened = []
+            if self.kv_recv_threads:
+                opened = self.kv_recv_threads[0].start_get_sessions(load_keys)
+                for recv_thread in self.kv_recv_threads[1:]:
+                    recv_thread.start_get_sessions(load_keys)
+            if self._session_tracker is not None and opened:
+                owning_req_ids = {
+                    r.req_id
+                    for r in requests
+                    if r.load_spec is not None and r.load_spec.can_load
+                }
+                for key in opened:
+                    self._session_tracker.record_get_result(
+                        key, owning_req_ids, succeeded=True
+                    )
             with self._load_session_lock:
                 self._opened_load_keys = load_keys
                 self._load_sessions_closed = False
 
     def _close_load_sessions_once(self) -> None:
-        """Release all get sessions (one-shot per step).
+        """Release all get sessions (legacy one-shot, kept for reference).
 
-        Called at the end of the final layer's ``save_kv_layer``, after
-        ``_wait_for_all_layer_saves()`` and before ``_reset_layer_state()``.
-        At this point every layer has been loaded and saved, so the lease
-        can be released safely.
+        Replaced by release_terminal() in wait_for_layer_load().
         """
         if not self._use_session_api:
             return
@@ -2562,6 +2666,10 @@ class MooncakeStoreWorker:
                 self.kv_send_thread._use_session_api = getattr(
                     self, '_use_session_api', False
                 )
+                if self._use_session_api:
+                    self.kv_send_thread._put_started_keys = self._put_started_keys
+                    self.kv_send_thread._put_started_keys_lock = self._put_started_keys_lock
+                    self.kv_send_thread._session_tracker = self._session_tracker
                 for layer_id in range(self._num_layers):
                     self.kv_send_thread.set_layer_finished_event(
                         layer_id, True, self._layer_save_finished_events[layer_id]
@@ -2612,11 +2720,6 @@ class MooncakeStoreWorker:
             return
 
         if self._layerwise_enabled:
-            # Backfill load_spec.token_len before starting sessions. It defaults
-            # to 0 and _start_layerwise_sessions() reads it to decide which
-            # blocks to lease via batch_get_session_start(); leaving it empty
-            # means no get session is opened and the later
-            # batch_get_into_multi_buffer_ranges returns rc=-600 for every key.
             for req_meta in metadata.requests:
                 load_spec = req_meta.load_spec
                 if (
@@ -2638,8 +2741,9 @@ class MooncakeStoreWorker:
             assert self.load_async, "load_async must be True for better performance."
 
     def wait_for_save(self, metadata: MooncakeStoreConnectorMetadata):
-        """Issue async stores (non-layerwise) or no-op (layerwise).
+        """Issue async stores with CUDA event synchronization (non-layerwise) or no-op (layerwise).
 
+        Runs after the forward launch for compute-I/O overlap.
         Layerwise stores are issued per-layer from save_kv_layer().
         """
         if self._capacity_only or not self.can_put:
@@ -2784,6 +2888,7 @@ class MooncakeStoreWorker:
                             block_ids=list(block_ids_out),
                             is_save=True,
                             use_key_major_ranges=self._use_session_api,
+                            store_job_id=req_meta.store_job_id,
                         )
                         self._layer_save_tasks[physical_layer_id].append(task)
 
@@ -2861,6 +2966,7 @@ class MooncakeStoreWorker:
                             block_ids=block_ids,
                             is_save=False,
                             use_key_major_ranges=self._use_session_api,
+                            store_job_id=req_meta.store_job_id,
                         )
                         self._layer_load_tasks[physical_layer_id].append(task)
 
@@ -2924,6 +3030,20 @@ class MooncakeStoreWorker:
         # Submit this layer's save tasks to the send thread.
         tasks = self._layer_save_tasks.get(layer_id, [])
         if tasks and self.kv_send_thread:
+            if layer_id == 0:
+                seen_req_ids: set[str] = set()
+                with self.kv_send_thread.done_task_lock:
+                    for task in tasks:
+                        req_id = task.req_id
+                        if (
+                            req_id not in seen_req_ids
+                            and task.is_save
+                            and task.store_job_id is not None
+                        ):
+                            seen_req_ids.add(req_id)
+                            self.kv_send_thread.stored_requests.setdefault(
+                                req_id, set()
+                            ).add(task.store_job_id)
             for task in tasks:
                 self.kv_send_thread.add_request(task)
         elif not tasks:
@@ -2932,29 +3052,20 @@ class MooncakeStoreWorker:
             if event is not None:
                 event.set()
 
-        # Last layer: wait for all saves to complete.
-        # Guard: finalize only once per step. If save_kv_layer fires twice for
-        # the last layer (e.g. both the @maybe_transfer_kv_layer decorator and
-        # an explicit hook), the second call would otherwise hit the
-        # _reset_layer_state()-replaced events and hang in _wait_for_all_layer_saves.
-        if layer_id == self._num_layers - 1 and not self._save_finalized:
-            self._save_finalized = True
+        # Last layer: wait for all saves to complete, then clear (not rebuild)
+        # the save events so the next chunk reuses the SAME Event objects.
+        if layer_id == self._num_layers - 1:
             self._wait_for_all_layer_saves()
-            # Session API: release get-session leases now that all layers are done.
-            self._close_load_sessions_once()
-            # Reset state for the next round of requests.
-            self._reset_layer_state()
+            for lid in range(self._num_layers):
+                ev = self._layer_save_finished_events.get(lid)
+                if ev is not None:
+                    ev.clear()
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """Wait for one layer's KV cache to finish loading from the store.
-
-        Called by ``@maybe_transfer_kv_layer`` before that layer's attention
-        forward runs.
-        """
+        """Wait for one layer's KV cache to finish loading from the store."""
         if not self._layerwise_enabled:
             return
 
-        # Extract the layer index from layer_name.
         from vllm.model_executor.models.utils import extract_layer_index
         try:
             layer_id = extract_layer_index(layer_name)
@@ -2965,24 +3076,49 @@ class MooncakeStoreWorker:
                 logger.warning("Cannot extract layer_id from %s", layer_name)
                 return
 
-        # Submit prefetch tasks for the following layers.
         self._submit_ready_layer_loads()
 
-        # No load tasks (cold start or full hit): mark complete directly.
         tasks = self._layer_load_tasks.get(layer_id, [])
         if not tasks:
+            # No load task — clear (not set) so stale set from a prior
+            # chunk cannot be mistaken for this layer's completion.
             event = self._layer_load_finished_events.get(layer_id)
             if event is not None:
-                event.set()
+                event.clear()
         else:
-            # Wait for this layer's load to complete.
             event = self._layer_load_finished_events.get(layer_id)
             if event is not None and not event.is_set():
                 if not event.wait(timeout=10.0):
                     logger.warning("Timeout waiting for layer %d to load", layer_id)
-                # Not cleared here; _reset_layer_state() rebuilds all events.
+            if event is not None:
+                event.clear()
 
         self._current_load_layer += 1
+
+        # Last layer of the last prefill chunk: close get sessions (reference-
+        # counted via tracker). Intermediate chunks keep get sessions open.
+        if (
+            layer_id == self._num_layers - 1
+            and self._use_session_api
+            and self._session_tracker is not None
+            and self._current_mooncake_last_chunk_req_ids
+        ):
+            keys_to_end = self._session_tracker.release_terminal(
+                self._current_mooncake_last_chunk_req_ids
+            )
+            if keys_to_end:
+                for recv_thread in self.kv_recv_threads:
+                    recv_thread.end_get_sessions(keys_to_end)
+            self._current_mooncake_last_chunk_req_ids = set()
+            with self._load_session_lock:
+                self._load_sessions_closed = True
+                self._opened_load_keys = []
+
+        # Reset counters at the last layer — events stay alive.
+        if layer_id == self._num_layers - 1:
+            self._current_save_layer = 0
+            self._current_load_layer = 0
+            self._next_load_layer_to_submit = 0
 
     def _wait_for_all_layer_saves(self) -> None:
         """Wait for all layers' saves to complete."""
@@ -2992,66 +3128,6 @@ class MooncakeStoreWorker:
                 if not event.wait(timeout=10.0):
                     logger.warning("Timeout waiting for layer %d to save", layer_id)
                 # Not cleared here; _reset_layer_state() rebuilds all events.
-
-    def _reset_layer_state(self) -> None:
-        """Reset layerwise state for the next round of requests.
-
-        Re-create all event objects (instead of clear()) so a stale set()
-        from the previous round's transfer threads cannot be mistaken for the
-        current round's completion signal.
-        """
-        self._current_save_layer = 0
-        self._current_load_layer = 0
-        self._next_load_layer_to_submit = 0
-        self._save_finalized = False
-
-        for layer_id in range(self._num_layers):
-            self._layer_save_tasks[layer_id] = []
-            self._layer_load_tasks[layer_id] = []
-
-        for layer_id in range(self._num_layers):
-            self._layer_save_finished_events[layer_id] = threading.Event()
-            self._layer_load_finished_events[layer_id] = threading.Event()
-
-        # Re-sync the events to the transfer threads.
-        if self.kv_send_thread is not None and self.kv_send_thread._layerwise_enabled:
-            for layer_id in range(self._num_layers):
-                self.kv_send_thread.set_layer_finished_event(
-                    layer_id, True, self._layer_save_finished_events[layer_id]
-                )
-        for recv_thread in self.kv_recv_threads:
-            if recv_thread._layerwise_enabled:
-                for layer_id in range(self._num_layers):
-                    recv_thread.set_layer_finished_event(
-                        layer_id, False, self._layer_load_finished_events[layer_id]
-                    )
-
-        # Session API: reset one-shot guard so the next step can release
-        # its load sessions.
-        if self._use_session_api:
-            self._load_sessions_closed = False
-            self._opened_load_keys = []
-
-
-        if self.can_put:
-            self._close_ended_store_requests(finished_req_ids, meta)
-
-        # Blocks read by a store job are released by the scheduler when the job
-        # reports back (see build_connector_worker_meta), so no request ever waits
-        # on a `finished_sending` signal to get its blocks back.
-        done_sending: set[str] = set()
-        done_recving: set[str] = set()
-        if self.load_async:
-            for recv_thread in self.kv_recv_threads:
-                done_recving |= recv_thread.get_and_clear_finished_requests()
-
-        logger.debug(
-            "Completed send: %d, recv: %d, tp_rank: %d",
-            len(done_sending),
-            len(done_recving),
-            self.tp_rank,
-        )
-        return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         block_ids: set[int] = set()
