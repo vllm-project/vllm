@@ -195,6 +195,29 @@ class CpuPlatform(Platform):
         return torch.no_grad()
 
     @classmethod
+    def _uses_gelu_activation(cls, model_config) -> bool:
+        """Best-effort check whether the model uses a GELU-family activation.
+
+        Falls back to True when the activation cannot be determined, so the
+        ARM GELU LUT ops are never withheld from a model that may need them.
+        """
+        if model_config is None:
+            return True
+        hf_config = getattr(model_config, "hf_text_config", None) or getattr(
+            model_config, "hf_config", None
+        )
+        if hf_config is None:
+            return True
+        acts = [
+            getattr(hf_config, attr, None)
+            for attr in ("hidden_act", "hidden_activation", "activation_function")
+        ]
+        known = [a for a in acts if isinstance(a, str)]
+        if not known:
+            return True
+        return any("gelu" in a.lower() for a in known)
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         model_config = vllm_config.model_config
 
@@ -317,24 +340,19 @@ class CpuPlatform(Platform):
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE
 
-        if (
-            cls.get_cpu_architecture() == CpuArchEnum.ARM
-            and "+gelu" not in compilation_config.custom_ops
-            and "-gelu" not in compilation_config.custom_ops
+        # Enable the ARM GELU LUT ops only for models that actually use a
+        # GELU-family activation; unconditionally appending them makes
+        # check_enabled_custom_ops() warn "has no effect" for every other
+        # model (e.g. SiLU-based ones) on every ARM CPU startup.
+        if cls.get_cpu_architecture() == CpuArchEnum.ARM and cls._uses_gelu_activation(
+            vllm_config.model_config
         ):
-            compilation_config.custom_ops.append("+gelu")
-        if (
-            cls.get_cpu_architecture() == CpuArchEnum.ARM
-            and "+gelu_tanh" not in compilation_config.custom_ops
-            and "-gelu_tanh" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+gelu_tanh")
-        if (
-            cls.get_cpu_architecture() == CpuArchEnum.ARM
-            and "+gelu_and_mul" not in compilation_config.custom_ops
-            and "-gelu_and_mul" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+gelu_and_mul")
+            for gelu_op in ("gelu", "gelu_tanh", "gelu_and_mul"):
+                if (
+                    f"+{gelu_op}" not in compilation_config.custom_ops
+                    and f"-{gelu_op}" not in compilation_config.custom_ops
+                ):
+                    compilation_config.custom_ops.append(f"+{gelu_op}")
 
         vllm_config.profiler_config.torch_profiler_dump_cuda_time_total = False
 
