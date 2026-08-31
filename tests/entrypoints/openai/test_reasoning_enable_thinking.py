@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for reasoning_effort -> chat template kwarg mappings.
+"""Unit tests for reasoning_effort -> enable_thinking mapping.
 
 Models like Gemma4 require enable_thinking=True in chat_template_kwargs to
-activate thinking mode, and MuseGlimmer templates read reasoning_strength.
-These mappings ensure that when a user requests reasoning (via
-reasoning_effort or reasoning.effort), the template kwargs are injected
-automatically.
+activate thinking mode. This mapping ensures that when a user requests
+reasoning (via reasoning_effort or reasoning.effort), the template kwarg
+is injected automatically.
 """
 
 import pytest
@@ -68,25 +67,6 @@ class TestChatCompletionReasoningEffort:
         params = request.build_chat_params(None, "auto")
         assert params.chat_template_kwargs["reasoning_effort"] == "high"
 
-    @pytest.mark.parametrize("effort", ["low", "medium", "high"])
-    def test_effort_injects_reasoning_strength(self, effort):
-        request = _build_chat_request(reasoning_effort=effort)
-        params = request.build_chat_params(None, "auto")
-        assert params.chat_template_kwargs["reasoning_strength"] == effort
-
-    def test_no_effort_does_not_inject_reasoning_strength(self):
-        request = _build_chat_request()
-        params = request.build_chat_params(None, "auto")
-        assert "reasoning_strength" not in params.chat_template_kwargs
-
-    def test_explicit_reasoning_strength_not_overridden(self):
-        request = _build_chat_request(
-            reasoning_effort="high",
-            chat_template_kwargs={"reasoning_strength": "low"},
-        )
-        params = request.build_chat_params(None, "auto")
-        assert params.chat_template_kwargs["reasoning_strength"] == "low"
-
 
 class TestResponsesReasoningEffort:
     """Responses API: reasoning.effort -> enable_thinking."""
@@ -125,24 +105,3 @@ class TestResponsesReasoningEffort:
         )
         params = request.build_chat_params(None, "auto")
         assert params.chat_template_kwargs["reasoning_effort"] == "high"
-
-    @pytest.mark.parametrize("effort", ["low", "medium", "high"])
-    def test_effort_injects_reasoning_strength(self, effort):
-        request = _build_responses_request(
-            reasoning=Reasoning(effort=effort),
-        )
-        params = request.build_chat_params(None, "auto")
-        assert params.chat_template_kwargs["reasoning_strength"] == effort
-
-    def test_no_reasoning_does_not_inject_reasoning_strength(self):
-        request = _build_responses_request()
-        params = request.build_chat_params(None, "auto")
-        assert "reasoning_strength" not in params.chat_template_kwargs
-
-    def test_explicit_reasoning_strength_not_overridden(self):
-        request = _build_responses_request(
-            reasoning=Reasoning(effort="high"),
-            chat_template_kwargs={"reasoning_strength": "low"},
-        )
-        params = request.build_chat_params(None, "auto")
-        assert params.chat_template_kwargs["reasoning_strength"] == "low"
