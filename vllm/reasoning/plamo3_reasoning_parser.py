@@ -248,7 +248,7 @@ class Plamo3ReasoningParser(ReasoningParser):
             return self._identity_parser.extract_content_ids(input_ids)
 
         ids = self._stream_token_ids or input_ids
-        end_start = self._find_seq(ids, self._end_think_token_ids)
+        end_start = self._find_seq(ids, self._end_think_token_ids, reverse=True)
         if end_start == -1:
             return []
 
