@@ -650,6 +650,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     "cache managers require block-aligned lookups: %s.",
                     ", ".join(sorted(unsupported_partial_hit_managers)),
                 )
+        cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
+        for manager in self.single_type_managers:
+            manager.cache_hit_alignment_tokens = cache_hit_alignment_tokens
         self.verify_and_split_kv_cache_groups()
 
     @property
