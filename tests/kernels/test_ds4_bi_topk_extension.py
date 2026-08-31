@@ -76,3 +76,41 @@ def test_standalone_topk_matches_vllm_score_and_tie_order() -> None:
             4,
         )
         torch.testing.assert_close(indices, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("width", [4095, 4096, 4097, 262144])
+@torch.inference_mode()
+def test_standalone_topk_has_no_packed_width_limit(width: int) -> None:
+    library = os.environ.get("DS4_BI_TOPK_LIB")
+    if not library:
+        pytest.skip("DS4_BI_TOPK_LIB is not configured")
+    torch.ops.load_library(library)
+
+    top_k = 64
+    logits = torch.zeros((2, width), dtype=torch.float32, device="cuda")
+    # Exercise a short offset row as well as a row spanning the full packed
+    # width. Equal scores make the expected descending local-index tie break
+    # exact and cheap to construct even for a 256K context.
+    row_starts = torch.tensor([17, 0], dtype=torch.int32, device="cuda")
+    row_ends = torch.tensor(
+        [min(width, 529), width], dtype=torch.int32, device="cuda"
+    )
+    indices = torch.empty((2, top_k), dtype=torch.int32, device="cuda")
+
+    torch.ops.ds4_bi.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        2,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+    lengths = row_ends - row_starts
+    expected = lengths[:, None] - 1 - torch.arange(
+        top_k, dtype=torch.int32, device="cuda"
+    )
+    torch.testing.assert_close(indices, expected, rtol=0, atol=0)
