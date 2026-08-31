@@ -81,7 +81,9 @@ def causal_conv1d_fn_cpu(
             block_row = None
             slot = int(cache_indices[seq_idx].item())
 
-        if slot == pad_slot_id or slot == NULL_BLOCK_ID:
+        # Block 0 is the reserved null block only in the block-table layout;
+        # in the legacy layout slot 0 is a valid state slot.
+        if slot == pad_slot_id or (block_table_mode and slot == NULL_BLOCK_ID):
             continue
 
         seq_x = x[:, bos:eos].unsqueeze(0)
