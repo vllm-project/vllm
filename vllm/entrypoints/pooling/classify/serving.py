@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.foundation.observability.logger import init_logger
-from vllm.outputs import ClassificationOutput
+from vllm.frontend.processing.outputs import ClassificationOutput
 
 from ..base.serving import PoolingServing
 from ..typing import PoolingServeContext

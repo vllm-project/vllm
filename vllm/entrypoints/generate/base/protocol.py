@@ -20,7 +20,7 @@ from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.frontend.processing.sampling_params import StructuredOutputsParams
 from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
@@ -176,7 +176,7 @@ def validate_structural_tag_response_format(
 
 
 def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
-    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+    from vllm.frontend.processing.sampling_params import SamplingParams, StructuredOutputsParams
     from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 
     if isinstance(payload, str) and not payload:
@@ -201,7 +201,7 @@ def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
 def validate_structured_outputs_structural_tag(
     structured_outputs: Any,
 ) -> None:
-    from vllm.sampling_params import StructuredOutputsParams
+    from vllm.frontend.processing.sampling_params import StructuredOutputsParams
 
     if isinstance(structured_outputs, StructuredOutputsParams):
         structural_tag = structured_outputs.structural_tag

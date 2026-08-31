@@ -14,7 +14,7 @@ from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
-from vllm.tasks import PoolingTask
+from vllm.frontend.processing.tasks import PoolingTask
 from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 
 from ...chat_utils import ChatTemplateResolutionError

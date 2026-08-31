@@ -31,7 +31,7 @@ from vllm.foundation.config import (
 )
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.logging_utils import logtime
-from vllm.tasks import ScoreType
+from vllm.frontend.processing.tasks import ScoreType
 from vllm.foundation.integrations.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
 from vllm.foundation.utilities.hashing import safe_hash
 

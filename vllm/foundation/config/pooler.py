@@ -8,7 +8,7 @@ from pydantic_core import ArgsKwargs
 
 from vllm.foundation.config.utils import config
 from vllm.foundation.observability.logger import init_logger
-from vllm.tasks import PoolingTask, check_removed_pooling_task
+from vllm.frontend.processing.tasks import PoolingTask, check_removed_pooling_task
 from vllm.foundation.utilities.hashing import safe_hash
 
 logger = init_logger(__name__)

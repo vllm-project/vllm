@@ -50,7 +50,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils impo
     mla_enabled,
 )
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank, get_tp_group
-from vllm.sampling_params import SamplingParams
+from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.foundation.utilities.torch_utils import get_kv_cache_torch_dtype
 from vllm.v1.attention.backend import AttentionMetadata

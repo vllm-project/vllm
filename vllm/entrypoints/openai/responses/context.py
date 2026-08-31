@@ -37,7 +37,7 @@ from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     construct_tool_dicts,
 )
-from vllm.outputs import RequestOutput
+from vllm.frontend.processing.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
 from vllm.foundation.utilities import random_uuid

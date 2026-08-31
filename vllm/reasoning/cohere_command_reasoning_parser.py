@@ -33,7 +33,7 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning import ReasoningParser
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.frontend.processing.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:

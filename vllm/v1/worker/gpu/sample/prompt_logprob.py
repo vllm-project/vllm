@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from vllm.foundation.config.model import LogprobsMode
-from vllm.sampling_params import SamplingParams
+from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch

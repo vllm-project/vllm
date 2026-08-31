@@ -16,8 +16,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from vllm.foundation.config import ModelConfig
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.foundation.observability.logger import init_logger
-from vllm.outputs import PoolingRequestOutput
-from vllm.tasks import SupportedTask
+from vllm.frontend.processing.outputs import PoolingRequestOutput
+from vllm.frontend.processing.tasks import SupportedTask
 from vllm.foundation.utilities.serial_utils import (
     EMBED_DTYPES,
     EmbedDType,

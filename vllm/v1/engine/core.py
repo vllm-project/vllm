@@ -33,7 +33,7 @@ from vllm.foundation.observability.logging_utils.dump_input import dump_engine_e
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalCacheMissError
-from vllm.tasks import POOLING_TASKS, SupportedTask
+from vllm.frontend.processing.tasks import POOLING_TASKS, SupportedTask
 from vllm.foundation.observability.tracing import instrument, maybe_init_worker_tracer
 from vllm.foundation.integrations.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.foundation.utilities import numa_utils

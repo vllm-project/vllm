@@ -14,7 +14,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
-from vllm.tasks import check_removed_pooling_task
+from vllm.frontend.processing.tasks import check_removed_pooling_task
 from vllm.foundation.utilities import random_uuid
 from vllm.foundation.utilities.serial_utils import EmbedDType, EncodingFormat, Endianness
 

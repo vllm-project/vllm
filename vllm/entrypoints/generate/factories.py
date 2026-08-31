@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING
 
 from vllm.foundation.config import ModelConfig
-from vllm.tasks import SupportedTask
+from vllm.frontend.processing.tasks import SupportedTask
 
 if TYPE_CHECKING:
     from vllm.entrypoints.serve.sagemaker.api_router import (

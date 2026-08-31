@@ -12,7 +12,7 @@ from pydantic import ConfigDict
 from starlette.datastructures import Headers
 
 from vllm import RequestOutput
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     SpeculativeDecodingMetrics,

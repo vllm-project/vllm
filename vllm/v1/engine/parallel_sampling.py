@@ -4,8 +4,8 @@
 from copy import copy
 from typing import cast
 
-from vllm.outputs import CompletionOutput
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.frontend.processing.outputs import CompletionOutput
+from vllm.frontend.processing.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import IterationStats
 

@@ -17,7 +17,7 @@ from typing import Literal
 from fastapi import Request
 from pydantic import Field
 
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
@@ -28,8 +28,8 @@ from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, tokens_input
 from vllm.foundation.observability.logger import init_logger
-from vllm.outputs import RequestOutput
-from vllm.sampling_params import SamplingParams
+from vllm.frontend.processing.outputs import RequestOutput
+from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.foundation.observability.tracing import (
     contains_trace_headers,

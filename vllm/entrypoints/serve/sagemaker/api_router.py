@@ -18,7 +18,7 @@ from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.instrumentator.basic import base
 from vllm.entrypoints.serve.instrumentator.health import health
 from vllm.entrypoints.serve.utils.api_utils import validate_json_request
-from vllm.tasks import SupportedTask
+from vllm.frontend.processing.tasks import SupportedTask
 
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
 # (requires typing_extensions >= 4.13)

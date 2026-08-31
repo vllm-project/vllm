@@ -10,7 +10,7 @@ from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.extensibility.plugins.io_processors import has_io_processor
 from vllm.renderers import BaseRenderer
-from vllm.tasks import POOLING_TASKS, SCORE_TYPE_MAP, SupportedTask
+from vllm.frontend.processing.tasks import POOLING_TASKS, SCORE_TYPE_MAP, SupportedTask
 
 from .base.io_processor import PoolingIOProcessor
 from .utils import enable_scoring_api
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
     from starlette.datastructures import State
 
-    from vllm.engine.protocol import EngineClient
+    from vllm.frontend.compat.engine.protocol import EngineClient
     from vllm.entrypoints.serve.sagemaker.api_router import (
         EndpointFn,
         GetHandlerFn,
@@ -152,7 +152,7 @@ def init_pooling_state(
         return
 
     from vllm.entrypoints.chat_utils import load_chat_template
-    from vllm.tasks import POOLING_TASKS
+    from vllm.frontend.processing.tasks import POOLING_TASKS
 
     from .classify.serving import ServingClassification
     from .embed.serving import ServingEmbedding

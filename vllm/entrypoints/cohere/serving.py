@@ -44,7 +44,7 @@ from cohere.types import (
 from fastapi import Request
 from pydantic import BaseModel
 
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.cohere.cohere_chat_message import (
     CitationSource as InternalCitationSource,

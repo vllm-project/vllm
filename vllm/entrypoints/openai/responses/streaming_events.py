@@ -76,7 +76,7 @@ from vllm.entrypoints.openai.responses.utils import (
     build_responses_tool_call_name_map,
     resolve_responses_tool_call_name,
 )
-from vllm.outputs import CompletionOutput
+from vllm.frontend.processing.outputs import CompletionOutput
 from vllm.parser.harmony import Segment
 from vllm.foundation.utilities import random_uuid
 

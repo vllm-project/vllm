@@ -16,7 +16,7 @@ from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.engine.protocol import StreamingInput
+from vllm.frontend.compat.engine.protocol import StreamingInput
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime

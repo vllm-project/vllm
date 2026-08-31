@@ -34,10 +34,10 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from fastapi import FastAPI
 from starlette.datastructures import State
 
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 
 if TYPE_CHECKING:
-    from vllm.tasks import SupportedTask
+    from vllm.frontend.processing.tasks import SupportedTask
 
 
 @runtime_checkable

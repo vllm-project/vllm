@@ -12,7 +12,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsEncoderCudaGraph,
     supports_encoder_cudagraph,
 )
-from vllm.tasks import GenerationTask
+from vllm.frontend.processing.tasks import GenerationTask
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig

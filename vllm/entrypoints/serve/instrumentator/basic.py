@@ -4,7 +4,7 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.foundation.observability.logger import init_logger
 from vllm.version import __version__ as VLLM_VERSION

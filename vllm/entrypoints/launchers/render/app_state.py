@@ -25,7 +25,7 @@ async def init_render_app_state(
     """Initialise FastAPI app state for a CPU-only render server.
 
     Unlike :func:`init_app_state` this function does not require an
-    :class:`~vllm.engine.protocol.EngineClient`; it bootstraps the
+    :class:`~vllm.frontend.compat.engine.protocol.EngineClient`; it bootstraps the
     preprocessing pipeline (renderer, input_processor)
     directly from the :class:`~vllm.foundation.config.VllmConfig`.
     """

@@ -11,8 +11,8 @@ from vllm import RequestOutput, TextPrompt, TokensPrompt
 from vllm.entrypoints.offline_utils import OfflineInferenceMixin
 from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import (
+from vllm.frontend.processing.pooling_params import PoolingParams
+from vllm.frontend.processing.sampling_params import (
     BeamSearchParams,
     SamplingParams,
     StructuredOutputsParams,

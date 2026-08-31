@@ -29,7 +29,7 @@ from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
-from vllm.sampling_params import RequestOutputKind
+from vllm.frontend.processing.sampling_params import RequestOutputKind
 from vllm.foundation.utilities.counter import Counter
 from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 from vllm.foundation.utilities.tqdm_utils import maybe_tqdm

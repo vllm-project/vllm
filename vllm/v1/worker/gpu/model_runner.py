@@ -60,7 +60,7 @@ from vllm.multimodal.encoder_budget import (
     get_dummy_encoder_profile_inputs,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.tasks import SupportedTask
+from vllm.frontend.processing.tasks import SupportedTask
 from vllm.foundation.utilities.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.foundation.utilities.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput

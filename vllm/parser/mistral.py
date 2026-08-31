@@ -48,7 +48,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.frontend.processing.sampling_params import StructuredOutputsParams
 from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:

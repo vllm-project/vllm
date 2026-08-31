@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
-from vllm.engine.protocol import EngineClient
-from vllm.tasks import SupportedTask
+from vllm.frontend.compat.engine.protocol import EngineClient
+from vllm.frontend.processing.tasks import SupportedTask
 
 if TYPE_CHECKING:
     from starlette.datastructures import State

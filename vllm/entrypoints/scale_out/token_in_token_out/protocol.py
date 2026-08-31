@@ -24,7 +24,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
-from vllm.sampling_params import SamplingParams
+from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.foundation.utilities import random_uuid
 
 ####### Tokens IN <> Tokens OUT #######

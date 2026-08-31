@@ -25,7 +25,7 @@ from vllm.benchmarks.lib.utils import (
     convert_to_pytorch_benchmark_format,
     write_to_json,
 )
-from vllm.engine.arg_utils import EngineArgs
+from vllm.frontend.compat.engine.arg_utils import EngineArgs
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
 PERCENTAGES = [10, 25, 50, 75, 90, 99]

@@ -29,8 +29,8 @@ from urllib3.util import parse_url
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import config
 from vllm.foundation.system.connections import HTTPResponseSizeExceededError, global_http_connection
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,

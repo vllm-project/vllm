@@ -30,7 +30,7 @@ from vllm.foundation.observability.logger import init_logger
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.frontend.processing.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.streaming import (

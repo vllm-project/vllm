@@ -12,7 +12,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.engine import PauseMode
 

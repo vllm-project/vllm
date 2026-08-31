@@ -21,11 +21,11 @@ from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.platforms import current_platform
-from vllm.pooling_params import PoolingParams
+from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs.preprocess import parse_model_prompt
-from vllm.sampling_params import SamplingParams
-from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
+from vllm.frontend.processing.sampling_params import SamplingParams
+from vllm.frontend.processing.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.foundation.utilities.async_utils import make_async

@@ -6,7 +6,7 @@ from collections import defaultdict
 from http import HTTPStatus
 
 from vllm.foundation.config import ModelConfig
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
 from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import (

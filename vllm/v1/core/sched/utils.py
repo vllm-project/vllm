@@ -3,7 +3,7 @@
 import contextlib
 from collections.abc import Sequence
 
-from vllm.sampling_params import RepetitionDetectionParams
+from vllm.frontend.processing.sampling_params import RepetitionDetectionParams
 from vllm.v1.request import Request, RequestStatus
 
 

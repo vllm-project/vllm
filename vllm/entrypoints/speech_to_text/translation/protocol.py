@@ -16,7 +16,7 @@ from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
-from vllm.sampling_params import (
+from vllm.frontend.processing.sampling_params import (
     BeamSearchParams,
     RequestOutputKind,
     SamplingParams,

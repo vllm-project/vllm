@@ -14,8 +14,8 @@ import torch
 from vllm.foundation.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams
+from vllm.frontend.processing.pooling_params import PoolingParams
+from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import (
     PrefillStats,
     RequestSpecDecodeMetrics,

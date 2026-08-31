@@ -11,8 +11,8 @@ import torch
 from vllm.foundation.config.reasoning import ReasoningConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.frontend.processing.pooling_params import PoolingParams
+from vllm.frontend.processing.sampling_params import SamplingParams, SamplingType
 from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
 from vllm.foundation.utilities.collection_utils import swap_dict_values
 from vllm.foundation.utilities.torch_utils import PIN_MEMORY

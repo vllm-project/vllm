@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 
-from vllm.sampling_params import SamplingParams
+from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.gumbel import apply_temperature

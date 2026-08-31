@@ -11,9 +11,9 @@ if TYPE_CHECKING:
 
     from starlette.datastructures import State
 
-    from vllm.engine.protocol import EngineClient
+    from vllm.frontend.compat.engine.protocol import EngineClient
     from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-    from vllm.tasks import SupportedTask
+    from vllm.frontend.processing.tasks import SupportedTask
 else:
     RequestLogger = object
 

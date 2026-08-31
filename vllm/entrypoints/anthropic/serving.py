@@ -15,7 +15,7 @@ from typing import Any
 import jinja2
 from fastapi import Request
 
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicContentBlock,
     AnthropicContextManagement,

@@ -10,7 +10,7 @@ from typing import Any, Final, cast
 
 from fastapi import Request
 
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
@@ -58,11 +58,11 @@ from vllm.foundation.system.exceptions import GenerationError
 from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.outputs import RequestOutput
+from vllm.frontend.processing.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.frontend.processing.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.foundation.utilities.collection_utils import as_list
 from vllm.foundation.utilities.serial_utils import numpy2base64

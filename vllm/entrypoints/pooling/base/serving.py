@@ -14,7 +14,7 @@ from starlette.datastructures import Headers
 
 from vllm import PoolingRequestOutput, envs
 from vllm.foundation.config import VllmConfig
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing

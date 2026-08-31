@@ -9,7 +9,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from vllm import envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.tasks import SupportedTask
+from vllm.frontend.processing.tasks import SupportedTask
 
 from .log_response import log_response
 

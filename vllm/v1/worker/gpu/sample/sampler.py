@@ -7,7 +7,7 @@ import torch
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.foundation.config.reasoning import ReasoningConfig
-from vllm.sampling_params import SamplingParams
+from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,

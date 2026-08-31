@@ -8,8 +8,8 @@ import torch
 
 from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.frontend.processing.pooling_params import PoolingParams
+from vllm.frontend.processing.sampling_params import BeamSearchParams, SamplingParams
 
 logger = init_logger(__name__)
 

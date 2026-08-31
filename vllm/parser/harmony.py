@@ -45,7 +45,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.foundation.observability.logger import init_logger
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.frontend.processing.sampling_params import StructuredOutputsParams
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SimplifiedToolChoice,

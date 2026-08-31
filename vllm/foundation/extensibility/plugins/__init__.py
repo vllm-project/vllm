@@ -9,7 +9,7 @@ import vllm.foundation.system.envs as envs
 
 if TYPE_CHECKING:
     from vllm.foundation.extensibility.plugins.endpoint_plugins.interface import EndpointPlugin
-    from vllm.tasks import SupportedTask
+    from vllm.frontend.processing.tasks import SupportedTask
 
 logger = logging.getLogger(__name__)
 

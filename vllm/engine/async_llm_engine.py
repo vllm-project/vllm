@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.v1.engine.async_llm import AsyncLLM
+"""Compatibility shim: vllm.engine/async_llm_engine -> vllm.frontend.compat.engine.async_llm_engine (sys.modules alias)."""
+import importlib
+import sys
 
-AsyncLLMEngine = AsyncLLM  # type: ignore
-"""The `AsyncLLMEngine` class is an alias of [vllm.v1.engine.async_llm.AsyncLLM][]."""
+_real = importlib.import_module("vllm.frontend.compat.engine.async_llm_engine")
+sys.modules[__name__] = _real

@@ -9,7 +9,7 @@ from vllm import PoolingParams
 from vllm.foundation.config import ModelConfig
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.renderers import TokenizeParams
-from vllm.tasks import PoolingTask
+from vllm.frontend.processing.tasks import PoolingTask
 from vllm.foundation.utilities import random_uuid
 
 from ..base.protocol import (

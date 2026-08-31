@@ -10,7 +10,7 @@ import torch
 import vllm.foundation.system.envs
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
-from vllm.sampling_params import SamplingParams
+from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.foundation.utilities.import_utils import LazyLoader
 from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (

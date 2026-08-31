@@ -30,7 +30,7 @@ from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 from vllm.foundation.utilities.import_utils import PlaceholderModule
 
 if TYPE_CHECKING:
-    from vllm.engine.arg_utils import EngineArgs
+    from vllm.frontend.compat.engine.arg_utils import EngineArgs
 
 try:
     from tensorizer import (

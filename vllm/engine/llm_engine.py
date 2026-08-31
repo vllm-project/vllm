@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+"""Compatibility shim: vllm.engine/llm_engine -> vllm.frontend.compat.engine.llm_engine (sys.modules alias)."""
+import importlib
+import sys
 
-LLMEngine = V1LLMEngine  # type: ignore
-"""The `LLMEngine` class is an alias of [vllm.v1.engine.llm_engine.LLMEngine][]."""
+_real = importlib.import_module("vllm.frontend.compat.engine.llm_engine")
+sys.modules[__name__] = _real

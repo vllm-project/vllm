@@ -32,7 +32,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
-from vllm.engine.arg_utils import EngineArgs
+from vllm.frontend.compat.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -45,9 +45,9 @@ from vllm.inputs import PromptType
 from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.frontend.processing.outputs import PoolingRequestOutput, RequestOutput
 from vllm.platforms import current_platform
-from vllm.sampling_params import SamplingParams
+from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.foundation.observability.usage.usage_lib import UsageContext
 from vllm.foundation.utilities.counter import Counter

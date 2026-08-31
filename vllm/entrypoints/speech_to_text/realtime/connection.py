@@ -211,7 +211,7 @@ class RealtimeConnection:
 
         try:
             # Create sampling params
-            from vllm.sampling_params import RequestOutputKind, SamplingParams
+            from vllm.frontend.processing.sampling_params import RequestOutputKind, SamplingParams
 
             sampling_params = SamplingParams.from_optional(
                 temperature=0.0,

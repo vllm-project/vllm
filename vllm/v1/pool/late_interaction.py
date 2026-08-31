@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 import torch
 
-from vllm.pooling_params import LateInteractionParams, PoolingParams
+from vllm.frontend.processing.pooling_params import LateInteractionParams, PoolingParams
 
 LATE_INTERACTION_MODE_CACHE_QUERY = "cache_query"
 LATE_INTERACTION_MODE_SCORE_DOC = "score_doc"

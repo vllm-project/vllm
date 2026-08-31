@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
-from vllm.outputs import (
+from vllm.frontend.processing.outputs import (
     STREAM_FINISHED,
     CompletionOutput,
     PoolingOutput,
@@ -19,7 +19,7 @@ from vllm.outputs import (
     RequestOutput,
     SamplingMask,
 )
-from vllm.sampling_params import RequestOutputKind
+from vllm.frontend.processing.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
 from vllm.foundation.observability.tracing import (
     SpanAttributes,

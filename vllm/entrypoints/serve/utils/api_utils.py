@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
 from vllm import envs
-from vllm.engine.arg_utils import EngineArgs
+from vllm.frontend.compat.engine.arg_utils import EngineArgs
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.foundation.observability.logger import current_formatter_type, init_logger

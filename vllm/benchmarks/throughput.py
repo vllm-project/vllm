@@ -23,12 +23,12 @@ from vllm.benchmarks.datasets import (
     get_samples,
 )
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
-from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
+from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
-from vllm.outputs import RequestOutput
+from vllm.frontend.processing.outputs import RequestOutput
 from vllm.platforms import current_platform
-from vllm.sampling_params import BeamSearchParams
+from vllm.frontend.processing.sampling_params import BeamSearchParams
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 from vllm.foundation.utilities.async_utils import merge_async_iterators

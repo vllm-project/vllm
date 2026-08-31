@@ -24,7 +24,7 @@ from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
-from vllm.sampling_params import (
+from vllm.frontend.processing.sampling_params import (
     BeamSearchParams,
     RepetitionDetectionParams,
     RequestOutputKind,

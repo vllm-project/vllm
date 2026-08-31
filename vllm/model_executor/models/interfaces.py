@@ -58,7 +58,7 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
-    from vllm.tasks import ScoreType
+    from vllm.frontend.processing.tasks import ScoreType
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,

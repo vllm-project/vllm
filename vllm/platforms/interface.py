@@ -20,8 +20,8 @@ if TYPE_CHECKING:
     from vllm.foundation.config import VllmConfig
     from vllm.foundation.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
-    from vllm.pooling_params import PoolingParams
-    from vllm.sampling_params import SamplingParams
+    from vllm.frontend.processing.pooling_params import PoolingParams
+    from vllm.frontend.processing.sampling_params import SamplingParams
     from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig

@@ -18,20 +18,20 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs
+from vllm.frontend.compat.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
 from vllm.foundation.system.exceptions import VLLMClientError, VLLMValidationError
 from vllm.inputs import EngineInput, PromptType
 from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
-from vllm.pooling_params import PoolingParams
+from vllm.frontend.processing.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
+from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
-from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.tasks import SupportedTask
+from vllm.frontend.processing.sampling_params import RequestOutputKind, SamplingParams
+from vllm.frontend.processing.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.foundation.observability.tracing import init_tracer
 from vllm.foundation.integrations.transformers_utils.config import maybe_register_config_serialize_by_value

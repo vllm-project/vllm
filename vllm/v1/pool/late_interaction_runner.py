@@ -4,7 +4,7 @@ from collections.abc import Iterable
 
 import torch
 
-from vllm.pooling_params import PoolingParams
+from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.late_interaction import (
     LATE_INTERACTION_MODE_CACHE_QUERY,

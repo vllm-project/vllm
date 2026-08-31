@@ -13,7 +13,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from vllm import envs
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.entrypoints.launchers.utils.ssl import SSLCertRefresher
 from vllm.entrypoints.serve.utils.api_utils import (
     log_non_default_args,

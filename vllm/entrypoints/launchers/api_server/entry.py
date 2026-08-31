@@ -13,8 +13,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import vllm.foundation.system.envs as envs
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.foundation.observability.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager

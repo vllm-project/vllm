@@ -8,7 +8,7 @@ from typing import Literal, cast
 
 import numpy as np
 
-from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.frontend.compat.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger

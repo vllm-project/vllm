@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from vllm import envs
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.gc_utils import freeze_gc_heap
 

@@ -42,7 +42,7 @@ except ImportError as e:
 import uvloop
 
 from vllm import envs
-from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.serve.utils.api_utils import log_version_and_model
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.usage.usage_lib import UsageContext

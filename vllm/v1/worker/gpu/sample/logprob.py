@@ -4,7 +4,7 @@
 import numpy as np
 import torch
 
-from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
+from vllm.frontend.processing.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor

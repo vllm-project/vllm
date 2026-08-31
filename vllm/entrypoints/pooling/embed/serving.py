@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.outputs import PoolingRequestOutput
+from vllm.frontend.processing.outputs import PoolingRequestOutput
 from vllm.foundation.utilities.serial_utils import EmbedDType, Endianness
 
 from ..base.io_processor import PoolingIOProcessor

@@ -118,10 +118,10 @@ from vllm.multimodal.utils import (
     set_mm_embedding_modality,
 )
 from vllm.platforms import current_platform
-from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingType
+from vllm.frontend.processing.pooling_params import PoolingParams
+from vllm.frontend.processing.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
-from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
+from vllm.frontend.processing.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.foundation.observability.tracing import instrument
 from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed

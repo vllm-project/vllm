@@ -11,14 +11,14 @@ from vllm.entrypoints.offline_utils import OfflineInferenceMixin
 from vllm.inputs import DataPrompt, PromptType
 from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import (
+from vllm.frontend.processing.outputs import (
     ClassificationRequestOutput,
     EmbeddingRequestOutput,
     PoolingRequestOutput,
     ScoringRequestOutput,
 )
-from vllm.pooling_params import PoolingParams
-from vllm.tasks import SCORE_TYPE_MAP, PoolingTask, SupportedTask
+from vllm.frontend.processing.pooling_params import PoolingParams
+from vllm.frontend.processing.tasks import SCORE_TYPE_MAP, PoolingTask, SupportedTask
 
 from .base.io_processor import PoolingIOProcessor
 from .factories import init_pooling_io_processors

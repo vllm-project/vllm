@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from vllm.foundation.config.pooler import SequencePoolingType
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
-from vllm.tasks import PoolingTask
+from vllm.frontend.processing.tasks import PoolingTask
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.pool.metadata import PoolingMetadata
 

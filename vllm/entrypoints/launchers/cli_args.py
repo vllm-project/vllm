@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import config
-from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
+from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
@@ -227,7 +227,7 @@ class BaseFrontendArgs:
         Subclasses should override ``_customize_cli_kwargs`` instead of
         this method so that base-class postprocessing is always applied.
         """
-        from vllm.engine.arg_utils import get_kwargs
+        from vllm.frontend.compat.engine.arg_utils import get_kwargs
 
         frontend_kwargs = get_kwargs(cls)
         frontend_kwargs = cls._customize_cli_kwargs(frontend_kwargs)

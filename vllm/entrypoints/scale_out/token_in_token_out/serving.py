@@ -10,7 +10,7 @@ from collections.abc import Sequence as GenericSequence
 import msgspec
 from fastapi import Request
 
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.generate.base.serving import (
@@ -39,9 +39,9 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
     PlaceholderRange,
 )
-from vllm.outputs import RequestOutput
+from vllm.frontend.processing.outputs import RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.frontend.processing.sampling_params import RequestOutputKind, SamplingParams
 from vllm.foundation.utilities.collection_utils import as_list
 from vllm.foundation.utilities.serial_utils import numpy2base64
 

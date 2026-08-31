@@ -22,7 +22,7 @@ from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     extract_prompt_len,
 )
-from vllm.sampling_params import BeamSearchParams
+from vllm.frontend.processing.sampling_params import BeamSearchParams
 from vllm.foundation.utilities import random_uuid
 
 

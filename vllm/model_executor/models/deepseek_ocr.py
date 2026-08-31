@@ -46,7 +46,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.sampling_params import SamplingParams
+from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.hf import HfTokenizer

@@ -26,7 +26,7 @@ from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.foundation.config.utils import replace
-from vllm.engine.protocol import EngineClient
+from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -94,10 +94,10 @@ from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionOutput
+from vllm.frontend.processing.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.frontend.processing.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.foundation.utilities import random_uuid
 from vllm.foundation.utilities.collection_utils import as_list

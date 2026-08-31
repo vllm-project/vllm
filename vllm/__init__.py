@@ -39,13 +39,13 @@ MODULE_ATTRS = {
 }
 
 if typing.TYPE_CHECKING:
-    from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
-    from vllm.engine.async_llm_engine import AsyncLLMEngine
-    from vllm.engine.llm_engine import LLMEngine
+    from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs, EngineArgs
+    from vllm.frontend.compat.engine.async_llm_engine import AsyncLLMEngine
+    from vllm.frontend.compat.engine.llm_engine import LLMEngine
     from vllm.entrypoints.llm import LLM
     from vllm.inputs import PromptType, TextPrompt, TokensPrompt
     from vllm.model_executor.models import ModelRegistry
-    from vllm.outputs import (
+    from vllm.frontend.processing.outputs import (
         ClassificationOutput,
         ClassificationRequestOutput,
         CompletionOutput,
@@ -57,8 +57,8 @@ if typing.TYPE_CHECKING:
         ScoringOutput,
         ScoringRequestOutput,
     )
-    from vllm.pooling_params import PoolingParams
-    from vllm.sampling_params import SamplingParams
+    from vllm.frontend.processing.pooling_params import PoolingParams
+    from vllm.frontend.processing.sampling_params import SamplingParams
     from vllm.v1.executor.ray_utils import initialize_ray_cluster
 else:
 
