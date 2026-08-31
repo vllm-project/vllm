@@ -120,7 +120,7 @@ class JambaMambaDecoderLayer(nn.Module):
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        is_lora_enabled: bool | None = False,
+        is_lora_enabled: bool = False,
         prefix: str = "",
         **kwargs,
     ) -> None:
