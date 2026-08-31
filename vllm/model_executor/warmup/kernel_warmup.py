@@ -257,7 +257,6 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
 
 
 _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
-_FLASHINFER_DECODE_AUTOTUNE_MIN_BATCH_SIZE = 64
 
 
 def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
@@ -289,12 +288,6 @@ def _run_flashinfer_mla_decode_autotune(
             table.get_device_tensor(batch_size)
             for table in runner.input_batch.block_table.block_tables
         )
-    block_tables = tuple(
-        table
-        if table.shape[0] == batch_size
-        else table.new_zeros((batch_size, *table.shape[1:]))
-        for table in block_tables
-    )
 
     static_forward_context = (
         runner.vllm_config.compilation_config.static_forward_context
@@ -319,6 +312,7 @@ def _run_flashinfer_deferred_moe_autotune(runner: "GPUModelRunner") -> None:
     from vllm.model_executor.layers.fused_moe import MoERunner
 
     max_num_batched_tokens = runner.scheduler_config.max_num_batched_tokens
+    tuned: set[tuple] = set()
     for module in runner.get_model().modules():
         if not isinstance(module, MoERunner):
             continue
@@ -343,6 +337,23 @@ def _run_flashinfer_deferred_moe_autotune(runner: "GPUModelRunner") -> None:
             or not moe_kernel.supports_deferred_moe_finalize()
         ):
             continue
+
+        # Layers agreeing on these properties produce identical autotune cache
+        # keys, so one dispatcher call already covers the rest.
+        signature = (
+            num_tokens,
+            moe_config.hidden_dim,
+            moe_config.num_experts,
+            moe_config.in_dtype,
+            moe_config.router_logits_dtype,
+            type(quant_method),
+            type(moe_kernel),
+            tuple(routed_experts.w13_weight.shape),
+            routed_experts.w13_weight.dtype,
+        )
+        if signature in tuned:
+            continue
+        tuned.add(signature)
 
         tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
         logger.info(
@@ -410,14 +421,10 @@ def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
         return
     # FlashInfer MLA otherwise profiles every batch bucket supported by any
     # candidate runner (currently through B8192 for TRTLLM-GEN), regardless of
-    # the dummy input size. Bound that sweep while retaining the low-batch
-    # B32/B64 profiles used by decode-oriented deployments.
-    max_tuning_batch_size = max(
-        max_decode_batch_size,
-        _FLASHINFER_DECODE_AUTOTUNE_MIN_BATCH_SIZE,
-    )
+    # the dummy input size. Limit the sweep to batches this scheduler can
+    # execute; scheduler settings are part of the autotune cache fingerprint.
     tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(
-        max_tuning_batch_size
+        max_decode_batch_size
     )
     max_model_len = (
         runner_any.model_state.max_model_len
@@ -427,7 +434,7 @@ def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
     logger.info(
         "Running FlashInfer MLA decode autotune with %d tokens, "
         "batch buckets %s, and max sequence length %d.",
-        max_tuning_batch_size * query_len,
+        max_decode_batch_size * query_len,
         tuning_buckets,
         max_model_len,
     )
@@ -438,7 +445,7 @@ def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
         # this key matches capture without rerunning the whole model (and MoE).
         _run_flashinfer_mla_decode_autotune(
             runner,
-            max_tuning_batch_size,
+            max_decode_batch_size,
             query_len,
             max_model_len,
         )

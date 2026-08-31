@@ -65,9 +65,9 @@ def _make_runner(
         "tuning_buckets",
     ),
     [
-        (1, 16, 8192, 64, (1, 2, 4, 8, 16, 32, 64)),
-        (8, 16, 8192, 64, (1, 2, 4, 8, 16, 32, 64)),
-        (8, 16, 100, 64, (1, 2, 4, 8, 16, 32, 64)),
+        (1, 16, 8192, 16, (1, 2, 4, 8, 16)),
+        (8, 16, 8192, 16, (1, 2, 4, 8, 16)),
+        (8, 16, 100, 12, (1, 2, 4, 8, 12)),
         (8, 128, 800, 100, (1, 2, 4, 8, 16, 32, 64, 100)),
     ],
 )
@@ -130,43 +130,46 @@ def test_flashinfer_autotune_adds_mla_decode_run_for_v1():
         _run_flashinfer_autotune_dummy_runs(runner)
 
     assert runner._dummy_run.call_count == 1
-    mla_decode_autotune.assert_called_once_with(runner, 64, 8, 1_048_576)
+    mla_decode_autotune.assert_called_once_with(runner, 16, 8, 1_048_576)
     autotune.assert_called_once_with(tuning_buckets=(1, 2, 4, 8, 16))
 
 
-def test_flashinfer_autotune_directly_tunes_deferred_moe_buckets():
-    import torch
+class _FakeMoERunner:
+    moe_config: Any
+    routed_experts: Any
 
-    class _FakeMoERunner:
-        moe_config: Any
-        routed_experts: Any
+
+def _make_deferred_moe(hidden_dim: int = 3584):
+    import torch
 
     moe_config = SimpleNamespace(
         use_deferred_moe_finalize=True,
         defer_moe_finalize_max_num_tokens=128,
         should_defer_moe_finalize=Mock(return_value=True),
-        hidden_dim=3584,
+        hidden_dim=hidden_dim,
         num_experts=896,
         in_dtype=torch.bfloat16,
         router_logits_dtype=torch.bfloat16,
     )
     moe_kernel = SimpleNamespace(supports_deferred_moe_finalize=Mock(return_value=True))
-    quant_method = SimpleNamespace(is_monolithic=True, moe_kernel=moe_kernel)
     routed_experts = SimpleNamespace(
-        quant_method=quant_method,
+        quant_method=SimpleNamespace(is_monolithic=True, moe_kernel=moe_kernel),
         w13_weight=torch.empty(0),
         forward_monolithic=Mock(),
     )
     moe = _FakeMoERunner()
     moe.moe_config = moe_config
     moe.routed_experts = routed_experts
-    model = SimpleNamespace(modules=Mock(return_value=[object(), moe]))
+    return moe
+
+
+def _run_deferred_moe_autotune(modules, buckets):
     runner = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8192),
-        get_model=Mock(return_value=model),
+        get_model=Mock(
+            return_value=SimpleNamespace(modules=Mock(return_value=modules))
+        ),
     )
-    buckets = (1, 2, 4, 8, 16, 32, 64, 128)
-
     with (
         patch("vllm.model_executor.layers.fused_moe.MoERunner", _FakeMoERunner),
         patch(
@@ -176,15 +179,38 @@ def test_flashinfer_autotune_directly_tunes_deferred_moe_buckets():
         patch("vllm.utils.flashinfer.autotune") as autotune,
     ):
         _run_flashinfer_deferred_moe_autotune(runner)
+    return get_buckets, autotune
+
+
+def test_flashinfer_autotune_directly_tunes_deferred_moe_buckets():
+    moe = _make_deferred_moe()
+    buckets = (1, 2, 4, 8, 16, 32, 64, 128)
+
+    get_buckets, autotune = _run_deferred_moe_autotune([object(), moe], buckets)
 
     get_buckets.assert_called_once_with(128)
     autotune.assert_called_once_with(tuning_buckets=buckets)
-    moe_config.should_defer_moe_finalize.assert_called_once_with(128)
+    moe_kernel = moe.routed_experts.quant_method.moe_kernel
+    moe.moe_config.should_defer_moe_finalize.assert_called_once_with(128)
     moe_kernel.supports_deferred_moe_finalize.assert_called_once_with()
-    routed_experts.forward_monolithic.assert_called_once()
-    call = routed_experts.forward_monolithic.call_args.kwargs
+    moe.routed_experts.forward_monolithic.assert_called_once()
+    call = moe.routed_experts.forward_monolithic.call_args.kwargs
     assert call["x"].shape == (128, 3584)
     assert call["router_logits"].shape == (128, 896)
+
+
+def test_flashinfer_autotune_tunes_each_deferred_moe_geometry_once():
+    # Identical layers share one cache key, so only the first needs a
+    # dispatcher call; a differently shaped layer still gets its own.
+    same_a, same_b = _make_deferred_moe(), _make_deferred_moe()
+    other = _make_deferred_moe(hidden_dim=1792)
+    buckets = (1, 2, 4, 8, 16, 32, 64, 128)
+
+    _run_deferred_moe_autotune([same_a, same_b, other], buckets)
+
+    same_a.routed_experts.forward_monolithic.assert_called_once()
+    same_b.routed_experts.forward_monolithic.assert_not_called()
+    other.routed_experts.forward_monolithic.assert_called_once()
 
 
 @pytest.mark.parametrize("use_v2_model_runner", [False, True])
@@ -225,36 +251,6 @@ def test_flashinfer_mla_decode_autotune_uses_initialized_attention_geometry(
         runner.block_tables.get_dummy_block_tables.assert_called_once_with(16)
     else:
         table.get_device_tensor.assert_called_once_with(16)
-
-
-def test_flashinfer_mla_decode_autotune_expands_static_block_table_batch():
-    import torch
-
-    layer = object()
-    static_block_table = torch.ones((16, 37), dtype=torch.int32)
-    group = SimpleNamespace(
-        backend=_Backend(),
-        layer_names=["model.layers.0.self_attn.attn"],
-        kv_cache_group_id=0,
-    )
-    runner = _make_runner(use_v2_model_runner=True)
-    runner.attn_groups = [[group]]
-    runner.vllm_config.compilation_config = SimpleNamespace(
-        static_forward_context={group.layer_names[0]: layer}
-    )
-    runner.block_tables = SimpleNamespace(
-        get_dummy_block_tables=Mock(return_value=(static_block_table,))
-    )
-
-    with patch(
-        "vllm.v1.attention.backends.mla.flashinfer_mla.flashinfer_mla_decode_autotune"
-    ) as decode_autotune:
-        _run_flashinfer_mla_decode_autotune(runner, 64, 8, 1_048_576)
-
-    block_table = decode_autotune.call_args.args[1]
-    assert block_table.shape == (64, 37)
-    assert block_table.dtype == static_block_table.dtype
-    assert not block_table.any()
 
 
 def test_flashinfer_mla_decode_autotune_builds_uniform_decode_metadata():
