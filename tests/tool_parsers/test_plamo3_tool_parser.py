@@ -112,6 +112,82 @@ def test_streaming_plain_content(parser, deltas, expected_content):
     assert reconstructor.tool_calls == []
 
 
+@pytest.mark.parametrize(
+    "steps",
+    [
+        [("first ", "first ", ()), ("second", "second", ())],
+        [
+            (
+                "Checking the weather." + BEGIN_TOOL_REQUESTS_TAG,
+                "Checking the weather.",
+                (),
+            ),
+        ],
+        [(EOT_TAG, None, None), ("ignored", None, None)],
+        [
+            (
+                "Before tools."
+                + _tool_requests(
+                    _tool_call("echo", '{"text": "hi"}'),
+                    _tool_call("sum", '{"a": 1, "b": 2}'),
+                ),
+                "Before tools.",
+                (
+                    ("echo", '{"text": "hi"}'),
+                    ("sum", '{"a": 1, "b": 2}'),
+                ),
+            ),
+        ],
+        [
+            (
+                BEGIN_TOOL_REQUESTS_TAG + _tool_call("echo", '{"text": "hi"}'),
+                None,
+                (("echo", '{"text": "hi"}'),),
+            ),
+            (
+                _tool_call("sum", '{"a": 1}'),
+                None,
+                (("sum", '{"a": 1}'),),
+            ),
+        ],
+    ],
+)
+def test_streaming_delta_messages(parser, steps):
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    current_text = ""
+    tool_indices: list[int] = []
+    tool_ids: list[str | None] = []
+    for delta_text, expected_content, expected_tool_calls in steps:
+        previous_text = current_text
+        current_text += delta_text
+        message = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+
+        if expected_content is None and expected_tool_calls is None:
+            assert message is None
+        else:
+            assert message is not None
+            assert message.content == expected_content
+            actual_tool_calls = message.tool_calls or []
+            assert [
+                (call.function.name, call.function.arguments)
+                for call in actual_tool_calls
+            ] == list(expected_tool_calls)
+            tool_indices.extend(call.index for call in actual_tool_calls)
+            tool_ids.extend(call.id for call in actual_tool_calls)
+
+    assert tool_indices == list(range(len(tool_indices)))
+    assert all(tool_ids)
+    assert len(set(tool_ids)) == len(tool_ids)
+
+
 def test_streaming_content_then_tool_call(parser):
     reconstructor = run_tool_extraction_streaming(
         parser,
@@ -197,31 +273,3 @@ def test_streaming_handles_incomplete_request_boundaries():
             (call.function.name, call.function.arguments)
             for call in reconstructor.tool_calls
         ] == expected_calls
-
-
-def test_streaming_complete_batch_emits_parallel_calls(parser):
-    model_output = "Before tools." + _tool_requests(
-        _tool_call("echo", '{"text": "hi"}'),
-        _tool_call("sum", '{"a": 1, "b": 2}'),
-    )
-    message = parser.extract_tool_calls_streaming(
-        previous_text="",
-        current_text=model_output,
-        delta_text=model_output,
-        previous_token_ids=[],
-        current_token_ids=[],
-        delta_token_ids=[],
-        request=ChatCompletionRequest(messages=[], model="test-model"),
-    )
-
-    assert message is not None
-    assert message.content == "Before tools."
-    assert message.tool_calls is not None
-    assert [call.index for call in message.tool_calls] == [0, 1]
-    assert [call.function.name for call in message.tool_calls] == ["echo", "sum"]
-    assert [call.function.arguments for call in message.tool_calls] == [
-        '{"text": "hi"}',
-        '{"a": 1, "b": 2}',
-    ]
-    assert all(call.id for call in message.tool_calls)
-    assert message.tool_calls[0].id != message.tool_calls[1].id
