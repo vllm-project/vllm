@@ -563,7 +563,6 @@ class Worker(WorkerBase):
             gc.collect()
             torch.accelerator.empty_cache()
             torch.accelerator.synchronize()
-            self.init_snapshot = MemorySnapshot(device=self.device)
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
