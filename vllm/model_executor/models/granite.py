@@ -395,7 +395,7 @@ class GraniteModel(nn.Module):
 class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     hf_to_vllm_mapper = GraniteModel.hf_to_vllm_mapper
     # LoRA specific attributes
-    packed_modules_mapping = {
+    packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
@@ -467,10 +467,5 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # With tie_word_embeddings, we can skip lm_head.weight
-        # The weight might appear unnecessarily in the files if the model is
-        # processed with quantization, LoRA, fine-tuning, etc.
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
-
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

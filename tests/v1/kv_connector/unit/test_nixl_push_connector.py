@@ -46,7 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
-from .utils import make_nixl_push_scheduler
+from .utils import create_request, make_nixl_push_scheduler
 
 # ----------------------------------------------------------------- #
 #  Helpers / fakes                                                   #
@@ -117,6 +117,24 @@ def _stub_sw_clipping(scheduler) -> None:
 
 
 class TestPushScheduler:
+    def test_p_side_mamba_truncates_before_cache_lookup(self):
+        """Push mode normalizes P-side Mamba requests before cache lookup."""
+        sched = make_nixl_push_scheduler(has_mamba=True)
+        request = create_request(num_tokens=10, do_remote_decode=True)
+        original_len = len(request.prompt_token_ids)
+
+        sched.on_new_request(request)
+
+        assert len(request.prompt_token_ids) == original_len - 1
+        assert request.kv_transfer_params["_p_side_truncated"] is True
+
+        with patch.object(
+            sched,
+            "_truncate_mamba_request_for_prefill",
+            side_effect=AssertionError("must not truncate after cache lookup"),
+        ):
+            assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
+
     def test_d_side_update_state_after_alloc_stages_registration(self):
         """D scheduler stashes registration data + arms watchdog deadline."""
         sched = make_nixl_push_scheduler()
@@ -334,12 +352,14 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._reqs_to_send = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
         w.tp_rank = 0
+        w.pcp_rank = 0
         w.world_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._physical_blocks_per_logical_kv_block = 1
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
+        w._is_csa_linear = False
         w._group_spec_types = (FullAttentionSpec,)
         w._engine_ttl = 0.0
         w._engine_last_active = {}
@@ -513,6 +533,24 @@ class TestPushWriterStartLoadKv:
         assert w._finished_blocks_inbox.qsize() == 1
         assert w._push_writer_wake.is_set()
         assert w.start_push_calls == []
+
+    def test_noncanonical_pcp_rank_skips_producer_work(self):
+        w = _StubWriterWorker.fresh()
+        w.pcp_rank = 1
+        w._send_heartbeats = MagicMock()
+
+        meta = NixlConnectorMetadata()
+        meta.push_finished_blocks["req"] = ([1, 2],)
+        meta.reqs_in_batch.add("req")
+        meta.reqs_to_send["req"] = time.perf_counter() + 10
+
+        w.start_load_kv(meta)
+
+        assert w._finished_blocks_inbox.empty()
+        assert "req" not in w._reqs_to_process
+        assert "req" not in w._reqs_to_send
+        assert not w._push_writer_wake.is_set()
+        w._send_heartbeats.assert_not_called()
 
 
 # The P→D handshake must run on the base worker's background executor, never
@@ -1062,6 +1100,8 @@ class TestPushPipelineParallel:
             device_id=0,
             num_blocks=4,
             block_lens=[block_len] * 4,
+            # Non-interleaved: consecutive blocks abut, so stride == block length.
+            block_strides=[block_len] * 4,
             kv_cache_layout="HND",
             block_size=16,
             ssm_sizes=(0, 0),
@@ -1158,6 +1198,75 @@ class TestPushWriterMlaReplication:
         # All of the request's WRITE handles must be tracked together, so the
         # engine thread never sees a partial set and double-frees the request.
         assert sorted(w._sending_transfers["p-req"]) == [1000, 1001]
+
+    def test_csa_linear_writes_every_group_to_each_target(self):
+        from types import SimpleNamespace
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+            RemoteMeta,
+            ReqMeta,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+            TPMapping,
+        )
+
+        engine_id = "decode-engine"
+        w = _StubWriterWorker.fresh()
+        w.world_size = 2
+        w.use_mla = False
+        w._has_mamba = True
+        w._is_csa_linear = True
+        w.nixl_wrapper = MagicMock()
+        w.transfer_topo = MagicMock()
+        w.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+            remote_tp_size=4,
+            remote_block_size=16,
+            remote_physical_blocks_per_logical=1,
+        )
+        w.transfer_topo.tp_ratio.return_value = -2
+        w.transfer_topo.handshake_target_ranks.return_value = (0, 1)
+        w.tp_mappings = {
+            engine_id: TPMapping(
+                source_ranks_per_group=((0,), (0,), (0, 1), (0, 1)),
+                all_source_ranks=(0, 1),
+                rank_to_attention_slot={0: 0, 1: 0},
+                rank_offset_factor=0,
+            )
+        }
+        w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
+        w.dst_xfer_side_handles = {engine_id: {0: 1000, 1: 1001}}
+        w.src_xfer_handles_by_tp_ratio = {(-2, 16): [2000, 2001]}
+
+        writes = []
+
+        def _fake_xfer(**kwargs):
+            writes.append(kwargs)
+            return 3000 + kwargs["read_spec"].remote_rank
+
+        w._xfer_blocks = _fake_xfer
+        block_ids = ([10], [20], [30], [40])
+        meta = ReqMeta(
+            local_block_ids=block_ids,
+            local_physical_block_ids=block_ids,
+            tp_size=2,
+            remote=RemoteMeta(
+                block_ids=([50], [60], [70], [80]),
+                host="",
+                port=0,
+                engine_id=engine_id,
+                request_id="d-req",
+            ),
+        )
+
+        w._xfer_blocks_for_req(req_id="p-req", meta=meta)
+
+        assert [write["read_spec"].remote_rank for write in writes] == [0, 1]
+        assert [write["read_spec"].local_block_ids for write in writes] == [
+            list(block_ids),
+            list(block_ids),
+        ]
+        assert [write["local_xfer_side_handle"] for write in writes] == [2000, 2001]
+        assert sorted(w._sending_transfers["p-req"]) == [3000, 3001]
 
 
 class TestPushPrefixCaching:
