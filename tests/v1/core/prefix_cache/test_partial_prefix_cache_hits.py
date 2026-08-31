@@ -132,6 +132,31 @@ def make_full_mamba_manager(
     )
 
 
+def test_dcp_fine_hit_retention_uses_hash_alignment_without_eagle():
+    """DCP must not discard a reusable Mamba state at hash alignment."""
+    hash_block_size = 2
+    manager = make_full_mamba_manager(
+        dcp_world_size=4,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=hash_block_size,
+        num_blocks=64,
+    )
+    manager.coordinator.retention_interval = 0
+
+    token_ids = list(range(7))
+    producer = make_request("producer", token_ids, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(producer)
+    assert num_computed == 0
+    assert manager.allocate_slots(producer, 6, 0, computed_blocks) is not None
+    manager.free(producer)
+    manager.new_step_starts()
+
+    consumer = make_request("consumer", token_ids, hash_block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(consumer)
+    assert num_computed == 6
+
+
 @pytest.mark.parametrize("dcp_world_size", [1, 4])
 def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
     """Chunk ends with partial hits on: block-aligned chunks, one extra stop
