@@ -116,6 +116,25 @@ class RequestState:
 
         self.draft_tokens[req_idx].zero_()
 
+    def append_prompt_token_ids(self, req_id: str, token_ids: list[int]) -> None:
+        if not token_ids:
+            return
+
+        req_idx = self.req_id_to_index[req_id]
+        start = int(self.prompt_len.np[req_idx])
+        end = start + len(token_ids)
+        if end > self.max_model_len:
+            raise ValueError(
+                f"Appending {len(token_ids)} prompt tokens to request {req_id} "
+                f"would exceed max_model_len ({end} > {self.max_model_len})."
+            )
+
+        self.all_token_ids.stage_write(req_idx, start, token_ids)
+        self.prompt_len.np[req_idx] = end
+        self.prefill_len.np[req_idx] = end
+        self.total_len.stage_write_elem(req_idx, end)
+        self.max_seq_len[req_idx] += len(token_ids)
+
     def apply_staged_writes(self) -> None:
         self.prompt_len.copy_to_uva()
         self.prefill_len.copy_to_uva()
