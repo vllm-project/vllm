@@ -35,6 +35,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
+    gdn_concat_router_gate_enabled,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
@@ -194,6 +195,16 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 prefix,
                 shared_expert_name="shared_expert",
             )
+        # C6 router-gate fold (VLLM_GDN_CONCAT_ROUTER_GATE, default off --
+        # measured in-graph negative unpadded, marginal padded): hand the
+        # 1-row shared expert gate to the MoE runner, which folds its rows
+        # into the (padded) router gate GEMM and applies the sigmoid
+        # scaling itself; the MLP then must not apply its own expert gate.
+        _concat_shared_gate = (
+            gdn_concat_router_gate_enabled()
+            and not self.is_fused_shared_expert_enabled
+            and config.shared_expert_intermediate_size > 0
+        )
 
         if (
             self.is_fused_shared_expert_enabled
@@ -207,7 +218,9 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
-                expert_gate=self.shared_expert_gate,
+                expert_gate=None
+                if _concat_shared_gate
+                else self.shared_expert_gate,
                 is_sequence_parallel=self.is_sequence_parallel,
                 disable_tp=self.replicate_shared_expert,
                 prefix=f"{prefix}.shared_expert",
@@ -231,7 +244,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             n_shared_experts=1 if self.shared_expert is None else None,
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
             shared_expert_gate=self.shared_expert_gate
-            if self.shared_expert is None
+            if (self.shared_expert is None or _concat_shared_gate)
             else None,
         )
 
@@ -751,7 +764,20 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             ckpt_prefix="mlp.shared_expert",
         )
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        # Accuracy-neutral weight-layout transforms (de-interleave /
+        # tiny-GEMM concat). load_weights can be invoked more than once per
+        # engine init (e.g. the MTP draft-model load streams the checkpoint
+        # again), and re-permuting already-permuted weights scrambles them,
+        # so transform a layer ONLY when THIS call actually (re)wrote its
+        # in_proj weights (which are then in raw checkpoint layout).
+        for name, module in self.named_modules():
+            if (
+                isinstance(module, QwenGatedDeltaNetAttention)
+                and f"{name}.in_proj_qkvz.weight" in loaded
+            ):
+                module.apply_traffic_opt_weight_transforms()
+        return loaded
 
 
 class QwenNextMixtureOfExperts(MixtureOfExperts):
