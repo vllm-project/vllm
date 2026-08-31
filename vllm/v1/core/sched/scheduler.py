@@ -531,6 +531,7 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        num_invalid_spec_tokens: dict[str, int] = {}
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
         # Whether any scheduled request has a synchronous connector KV load.
@@ -963,6 +964,7 @@ class Scheduler(SchedulerInterface):
                     # Not for diffusion where draft tokens can't be padded.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        and not (spec is not None and spec.enable_adaptive_verification)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and (scheduled_running_reqs and not prefill_scheduled)
@@ -978,7 +980,6 @@ class Scheduler(SchedulerInterface):
                             if padded_num_tokens > request_token_budget:
                                 # Prefer to not schedule than schedule un-padded.
                                 break
-                            num_new_tokens = padded_num_tokens
                             pad_spec_decode = True
 
                     threshold = self.scheduler_config.long_prefill_token_threshold
@@ -1033,6 +1034,10 @@ class Scheduler(SchedulerInterface):
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
                         break
+
+                    if pad_spec_decode:
+                        assert num_new_tokens == 1
+                        num_new_tokens += self.num_spec_tokens
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -1173,6 +1178,7 @@ class Scheduler(SchedulerInterface):
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
                     ] * self.num_spec_tokens
+                    num_invalid_spec_tokens[request_id] = self.num_spec_tokens
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
@@ -1340,6 +1346,7 @@ class Scheduler(SchedulerInterface):
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            num_invalid_spec_tokens=num_invalid_spec_tokens or None,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
@@ -2331,7 +2338,7 @@ class Scheduler(SchedulerInterface):
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
     ) -> None:
-        num_invalid_spec_tokens: dict[str, int] = {}
+        num_invalid_spec_tokens = dict(scheduler_output.num_invalid_spec_tokens or {})
 
         sched_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         for req_id, spec_token_ids in zip(
@@ -2359,11 +2366,13 @@ class Scheduler(SchedulerInterface):
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:
                 spec_token_ids.extend([-1] * num_invalid_tokens)
-                num_invalid_spec_tokens[req_id] = num_invalid_tokens
+                num_invalid_spec_tokens[req_id] = max(
+                    num_invalid_spec_tokens.get(req_id, 0), num_invalid_tokens
+                )
 
             sched_spec_tokens[req_id] = spec_token_ids
 
-        scheduler_output.num_invalid_spec_tokens = num_invalid_spec_tokens
+        scheduler_output.num_invalid_spec_tokens = num_invalid_spec_tokens or None
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""

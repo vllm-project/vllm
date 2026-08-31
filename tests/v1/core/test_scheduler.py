@@ -1724,6 +1724,39 @@ def test_spec_decode_padding_first_decode_step():
     # r2 is padded to the 1 + num_spec shape with placeholder (-1) drafts.
     assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+    assert out.num_invalid_spec_tokens == {r2.request_id: num_spec}
+
+
+def test_spec_decode_padding_follows_mamba_alignment():
+    """Mamba alignment must not clip reject-only verifier padding."""
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=16,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    scheduler.need_mamba_block_aligned_split = True
+    running, prompt_tail = create_requests(num_requests=2, num_tokens=14)
+    scheduler.connector.get_num_new_matched_tokens = Mock(
+        side_effect=lambda request, _: (
+            (13, False) if request is prompt_tail else (0, False)
+        )
+    )
+
+    scheduler.add_request(running)
+    out = scheduler.schedule()
+    _model_output(scheduler, out, [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([running.request_id], [[1, 2, 3]]))
+
+    scheduler.add_request(prompt_tail)
+    out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens == {
+        running.request_id: 1 + num_spec,
+        prompt_tail.request_id: 1 + num_spec,
+    }
+    assert out.scheduled_spec_decode_tokens[prompt_tail.request_id] == [-1] * num_spec
 
 
 def test_spec_decode_padding_skipped_for_diffusion():
@@ -1757,6 +1790,33 @@ def test_spec_decode_padding_skipped_for_diffusion():
 
     assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
     # r2 keeps its true 1-token span; no placeholder drafts are attached.
+    assert out.num_scheduled_tokens[r2.request_id] == 1
+    assert r2.request_id not in out.scheduled_spec_decode_tokens
+
+
+def test_spec_decode_padding_skipped_for_adaptive_verification():
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=16,
+    )
+    speculative_config = scheduler.vllm_config.speculative_config
+    assert speculative_config is not None
+    speculative_config.enable_adaptive_verification = True
+    r1, r2 = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=16
+    )
+
+    scheduler.add_request(r1)
+    out = scheduler.schedule()
+    _model_output(scheduler, out, [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+
+    scheduler.add_request(r2)
+    out = scheduler.schedule()
+
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
     assert out.num_scheduled_tokens[r2.request_id] == 1
     assert r2.request_id not in out.scheduled_spec_decode_tokens
 

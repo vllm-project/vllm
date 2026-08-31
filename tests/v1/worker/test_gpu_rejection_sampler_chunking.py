@@ -10,6 +10,9 @@ import torch
 
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.spec_decode import (
+    rejection_sampler as rejection_sampler_module,
+)
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
@@ -24,6 +27,47 @@ def test_iter_request_chunks_preserves_request_boundaries():
         (2, 3),
         (3, 4),
     ]
+
+
+def test_rejection_sampler_restores_synthetic_draft_sentinels(monkeypatch):
+    input_ids = torch.tensor([10, 13, 0, 0], dtype=torch.int32)
+    input_batch = SimpleNamespace(
+        input_ids=input_ids,
+        logits_indices=torch.arange(4),
+        num_invalid_spec_tokens={"req": 2},
+        req_ids=["req"],
+        cu_num_logits_np=np.array([0, 4], dtype=np.int32),
+        positions=torch.arange(4),
+        idx_mapping_np=np.array([0], dtype=np.int32),
+        seq_lens=torch.tensor([4], dtype=torch.int32),
+        cu_num_logits=torch.tensor([0, 4], dtype=torch.int32),
+        idx_mapping=torch.tensor([0], dtype=torch.int32),
+    )
+    sampler = object.__new__(RejectionSampler)
+    sampler.enable_adaptive_verification = False
+    sampler.sampler = SimpleNamespace(
+        compute_nans=False,
+        sampling_states=SimpleNamespace(max_num_logprobs=lambda _indices: 0),
+        req_states=SimpleNamespace(
+            prefill_len=SimpleNamespace(gpu=torch.tensor([0], dtype=torch.int32))
+        ),
+    )
+
+    def fake_verify_in_chunks(
+        _self, _logits, _input_batch, _draft_logits, draft_sampled, *_args
+    ):
+        assert draft_sampled.tolist() == [10, 13, -1, -1]
+        return torch.tensor([[1]]), torch.tensor([1], dtype=torch.int32), None
+
+    sampler._verify_in_chunks = MethodType(fake_verify_in_chunks, sampler)
+    monkeypatch.setattr(
+        rejection_sampler_module,
+        "get_num_sampled_and_rejected",
+        lambda num_sampled, *_args: (num_sampled, torch.zeros_like(num_sampled)),
+    )
+
+    sampler(torch.zeros((4, 4)), input_batch)
+    assert input_ids.tolist() == [10, 13, 0, 0]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")

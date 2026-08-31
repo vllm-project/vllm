@@ -15,7 +15,9 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
+from vllm.v1.worker.gpu import model_runner as gpu_model_runner
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 pytestmark = pytest.mark.cpu_test
@@ -82,6 +84,42 @@ def _create_vllm_config_for_dsd(
     vllm_config.speculative_config = speculative_config
 
     return vllm_config
+
+
+def test_model_runner_dispatches_full_graph_only_for_verifier_topology(
+    monkeypatch,
+):
+    dispatched_uniform_tokens = []
+
+    def fake_dispatch(
+        _manager, _num_reqs, _num_tokens, uniform_token_count, *_args, **_kwargs
+    ):
+        dispatched_uniform_tokens.append(uniform_token_count)
+        return SimpleNamespace(num_tokens=0), None
+
+    monkeypatch.setattr(gpu_model_runner, "dispatch_cg_and_sync_dp", fake_dispatch)
+    runner = object.__new__(gpu_model_runner.GPUModelRunner)
+    runner.speculative_config = SimpleNamespace()
+    runner.model_state = SimpleNamespace(num_new_sampled_tokens_per_step=1)
+    runner.lora_config = None
+    runner.is_encoder_decoder = False
+    runner.cudagraph_manager = None
+    runner.dp_size = 1
+    runner.dp_rank = 0
+    runner.kv_connector = SimpleNamespace(no_forward=lambda _output: None)
+    runner._merge_ec_connector_no_forward = lambda *_args: None
+
+    def execute(scheduled_drafts):
+        output = SchedulerOutput.make_empty()
+        output.num_scheduled_tokens = {"r0": 8, "r1": 8}
+        output.total_num_scheduled_tokens = 16
+        output.scheduled_spec_decode_tokens = scheduled_drafts
+        runner.execute_model(output, dummy_run=True)
+
+    execute({"r0": [1] * 7, "r1": [2] * 7})
+    execute({})
+    execute({"r0": [1] * 7})
+    assert dispatched_uniform_tokens == [8, None, None]
 
 
 def test_dynamic_sd_full_cudagraph_covers_all_uniform_decode_shapes(monkeypatch):
