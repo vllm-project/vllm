@@ -197,3 +197,45 @@ class TestProcessTokensForwardsOffsets:
         engine_input = renderer._process_tokens(tokens_prompt)
 
         assert "prompt_token_offsets" not in engine_input
+
+
+class TestTruncationKeepsOffsetsAligned:
+    """``prompt_token_offsets`` runs parallel to ``prompt_token_ids``, and both
+    ``TokensPrompt`` and the render API's ``GenerateRequest`` document that the
+    two have equal length. Only ``prompt_token_ids`` was being truncated.
+    """
+
+    @pytest.mark.parametrize("side", ["left", "right"])
+    def test_explicit_truncation_side_truncates_offsets(self, fast_tokenizer, side):
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        text = "The quick brown fox jumps over the lazy dog."
+        keep = 4
+
+        untruncated = renderer._tokenize_prompt(
+            {"prompt": text},
+            TokenizeParams(max_total_tokens=1024, return_token_offsets=True),
+        )
+        full_offsets = untruncated["prompt_token_offsets"]
+        assert len(full_offsets) > keep
+
+        # An explicit truncation_side disables tokenizer-level truncation (see
+        # get_encode_kwargs), so the tokenizer returns the whole sequence and
+        # truncation happens in apply_post_tokenization.
+        params = TokenizeParams(
+            max_total_tokens=1024,
+            return_token_offsets=True,
+            truncate_prompt_tokens=keep,
+            truncation_side=side,
+        )
+        result = params.apply_post_tokenization(
+            fast_tokenizer, renderer._tokenize_prompt({"prompt": text}, params)
+        )
+
+        offsets = result["prompt_token_offsets"]
+        assert len(result["prompt_token_ids"]) == keep
+        assert len(offsets) == keep
+
+        # Equal length is not enough: the surviving offsets must be the ones
+        # belonging to the surviving tokens.
+        expected = full_offsets[-keep:] if side == "left" else full_offsets[:keep]
+        assert offsets == expected
