@@ -1296,10 +1296,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
 
-        # `compute_need_sampled_mask` no longer predicts which requests are
-        # about to finish, so nothing consumes max_seq_len under PP.
-        max_seq_len_np = None
-
         prompt_lens = None
         if self.model_config.rswa_window is not None:
             # prompt_lens is only used in R-SWA case.
@@ -1328,7 +1324,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
-            max_seq_len_np=max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],

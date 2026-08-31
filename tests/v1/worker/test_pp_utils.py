@@ -9,15 +9,12 @@ import numpy as np
 from vllm.v1.worker.gpu import pp_utils
 
 
-def _batch(num_computed, prefill_len, num_scheduled, max_seq_len=None):
+def _batch(num_computed, prefill_len, num_scheduled):
     return Mock(
         num_reqs=len(num_computed),
         num_computed_tokens_np=np.array(num_computed, dtype=np.int32),
         prefill_len_np=np.array(prefill_len, dtype=np.int32),
         num_scheduled_tokens=np.array(num_scheduled, dtype=np.int32),
-        max_seq_len_np=(
-            None if max_seq_len is None else np.array(max_seq_len, dtype=np.int32)
-        ),
     )
 
 
@@ -29,7 +26,6 @@ def test_excludes_non_final_prefill_chunks():
         num_computed=[512, 1000],
         prefill_len=[4096, 1004],
         num_scheduled=[448, 4],
-        max_seq_len=[8192, 2048],
     )
 
     mask = pp_utils.compute_need_sampled_mask(batch)
@@ -44,7 +40,6 @@ def test_none_when_no_row_samples():
         num_computed=[0, 512],
         prefill_len=[4096, 4096],
         num_scheduled=[448, 448],
-        max_seq_len=[8192, 8192],
     )
 
     assert pp_utils.compute_need_sampled_mask(batch) is None
@@ -61,10 +56,11 @@ def test_keeps_decoding_request_past_its_length_cap():
     then diverge permanently.
     """
     batch = _batch(
+        # 14176 computed tokens is already past this request's own
+        # prompt_len + max_tokens; the scheduler is still running it.
         num_computed=[14176],
         prefill_len=[12175],
         num_scheduled=[8],
-        max_seq_len=[14175],  # already overrun
     )
 
     mask = pp_utils.compute_need_sampled_mask(batch)
@@ -73,13 +69,12 @@ def test_keeps_decoding_request_past_its_length_cap():
     assert mask.tolist() == [True]
 
 
-def test_does_not_depend_on_max_seq_len():
-    """The mask must be computable without `max_seq_len_np`."""
+def test_decode_row_ahead_of_a_prefill_chunk():
+    """Row order does not matter: only whether the row finishes its prefill."""
     batch = _batch(
         num_computed=[10, 512],
         prefill_len=[8, 4096],
         num_scheduled=[1, 448],
-        max_seq_len=None,
     )
 
     mask = pp_utils.compute_need_sampled_mask(batch)
