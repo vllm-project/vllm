@@ -109,6 +109,7 @@ def test_reasoning_delimiter_properties(parser):
         (True, _END_IDS + [99, 100], [99, 100]),
         (True, _BEGIN_IDS + [42] + _END_IDS, []),
         (True, _BEGIN_IDS + [42] + _END_IDS + [99], [99]),
+        (True, _END_IDS + [99] + _END_IDS + [100], [100]),
     ],
 )
 def test_extract_content_ids(enable_thinking, input_ids, expected, tokenizer):

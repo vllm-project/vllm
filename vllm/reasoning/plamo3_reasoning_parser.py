@@ -193,8 +193,11 @@ class Plamo3ReasoningParser(ReasoningParser):
         n = len(target)
         if not n or len(seq) < n:
             return -1
+        start = max(start, 0)
         search_range = (
-            range(len(seq) - n, -1, -1) if reverse else range(start, len(seq) - n + 1)
+            range(len(seq) - n, start - 1, -1)
+            if reverse
+            else range(start, len(seq) - n + 1)
         )
         for i in search_range:
             if Plamo3ReasoningParser._tokens_match_at(seq, target, i):
