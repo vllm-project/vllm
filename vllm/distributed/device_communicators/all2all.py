@@ -81,14 +81,15 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         Gather hidden_states and router_logits from all dp ranks.
         """
-        tensors_to_gather = [hidden_states, router_logits]
-        if extra_tensors is not None:
-            tensors_to_gather.extend(extra_tensors)
-
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
         assert len(sizes) == dist_group.world_size
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
+
+        tensors_to_gather = [hidden_states, router_logits]
+        if extra_tensors is not None:
+            tensors_to_gather.extend(extra_tensors)
+
         gathered_tensors = dist_group.all_gatherv(
             tensors_to_gather,
             dim=0,
@@ -113,14 +114,15 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         Gather hidden_states and router_logits from all dp ranks.
         """
-        tensors_to_gather = [hidden_states, topk_weights, topk_ids]
-        if extra_tensors is not None:
-            tensors_to_gather.extend(extra_tensors)
-
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
         assert len(sizes) == dist_group.world_size
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
+
+        tensors_to_gather = [hidden_states, topk_weights, topk_ids]
+        if extra_tensors is not None:
+            tensors_to_gather.extend(extra_tensors)
+
         gathered_tensors = dist_group.all_gatherv(
             tensors_to_gather,
             dim=0,
