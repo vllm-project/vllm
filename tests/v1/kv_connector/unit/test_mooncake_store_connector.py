@@ -428,6 +428,28 @@ def test_update_connector_output_and_take_events():
     assert connector._kv_cache_events is None
 
 
+def test_store_events_persist_across_polls():
+    connector = object.__new__(mooncake_store_connector.MooncakeStoreConnector)
+    connector.connector_scheduler = MagicMock()
+    connector._kv_cache_events = None
+    complete = _make_block_stored(b"complete", group_idx=0)
+    pending = _make_block_stored(b"pending", group_idx=0)
+
+    def poll(worker_events: list[BlockStored]) -> list[BlockStored]:
+        events = mooncake_store_connector.MooncakeStoreKVEvents(
+            num_workers=4,
+            group_tp_replication_factors=(2,),
+        )
+        events.add_events(worker_events)
+        connector.update_connector_output(KVConnectorOutput(kv_cache_events=events))
+        return list(connector.take_events())
+
+    assert poll([complete, pending]) == []
+    assert poll([complete]) == [complete]
+    assert poll([pending, pending]) == [pending]
+    assert connector._kv_cache_events is None
+
+
 # ============================================================
 # reset_cache() — RL hard-reset path via typed LookupKey protocol
 # ============================================================

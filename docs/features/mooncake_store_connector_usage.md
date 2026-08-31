@@ -280,6 +280,8 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
 - `store_tp_size` (int): Common Store TP for endpoints with different local TP sizes. It supports LBHNC and LBNHC local KV caches, with `store_tp_size >= local_tp_size` and `store_tp_size % local_tp_size == 0`. The current topology is one full-attention cache group, PCP/DCP disabled, and cross-layer blocks disabled. For GQA and MHA, the total KV-head count must be divisible by `store_tp_size`. Store shards contain fixed global KV-head ranges in the local layout. Shared endpoints use the same KV cache layout, pipeline-parallel size, and Store TP. The Store namespace includes the layout and PP size. Unsupported configurations use a topology-specific rank-local namespace.
 
+LBHNC/HND is recommended for TP-sharded Store when supported.
+
 For example, with prefill TP 4, decode TP 2, and eight KV heads, set
 `store_tp_size` to 4 on both instances. Each decode rank reads and writes two
 of the four Store shards.

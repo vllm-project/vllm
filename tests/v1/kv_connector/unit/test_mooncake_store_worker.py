@@ -48,6 +48,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
+    RSWASpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -2257,6 +2258,22 @@ def test_worker_enables_lbnhc_store_tp_layout(tmp_path, monkeypatch):
     assert isinstance(w.token_dbs[0].store_layout, LBNHCStoreLayout)
     assert w.token_dbs[0].store_layout.local_shard_ids == (0, 1)
     assert len(w._lookup_key_prefixes[0]) == 4
+
+
+def test_tp_sharded_layout_rejects_full_attention_subclasses():
+    spec = RSWASpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=None,
+        rswa_window=32,
+    )
+    store_worker = object.__new__(worker.MooncakeStoreWorker)
+    store_worker.pcp_size = 1
+    store_worker.dcp_size = 1
+    store_worker._kv_cache_groups = [SimpleNamespace(kv_cache_spec=spec)]
+
+    assert not store_worker._supports_tp_sharded_store_layout(LBHNCStoreLayout, {})
 
 
 @pytest.mark.parametrize(

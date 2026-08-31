@@ -80,16 +80,28 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
             return 1
         return self._group_tp_replication_factors[event.group_idx]
 
+    def _is_common_event(self, event: KVCacheEvent, count: int) -> bool:
+        return count * self._replication_factor(event) >= self._num_workers
+
     def aggregate(self) -> "MooncakeStoreKVEvents":
-        common_events = [
-            event
-            for event, count in self._event_counter.items()
-            if count * self._replication_factor(event) == self._num_workers
-        ]
+        common_events = self.pop_common_events()
         self._event_counter.clear()
         self._event_counter.update(common_events)
         self._num_workers = 1
         return self
+
+    def pop_common_events(self) -> list[KVCacheEvent]:
+        common_events = [
+            event
+            for event, count in self._event_counter.items()
+            if self._is_common_event(event, count)
+        ]
+        for event in common_events:
+            del self._event_counter[event]
+        return common_events
+
+    def has_events(self) -> bool:
+        return bool(self._event_counter)
 
     def increment_workers(self, count: int = 1) -> None:
         if count <= 0:
@@ -284,16 +296,13 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             self._kv_cache_events = kv_cache_events
         else:
             self._kv_cache_events.add_events(kv_cache_events.get_all_events())
-            self._kv_cache_events.increment_workers(
-                kv_cache_events.get_number_of_workers()
-            )
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         if self._kv_cache_events is not None:
-            self._kv_cache_events.aggregate()
-            yield from self._kv_cache_events.get_all_events()
-            self._kv_cache_events.clear_events()
-            self._kv_cache_events = None
+            events = self._kv_cache_events.pop_common_events()
+            if not self._kv_cache_events.has_events():
+                self._kv_cache_events = None
+            yield from events
 
     # ============================================================
     # Worker-side methods
@@ -351,6 +360,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         ):
             return None
         events = self.connector_worker.get_kv_events()
+        # Empty containers still count this worker toward the poll's quorum.
         kv_events = MooncakeStoreKVEvents(
             num_workers=1,
             group_tp_replication_factors=(

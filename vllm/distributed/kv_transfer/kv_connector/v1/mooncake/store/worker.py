@@ -54,6 +54,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     ReqMeta,
     StoreShardId,
     TailKeyBoundary,
+    TPShardedStoreLayout,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # noqa: E501
     LOOKUP_MSG,
@@ -1671,76 +1672,9 @@ class MooncakeStoreWorker:
             retention_interval=kv_cache_config.prefix_cache_retention_interval,
             dcp_world_size=self.dcp_size,
         )
-        lcm_store_tp_enabled = extra_config.get("enable_store_tp_lcm") is True
-        store_tp_requested = (
-            lcm_store_tp_enabled or extra_config.get("store_tp_size") is not None
+        self.store_tp_size, store_namespace, store_layout_cls = (
+            self._select_store_layout(extra_config)
         )
-        requested_store_tp_size = resolve_store_tp_size(extra_config)
-        cache_layout = (
-            self.cache_config.get_resolved_kv_cache_layout()
-            if store_tp_requested
-            else None
-        )
-        store_layout_cls = None
-        if cache_layout is not None:
-            store_layout_cls = {
-                KVCacheLayout.LBHNC: LBHNCStoreLayout,
-                KVCacheLayout.LBNHC: LBNHCStoreLayout,
-            }.get(cache_layout)
-        share_tp_topology = (
-            store_layout_cls is not None
-            and self.pcp_size == 1
-            and self.dcp_size == 1
-            and len(self._kv_cache_groups) == 1
-            and type(self._kv_cache_groups[0].kv_cache_spec) is FullAttentionSpec
-            and str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
-            != "true"
-        )
-        valid_tp_mapping = (
-            requested_store_tp_size is not None
-            and requested_store_tp_size >= self.tp_size
-            and requested_store_tp_size % self.tp_size == 0
-            and share_tp_topology
-        )
-        share_tp_layout = False
-        share_replicated_mqa = False
-        if valid_tp_mapping:
-            assert requested_store_tp_size is not None
-            share_tp_layout = self.num_kv_head % requested_store_tp_size == 0
-            share_replicated_mqa = self.num_kv_head == 1
-        self.store_tp_size = requested_store_tp_size if share_tp_layout else None
-        store_namespace = ""
-        if share_tp_layout:
-            assert store_layout_cls is not None
-            assert requested_store_tp_size is not None
-            store_namespace = store_layout_cls.shared_namespace(
-                requested_store_tp_size, self.pp_size
-            )
-        elif share_replicated_mqa:
-            store_namespace = f"@store_pp:{self.pp_size}@store_format:tp_shared_mqa"
-            logger.info(
-                "Mooncake heterogeneous-TP store sharing uses the replicated "
-                "MQA layout for store_tp_size=%d",
-                requested_store_tp_size,
-            )
-        elif store_tp_requested:
-            store_namespace = (
-                f"@store_pp:{self.pp_size}@store_format:"
-                f"rank_local_tp{self.tp_size}_layout_"
-                f"{cache_layout.name if cache_layout else 'unknown'}"
-            )
-            requested_topology = (
-                extra_config.get("prefill_tp_sizes")
-                if lcm_store_tp_enabled
-                else extra_config.get("store_tp_size")
-            )
-            logger.warning(
-                "Mooncake heterogeneous-TP store sharing is disabled for "
-                "Store TP configuration %r with KV layout %s; using a "
-                "compatibility-namespaced rank-local store layout",
-                requested_topology,
-                cache_layout,
-            )
         metadata = KeyMetadata(
             model_name=model_config.model.rstrip("/").split("/")[-1],
             tp_rank=self.tp_rank,
@@ -1757,42 +1691,127 @@ class MooncakeStoreWorker:
         self._group_tp_replication_factors: tuple[int, ...] = (
             self._compute_group_tp_replication_factors()
         )
-        if self.store_tp_size is not None:
-            assert store_layout_cls is not None
-            group = self._kv_cache_groups[0]
-            group_metadata = dataclasses.replace(metadata, group_id=0)
-            self.token_dbs = [
+        self.token_dbs = self._build_token_databases(metadata, store_layout_cls)
+        self._init_lookup_key_prefixes()
+
+    def _supports_tp_sharded_store_layout(
+        self,
+        layout_cls: type[TPShardedStoreLayout] | None,
+        extra_config: dict[str, Any],
+    ) -> bool:
+        if (
+            layout_cls is None
+            or self.pcp_size != 1
+            or self.dcp_size != 1
+            or len(self._kv_cache_groups) != 1
+        ):
+            return False
+
+        # Subclasses may use different sharding or cache-lifetime semantics.
+        return (
+            type(self._kv_cache_groups[0].kv_cache_spec) is FullAttentionSpec
+            and str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
+            != "true"
+        )
+
+    def _select_store_layout(
+        self, extra_config: dict[str, Any]
+    ) -> tuple[int | None, str, type[TPShardedStoreLayout] | None]:
+        """Select the opt-in TP layout and its Store namespace."""
+        lcm_store_tp_enabled = extra_config.get("enable_store_tp_lcm") is True
+        store_tp_requested = (
+            lcm_store_tp_enabled or extra_config.get("store_tp_size") is not None
+        )
+        if not store_tp_requested:
+            return None, "", None
+
+        requested_store_tp_size = resolve_store_tp_size(extra_config)
+        cache_layout = self.cache_config.get_resolved_kv_cache_layout()
+        layout_cls: type[TPShardedStoreLayout] | None = {
+            KVCacheLayout.LBHNC: LBHNCStoreLayout,
+            KVCacheLayout.LBNHC: LBNHCStoreLayout,
+        }.get(cache_layout)
+
+        if (
+            requested_store_tp_size is not None
+            and requested_store_tp_size >= self.tp_size
+            and requested_store_tp_size % self.tp_size == 0
+            and self._supports_tp_sharded_store_layout(layout_cls, extra_config)
+        ):
+            assert layout_cls is not None
+            if self.num_kv_head % requested_store_tp_size == 0:
+                return (
+                    requested_store_tp_size,
+                    layout_cls.shared_namespace(requested_store_tp_size, self.pp_size),
+                    layout_cls,
+                )
+            if self.num_kv_head == 1:
+                logger.info(
+                    "Mooncake heterogeneous-TP store sharing uses the replicated "
+                    "MQA layout for store_tp_size=%d",
+                    requested_store_tp_size,
+                )
+                return (
+                    None,
+                    f"@store_pp:{self.pp_size}@store_format:tp_shared_mqa",
+                    None,
+                )
+
+        store_namespace = (
+            f"@store_pp:{self.pp_size}@store_format:"
+            f"rank_local_tp{self.tp_size}_layout_{cache_layout.name}"
+        )
+        requested_topology = (
+            extra_config.get("prefill_tp_sizes")
+            if lcm_store_tp_enabled
+            else extra_config.get("store_tp_size")
+        )
+        logger.warning(
+            "Mooncake heterogeneous-TP store sharing is disabled for "
+            "Store TP configuration %r with KV layout %s; using a "
+            "compatibility-namespaced rank-local store layout",
+            requested_topology,
+            cache_layout,
+        )
+        return None, store_namespace, None
+
+    def _build_token_databases(
+        self,
+        metadata: KeyMetadata,
+        layout_cls: type[TPShardedStoreLayout] | None,
+    ) -> list[ChunkedTokenDatabase]:
+        """Construct token databases and their Store layouts."""
+        token_dbs: list[ChunkedTokenDatabase] = []
+        for group_idx, group in enumerate(self._kv_cache_groups):
+            group_tp_rank = self.tp_rank
+            if layout_cls is None:
+                group_tp_rank //= self._group_tp_replication_factors[group_idx]
+            group_metadata = dataclasses.replace(
+                metadata,
+                group_id=group_idx,
+                tp_rank=group_tp_rank,
+            )
+            store_layout: TPShardedStoreLayout | None = None
+            if layout_cls is not None:
+                assert self.store_tp_size is not None
+                store_layout = layout_cls(
+                    group_metadata,
+                    group.kv_cache_spec.block_size,
+                    self.hash_block_size,
+                    local_tp_size=self.tp_size,
+                    store_tp_size=self.store_tp_size,
+                    tp_rank=self.tp_rank,
+                    num_kv_heads=self.num_kv_head,
+                )
+            token_dbs.append(
                 ChunkedTokenDatabase(
                     group_metadata,
                     group.kv_cache_spec.block_size,
                     hash_block_size=self.hash_block_size,
-                    store_layout=store_layout_cls(
-                        group_metadata,
-                        group.kv_cache_spec.block_size,
-                        self.hash_block_size,
-                        local_tp_size=self.tp_size,
-                        store_tp_size=self.store_tp_size,
-                        tp_rank=self.tp_rank,
-                        num_kv_heads=self.num_kv_head,
-                    ),
+                    store_layout=store_layout,
                 )
-            ]
-        else:
-            self.token_dbs = [
-                ChunkedTokenDatabase(
-                    dataclasses.replace(
-                        metadata,
-                        group_id=g_idx,
-                        tp_rank=(
-                            self.tp_rank // self._group_tp_replication_factors[g_idx]
-                        ),
-                    ),
-                    g.kv_cache_spec.block_size,
-                    hash_block_size=self.hash_block_size,
-                )
-                for g_idx, g in enumerate(self._kv_cache_groups)
-            ]
-        self._init_lookup_key_prefixes()
+            )
+        return token_dbs
 
     def _spec_tp_replication_factor(self, spec: KVCacheSpec) -> int:
         if self.dcp_size > 1:
