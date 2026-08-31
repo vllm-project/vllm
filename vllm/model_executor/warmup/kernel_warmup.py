@@ -311,6 +311,11 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     if is_leader:
         logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
 
+    # We skip EPLB here since we don't want to record dummy metrics.
+    # Randomize inputs to avoid every token pick the same experts,
+    # which lead to some EP ranks receiving no tokens and skipping their
+    # MoE kernel entirely, and cause hang due to all-reduce collective
+    # during synchronized autotuning.
     # Read cached autotune results and broadcast to all ranks.
     cached_results: bytes | None = None
     if is_leader and cache_path.exists():
