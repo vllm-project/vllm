@@ -27,7 +27,7 @@ from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
-from vllm.tracing import instrument
+from vllm.foundation.observability.tracing import instrument
 from vllm.utils.async_utils import in_loop
 from vllm.utils.network_utils import (
     close_sockets,

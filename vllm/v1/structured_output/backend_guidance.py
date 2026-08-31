@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from transformers import MistralCommonBackend
 
-from vllm.exceptions import VLLMValidationError
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader

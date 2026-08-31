@@ -5,7 +5,7 @@ from typing import cast
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
-from vllm.exceptions import VLLMValidationError
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import SupportedTask

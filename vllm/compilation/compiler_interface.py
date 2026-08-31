@@ -16,7 +16,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
-from vllm.env_override import _apply_constrain_to_fx_strides_patch
+from vllm.foundation.system.env_override import _apply_constrain_to_fx_strides_patch
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 from vllm.utils.torch_utils import is_torch_equal_or_newer

@@ -17,7 +17,7 @@ from types import MethodType
 from typing import Any, Literal, cast
 
 import vllm.envs as envs
-from vllm.logging_utils import ColoredFormatter, NewLineFormatter
+from vllm.foundation.observability.logging_utils import ColoredFormatter, NewLineFormatter
 
 _FORMAT = (
     f"{envs.VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
@@ -41,12 +41,12 @@ def _use_color() -> bool:
 DEFAULT_LOGGING_CONFIG: dict[str, dict[str, Any] | Any] = {
     "formatters": {
         "vllm": {
-            "class": "vllm.logging_utils.NewLineFormatter",
+            "class": "vllm.foundation.observability.logging_utils.NewLineFormatter",
             "datefmt": _DATE_FORMAT,
             "format": _FORMAT,
         },
         "vllm_color": {
-            "class": "vllm.logging_utils.ColoredFormatter",
+            "class": "vllm.foundation.observability.logging_utils.ColoredFormatter",
             "datefmt": _DATE_FORMAT,
             "format": _FORMAT,
         },
@@ -195,7 +195,7 @@ def _configure_vllm_root_logger() -> None:
     for formatter in logging_config.get("formatters", {}).values():
         # This provides backwards compatibility after #10134.
         if formatter.get("class") == "vllm.logging.NewLineFormatter":
-            formatter["class"] = "vllm.logging_utils.NewLineFormatter"
+            formatter["class"] = "vllm.foundation.observability.logging_utils.NewLineFormatter"
 
     if logging_config:
         dictConfig(logging_config)

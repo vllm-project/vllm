@@ -15,7 +15,7 @@ from vllm.entrypoints.chat_utils import (
     MultiModalItemTracker,
     _parse_chat_message_content_parts,
 )
-from vllm.exceptions import VLLMValidationError
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 
 from .typing import (

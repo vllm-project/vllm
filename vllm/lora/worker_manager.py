@@ -8,7 +8,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
-from vllm.exceptions import LoRAAdapterNotFoundError
+from vllm.foundation.system.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.model_manager import (

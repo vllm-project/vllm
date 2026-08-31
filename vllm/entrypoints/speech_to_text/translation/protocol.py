@@ -14,7 +14,7 @@ from pydantic import (
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.exceptions import VLLMValidationError
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import (
     BeamSearchParams,

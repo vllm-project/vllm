@@ -14,7 +14,7 @@ from torch._inductor.pattern_matcher import (
 from vllm.config import VllmConfig
 from vllm.ir.op import IrOp
 from vllm.logger import init_logger
-from vllm.logging_utils import lazy
+from vllm.foundation.observability.logging_utils import lazy
 
 from ..vllm_inductor_pass import VllmInductorPass
 from .utils import get_ir_op

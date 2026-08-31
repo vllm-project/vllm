@@ -49,7 +49,7 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.usage.usage_lib import UsageContext
+from vllm.foundation.observability.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine

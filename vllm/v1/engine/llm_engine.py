@@ -26,8 +26,8 @@ from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import init_tracer
-from vllm.usage.usage_lib import UsageContext
+from vllm.foundation.observability.tracing import init_tracer
+from vllm.foundation.observability.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.input_processor import InputProcessor

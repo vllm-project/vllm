@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.exceptions import VLLMServerError
+from vllm.foundation.system.exceptions import VLLMServerError
 
 
 class EngineGenerateError(VLLMServerError):

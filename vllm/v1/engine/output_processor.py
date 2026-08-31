@@ -21,7 +21,7 @@ from vllm.outputs import (
 )
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import (
+from vllm.foundation.observability.tracing import (
     SpanAttributes,
     SpanKind,
     extract_trace_context,

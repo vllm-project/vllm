@@ -28,7 +28,7 @@ from torch.autograd.profiler import record_function
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
+from vllm.foundation.observability.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils.network_utils import get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
 from vllm.utils.torch_utils import PIN_MEMORY

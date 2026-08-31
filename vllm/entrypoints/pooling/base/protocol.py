@@ -12,7 +12,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
-from vllm.exceptions import VLLMValidationError
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.tasks import check_removed_pooling_task
 from vllm.utils import random_uuid

@@ -13,7 +13,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
-from vllm.exceptions import VLLMValidationError
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 
 

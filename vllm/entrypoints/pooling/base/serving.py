@@ -22,7 +22,7 @@ from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
-from vllm.tracing import (
+from vllm.foundation.observability.tracing import (
     contains_trace_headers,
     extract_trace_headers,
     log_tracing_disabled_warning,

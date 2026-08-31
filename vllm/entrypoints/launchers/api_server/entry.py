@@ -18,7 +18,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
-from vllm.usage.usage_lib import UsageContext
+from vllm.foundation.observability.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import decorate_logs
 
 from ..app import build_app

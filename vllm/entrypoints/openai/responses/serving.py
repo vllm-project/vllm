@@ -88,7 +88,7 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError, VLLMValidationError
+from vllm.foundation.system.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob

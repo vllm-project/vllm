@@ -30,7 +30,7 @@ from vllm.config import (
     try_match_architecture_defaults,
 )
 from vllm.logger import init_logger
-from vllm.logging_utils import logtime
+from vllm.foundation.observability.logging_utils import logtime
 from vllm.tasks import ScoreType
 from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
 from vllm.utils.hashing import safe_hash

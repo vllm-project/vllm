@@ -9,7 +9,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.exceptions import VLLMValidationError
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async

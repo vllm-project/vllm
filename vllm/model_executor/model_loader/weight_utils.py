@@ -44,7 +44,7 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
 )
 from vllm.platforms import current_platform
-from vllm.tracing import instrument
+from vllm.foundation.observability.tracing import instrument
 from vllm.transformers_utils.repo_utils import hf_api, hf_fs
 from vllm.utils.import_utils import PlaceholderModule
 

@@ -1,34 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Provides a timeslice logging decorator
-"""
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-import functools
-import time
+"""Compatibility shim: vllm.logging_utils/log_time -> vllm.foundation.observability.logging_utils.log_time (sys.modules alias)."""
+import importlib
+import sys
 
-
-def logtime(logger, msg=None):
-    """
-    Logs the execution time of the decorated function.
-    Always place it beneath other decorators.
-    """
-
-    def _inner(func):
-        @functools.wraps(func)
-        def _wrapper(*args, **kwargs):
-            start = time.perf_counter()
-            result = func(*args, **kwargs)
-            elapsed = time.perf_counter() - start
-
-            prefix = (
-                f"Function '{func.__module__}.{func.__qualname__}'"
-                if msg is None
-                else msg
-            )
-            logger.debug("%s: Elapsed time %.7f secs", prefix, elapsed)
-            return result
-
-        return _wrapper
-
-    return _inner
+_real = importlib.import_module("vllm.foundation.observability.logging_utils.log_time")
+sys.modules[__name__] = _real

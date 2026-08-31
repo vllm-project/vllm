@@ -31,7 +31,7 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import (
+from vllm.foundation.observability.tracing import (
     contains_trace_headers,
     extract_trace_headers,
     log_tracing_disabled_warning,

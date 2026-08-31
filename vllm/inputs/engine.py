@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal, TypeAlias
 
 from typing_extensions import NotRequired, TypedDict, assert_never
 
-from vllm.exceptions import VLLMValidationError
+from vllm.foundation.system.exceptions import VLLMValidationError
 
 if TYPE_CHECKING:
     import torch

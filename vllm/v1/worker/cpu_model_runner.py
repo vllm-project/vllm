@@ -14,7 +14,7 @@ from vllm.config import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.tracing import instrument
+from vllm.foundation.observability.tracing import instrument
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner

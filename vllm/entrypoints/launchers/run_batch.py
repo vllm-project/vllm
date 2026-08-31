@@ -28,7 +28,7 @@ from urllib3.util import parse_url
 
 import vllm.envs as envs
 from vllm.config import config
-from vllm.connections import HTTPResponseSizeExceededError, global_http_connection
+from vllm.foundation.system.connections import HTTPResponseSizeExceededError, global_http_connection
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -61,7 +61,7 @@ from vllm.entrypoints.speech_to_text.translation.protocol import (
     TranslationResponse,
     TranslationResponseVerbose,
 )
-from vllm.exceptions import VLLMValidationError
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.utils import random_uuid
@@ -883,7 +883,7 @@ async def run_batch(
 
 async def main(args: Namespace):
     from vllm.entrypoints.launchers.api_server.entry import build_async_engine_client
-    from vllm.usage.usage_lib import UsageContext
+    from vllm.foundation.observability.usage.usage_lib import UsageContext
 
     validate_run_batch_args(args)
 

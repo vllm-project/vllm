@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Literal, get_args
 
-from vllm.exceptions import VLLMValidationError
+from vllm.foundation.system.exceptions import VLLMValidationError
 
 GenerationTask = Literal["generate", "transcription", "realtime"]
 GENERATION_TASKS: tuple[GenerationTask, ...] = get_args(GenerationTask)

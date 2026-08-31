@@ -15,7 +15,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.profiler.wrapper import TorchProfilerWrapper
+from vllm.foundation.devtools.profiler.wrapper import TorchProfilerWrapper
 from vllm.utils.cpu_resource_utils import (
     get_allowed_cpu_list,
     get_memory_node_info,

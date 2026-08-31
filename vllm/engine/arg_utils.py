@@ -128,7 +128,7 @@ if TYPE_CHECKING:
     from vllm.config.quantization import QuantizationConfigArgs
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.model_loader import LoadFormats
-    from vllm.usage.usage_lib import UsageContext
+    from vllm.foundation.observability.usage.usage_lib import UsageContext
     from vllm.v1.executor import Executor
 else:
     Executor = Any
@@ -2589,7 +2589,7 @@ class EngineArgs:
         cls,
         world_size: int,
     ) -> tuple[dict[UsageContext | None, int], dict[UsageContext | None, int]]:
-        from vllm.usage.usage_lib import UsageContext
+        from vllm.foundation.observability.usage.usage_lib import UsageContext
 
         default_max_num_batched_tokens: dict[UsageContext | None, int]
         default_max_num_seqs: dict[UsageContext | None, int]

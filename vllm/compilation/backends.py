@@ -31,9 +31,9 @@ from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
 from vllm.logger import init_logger
-from vllm.logging_utils import lazy
+from vllm.foundation.observability.logging_utils import lazy
 from vllm.platforms import current_platform
-from vllm.tracing import instrument, instrument_manual
+from vllm.foundation.observability.tracing import instrument, instrument_manual
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 

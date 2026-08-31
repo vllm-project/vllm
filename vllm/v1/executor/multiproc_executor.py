@@ -44,7 +44,7 @@ from vllm.distributed.parallel_state import (
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.tracing import instrument, maybe_init_worker_tracer
+from vllm.foundation.observability.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
     aiter_requires_tcp_store,

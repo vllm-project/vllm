@@ -22,12 +22,12 @@ from PIL import Image, UnidentifiedImageError
 from urllib3.util import Url, parse_url
 
 import vllm.envs as envs
-from vllm.connections import (
+from vllm.foundation.system.connections import (
     HTTPConnection,
     MediaDownloadSizeExceededError,
     global_http_connection,
 )
-from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
+from vllm.foundation.system.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.multimodal.video import get_video_loader_backend_for_processor
 from vllm.utils.registry import ExtensionManager

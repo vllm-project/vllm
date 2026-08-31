@@ -16,7 +16,7 @@ status codes are recorded correctly.
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 
-from vllm.exceptions import VLLMError
+from vllm.foundation.system.exceptions import VLLMError
 
 from .handlers.exception import exception_handler
 from .handlers.http import http_exception_handler

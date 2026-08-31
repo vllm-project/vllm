@@ -1,21 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.logging_utils.access_log_filter import (
-    UvicornAccessLogFilter,
-    create_uvicorn_log_config,
-)
-from vllm.logging_utils.formatter import ColoredFormatter, NewLineFormatter
-from vllm.logging_utils.lazy import lazy
-from vllm.logging_utils.log_time import logtime
-from vllm.logging_utils.torch_tensor import tensors_str_no_data
+"""Compatibility shim: vllm.logging_utils/ -> vllm.foundation.observability.logging_utils (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-__all__ = [
-    "NewLineFormatter",
-    "ColoredFormatter",
-    "UvicornAccessLogFilter",
-    "create_uvicorn_log_config",
-    "lazy",
-    "logtime",
-    "tensors_str_no_data",
-]
+_real = _importlib.import_module("vllm.foundation.observability.logging_utils")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

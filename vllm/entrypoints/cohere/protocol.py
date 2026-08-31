@@ -47,7 +47,7 @@ from cohere.types import (
 from pydantic import BaseModel, Field, field_validator
 
 import vllm.envs as envs
-from vllm.exceptions import VLLMValidationError
+from vllm.foundation.system.exceptions import VLLMValidationError
 
 # Re-export the SDK wire-format types alongside our local extensions so
 # ``vllm.entrypoints.cohere.serving`` and friends can import everything

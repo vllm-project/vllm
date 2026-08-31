@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from http import HTTPStatus
 
-from vllm.exceptions import GenerationError
+from vllm.foundation.system.exceptions import GenerationError
 from vllm.logger import init_logger
 
 from ..engine.protocol import ErrorInfo, ErrorResponse
@@ -25,7 +25,7 @@ def create_error_response(
             "create_error_response called with %s: %s", type(exc).__name__, exc
         )
 
-        from vllm.exceptions import (
+        from vllm.foundation.system.exceptions import (
             VLLMClientError,
             VLLMNotFoundError,
             VLLMServerError,

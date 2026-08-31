@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import pybase64
 import torch
 
-from vllm.exceptions import VLLMValidationError
+from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.utils.async_utils import make_async
 from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
 

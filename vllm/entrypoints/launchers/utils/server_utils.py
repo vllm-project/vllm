@@ -45,7 +45,7 @@ def get_uvicorn_log_config(args: Namespace) -> dict | None:
 
     # If endpoints to filter are specified, create a config with the filter
     if args.disable_access_log_for_endpoints:
-        from vllm.logging_utils import create_uvicorn_log_config
+        from vllm.foundation.observability.logging_utils import create_uvicorn_log_config
 
         # Parse comma-separated string into list
         excluded_paths = [

@@ -14,7 +14,7 @@ from torch.library import Library, infer_schema
 from vllm.ir.tolerances import DEFAULT_TOLERANCES, ToleranceSpec
 from vllm.ir.util import hash_source, weak_cache
 from vllm.logger import init_logger
-from vllm.logging_utils import lazy, tensors_str_no_data
+from vllm.foundation.observability.logging_utils import lazy, tensors_str_no_data
 
 InputGenerator = Callable[..., tuple[Any, ...]]
 

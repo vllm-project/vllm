@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from vllm.logger import init_logger
 from vllm.models.minimax_m3.nvidia.model import MiniMaxM3SparseAttention
 from vllm.platforms import current_platform
-from vllm.tracing import instrument
+from vllm.foundation.observability.tracing import instrument
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker

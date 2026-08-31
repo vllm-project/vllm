@@ -18,7 +18,7 @@ from tqdm import tqdm
 from vllm.distributed import is_global_first_rank
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.tracing import instrument
+from vllm.foundation.observability.tracing import instrument
 
 logger = init_logger(__name__)
 

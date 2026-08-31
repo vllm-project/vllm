@@ -10,7 +10,7 @@ from torch import nn
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.tracing import instrument
+from vllm.foundation.observability.tracing import instrument
 
 _MODELEXPRESS_LOADER_MODULE = "modelexpress.engines.vllm.loader"
 _MISSING_MODELEXPRESS_MODULES = frozenset(
