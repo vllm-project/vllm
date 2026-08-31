@@ -17,7 +17,7 @@ use crate::error::{ApiError, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
 use crate::routes::inference::generate::{
-    GenerateRequest, validate_request_compat as validate_generate_request,
+    GenerateRequest, GenerateSamplingParams, validate_request_compat as validate_generate_request,
 };
 use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -68,6 +68,14 @@ fn model_resolution(state: &RenderState) -> LoraModelResolution {
     }
 }
 
+fn response_model(state: &RenderState, requested_model: Option<&str>) -> String {
+    requested_model
+        .filter(|model| !model.is_empty())
+        .or_else(|| state.served_model_names.first().map(String::as_str))
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn lower_render_request(
     state: &RenderState,
     text_request: TextRequest,
@@ -86,7 +94,10 @@ fn lower_render_request(
         request_id: Some(text_request.request_id),
         model: Some(model),
         token_ids,
-        sampling_params: text_request.sampling_params,
+        sampling_params: GenerateSamplingParams {
+            n: None,
+            inner: text_request.sampling_params,
+        },
         stream,
         stream_options,
         cache_salt: text_request.cache_salt,
@@ -105,7 +116,7 @@ async fn render_chat(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Result<Json<GenerateRequest>, ApiError> {
-    let model = body.model.clone();
+    let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
@@ -129,7 +140,7 @@ async fn render_completion(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Result<Json<Vec<GenerateRequest>>, ApiError> {
-    let model = body.model.clone();
+    let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());

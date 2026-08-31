@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
 
 use crate::error::{Error, Result};
+use crate::normalize_top_k;
 
 /// Minimal subset of `tokenizer_config.json` needed by chat/EOS handling.
 #[derive(Debug, Default, Deserialize)]
@@ -111,10 +112,26 @@ pub(super) struct GenerationConfig {
     pub eos_token_id: Option<OneOrManyTokenIds>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
+    #[serde(deserialize_with = "deserialize_top_k")]
     pub top_k: Option<u32>,
     pub min_p: Option<f32>,
     pub repetition_penalty: Option<f32>,
     pub max_new_tokens: Option<u32>,
+}
+
+/// Deserialize a generation-config `top_k` into the text sampling model.
+///
+/// Null, `-1`, and `0` all disable top-k sampling; positive limits are
+/// preserved.
+fn deserialize_top_k<'de, D>(deserializer: D) -> std::result::Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i64>::deserialize(deserializer)?
+        .map(normalize_top_k)
+        .transpose()
+        .map(Option::flatten)
+        .map_err(serde::de::Error::custom)
 }
 
 /// HF generation configs allow either one EOS id or a list of EOS ids.
@@ -294,7 +311,24 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::ModelConfig;
+    use super::{GenerationConfig, ModelConfig};
+
+    #[test]
+    fn generation_config_normalizes_vllm_top_k_values() {
+        for (input, expected) in [
+            (r#"{"top_k":null}"#, None),
+            (r#"{"top_k":-1}"#, None),
+            (r#"{"top_k":0}"#, None),
+            (r#"{"top_k":20}"#, Some(20)),
+        ] {
+            let config: GenerationConfig = serde_json::from_str(input).unwrap();
+            assert_eq!(config.top_k, expected, "input={input}");
+        }
+
+        for input in [r#"{"top_k":-2}"#, r#"{"top_k":4294967296}"#] {
+            assert!(serde_json::from_str::<GenerationConfig>(input).is_err());
+        }
+    }
 
     #[test]
     fn model_config_detects_moe_from_named_expert_fields() {
