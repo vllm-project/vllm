@@ -352,7 +352,7 @@ def test_online_mxfp4_moe_matches_quark(
         checkpoint_method = QuarkOCP_MX_MoEMethod(
             moe=checkpoint_layer.moe_config,
             weight_quant_key=kMxfp4Static,
-            act_quant_key=kMxfp4Dynamic,
+            activation_quant_key=kMxfp4Dynamic,
         )
         online_method = Mxfp4OnlineMoEMethod(layer=online_layer)
 
@@ -571,7 +571,7 @@ def test_online_mxfp4_dense_matches_quark(
 
         checkpoint_scheme = QuarkOCP_MX(
             weight_quant_key=kMxfp4Static,
-            act_quant_key=kMxfp4Dynamic,
+            activation_quant_key=kMxfp4Dynamic,
         )
         checkpoint_scheme.create_weights(
             layer=checkpoint_layer,
