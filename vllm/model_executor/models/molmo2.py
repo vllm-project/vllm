@@ -1879,6 +1879,7 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
                             num_frames_override,
                         )
                     target_num_frames = min(target_num_frames, num_frames_override)
+                    target_num_frames = max(target_num_frames, 2)
 
             dummy_videos = self._get_dummy_videos(
                 width=video_size["width"],

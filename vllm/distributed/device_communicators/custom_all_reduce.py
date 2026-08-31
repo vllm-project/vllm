@@ -33,6 +33,57 @@ except ImportError:
 logger = init_logger(__name__)
 
 
+def _has_local_multicast_support(device: torch.device) -> bool:
+    """Return whether this CUDA device can allocate multicast memory."""
+    if torch_symm_mem is None or not current_platform.is_cuda():
+        return False
+    if device.index is None:
+        return False
+
+    try:
+        from torch._C._autograd import DeviceType
+        from torch._C._distributed_c10d import _SymmetricMemory
+
+        return _SymmetricMemory.has_multicast_support(
+            DeviceType.CUDA,
+            device.index,
+        )
+    except Exception as error:
+        logger.debug("MNNVL capability probe failed: %s", error)
+        return False
+
+
+def _group_can_attempt_mnnvl(
+    group: ProcessGroup,
+    device: torch.device,
+) -> bool:
+    """Return whether every rank can enter the cross-node MNNVL path.
+
+    MNNVL is available only on Blackwell-class GPUs. Local multicast support
+    is necessary but does not establish that the process group spans an MNNVL
+    domain; the symmetric-memory rendezvous below performs that group-level
+    check. The CPU all-reduce keeps every rank on the same control-flow path
+    when a heterogeneous or partially configured group is encountered.
+    """
+    device_index = device.index
+    local_support = (
+        device_index is not None
+        and current_platform.has_device_capability(100, device_index)
+        and _has_local_multicast_support(device)
+    )
+    group_support = torch.tensor(
+        int(local_support),
+        dtype=torch.int32,
+        device="cpu",
+    )
+    dist.all_reduce(
+        group_support,
+        op=dist.ReduceOp.MIN,
+        group=group,
+    )
+    return bool(group_support.item())
+
+
 def _can_p2p(rank: int, world_size: int) -> bool:
     for i in range(world_size):
         if i == rank:
@@ -146,6 +197,12 @@ class CustomAllreduce:
         # now `device` is a `torch.device` object
         assert isinstance(device, torch.device)
         self.device = device
+        if not same_node and not _group_can_attempt_mnnvl(group, device):
+            logger.warning(
+                "Custom collectives are disabled because this multi-node "
+                "group does not have MNNVL-capable GPUs on every rank."
+            )
+            return
         device_capability = current_platform.get_device_capability()
         if (
             current_platform.is_cuda()
@@ -347,6 +404,8 @@ class CustomAllreduce:
 
     def should_custom_ar(self, inp: torch.Tensor):
         if self.disabled or self.world_size > 8:
+            return False
+        if inp.dtype not in (torch.float32, torch.float16, torch.bfloat16):
             return False
         inp_size = inp.numel() * inp.element_size()
         # custom allreduce requires input byte size to be multiples of 16

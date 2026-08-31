@@ -869,7 +869,7 @@ class TestDpDeviceIdSharding:
         against its inherited device-control env var."""
         import argparse
 
-        from vllm.entrypoints.openai.dp_supervisor import _build_device_ids
+        from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
 
         args = argparse.Namespace(
             tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=None
@@ -881,7 +881,7 @@ class TestDpDeviceIdSharding:
         """User-provided --device-ids are sharded across DP children."""
         import argparse
 
-        from vllm.entrypoints.openai.dp_supervisor import _build_device_ids
+        from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
 
         args = argparse.Namespace(
             tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=[4, 5, 6, 7]

@@ -21,13 +21,15 @@ def _cache(num_blocks: int = 8) -> EmbeddingCache:
 # ── alloc ────────────────────────────────────────────────────────────────────
 
 
-def test_alloc_returns_unique_block_ids():
+def test_alloc_returns_unique_ascending_block_ids():
     cache = _cache()
     entry = cache.alloc("a", 3)
     assert entry is not None
     assert len(entry.block_ids) == 3
     assert len(set(entry.block_ids)) == 3
     assert all(0 <= i < 8 for i in entry.block_ids)
+    # Ascending order lets consumers detect which blocks are adjacent.
+    assert list(entry.block_ids) == sorted(entry.block_ids)
 
 
 def test_alloc_returns_tuple():
@@ -159,6 +161,33 @@ def test_unpin_asserts_on_unpinned():
     cache.mark_ready("a")
     with pytest.raises(AssertionError, match="unpinned"):
         cache.unpin("a")
+
+
+# ── has_held_entries ─────────────────────────────────────────────────────────
+
+
+def test_has_held_entries_empty_cache():
+    cache = _cache()
+    assert cache.has_held_entries() is False
+
+
+def test_has_held_entries_true_while_not_ready():
+    cache = _cache()
+    cache.alloc("a", 2)  # not ready → held
+    assert cache.has_held_entries() is True
+    cache.mark_ready("a")  # ready + unpinned → settled
+    assert cache.has_held_entries() is False
+
+
+def test_has_held_entries_true_while_pinned():
+    cache = _cache()
+    cache.alloc("a", 2)
+    cache.mark_ready("a")
+    assert cache.has_held_entries() is False
+    cache.pin("a")  # pinned → held
+    assert cache.has_held_entries() is True
+    cache.unpin("a")
+    assert cache.has_held_entries() is False
 
 
 # ── eviction ─────────────────────────────────────────────────────────────────

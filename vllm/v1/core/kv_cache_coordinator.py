@@ -599,7 +599,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.hash_block_size = hash_block_size
         self.dcp_world_size = dcp_world_size
         group_block_sizes = [
-            manager.block_size for manager in self.single_type_managers
+            manager.block_size
+            for manager, group in zip(
+                self.single_type_managers, kv_cache_config.kv_cache_groups
+            )
+            if group.kv_cache_spec.prefix_cacheable
         ]
         assert all(
             block_size % hash_block_size == 0 for block_size in group_block_sizes
@@ -638,8 +642,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         if self.enable_partial_hash_hits:
             unsupported_partial_hit_managers = {
                 type(manager).__name__
-                for manager in self.single_type_managers
-                if not manager.supports_fine_grained_hash_lookup
+                for manager, group in zip(
+                    self.single_type_managers, kv_cache_config.kv_cache_groups
+                )
+                if group.kv_cache_spec.prefix_cacheable
+                and not manager.supports_fine_grained_hash_lookup
                 and manager.block_size != hash_block_size
             }
             if unsupported_partial_hit_managers:
@@ -668,6 +675,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         """
         self.attention_groups: list[SpecGroup] = []
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
+            if not g.kv_cache_spec.prefix_cacheable:
+                continue
             manager_cls = self.single_type_managers[i].__class__
             spec = g.kv_cache_spec
             use_eagle = i in self.eagle_group_ids
@@ -687,8 +696,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     SpecGroup(spec, [i], manager_cls, use_eagle)
                 )
 
-        assert len(self.attention_groups) > 1, (
-            "HybridKVCacheCoordinator requires at least two attention groups."
+        assert self.attention_groups, (
+            "HybridKVCacheCoordinator requires at least one cacheable group."
         )
 
         # Put full attention first: its efficient left-to-right scan provides
@@ -867,14 +876,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if is_simple_hybrid:
                 break
 
-        # Truncate full attention blocks to final hit_length (if present)
-        first_group = self.attention_groups[0]
-        if isinstance(first_group.spec, FullAttentionSpec):
-            group_block_size = self.single_type_managers[
-                first_group.group_ids[0]
-            ].block_size
+        # Truncate every full-attention group (target and draft) blocks
+        # to final hit_length.
+        for group in self.attention_groups:
+            if not isinstance(group.spec, FullAttentionSpec):
+                continue
+            group_block_size = self.single_type_managers[group.group_ids[0]].block_size
             num_blocks = cdiv(hit_length, group_block_size)
-            for group_id in first_group.group_ids:
+            for group_id in group.group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
                     hit_length_by_group[group_id] = hit_length

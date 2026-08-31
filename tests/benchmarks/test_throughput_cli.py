@@ -230,3 +230,50 @@ def test_get_requests_resolves_mmvu(
     requests = get_requests(args, hf_tokenizer)
     assert len(requests) == 3
     assert all(isinstance(r, SampleRequest) for r in requests)
+
+
+@pytest.mark.benchmark
+def test_get_requests_allows_multimodal_on_plain_vllm_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    hf_tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    """Regression: --backend vllm must accept multimodal datasets such as ASR.
+
+    _run_vllm_requests forwards multi_modal_data straight to LLM.generate, so
+    the vllm-chat-only gate in get_samples rejected a backend that always
+    worked.
+    """
+    import vllm.benchmarks.datasets.datasets as dsmod
+
+    class _StubASRDataset:
+        IS_MULTIMODAL = True
+        SUPPORTED_DATASET_PATHS = {"openslr/librispeech_asr"}
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        def sample(self, *, num_requests, tokenizer, **kwargs):  # noqa: ARG002
+            return [
+                SampleRequest(prompt="q", prompt_len=1, expected_output_len=1)
+                for _ in range(num_requests)
+            ]
+
+    monkeypatch.setattr(dsmod, "ASRDataset", _StubASRDataset)
+
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args(
+        [
+            "--dataset-name",
+            "hf",
+            "--dataset-path",
+            "openslr/librispeech_asr",
+            "--backend",
+            "vllm",
+            "--num-prompts",
+            "3",
+        ]
+    )
+    requests = get_requests(args, hf_tokenizer)
+    assert len(requests) == 3
+    assert all(isinstance(r, SampleRequest) for r in requests)

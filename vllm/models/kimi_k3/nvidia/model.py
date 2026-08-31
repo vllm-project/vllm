@@ -1120,6 +1120,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         "in_proj_qkvgfab": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj"],
         "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        "fused_qkv_a_g_proj": ["q_a_proj", "kv_a_proj_with_mqa", "g_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1460,10 +1461,17 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         if use_full_rank_gate:
             stacked_params_mapping.append((".in_proj_qkvgfab", ".g_proj", 3))
         if getattr(self.config, "q_lora_rank", None) is not None:
-            stacked_params_mapping += [
-                (".fused_qkv_a_proj", ".q_a_proj", 0),
-                (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
-            ]
+            if self.config.mla_use_output_gate:
+                stacked_params_mapping += [
+                    (".fused_qkv_a_g_proj", ".q_a_proj", 0),
+                    (".fused_qkv_a_g_proj", ".kv_a_proj_with_mqa", 1),
+                    (".fused_qkv_a_g_proj", ".g_proj", 2),
+                ]
+            else:
+                stacked_params_mapping += [
+                    (".fused_qkv_a_proj", ".q_a_proj", 0),
+                    (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
+                ]
         use_mega_moe = any(
             module.use_mega_moe
             for module in self.modules()

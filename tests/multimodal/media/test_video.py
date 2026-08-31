@@ -454,7 +454,7 @@ class TestMergeKwargsGpuBackendPolicy:
         )
         assert result["hw_decoders"] == 2
 
-    @pytest.mark.parametrize("backend", ["opencv", "pyav", "torchcodec"])
+    @pytest.mark.parametrize("backend", ["opencv", "torchcodec"])
     def test_software_video_backend_passes_through(self, backend: str):
         result = VideoMediaIO.merge_kwargs(
             default_kwargs=None,
@@ -462,7 +462,7 @@ class TestMergeKwargsGpuBackendPolicy:
         )
         assert result["video_backend"] == backend
 
-    @pytest.mark.parametrize("backend", ["opencv", "pyav"])
+    @pytest.mark.parametrize("backend", ["opencv"])
     def test_software_codec_backend_passes_through(self, backend: str):
         result = VideoMediaIO.merge_kwargs(
             default_kwargs=None,

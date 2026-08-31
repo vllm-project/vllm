@@ -5,16 +5,13 @@ use std::collections::HashMap;
 use std::slice;
 
 use llm_multimodal::ImageDetail;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use vllm_llm::TokenUsage;
 
 // ============================================================================
 // Constants
 // ============================================================================
-
-/// Default model identifier used when no model is specified.
-pub const UNKNOWN_MODEL_ID: &str = "unknown";
 
 // ============================================================================
 // Default value helpers
@@ -23,6 +20,23 @@ pub const UNKNOWN_MODEL_ID: &str = "unknown";
 /// Helper function for serde default value (returns true).
 pub fn default_true() -> bool {
     true
+}
+
+/// Deserialize an OpenAI request `top_k` while preserving explicit disable.
+///
+/// Null remains `None` so model generation defaults apply. Explicit `-1` and
+/// `0` become `Some(0)` so the request overrides those defaults and disables
+/// top-k sampling. Positive limits are preserved.
+pub fn deserialize_request_top_k<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<i64>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(value) => vllm_text::normalize_top_k(value)
+            .map(|value| Some(value.unwrap_or(0)))
+            .map_err(serde::de::Error::custom),
+    }
 }
 
 // ============================================================================
@@ -187,6 +201,29 @@ pub struct InputAudio {
 // Streaming
 // ============================================================================
 
+#[derive(Debug, Serialize)]
+pub(crate) struct StreamResponseEnvelope {
+    id: String,
+    object: &'static str,
+    created: u64,
+    model: String,
+}
+
+impl StreamResponseEnvelope {
+    pub(crate) fn new(id: String, object: &'static str, created: u64, model: String) -> Self {
+        Self {
+            id,
+            object,
+            created,
+            model,
+        }
+    }
+
+    pub(crate) fn model(&self) -> &str {
+        &self.model
+    }
+}
+
 /// Mirrors the Python vLLM `StreamOptions` class.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StreamOptions {
@@ -201,8 +238,13 @@ pub struct StreamOptions {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Tool {
     #[serde(rename = "type")]
+    #[serde(default = "default_function_tool_type")]
     pub tool_type: String,
     pub function: Function,
+}
+
+fn default_function_tool_type() -> String {
+    "function".to_string()
 }
 
 #[serde_with::skip_serializing_none]
@@ -210,6 +252,7 @@ pub struct Tool {
 pub struct Function {
     pub name: String,
     pub description: Option<String>,
+    #[serde(default)]
     pub parameters: Value,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,
@@ -479,6 +522,16 @@ pub struct LogProbs {
     pub top_logprobs: Vec<Option<HashMap<String, f32>>>,
     pub text_offset: Vec<u32>,
 }
+
+/// vLLM prompt-logprob metadata keyed by vocabulary token ID.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PromptLogprob {
+    pub logprob: f32,
+    pub rank: u32,
+    pub decoded_token: String,
+}
+
+pub type PromptLogprobs = Vec<Option<HashMap<u32, PromptLogprob>>>;
 
 /// Mirrors the Python vLLM `ChatCompletionLogProbs` class.
 #[derive(Debug, Clone, Serialize)]

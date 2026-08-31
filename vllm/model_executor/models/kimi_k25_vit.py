@@ -37,6 +37,7 @@ from vllm.model_executor.models.vision import (
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
+from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
 
@@ -821,9 +822,7 @@ class MoonViT3dPretrainedModel(nn.Module):
         merge_gather_idx = build_image_merge_gather_idx(
             grid_thw_list, self.merge_kernel_size
         )
-        metadata["merge_gather_idx"] = torch.from_numpy(merge_gather_idx).to(
-            device=device, non_blocking=True
-        )
+        metadata["merge_gather_idx"] = async_tensor_h2d(merge_gather_idx, device=device)
         return metadata
 
 

@@ -917,16 +917,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             arch,
         )
         # Preparing persistent buffers
-        # Since we do not have explicit synchronization in ModelRunnerV2, we do not pin
-        # reused CPU buffers to avoid a race condition between step N async copies to
-        # GPU and step N+1 buffer updates.
-        self.pin_memory = not vllm_config.use_v2_model_runner and PIN_MEMORY
-        self.paged_kv_indptr = self._make_buffer(max_num_reqs + 1)
-        self.paged_kv_indptr_cpu_buffer = torch.zeros_like(
-            self.paged_kv_indptr.cpu, pin_memory=self.pin_memory
-        )  # Extra buffer for mutable paged_kv_indptr.cpu in cuda graph mode
-        self.paged_kv_indices = self._make_buffer(max_num_pages)
-        self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
+        self.paged_kv_indptr = CpuGpuBuffer(
+            max_num_reqs + 1, dtype=torch.int32, device=self.device, pin_memory=False
+        )
+        self.paged_kv_indices = torch.zeros(
+            max_num_pages, dtype=torch.int32, device=self.device
+        )
+        self.paged_kv_last_page_len = CpuGpuBuffer(
+            max_num_reqs, dtype=torch.int32, device=self.device, pin_memory=False
+        )
 
     @property
     def kv_cache_layout(self) -> KVCacheLayout:
@@ -969,17 +968,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if cache_dtype.startswith("nvfp4"):
             return FlashInferBackend.get_dtype_for_flashinfer("fp8_e4m3")
         return self.kv_cache_spec.dtype
-
-    def _make_buffer(
-        self, *size: int | torch.SymInt, dtype: torch.dtype = torch.int32
-    ) -> CpuGpuBuffer:
-        return CpuGpuBuffer(
-            *size,
-            dtype=dtype,
-            device=self.device,
-            pin_memory=self.pin_memory,
-            with_numpy=True,
-        )
 
     @override  # type: ignore[misc]
     @classmethod
@@ -1197,7 +1185,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if decode_wrapper is None:
             if use_cudagraph:
                 paged_kv_indptr = self.paged_kv_indptr.gpu[: batch_size + 1]
-                paged_kv_indices = self.paged_kv_indices.gpu
+                paged_kv_indices = self.paged_kv_indices
                 paged_kv_last_page_len = self.paged_kv_last_page_len.gpu[:batch_size]
             else:
                 paged_kv_indptr = None
@@ -1260,20 +1248,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             dtype=np.int32,
             out=self.paged_kv_indptr.np[1 : num_reqs + 1],
         )
-        # NOTE(woosuk): Because self.paged_kv_indptr_cpu can be modified
-        # after this line (e.g., for cuda graphs), we need to copy the data to
-        # self.paged_kv_indptr_buffer to avoid race condition.
-        self.paged_kv_indptr_cpu_buffer[: num_reqs + 1] = self.paged_kv_indptr.cpu[
-            : num_reqs + 1
-        ]
         paged_kv_indptr = self.paged_kv_indptr.gpu[: num_reqs + 1]
-        paged_kv_indptr.copy_(
-            self.paged_kv_indptr_cpu_buffer[: num_reqs + 1], non_blocking=True
-        )
+        paged_kv_indptr_cpu = self.paged_kv_indptr.cpu[: num_reqs + 1]
+        if PIN_MEMORY:
+            paged_kv_indptr_cpu = paged_kv_indptr_cpu.pin_memory()
+        paged_kv_indptr.copy_(paged_kv_indptr_cpu, non_blocking=True)
 
         # write self.paged_kv_indices inplace
         num_actual_pages = self.paged_kv_indptr.np[num_reqs]
-        paged_kv_indices = self.paged_kv_indices.gpu[:num_actual_pages]
+        paged_kv_indices = self.paged_kv_indices[:num_actual_pages]
         _copy_page_indices_kernel[(num_reqs,)](
             paged_kv_indices,
             block_table_tensor,
@@ -1289,8 +1272,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             page_size,
             paged_kv_last_page_len_np,
         )
+        paged_kv_last_page_len_cpu = self.paged_kv_last_page_len.cpu[:num_reqs]
+        if PIN_MEMORY:
+            paged_kv_last_page_len_cpu = paged_kv_last_page_len_cpu.pin_memory()
         self.paged_kv_last_page_len.gpu[:num_reqs].copy_(
-            self.paged_kv_last_page_len.cpu[:num_reqs], non_blocking=True
+            paged_kv_last_page_len_cpu, non_blocking=True
         )
         return paged_kv_indices
 

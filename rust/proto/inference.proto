@@ -50,6 +50,9 @@ message GenerateRequest {
 
   // Multimodal inputs aligned with placeholder markers in token_ids.
   repeated MediaItem media = 14;
+
+  // Loaded LoRA name; empty selects the base model.
+  string lora_name = 15;
 }
 
 message RandomSampling {

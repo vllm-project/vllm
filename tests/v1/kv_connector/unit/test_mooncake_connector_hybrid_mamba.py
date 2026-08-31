@@ -101,25 +101,45 @@ def test_hybrid_gdn_remote_prefill_uses_mamba_n_minus_one():
 
 
 @pytest.mark.cpu_test
-def test_hybrid_gdn_remote_decode_truncates_prefill_once():
-    scheduler = make_hybrid_gdn_scheduler(kv_role="kv_producer")
+def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_producer",
+    )
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    connector = MooncakeConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        make_hybrid_gdn_kv_cache_config(vllm_config.cache_config.block_size),
+    )
+    scheduler = connector.connector_scheduler
+    assert scheduler is not None
     request = create_request(num_tokens=10, do_remote_decode=True)
     original_tokens = list(request.prompt_token_ids)
 
-    num_new_tokens, is_async = scheduler.get_num_new_matched_tokens(
-        request, num_computed_tokens=0
-    )
-
-    assert num_new_tokens == 0
-    assert is_async is False
+    connector.on_new_request(request)
     assert request.prompt_token_ids == original_tokens[:-1]
     assert request._all_token_ids == original_tokens[:-1]
     assert request.num_prompt_tokens == len(original_tokens) - 1
     assert request.max_tokens == 1
     assert request.kv_transfer_params["_p_side_truncated"] is True
 
-    scheduler.get_num_new_matched_tokens(request, num_computed_tokens=0)
+    # Re-adding or rescheduling the request must not truncate another token.
+    scheduler.on_new_request(request)
     assert request.prompt_token_ids == original_tokens[:-1]
+
+    # Prefix-cache matching must not mutate the request after its local lookup.
+    with patch.object(
+        scheduler,
+        "_truncate_mamba_request_for_prefill",
+        side_effect=AssertionError("late Mamba truncation"),
+    ):
+        num_new_tokens, is_async = scheduler.get_num_new_matched_tokens(
+            request, num_computed_tokens=0
+        )
+
+    assert num_new_tokens == 0
+    assert is_async is False
 
 
 def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):

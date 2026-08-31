@@ -157,6 +157,8 @@ class OffloadingEvent:
     # True if blocks are removed, False if stored
     removed: bool
     locality: Locality | None = None
+    # Secondary tier identifier that generated the event, or None for primary.
+    ownership: str | None = None
 
 
 """

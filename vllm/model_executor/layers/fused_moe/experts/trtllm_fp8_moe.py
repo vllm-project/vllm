@@ -79,12 +79,27 @@ class TrtLlmFp8ExpertsBase:
             activation_key,
             activation_format,
         )
-        if not supported or moe_config.num_experts <= 2048:
+        if not supported:
             return supported, reason
-        return False, (
-            "FlashInfer TRTLLM routing supports at most 2048 experts, "
-            f"but got {moe_config.num_experts}"
-        )
+        # FlashInfer accepts gemm1_alpha/beta/clamp_limit only for MXFP8; the
+        # DeepSeek-FP8 block-scale kernel rejects them and the per-tensor kernel
+        # has no clamp at all, so a model-requested SwiGLU clamp cannot be
+        # honored on those paths.
+        if (
+            moe_config.swiglu_limit is not None
+            or moe_config.swiglu_alpha is not None
+            or moe_config.swiglu_beta is not None
+        ) and (weight_key, activation_key) != (kMxfp8Static, kMxfp8Dynamic):
+            return False, (
+                "the TRTLLM FP8 kernels apply the SwiGLU alpha/beta/clamp "
+                "parameters only for MXFP8 weights"
+            )
+        if moe_config.num_experts > 2048:
+            return False, (
+                "FlashInfer TRTLLM routing supports at most 2048 experts, "
+                f"but got {moe_config.num_experts}"
+            )
+        return True, None
 
     def __init__(
         self,

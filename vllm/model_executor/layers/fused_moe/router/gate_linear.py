@@ -20,30 +20,20 @@ class GateLinear(ReplicatedLinear):
 
     1. cuteDSL ll_bf16_gemm (SM90+, M<=16, bf16 in, fp32 out,
        K divisible by 8)
-    2. DSV3 specialized kernel (SM90+, M<=16, H=7168 E=256/384, H=6144 E=256)
-    3. fp32 specialized kernel  (SM90+, bf16/fp32 in, fp32 out, M<=32,
-       (H, E) in {(3072, 256), (6144, 128), (6144, 256)})
-    4. experimental bf16x3 CuteDSL kernel (opt-in, SM100, bf16 in, fp32 weight)
-    5. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
-    6. F.linear via ReplicatedLinear (ultimate fallback)
+    2. fp32 specialized kernel  (SM90+, bf16/fp32 in, fp32 out, M<=32,
+       (H, E) in {(3072, 256), (6144, 128)})
+    3. experimental bf16x3 CuteDSL kernel (opt-in, SM100, bf16 in, fp32 weight)
+    4. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
+    5. F.linear via ReplicatedLinear (ultimate fallback)
 
     The ``out_dtype`` attribute is mutable and can be set after init
     (e.g. when the required dtype depends on the expert quantization
     method which is only known later).
     """
 
-    # Dimensions supported by the DSV3 specialized kernel.
-    # Valid (hidden_size, num_experts) combinations:
-    #   (7168, 256) -> DeepSeek-V3,  (7168, 384) -> Kimi-K2,
-    #   (6144, 256) -> GLM-5
-    DSV3_SUPPORTED_NUM_EXPERTS = [256, 384]
-    DSV3_SUPPORTED_HIDDEN_SIZES = [7168, 6144]
-    # num_experts=384 is only instantiated for hidden_size=7168.
-    DSV3_UNSUPPORTED_SHAPES = {(6144, 384)}
-
     # (hidden_size, num_experts) pairs with an instantiated fp32 kernel:
     #   (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
-    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128), (6144, 256)}
+    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128)}
     FP32_MAX_TOKENS = 32
 
     def __init__(
@@ -77,18 +67,7 @@ class GateLinear(ReplicatedLinear):
         )
         self.out_dtype = out_dtype
 
-        # DSV3 specialized kernel eligibility (SM90+, exact dims)
         self.allow_specialized_router_gemm = can_use_specialized_kernels
-        self.allow_dsv3_router_gemm = (
-            self.allow_specialized_router_gemm
-            and self.weight.dtype == torch.bfloat16
-            and output_size in self.DSV3_SUPPORTED_NUM_EXPERTS
-            and input_size in self.DSV3_SUPPORTED_HIDDEN_SIZES
-            and (input_size, output_size) not in self.DSV3_UNSUPPORTED_SHAPES
-        )
-        # See https://github.com/vllm-project/vllm/pull/44217
-        # for more details.
-        self._dsv3_max_batch = 16 if is_hopper else 8
 
         # fp32 specialized kernel eligibility (SM90+, exact dims, fp32 weight)
         vllm_config = get_current_vllm_config_or_none()
@@ -116,15 +95,17 @@ class GateLinear(ReplicatedLinear):
 
         # Fused bf16 x bf16 -> fp32 GEMM eligibility. torch.mm's out_dtype
         # epilogue folds the fp32 cast into the GEMM, removing the standalone
-        # bf16->fp32 copy kernel that otherwise runs before grouped_topk.
-        # cuBLAS on CUDA (SM90+, via allow_specialized_router_gemm); hipBLASLt on
-        # ROCm, which supports the same out_dtype epilogue.
+        # bf16->fp32 copy kernel that otherwise runs before grouped_topk. This is
+        # the plain cuBLAS (CUDA) / hipBLASLt (ROCm) out_dtype epilogue, so it
+        # applies on any CUDA-alike device (no bias, since torch.mm has no bias
+        # term). The specialized-kernel gate above excludes family-120 Blackwell
+        # (GB10 / DGX Spark), which this tier still covers. See #49921.
         self._router_gemm_no_bias = not bias
+        self._router_gemm_cublas_capable = (
+            current_platform.is_cuda() or current_platform.is_rocm()
+        ) and self._router_gemm_no_bias
         self.allow_cublas_router_gemm = (
-            (
-                self.allow_specialized_router_gemm
-                or (current_platform.is_rocm() and self._router_gemm_no_bias)
-            )
+            self._router_gemm_cublas_capable
             and self.weight.dtype == torch.bfloat16
             and self.out_dtype == torch.float32
         )
@@ -156,10 +137,7 @@ class GateLinear(ReplicatedLinear):
 
         if (
             not self.allow_cublas_router_gemm
-            and (
-                self.allow_specialized_router_gemm
-                or (current_platform.is_rocm() and self._router_gemm_no_bias)
-            )
+            and self._router_gemm_cublas_capable
             and out_dtype == torch.float32
         ):
             self.allow_cublas_router_gemm = self.weight.dtype == torch.bfloat16
@@ -188,16 +166,7 @@ class GateLinear(ReplicatedLinear):
             output = ll_bf16_gemm(x, self.weight)
             return output, None
 
-        # Tier 2: DSV3 specialized kernel (fallback for when cuteDSL unavailable)
-        if self.allow_dsv3_router_gemm and x.shape[0] <= self._dsv3_max_batch:
-            output = ops.dsv3_router_gemm(
-                hidden_states=x,
-                router_weight=self.weight,
-                output_dtype=self.out_dtype,
-            )
-            return output, None
-
-        # Tier 3: fp32 specialized kernel (H=3072, E=256, M<=32)
+        # Tier 2: fp32 specialized kernel (H=3072, E=256, M<=32)
         # Dispatch is wrapped in a custom op so that torch.compile/CUDA-graph
         # capture does not freeze the runtime num_tokens branch.
         if self.allow_fp32_router_gemm and x.dtype in (
@@ -209,7 +178,7 @@ class GateLinear(ReplicatedLinear):
             )
             return output, None
 
-        # Tier 4: experimental bf16x3 CuteDSL kernel for fp32 router weights
+        # Tier 3: experimental bf16x3 CuteDSL kernel for fp32 router weights
         if self.allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
             from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
                 bf16x3_router_gemm,
@@ -218,12 +187,12 @@ class GateLinear(ReplicatedLinear):
             output = bf16x3_router_gemm(x, self.weight)
             return output, None
 
-        # Tier 5: cuBLAS bf16→fp32
+        # Tier 4: cuBLAS bf16→fp32
         if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
             output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
             return output, None
 
-        # Tier 6: F.linear (ReplicatedLinear)
+        # Tier 5: F.linear (ReplicatedLinear)
         if self.out_dtype is not None and x.dtype != self.weight.dtype:
             x = x.to(self.weight.dtype)
         output, output_bias = super().forward(x)

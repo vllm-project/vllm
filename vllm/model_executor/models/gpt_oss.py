@@ -79,6 +79,13 @@ _GPT_OSS_STREAMED_EXPERT_SUFFIX_TO_SHARD = {
 }
 
 
+def _get_weight_loader(param: torch.Tensor) -> Callable[..., object]:
+    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+    if not callable(weight_loader):
+        raise TypeError("weight_loader must be callable")
+    return weight_loader
+
+
 class OAIAttention(nn.Module):
     # Override to switch RoPE convention. gpt-oss uses NeoX (chunk halves);
     # privacy-filter and similar derivatives use GPT-J (interleaved pairs).
@@ -273,6 +280,28 @@ class GptOssRoutedExperts(RoutedExperts):
 
         self._copy_to_expert(expert_data, loaded_weight)
 
+    @typing.overload
+    def weight_loader(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        shard_id: str,
+        expert_id: int,
+        return_success: typing.Literal[False],
+    ) -> None: ...
+
+    @typing.overload
+    def weight_loader(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        shard_id: str,
+        expert_id: int,
+        return_success: typing.Literal[True],
+    ) -> bool: ...
+
     def weight_loader(
         self,
         param: torch.nn.Parameter,
@@ -283,14 +312,24 @@ class GptOssRoutedExperts(RoutedExperts):
         return_success: bool = False,
     ) -> bool | None:
         if shard_id not in ("gpt_oss_w13", "gpt_oss_w2"):
-            return super().weight_loader(
+            if return_success:
+                return super().weight_loader(
+                    param,
+                    loaded_weight,
+                    weight_name,
+                    shard_id,
+                    expert_id,
+                    True,
+                )
+            super().weight_loader(
                 param,
                 loaded_weight,
                 weight_name,
                 shard_id,
                 expert_id,
-                return_success,
+                False,
             )
+            return None
 
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
         if expert_id == -1:
@@ -518,7 +557,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         heads_per_rank: int,
         head_start: int,
         weights: Iterable[tuple[str, torch.Tensor]],
-        stacked_params_mapping: list[tuple[str, ...]],
+        stacked_params_mapping: list[tuple[str, str, str]],
     ) -> set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -564,7 +603,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end, ...]
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = _get_weight_loader(param)
                 weight_loader(
                     param,
                     narrow_weight,
@@ -586,7 +625,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     ]
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = _get_weight_loader(param)
                 weight_loader(
                     param,
                     narrow_weight,
@@ -612,7 +651,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end, ...]
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = _get_weight_loader(param)
                 weight_loader(
                     param,
                     narrow_weight,
@@ -635,7 +674,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     narrow_weight = weight[..., tp_rank_start // 2 : tp_rank_end // 2]
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = _get_weight_loader(param)
                 weight_loader(
                     param,
                     narrow_weight,
@@ -654,7 +693,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end]
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = _get_weight_loader(param)
                 weight_loader(
                     param,
                     narrow_weight,
@@ -667,7 +706,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
             elif ".w2_bias" in name:
                 # Handle MLP down projection bias
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = _get_weight_loader(param)
                 if use_ep:
                     weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
@@ -691,7 +730,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     continue
                 name = name.replace(weight_name, param_name)
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = _get_weight_loader(param)
                 if weight_loader == default_weight_loader:
                     weight_loader(param, weight)
                 else:
@@ -702,7 +741,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 if name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = _get_weight_loader(param)
                 weight_loader(param, weight)
             loaded_params.add(name)
         return loaded_params
@@ -714,7 +753,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         heads_per_rank: int,
         head_start: int,
         weights: Iterable[tuple[str, torch.Tensor]],
-        stacked_params_mapping: list[tuple[str, ...]],
+        stacked_params_mapping: list[tuple[str, str, str]],
     ) -> set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -820,6 +859,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 and expert_id is not None
             ):
                 assert loaded_weight.numel() == 1
+                assert fused_name is not None
                 expert_data = params_dict[fused_name].data[expert_id]
                 expert_data.copy_(loaded_weight)
                 loaded_params.add(fused_name)
@@ -901,6 +941,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 # fused gate_up_proj fused on disk, we cannot use the existing
                 # weight loaders without added complexity, so just do the
                 # direct load here.
+                assert fused_name is not None
                 param = params_dict[fused_name]
                 expert_data = param.data[expert_id]
                 dim1 = sliced_weight.shape[0]
@@ -1062,9 +1103,10 @@ class GptOssModel(nn.Module, EagleModelMixin):
 
                 if name.endswith("scale"):
                     # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -1084,6 +1126,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     if weight_name not in name:
                         continue
 
+                    assert fused_name is not None
                     param = params_dict[fused_name]
                     # We should ask the weight loader to return success or not
                     # here since otherwise we may skip experts with other
@@ -1112,9 +1155,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     if name not in params_dict:
                         continue
                     param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
+                    weight_loader = _get_weight_loader(param)
                     weight_loader(param, loaded_weight)
 
                 loaded_params.add(name)
@@ -1127,7 +1168,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         heads_per_rank: int,
         head_start: int,
         weights: Iterable[tuple[str, torch.Tensor]],
-        stacked_params_mapping: list[tuple[str, ...]],
+        stacked_params_mapping: list[tuple[str, str, str]],
     ) -> set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -1224,7 +1265,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     continue
                 name = name.replace(weight_name, param_name)
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = _get_weight_loader(param)
                 if weight_loader == default_weight_loader:
                     weight_loader(param, weight)
                 else:
@@ -1235,7 +1276,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 if name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = _get_weight_loader(param)
                 weight_loader(param, weight)
             loaded_params.add(name)
         return loaded_params
@@ -1367,7 +1408,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
 class GptOssForCausalLM(
     nn.Module, SupportsPP, SupportsEagle, SupportsEagle3, SupportsLoRA
 ):
-    is_3d_moe_weight: bool = True
+    is_3d_moe_weight: typing.ClassVar[bool] = True
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(

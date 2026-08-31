@@ -852,7 +852,9 @@ class Gemma3ForConditionalGeneration(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         image_input = self._parse_and_validate_image_input(**mm_kwargs)
+        assert image_input is not None
         results = self._process_image_input(image_input)
         return torch.cat(results, dim=0)

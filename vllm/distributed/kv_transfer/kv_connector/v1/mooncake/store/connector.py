@@ -97,7 +97,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         unsupported: list[str] = []
         cache_block_size = vllm_config.cache_config.block_size
-        for g_idx, g in enumerate(kv_cache_config.kv_cache_groups):
+        for g_idx, g in enumerate(kv_cache_config.transfer_groups):
             spec = g.kv_cache_spec
             if isinstance(spec, CrossAttentionSpec):
                 unsupported.append(f"group {g_idx}: CrossAttentionSpec")
@@ -109,11 +109,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
                     f"{cache_block_size} (mamba_cache_mode != 'align')"
                 )
         pcp = vllm_config.parallel_config.prefill_context_parallel_size
-        dcp = vllm_config.parallel_config.decode_context_parallel_size
-        if len(kv_cache_config.kv_cache_groups) > 1 and pcp * dcp > 1:
-            unsupported.append(
-                f"PCP/DCP > 1 (pcp={pcp}, dcp={dcp}) with hybrid attention"
-            )
+        if len(kv_cache_config.transfer_groups) > 1 and pcp > 1:
+            unsupported.append(f"PCP > 1 (pcp={pcp}) with hybrid attention")
         if unsupported:
             raise ValueError(
                 "MooncakeStoreConnector does not support: " + "; ".join(unsupported)
@@ -283,8 +280,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
-        # No-op: loads are issued in get_finished() for compute overlap.
-        pass
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        self.connector_worker.start_load_kv(metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         # No layerwise support - no-op
@@ -301,8 +300,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return
 
     def wait_for_save(self):
-        # No-op: stores are issued in get_finished() for compute overlap.
-        pass
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        self.connector_worker.wait_for_save(metadata)
 
     def get_finished(
         self, finished_req_ids: set[str]

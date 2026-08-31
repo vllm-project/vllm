@@ -174,6 +174,31 @@ def mla_decode_kvcache_cpu(
     torch.ops._C.mla_decode_kvcache(out, query, kv_cache, scale, block_tables, seq_lens)
 
 
+def gather_mla_context_cache_cpu(
+    *,
+    src_cache: torch.Tensor,
+    dst: torch.Tensor,
+    block_table: torch.Tensor,
+    starts: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+) -> None:
+    page_size = src_cache.shape[1]
+    flat_cache = src_cache.view(-1, src_cache.shape[-1])
+    seq_lens = cu_seq_lens[1:] - cu_seq_lens[:-1]
+
+    out_start = 0
+    for req_idx, (start, seq_len) in enumerate(zip(starts.tolist(), seq_lens.tolist())):
+        if seq_len <= 0:
+            continue
+        positions = torch.arange(start, start + seq_len, device=block_table.device)
+        block_ids = block_table[req_idx, positions // page_size].to(torch.long)
+        offsets = positions % page_size
+        slots = block_ids * page_size + offsets
+        out_end = out_start + seq_len
+        dst[out_start:out_end].copy_(flat_cache[slots])
+        out_start = out_end
+
+
 # merge attn states ops
 def merge_attn_states(
     output: torch.Tensor,
@@ -2359,21 +2384,6 @@ def moe_wna16_gemm(
     )
 
 
-def dsv3_router_gemm(
-    hidden_states: torch.Tensor,
-    router_weight: torch.Tensor,
-    output_dtype: torch.dtype,
-) -> torch.Tensor:
-    output = torch.empty(
-        hidden_states.shape[0],
-        router_weight.shape[0],
-        device=hidden_states.device,
-        dtype=output_dtype,
-    )
-    torch.ops._moe_C.dsv3_router_gemm(output, hidden_states, router_weight)
-    return output
-
-
 def fp32_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
@@ -2792,6 +2802,7 @@ def fused_gdn_decode_post_conv_mtp(
     out: torch.Tensor | None = None,
     scale: float = 128**-0.5,
     norm_eps: float = 1e-5,
+    output_gate_activation: str = "silu",
 ) -> torch.Tensor:
     if out is None:
         out = torch.empty_like(output_gate)
@@ -2810,6 +2821,7 @@ def fused_gdn_decode_post_conv_mtp(
         out,
         scale,
         norm_eps,
+        output_gate_activation,
     )
     return out
 
@@ -3316,18 +3328,17 @@ def dsv3_fused_a_gemm(
     torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b, enable_pdl)
 
 
-if hasattr(torch.ops._C, "weight_packed_linear"):
-
-    @register_fake("_C::weight_packed_linear")
-    def weight_packed_linear_fake(
-        mat1: torch.Tensor,
-        mat2: torch.Tensor,
-        bias: torch.Tensor | None,
-        is_vnni: bool,
-    ) -> torch.Tensor:
-        return torch.empty(
-            (mat1.size(0), mat2.size(0)), dtype=mat1.dtype, device=mat2.device
-        )
+def weight_packed_linear_cpu(
+    x: torch.Tensor,
+    packed_weight: torch.Tensor,
+    n: int,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    output = torch.empty((*x.shape[0:-1], n), dtype=x.dtype)
+    torch.ops._C.weight_packed_linear(
+        output.reshape(-1, n), x.reshape(-1, x.size(-1)), packed_weight, bias, True
+    )
+    return output
 
 
 class CPUQuantMethod(IntEnum):

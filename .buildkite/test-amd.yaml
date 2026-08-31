@@ -320,18 +320,6 @@ steps:
 
 #-----------------------------------------------------  mi250 · models / language  -----------------------------------------------------#
 
-- label: ":amd: (MI250) Language Models (MTEB)" # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/models/language/pooling_mteb_test
-  commands:
-  - pytest -v -s models/language/pooling_mteb_test
-
 - label: ":amd: (MI250) Language Models (PPL)" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -1500,7 +1488,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_USE_DEEP_GEMM=0
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-tp4.txt --tp-size=4
 
 #---------------------------------------------------------  mi300 · examples  ----------------------------------------------------------#
 
@@ -1960,6 +1948,19 @@ steps:
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
+
+- label: ":amd: (MI300) Language Models (MTEB)" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/pooling_mteb_test
+  commands:
+  - pytest -v -s models/language/pooling_mteb_test
 
 - label: ":amd: (MI300) Language Models (Extended Pooling)" # TBD
   timeout_in_minutes: 180
@@ -2713,7 +2714,7 @@ steps:
   dind: false
   agent_pool: mi300_2
   num_gpus: 2
-  working_dir: "/vllm-workspace/tests"
+  working_dir: "/vllm-workspace/"
   source_file_dependencies:
   - vllm/config/speculative.py
   - vllm/distributed/kv_transfer/kv_connector/
@@ -2737,7 +2738,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s v1/kv_connector/extract_hidden_states_integration
+  - pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration
 
 - label: ":amd: (MI300) V1 Attention Shard %N" # TBD
   timeout_in_minutes: 180
@@ -3373,7 +3374,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_USE_DEEP_GEMM=0
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-tp4.txt --tp-size=4
 
 - label: ":amd: (MI355) LM Eval Large Models" # TBD
   timeout_in_minutes: 180

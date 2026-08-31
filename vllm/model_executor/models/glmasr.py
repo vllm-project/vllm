@@ -11,7 +11,7 @@ from transformers.models.glmasr import GlmAsrConfig, GlmAsrProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
@@ -710,6 +710,7 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         sampling_rate = feature_extractor.sampling_rate
         num_audios = mm_counts.get("audio", 0)
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         max_audio_len = getattr(
             self.info.get_hf_processor(), "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S
@@ -793,8 +794,13 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
                 )
                 processed_data["feature_attention_mask"] = mask
 
-        audio = mm_data.get("audio", [])
-        audio_list = [audio] if audio and not isinstance(audio, list) else audio
+        audio = mm_data.get("audio")
+        if audio is None:
+            audio_list: list[Any] = []
+        elif isinstance(audio, list):
+            audio_list = audio
+        else:
+            audio_list = [audio]
         if audio_list:
             processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
@@ -878,6 +884,7 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
                 audio_embeds = out_mm_data.get("audio_embeds")
                 if audio_embeds is not None:
                     embed = audio_embeds[item_idx]
+                    assert isinstance(embed, torch.Tensor)
                     num_features = embed.shape[0]
                 else:
                     raise ValueError(
@@ -1118,7 +1125,11 @@ class GlmAsrForConditionalGeneration(
         audio_token = cls._get_audio_token(model_config)
 
         if task_type == "translate":
-            full_lang_name_to = cls.supported_languages.get(to_language, to_language)
+            full_lang_name_to = (
+                cls.supported_languages.get(to_language, to_language)
+                if to_language is not None
+                else ""
+            )
             user_content = f"{audio_token}translate the speech to {full_lang_name_to}"
         elif task_type == "transcribe":
             user_content = (

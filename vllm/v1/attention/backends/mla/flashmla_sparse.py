@@ -587,7 +587,14 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        q_concat_shape = (max_tokens, num_heads, head_size)
+        q_concat_heads = num_heads
+        if not is_quantized_kv_cache(kv_cache_dtype):
+            q_concat_heads = (
+                (num_heads + self.prefill_padding - 1)
+                // self.prefill_padding
+                * self.prefill_padding
+            )
+        q_concat_shape = (max_tokens, q_concat_heads, head_size)
         if is_quantized_kv_cache(kv_cache_dtype):
             assert kv_cache_dtype == "fp8_ds_mla", (
                 "FlashMLA Sparse Attention backend fp8 only supports "
@@ -626,6 +633,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
+        actual_num_heads: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill). req_id_per_token covers the whole batch; slice it
@@ -648,6 +656,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             kv_rows,
             topk_indices,
             topk_length,
+            actual_num_heads,
         )
 
     def _forward_fp8_kv_separate_prefill_decode(
@@ -880,6 +889,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         topk_length: torch.Tensor | None = None,
+        actual_num_heads: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
@@ -889,13 +899,14 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # NOTE(Chen): kernel requires num_local_head to be a multiple of
         # 64 on hopper and 128 on blackwell. Pad from q's head count, not
         # self.num_heads: under DCP the heads are all-gathered before this.
-        actual_num_heads = q.shape[1]
+        if actual_num_heads is None:
+            actual_num_heads = q.shape[1]
         padded_num_heads = (
             (actual_num_heads + self.prefill_padding - 1)
             // self.prefill_padding
             * self.prefill_padding
         )
-        if actual_num_heads < padded_num_heads:
+        if q.shape[1] < padded_num_heads:
             logger.warning_once(
                 f"Padding num_heads from {actual_num_heads} to "
                 f"{padded_num_heads} for BF16 sparse prefill kernel"
@@ -928,10 +939,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # MQA 576/512 approach for both prefill and decode
 
         # Concatenate q if it's a tuple (ql_nope, q_pe)
+        actual_num_heads = self.num_heads
         if isinstance(q, tuple):
             ql_nope, q_pe = q
             q = self.q_concat_buffer[: ql_nope.shape[0]]
             ops.concat_mla_q(ql_nope, q_pe, q)
+        else:
+            actual_num_heads = q.shape[1]
 
         num_actual_toks = q.shape[0]
 
@@ -945,7 +959,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         if not use_fp8_cache:
             attn_out, bf16_lse = self._forward_bf16_kv(
-                q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
+                q,
+                kv_c_and_k_pe_cache,
+                topk_indices,
+                attn_metadata,
+                actual_num_heads,
             )
             if self.need_to_return_lse_for_decode:
                 lse = bf16_lse

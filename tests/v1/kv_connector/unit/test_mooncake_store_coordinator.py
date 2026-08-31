@@ -451,6 +451,27 @@ def test_store_mask_retention_prefix_stable_as_aligned_length_grows():
     assert longer[: len(shorter)] == shorter
 
 
+def test_store_mask_excludes_mamba_groups_lookup_unaffected():
+    """Align-mode mamba block tables are not append-only (interior states are
+    nulled/freed; speculative blocks relocate), so the positional normal save
+    must never cover mamba chunks — regardless of retention. Lookups still
+    probe mamba boundaries: their keys come from the pinned snapshot/CoW
+    hand-off path instead."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(16)),
+        KVCacheGroupSpec(["L1"], _mamba_align(16)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16)
+    masks = coord.store_mask(64)
+    assert masks[0] is None  # full attn stays dense
+    assert masks[1] == [False] * 4
+
+    coord = _make_coord(groups, hash_block_size=16, retention_interval=32)
+    assert coord.store_mask(64)[1] == [False] * 4
+
+    assert coord.lookup_mask(64)[1] is None
+
+
 # ----- Eagle / MTP interaction with load_mask -----
 
 

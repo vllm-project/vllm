@@ -218,6 +218,6 @@ mkdocs.yaml @hmellor
 /vllm/model_executor/layers/pooler @noooop
 
 # Security guide and policies
-/docs/usage/security.md @russellb
-/SECURITY.md @russellb
-/docs/contributing/vulnerability_management.md @russellb
+/docs/usage/security.md @russellb @jperezdealgaba
+/SECURITY.md @russellb @jperezdealgaba
+/docs/contributing/vulnerability_management.md @russellb @jperezdealgaba

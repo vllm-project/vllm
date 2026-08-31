@@ -2,7 +2,7 @@ group: LoRA
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) LoRA Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) LoRA Shard %N"
   device: h200_35gb
   key: lora
   timeout_in_minutes: 40
@@ -30,6 +30,7 @@ steps:
 - label: ":nvidia: (L4) LoRA TP (Distributed)"
   key: lora-tp-distributed
   timeout_in_minutes: 60
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/lora

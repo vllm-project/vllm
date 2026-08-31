@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence, Sized
 from typing import Annotated, Any, Literal
 
 import torch
@@ -18,7 +18,7 @@ from transformers.models.gemma3n import (
 from transformers.models.siglip import SiglipImageProcessorFast
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TextPrompt
 from vllm.logger import init_logger
@@ -115,8 +115,10 @@ def batch_audio_features(
         The `(bn, s_max, f)` features and their `(bn, s_max)` mask.
     """
     if isinstance(input_features, torch.Tensor):
+        assert isinstance(input_features_mask, torch.Tensor)
         return input_features.squeeze(1), input_features_mask.squeeze(1)
 
+    assert isinstance(input_features_mask, list)
     max_len = max(features.shape[0] for features in input_features)
     batched_features = input_features[0].new_zeros(
         (len(input_features), max_len, input_features[0].shape[-1])
@@ -248,6 +250,7 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
 
         image_overrides = mm_options.get("image")
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         return {
             "image": self._get_dummy_images(
@@ -293,10 +296,14 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
             # output (and thus its cache entry) is independent of the other
             # items in the batch. `batch_audio_features` re-pads the
             # per-item features so audio_tower can still run batched.
-            num_frames = [
-                self._get_num_audio_frames_alone(len(audio))
-                for audio in mm_data["audio"]
-            ]
+            audios = mm_data["audio"]
+            if not isinstance(audios, Sequence):
+                raise TypeError("audio data must be a sequence")
+            num_frames = []
+            for audio in audios:
+                if not isinstance(audio, Sized):
+                    raise TypeError("each audio item must have a length")
+                num_frames.append(self._get_num_audio_frames_alone(len(audio)))
             processed_data["input_features_padded"] = [
                 features[:n]
                 for features, n in zip(processed_data.pop("input_features"), num_frames)
@@ -685,7 +692,9 @@ class Gemma3nForConditionalGeneration(
         )
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        mm_input_by_modality = {}
+        mm_input_by_modality: dict[
+            str, Gemma3nImageInputs | Gemma3nAudioInputs | None
+        ] = {}
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -852,7 +861,13 @@ class Gemma3nForConditionalGeneration(
         # select a chunk of pre-allocated PLEs. During normal execution,
         # `embed_input_ids` is called before forward, hence this slice
         # will contain PLEs computed from the actual input_ids.
-        per_layer_inputs = self.per_layer_embeddings[: inputs_embeds.shape[0]]
+        if inputs_embeds is not None:
+            num_tokens = inputs_embeds.shape[0]
+        elif intermediate_tensors is not None:
+            num_tokens = intermediate_tensors["hidden_states"].shape[0]
+        else:
+            raise ValueError("inputs_embeds is required on the first PP rank")
+        per_layer_inputs = self.per_layer_embeddings[:num_tokens]
 
         hidden_states = self.language_model.model(
             input_ids,
@@ -913,9 +928,15 @@ class Gemma3nForConditionalGeneration(
         prompt += " this audio"
 
         # We assume the language is a valid ISO 639-1 code.
-        full_lang_name = cls.supported_languages.get(language, "")
+        full_lang_name = (
+            cls.supported_languages.get(language, "") if language is not None else ""
+        )
         # Translation only for now
-        full_lang_name_to = cls.supported_languages.get(to_language, "")
+        full_lang_name_to = (
+            cls.supported_languages.get(to_language, "")
+            if to_language is not None
+            else ""
+        )
 
         if task_type == "transcribe" and full_lang_name:
             prompt += f" into {full_lang_name}"

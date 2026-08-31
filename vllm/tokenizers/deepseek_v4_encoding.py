@@ -225,8 +225,12 @@ def render_message(
     Returns:
         Encoded string for this message.
     """
-    assert 0 <= index < len(messages)
-    assert thinking_mode in ["chat", "thinking"], f"Invalid thinking_mode `{thinking_mode}`"
+    if not (0 <= index < len(messages)):
+        raise ValueError(
+            f"Index {index} out of range for messages list of length {len(messages)}"
+        )
+    if thinking_mode not in ["chat", "thinking"]:
+        raise ValueError(f"Invalid thinking_mode `{thinking_mode}`")
 
     prompt = ""
     msg = messages[index]
@@ -248,10 +252,11 @@ def render_message(
         tool_calls = tool_calls_from_openai_format(tool_calls)
 
     reasoning_effort = reasoning_effort or DEFAULT_REASONING_EFFORT
-    assert reasoning_effort in REASONING_EFFORT_PROMPTS, (
-        f"Invalid reasoning effort: {reasoning_effort}, expected one of "
-        f"{list(REASONING_EFFORT_PROMPTS)}"
-    )
+    if reasoning_effort not in REASONING_EFFORT_PROMPTS:
+        raise ValueError(
+            f"Invalid reasoning effort: {reasoning_effort}, expected one of "
+            f"{list(REASONING_EFFORT_PROMPTS)}"
+        )
     if index == 0 and thinking_mode == "thinking":
         prompt += REASONING_EFFORT_PROMPTS[reasoning_effort]
 
@@ -263,7 +268,8 @@ def render_message(
             prompt += "\n\n" + response_format_template.format(schema=to_json(response_format))
 
     elif role == "developer":
-        assert content, f"Invalid message for role `{role}`: {msg}"
+        if not content:
+            raise ValueError(f"Invalid message for role `{role}`: {msg}")
 
         content_developer = USER_SP_TOKEN
         content_developer += content
@@ -362,7 +368,10 @@ def render_message(
     task = messages[index].get("task")
     if task is not None:
         # Task special token for internal classification tasks
-        assert task in VALID_TASKS, f"Invalid task: '{task}'. Valid tasks are: {list(VALID_TASKS)}"
+        if task not in VALID_TASKS:
+            raise ValueError(
+                f"Invalid task: '{task}'. Valid tasks are: {list(VALID_TASKS)}"
+            )
         task_sp_token = DS_TASK_SP_TOKENS[task]
 
         if task != "action":
@@ -374,7 +383,15 @@ def render_message(
             prompt += thinking_end_token if thinking_mode != "thinking" else thinking_start_token
             prompt += task_sp_token
 
-    elif messages[index].get("role") in ["user", "developer"]:
+    # A trailing system message opens generation, while a system message
+    # followed by assistant opens that assistant history turn.
+    elif role in ["user", "developer"] or (
+        role == "system"
+        and (
+            index == len(messages) - 1
+            or messages[index + 1].get("role") == "assistant"
+        )
+    ):
         # Normal generation: append Assistant + thinking token
         prompt += ASSISTANT_SP_TOKEN
         if not drop_thinking and thinking_mode == "thinking":

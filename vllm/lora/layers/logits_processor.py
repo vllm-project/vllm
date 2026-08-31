@@ -20,7 +20,7 @@ from .base import BaseLayerWithLoRA
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     """
     LoRA wrapper for LogitsProcessor, with extra logic to handle the
-    application of the LoRA adapter and added LoRA vocabulary.
+    application of the LoRA adapter.
 
     Args:
         base_layer: LogitsProcessor layer
@@ -183,19 +183,19 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             return None
 
         if self.sharded_to_full_mapping_gpu is not None:
-            # Reindex full logits tensor to ensure 1:1 mapping between
-            # index and token_id
+            # Reindex the gathered logits so that index == token_id. Each TP
+            # shard is padded to `num_embeddings_per_partition`, so the gather
+            # interleaves the shards' padding with real vocab entries.
             # Example for:
-            #   org_vocab_size = 4
-            #   added_vocab_size = 2
+            #   org_vocab_size = 6
             #   pad_to_size = 8
             #   tp_size = 2
 
-            # indices:  [0, 1, 2,  3, 4, 5, 6,  7]
-            # token_id: [0, 1, 4, -1, 2, 3, 5, -1]
+            # indices:  [0, 1, 2,  3, 4, 5,  6,  7]
+            # token_id: [0, 1, 2, -1, 3, 4,  5, -1]
 
             # Therefore, the mapping is expected to be:
-            # [0, 1, 4, 6, 2, 3, 5, 7] so that when we reindex,
+            # [0, 1, 2, 4, 5, 6, 3, 7] so that when we reindex,
             # we get:
             # indices:  [0, 1, 2, 3, 4, 5,  6,  7]
             # token_id: [0, 1, 2, 3, 4, 5, -1, -1]

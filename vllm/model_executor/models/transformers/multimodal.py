@@ -173,6 +173,11 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
                 image_token = processor.boi_token
             else:
                 image_token = getattr(processor, "image_token", "")
+                # Some processors (e.g. HunYuanVL) reject a bare image token and
+                # require each one to be wrapped in its start/end markers.
+                start_token = getattr(processor, "image_start_token", "")
+                end_token = getattr(processor, "image_end_token", "")
+                image_token = f"{start_token}{image_token}{end_token}"
             text += image_token * num_images
         return text
 

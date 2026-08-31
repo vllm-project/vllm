@@ -75,14 +75,15 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
         if main_md.num_prefills > 0:
             p = main_md.prefill
             assert p is not None
+            assert p.query_req_id is not None and p.query_abs_pos is not None
             minimax_m3_sparse_attn_prefill_aiter(
                 q[nd:],
                 k_cache,
                 v_cache,
                 topk[:, nd:num_tokens, :],
                 p.block_table,
-                p.cu_seqlens_q,
-                p.context_lens,
+                p.query_req_id,
+                p.query_abs_pos,
                 self.num_kv_heads,
                 self.scale,
                 out[nd:],

@@ -132,17 +132,19 @@ pass — this is the invariant to test first.
 
 ## Sparse NCCL
 
-Sparse, flat-index weight patches use a separate backend,
-`WeightTransferConfig(backend="sparse_nccl")`. It shares only NCCL process-group
-initialization with the dense engine; patches are applied directly in place to
-existing parameters, with no layerwise reload. The current sparse MVP requires
-`TP=1` and `PP=1`, and assumes a single-rank trainer.
+Sparse, flat-index weight patches use
+`WeightTransferConfig(backend="sparse_nccl")`. Names, full shapes, and flat
+indices are interpreted in **checkpoint/Hugging Face coordinates**. Every
+inference rank receives the same checkpoint-global patch, then the model's native
+`load_weights()` maps it to rank-local TP/EP and packed runtime parameters.
 
-Sparse is a **delta** backend: each round's patches are a fresh set of deltas
-from the latest optimizer step, not a stable stream of the model's parameters. So
-the engine takes **no `WeightSource`** — passing one raises — and each round's
-patches go straight to `send_weights(patches)`. A round with no patches is a
-no-op.
+Tensor parallelism is supported and does not have to match the trainer's layout.
+Pipeline-parallel behavior is not covered by the current sparse NCCL GPU test.
+
+Sparse is a **delta** backend: each call supplies replacement patches rather
+than a stable stream of the model's parameters. The engine therefore takes no
+`WeightSource`; patches go straight to `send_weights(patches)`, and an empty
+patch list is a no-op.
 
 ```python
 from vllm.distributed.weight_transfer import (
@@ -154,6 +156,7 @@ from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseWeightPatch,
 )
 
+client = RayVLLMWeightSyncClient(llm)
 engine = WeightTransferTrainerFactory.trainer_init(
     init_info=SparseNCCLTrainerInitInfo(
         master_address=master_address,
@@ -161,7 +164,7 @@ engine = WeightTransferTrainerFactory.trainer_init(
         world_size=world_size,
         rank=0,
     ),
-    client=RayVLLMWeightSyncClient(llm),
+    client=client,
 )
 
 patches = [
@@ -175,21 +178,24 @@ patches = [
 engine.send_weights(patches)
 ```
 
-`SparseNCCLTrainerInitInfo` takes the same rendezvous fields as the dense
-backend and no packed params — sparse transfers are never packed.
+Each `send_weights(patches)` call owns a complete one-shot `start` / `update` / `finish` lifecycle.
 
-Patches are validated on the trainer *before* `start_weight_update`: int32
-indices, 1-D, and matching `indices`/`values` lengths, with `full_shape` set. The
-worker checks the same invariants when applying, but by then the broadcasts are
-under way, where a size mismatch wedges both sides instead of raising.
+RL infrastructure that owns the generic worker lifecycle can keep one logical update open across bounded chunks without adding trainer-side session state:
 
-A trainer can hold a dense engine and a sparse engine at once — a full resync
-through the dense engine, cheap sparse deltas in between — as
-[`rlhf_sparse_nccl.py`](../../../examples/rl/rlhf_sparse_nccl.py) demonstrates.
+```python
+client.start_weight_update()
+for patches in patch_chunks:
+    engine.send_weight_chunk(patches)
+client.finish_weight_update()
+```
+
+Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still uses `O(N)` staging through the native loader, and the caller owns export/diff state and restart or reseed after a partial failure.
+
+[`rlhf_sparse_nccl.py`](../../../examples/rl/rlhf_sparse_nccl.py) demonstrates per-expert checkpoint patches with a Qwen3 MoE TP2/EP2 engine.
 
 ## Examples
 
 - [RLHF with NCCL weight syncing (`vllm serve`, HTTP)](../../../examples/rl/rlhf_http_nccl.py) - **Start here.** Trainer on one GPU, 2x tensor-parallel fp8 server on two others; HTTP control plane, NCCL data plane. Launches and tears down its own server
 - [RLHF with NCCL + FSDP2 and expert parallelism](../../../examples/rl/rlhf_nccl_fsdp_ep.py) - Multi-rank trainer: every FSDP rank builds an engine and joins the `full_tensor()` gather while only rank 0 touches the wire
-- [RLHF with sparse NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_sparse_nccl.py) - Dense-vs-sparse equivalence demo with a real model on a 2-GPU trainer/inference setup; sparse patches use `backend="sparse_nccl"` and currently require `TP=1` and `PP=1`
+- [RLHF with sparse NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_sparse_nccl.py) - Qwen3 MoE per-expert checkpoint updates with one trainer GPU and two TP2/EP2 inference GPUs
 - [RLHF with async weight syncing (offline, Ray)](../../../examples/rl/rlhf_async_new_apis.py) - Async generation with mid-flight pause, weight sync, resume, and validation against a fresh model; uses an in-process `AsyncLLMEngine` with `RayVLLMWeightSyncClient`

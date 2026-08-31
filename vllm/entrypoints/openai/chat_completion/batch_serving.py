@@ -291,7 +291,11 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 if request.echo:
                     conversation = all_conversations[prompt_idx]
                     last_msg_content: str | list[dict[str, str]] = ""
-                    if conversation and "content" in conversation[-1]:
+                    if (
+                        conversation
+                        and "content" in conversation[-1]
+                        and conversation[-1].get("role") == role
+                    ):
                         last_msg_content = conversation[-1]["content"] or ""
                     if isinstance(last_msg_content, list):
                         last_msg_content = "\n".join(
