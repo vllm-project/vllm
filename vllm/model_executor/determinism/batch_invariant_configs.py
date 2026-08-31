@@ -295,6 +295,29 @@ def resolve_tuned_matmul_configs() -> None:
     _TUNED_MATMUL_CONFIGS_RESOLVED = True
 
 
+def _get_tuned_matmul_shape_config(
+    N: int,
+    K: int,
+    dtype: torch.dtype,
+) -> _MatmulShapeConfig | None:
+    if not _TUNED_MATMUL_CONFIGS_RESOLVED:
+        resolve_tuned_matmul_configs()
+    if dtype != torch.bfloat16:
+        return None
+    device_configs = _TUNED_MATMUL_CONFIGS_FOR_DEVICE
+    if device_configs is None:
+        return None
+    return device_configs.get((N, K))
+
+
+def _get_tuned_matmul_configs_for_device() -> (
+    dict[tuple[int, int], _MatmulShapeConfig] | None
+):
+    if not _TUNED_MATMUL_CONFIGS_RESOLVED:
+        resolve_tuned_matmul_configs()
+    return _TUNED_MATMUL_CONFIGS_FOR_DEVICE
+
+
 def _get_matmul_config(
     M: int,
     N: int,
@@ -302,14 +325,7 @@ def _get_matmul_config(
     dtype: torch.dtype,
     default: dict[str, int],
 ) -> dict[str, int]:
-    if not _TUNED_MATMUL_CONFIGS_RESOLVED:
-        resolve_tuned_matmul_configs()
-    if dtype != torch.bfloat16:
-        return default
-    device_configs = _TUNED_MATMUL_CONFIGS_FOR_DEVICE
-    if device_configs is None:
-        return default
-    shape_config = device_configs.get((N, K))
+    shape_config = _get_tuned_matmul_shape_config(N, K, dtype)
     if shape_config is None:
         return default
     # Values above the tuned range reuse the largest bucket;
