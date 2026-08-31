@@ -138,6 +138,7 @@ ignore-hidden = false
 extend-ignore-identifiers-re = [".*[Uu][Ee][0-9][Mm][0-9].*"]
 
 [tool.typos.default.extend-identifiers]
+a63ede7 = "a63ede7"
 bbc5b7ede = "bbc5b7ede"
 NOOPs = "NOOPs"
 nin_shortcut = "nin_shortcut"
