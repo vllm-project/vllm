@@ -289,6 +289,7 @@ def combine_case(
     query_lens: list[int],
     spans: list[list[tuple[int, int]]],
     with_image: bool,
+    padding_value: int = -1,
 ):
     """Run combine_topk_swa_indices and return (indices, lens, expected)."""
     device = torch.device("cuda")
@@ -332,6 +333,7 @@ def combine_case(
         left_visible=left_t,
         right_visible=right_t,
         max_image_tokens=MAX_IMG,
+        padding_value=padding_value,
     )
 
     # Reference rows.
@@ -355,7 +357,7 @@ def combine_case(
             topk_len = min((pos + 1) // compress_ratio, topk)
             start, end = ref_swa_bounds(pos, WINDOW, lefts[token], rights[token])
             swa_len = end - start
-            row = [-1] * combined_topk
+            row = [padding_value] * combined_topk
             for j in range(topk_len):
                 row[j] = int(topk_cpu[token, j]) + M * b
             for j in range(swa_len):
@@ -374,7 +376,8 @@ COMBINE_CASES = [
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
-def test_combine_topk_swa_with_image_spans(cfg):
+@pytest.mark.parametrize("padding_value", [-1, 20000])
+def test_combine_topk_swa_with_image_spans(cfg, padding_value):
     case = CASES[0]
     indices, lens, rows, exp_lens = combine_case(
         cfg["compress_ratio"],
@@ -383,6 +386,7 @@ def test_combine_topk_swa_with_image_spans(cfg):
         case["query_lens"],
         case["spans"],
         with_image=True,
+        padding_value=padding_value,
     )
     assert lens.cpu().tolist() == exp_lens
     assert indices.cpu().tolist() == rows
@@ -390,7 +394,8 @@ def test_combine_topk_swa_with_image_spans(cfg):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
-def test_combine_topk_swa_without_image_unchanged(cfg):
+@pytest.mark.parametrize("padding_value", [-1, 20000])
+def test_combine_topk_swa_without_image_unchanged(cfg, padding_value):
     """left_visible=None must reproduce the plain causal combined indices."""
     case = CASES[0]
     indices, lens, rows, exp_lens = combine_case(
@@ -400,6 +405,7 @@ def test_combine_topk_swa_without_image_unchanged(cfg):
         case["query_lens"],
         case["spans"],
         with_image=False,
+        padding_value=padding_value,
     )
     assert lens.cpu().tolist() == exp_lens
     assert indices.cpu().tolist() == rows
