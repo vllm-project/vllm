@@ -1391,7 +1391,17 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
         if constexpr (std::is_same_v<state_t, float>) {
           s_ptr = state_slot;
         } else {
-          for (int64_t d0 = 0; d0 < D * D; ++d0) {
+          using bVec = at::vec::Vectorized<state_t>;
+          using fVec = at::vec::Vectorized<float>;
+          constexpr int kVecSize = bVec::size();
+          constexpr int fVecSize = fVec::size();
+          int64_t d0 = 0;
+          for (; d0 + kVecSize <= D * D; d0 += kVecSize) {
+            auto [state_vec0, state_vec1] = load_float_vec2(state_slot + d0);
+            state_vec0.store(state_tmp + d0);
+            state_vec1.store(state_tmp + d0 + fVecSize);
+          }
+          for (; d0 < D * D; ++d0) {
             state_tmp[d0] = static_cast<float>(state_slot[d0]);
           }
           s_ptr = state_tmp;
@@ -1574,7 +1584,17 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
         }
 
         if constexpr (!std::is_same_v<state_t, float>) {
-          for (int64_t d0 = 0; d0 < D * D; ++d0) {
+          using bVec = at::vec::Vectorized<state_t>;
+          using fVec = at::vec::Vectorized<float>;
+          constexpr int kVecSize = bVec::size();
+          constexpr int fVecSize = fVec::size();
+          int64_t d0 = 0;
+          for (; d0 + kVecSize <= D * D; d0 += kVecSize) {
+            fVec state_vec0 = fVec::loadu(s_ptr + d0);
+            fVec state_vec1 = fVec::loadu(s_ptr + d0 + fVecSize);
+            store_state_vec2<state_t>(state_slot + d0, state_vec0, state_vec1);
+          }
+          for (; d0 < D * D; ++d0) {
             state_slot[d0] = static_cast<state_t>(s_ptr[d0]);
           }
         }
