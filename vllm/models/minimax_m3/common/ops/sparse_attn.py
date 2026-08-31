@@ -326,10 +326,15 @@ def _gqa_sparse_decode_kernel(
     for _ in tl.range(chunk_start_topk, chunk_end_topk):
         blk = tl.load(cur_idx_ptr).to(tl.int32)
         cur_idx_ptr = cur_idx_ptr + stride_tk
-        c = blk * BLOCK_SIZE_K
-        page = tl.load(bt_row + blk).to(tl.int64)
+        # topk_idx uses -1 for unused entries. Select a safe logical block
+        # before dereferencing the block table; invalid and future blocks then
+        # contribute a neutral online-softmax update without control flow.
+        valid_blk = (blk >= 0) & (blk < num_blocks)
+        safe_blk = tl.where(valid_blk, blk, 0)
+        c = safe_blk * BLOCK_SIZE_K
+        page = tl.load(bt_row + safe_blk).to(tl.int64)
         pos = c + off_n
-        pos_mask = pos < kv_len
+        pos_mask = (pos < kv_len) & valid_blk
         k = tl.load(
             kv_cache_ptr
             + page * stride_kv_blk
@@ -356,9 +361,11 @@ def _gqa_sparse_decode_kernel(
         qk += tl.where(pos_mask[None, :], 0, float("-inf"))
         qk += tl.dot(q, k) * sm_scale_log2e
         m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
-        p = tl.exp2(qk - m_ij[:, None])
+        m_safe = tl.where(valid_blk, m_ij, 0.0)
+        p = tl.where(pos_mask[None, :], tl.exp2(qk - m_safe[:, None]), 0.0)
         l_ij = tl.sum(p, axis=1)
-        acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
+        alpha = tl.where(valid_blk, tl.exp2(m_i - m_safe), 1.0)
+        acc_o = acc_o * alpha[:, None]
         v = tl.load(
             kv_cache_ptr
             + page * stride_kv_blk
@@ -382,8 +389,9 @@ def _gqa_sparse_decode_kernel(
                 )
                 v = (v * v_scale[:, None]).to(q.dtype)
         acc_o += tl.dot(p.to(v.dtype), v)
-        m_i = m_ij
-        lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
+        lse_ij = m_safe + tl.log2(tl.exp2(lse_i - m_safe) + l_ij)
+        m_i = tl.where(valid_blk, m_safe, m_i)
+        lse_i = tl.where(valid_blk, lse_ij, lse_i)
 
     if USE_PDL:
         tl.extra.cuda.gdc_launch_dependents()
