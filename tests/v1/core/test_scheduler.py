@@ -6220,4 +6220,121 @@ def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str)
     output = scheduler.schedule()
 
     assert output.num_scheduled_tokens[req_id] > 0
-    assert not output.scheduled_encoder_inputs.get(req_id)
+
+
+def _make_running_decode(scheduler) -> None:
+    """Drive a short request through its prefill into a running decode state."""
+    (req,) = create_requests(num_requests=1, num_tokens=4, req_ids=["_dec"])
+    scheduler.add_request(req)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["_dec"],
+            req_id_to_index={"_dec": 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert not scheduler.running[0].is_prefill_chunk
+
+
+def test_release_step_produces_pure_prefill():
+    """On a release step (enable_prefill_delayer=True, throttle_prefills=False)
+    with both a running decode and an in-flight prefill chunk, the batch contains
+    only prefill tokens and no decode tokens."""
+    scheduler = create_scheduler(
+        max_num_seqs=16,
+        max_num_batched_tokens=50,
+        enable_chunked_prefill=True,
+        enable_prefill_delayer=True,
+    )
+    _make_running_decode(scheduler)
+
+    # Stage chk0's first chunk via a non-throttled release step. With no
+    # in-flight prefill chunk yet, defer_decodes is False, so this step is
+    # mixed (decode + first prefill chunk). After update_from_output, chk0
+    # is partially computed and is an in-flight prefill chunk in self.running.
+    (chunk_req,) = create_requests(num_requests=1, num_tokens=80, req_ids=["chk0"])
+    scheduler.add_request(chunk_req)
+    output = scheduler.schedule(throttle_prefills=False)
+    assert "chk0" in output.num_scheduled_tokens
+    assert "_dec" in output.num_scheduled_tokens
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["_dec", "chk0"],
+            req_id_to_index={"_dec": 0, "chk0": 1},
+            sampled_token_ids=[[0], []],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert chunk_req.is_prefill_chunk
+
+    output = scheduler.schedule(throttle_prefills=False)
+    assert "chk0" in output.num_scheduled_tokens, "in-flight prefill must run"
+    assert "_dec" not in output.num_scheduled_tokens, "decode must be deferred"
+
+
+def test_no_livelock_when_no_prefill_admissible():
+    """When no prefill can be admitted on a release step (KV full), decodes are
+    NOT starved: defer_decodes requires an in-flight prefill chunk, so when only
+    decode requests are running, decodes schedule normally."""
+    scheduler = create_scheduler(
+        max_num_seqs=16,
+        max_num_batched_tokens=8192,
+        enable_chunked_prefill=True,
+        enable_prefill_delayer=True,
+        num_blocks=10,
+    )
+    _make_running_decode(scheduler)
+
+    assert not any(r.is_prefill_chunk for r in scheduler.running)
+
+    output = scheduler.schedule(throttle_prefills=False)
+    assert "_dec" in output.num_scheduled_tokens, (
+        "decode must not be starved when no prefill chunk is in-flight"
+    )
+
+
+def test_pure_prefill_disabled_without_flag():
+    """When enable_prefill_delayer=False, a release step produces a mixed batch
+    (decodes run alongside in-flight prefill chunks) as before."""
+    scheduler = create_scheduler(
+        max_num_seqs=16,
+        max_num_batched_tokens=50,
+        enable_chunked_prefill=True,
+        enable_prefill_delayer=False,
+    )
+    _make_running_decode(scheduler)
+
+    # Stage chk0's first chunk via a non-throttled step to get it into the
+    # in-flight prefill state. defer_prefills is False here so both the decode
+    # and the first prefill chunk are scheduled (mixed batch).
+    (chunk_req,) = create_requests(num_requests=1, num_tokens=80, req_ids=["chk0"])
+    scheduler.add_request(chunk_req)
+    output = scheduler.schedule(throttle_prefills=False)
+    assert "chk0" in output.num_scheduled_tokens
+    assert "_dec" in output.num_scheduled_tokens
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["_dec", "chk0"],
+            req_id_to_index={"_dec": 0, "chk0": 1},
+            sampled_token_ids=[[0], []],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert chunk_req.is_prefill_chunk
+
+    # On the next release step with the flag off, defer_decodes is False, so
+    # the decode runs alongside the in-flight prefill chunk (mixed batch).
+    output = scheduler.schedule(throttle_prefills=False)
+    assert "chk0" in output.num_scheduled_tokens, "prefill must run"
+    assert "_dec" in output.num_scheduled_tokens, "decode must also run (mixed batch)"

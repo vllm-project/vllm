@@ -547,6 +547,16 @@ class Scheduler(SchedulerInterface):
             throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
+        # DP prefill balancing: on a release step (not throttled), defer decodes
+        # so the step is pure-prefill. Only safe when an in-flight prefill chunk
+        # in self.running guarantees a non-empty batch (its KV is pre-allocated).
+        defer_decodes = (
+            self.scheduler_config.enable_prefill_delayer
+            and not throttle_prefills
+            and not defer_prefills
+            and any(r.is_prefill_chunk for r in self.running)
+        )
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -579,6 +589,12 @@ class Scheduler(SchedulerInterface):
             if defer_prefills and request.is_prefill_chunk:
                 # DP prefill balancing: defer this in-progress prefill chunk to a
                 # cadence-aligned step; decodes still run to fill this step.
+                req_index += 1
+                continue
+
+            if defer_decodes and not request.is_prefill_chunk:
+                # DP prefill balancing: defer this decode to a non-release step so
+                # the release step is pure-prefill.
                 req_index += 1
                 continue
 
