@@ -10,7 +10,7 @@ clusters:
   • decode  (language-model inference)
 
 For MM input we:
-    1. Extract *every* image/audio item.
+    1. Extract *every* image/audio/video item.
     2. Fire N concurrent requests to the encoder cluster
        (one request per item, with **all text removed**).
     3. Wait for all of them to succeed.
@@ -51,12 +51,41 @@ encode_session: aiohttp.ClientSession | None = None
 prefill_session: aiohttp.ClientSession | None = None
 decode_session: aiohttp.ClientSession | None = None
 
+# Cursor for round-robin encoder assignment, shared across requests so the
+# fan-out doesn't restart from e_urls[0] every time.
+encoder_rr_idx = 0
+encoder_rr_lock = asyncio.Lock()
+
 ###############################################################################
 # Utils
 ###############################################################################
 
 
-MM_TYPES = {"image_url", "audio_url", "input_audio"}
+MM_TYPES = {"image_url", "audio_url", "input_audio", "video_url"}
+
+# The embeds content type each MM item is rewritten to once the encoder has
+# published its embedding out of band.
+EMBEDS_TYPES = {
+    "image_url": "image_embeds",
+    "audio_url": "audio_embeds",
+    "input_audio": "audio_embeds",
+    "video_url": "video_embeds",
+}
+
+
+def encoder_rr_assignment(
+    e_urls: list[str], start: int, count: int
+) -> tuple[list[str], int]:
+    """Assign `count` items to encoder URLs starting from cursor `start`.
+
+    Returns the per-item URL list and the cursor value the next call should
+    start from, so the assignment is contiguous across calls instead of
+    restarting at e_urls[0] every time.
+    """
+    urls = [e_urls[(start + i) % len(e_urls)] for i in range(count)]
+    next_start = (start + count) % len(e_urls)
+    return urls, next_start
+
 
 # Diagnostic switch: forward the original request to the decoder so the
 # only difference from the rewrite path is the rewrite itself.
@@ -74,7 +103,9 @@ def content_uuid(item: dict) -> str:
     the unmodified path, which hashes the content, would keep it. That asymmetry
     silently biases any comparison between the two.
     """
-    url = (item.get("image_url") or item.get("audio_url") or {}).get("url") or ""
+    url = (
+        item.get("image_url") or item.get("audio_url") or item.get("video_url") or {}
+    ).get("url") or ""
     payload = url or json.dumps(item, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -83,19 +114,22 @@ def _b64_tensor(values: list) -> str:
     import torch
 
     buf = io.BytesIO()
-    grid = torch.tensor(values, dtype=torch.long)
-    # Downstream stacks per item, so hand over a flat (t, h, w).
-    torch.save(grid.reshape(-1)[:3], buf)
+    flat = [v for item in values for v in (item if isinstance(item, list) else [item])]
+    # Floats stay float64 so timestamp strings format exactly as the
+    # encoder computed them.
+    dtype = torch.float64 if any(isinstance(v, float) for v in flat) else None
+    # Downstream stacks per item, so hand over a flat vector.
+    torch.save(torch.tensor(flat, dtype=dtype), buf)
     return base64.b64encode(buf.getvalue()).decode()
 
 
 def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
-    """Replace each image item with a metadata-only reference for the decoder.
+    """Replace each media item with a metadata-only reference for the decoder.
 
     The decoder does not need the pixels: the encoder instance already produced
     the embedding and published it through the EC connector under the same uuid.
     Sending only the grid lets the decoder size the placeholder range without
-    re-running the image transform.
+    re-running the media transform.
 
     `item_meta` holds what the encoder reported for each item (its cache key and
     the grid its processor actually produced), so the grid is never re-derived
@@ -126,25 +160,22 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
                 # processor cache); let the decoder process the media itself.
                 new_content.append(item)
                 continue
+            embeds_type = EMBEDS_TYPES[item["type"]]
             new_content.append(
-                {
-                    "type": "image_embeds",
-                    "image_embeds": metadata,
-                    "uuid": item_uuid,
-                }
+                {"type": embeds_type, embeds_type: metadata, "uuid": item_uuid}
             )
             rewritten += 1
         new_messages.append({**msg, "content": new_content})
 
     if not rewritten:
         return req_data
-    logger.info("Rewrote %d image item(s) as metadata references", rewritten)
+    logger.info("Rewrote %d media item(s) as metadata references", rewritten)
     return {**req_data, "messages": new_messages}
 
 
 def extract_mm_items(request_data: dict) -> list[dict]:
     """
-    Return *all* image/audio items that appear anywhere in `messages`.
+    Return *all* image/audio/video items that appear anywhere in `messages`.
 
     Each returned dict looks like:
         { "type": "image_url", "image_url": {...} }
@@ -189,8 +220,14 @@ async def fanout_encoder_primer(
     item_uuids: dict[int, str] = {}
     item_meta: dict[int, dict] = {}
 
-    # Round-robin over encode servers to distribute load a bit
-    url_cycle = (e_urls[i % len(e_urls)] for i in range(len(mm_items)))
+    # Round-robin over encode servers to distribute load a bit. The cursor
+    # persists across requests so fan-out doesn't restart at e_urls[0] every
+    # time (which would hot-spot the first encoder for single-item requests).
+    global encoder_rr_idx
+    async with encoder_rr_lock:
+        url_cycle, encoder_rr_idx = encoder_rr_assignment(
+            e_urls, encoder_rr_idx, len(mm_items)
+        )
 
     for idx, (item, target_url) in enumerate(zip(mm_items, url_cycle)):
         # Derive a *child* request id:  <parent>:<index>:<random-short>

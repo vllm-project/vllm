@@ -130,6 +130,7 @@ class WindowQFormerDownsampler(nn.Module):
 
         self.dropout = nn.Dropout(config.projector_dropout)
 
+        self.downsampler: SpatialOffsetDownsampler | InterpolateDownsampler
         if spatial_offset is not None:
             self.downsampler = SpatialOffsetDownsampler(config, offset=spatial_offset)
         else:
@@ -843,6 +844,7 @@ class Granite4VisionForConditionalGeneration(
         #    (possibly a chunk slice from the framework's encoder cache).
         #    Concatenate along token dim → (total_mm_tokens, lm_h * num_levels).
         N, lm_h = inputs_embeds.shape
+        assert multimodal_embeddings is not None
         all_packed = torch.cat(
             [t.to(dtype=inputs_embeds.dtype) for t in multimodal_embeddings],
             dim=0,
