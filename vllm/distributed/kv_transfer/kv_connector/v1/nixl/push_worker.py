@@ -159,6 +159,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Pre-process metadata; defer NIXL ops to the writer thread."""
+        if self.pcp_rank > 0:
+            return
+
         # D-side: track reqs waiting for P to push.
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
@@ -533,7 +536,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
             return [
                 list(block_ids[g])
-                if (replicate_attn and _is_attention_spec(self._group_spec_types[g]))
+                if (self._is_csa_linear and tp_ratio < 0)
+                or (replicate_attn and _is_attention_spec(self._group_spec_types[g]))
                 or rank in plan.source_ranks_per_group[g]
                 else []
                 for g in range(num_groups)
