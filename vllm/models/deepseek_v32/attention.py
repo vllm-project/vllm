@@ -119,8 +119,6 @@ class DeepseekV32Attention(MLAAttention):
     indexer: "DeepseekV32Indexer | None"
     indexer_cls: "type[DeepseekV32Indexer]" = DeepseekV32Indexer
 
-    supports_dense_mha_prefill = False
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -303,15 +301,6 @@ class DeepseekV32Attention(MLAAttention):
             device=hidden_states.device,
         )
         forward_context = get_forward_context()
-        attn_metadata_raw = forward_context.attn_metadata
-        if isinstance(attn_metadata_raw, dict):
-            attn_metadata = attn_metadata_raw.get(self.layer_name)
-        elif isinstance(attn_metadata_raw, list):
-            attn_metadata = attn_metadata_raw[0].get(self.layer_name)
-        else:
-            attn_metadata = attn_metadata_raw
-        attn_metadata = cast("MLACommonMetadata | None", attn_metadata)
-
         slot_mapping = forward_context.slot_mapping
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
@@ -337,7 +326,7 @@ class DeepseekV32Attention(MLAAttention):
             indexer_softmax_scale = 0.0
             indexer_n_head_scale = 0.0
 
-        if attn_metadata is None or self.use_pcp:
+        if forward_context.attn_metadata is None or self.use_pcp:
             mla_kv_cache = None
             mla_k_scale = None
             indexer_k_cache = None
@@ -346,8 +335,8 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
 
-        kv_c_out = torch.empty_like(kv_c) if self.use_pcp else None
-        k_pe_out = torch.empty_like(k_pe) if self.use_pcp else None
+        kv_c_out = torch.empty_like(kv_c)
+        k_pe_out = torch.empty_like(k_pe)
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -403,7 +392,10 @@ class DeepseekV32Attention(MLAAttention):
         )
 
         self._sparse_indexer_and_attn(
+            positions,
             q_c,
+            q_nope,
+            q_pe,
             index_q_fp8,
             index_k_out,
             index_weights_out,
@@ -418,7 +410,10 @@ class DeepseekV32Attention(MLAAttention):
     @eager_break_during_capture
     def _sparse_indexer_and_attn(
         self,
+        positions: torch.Tensor,
         q_c: torch.Tensor,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
         index_q_fp8: torch.Tensor | None,
         index_k: torch.Tensor | None,
         index_weights_out: torch.Tensor | None,
@@ -496,6 +491,20 @@ class DeepseekV32Attention(MLAAttention):
         num_actual = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
         if num_actual == 0:
             output.zero_()
+            return
+
+        if self._use_sparse_mha(attn_metadata):
+            assert kv_c is not None and k_pe is not None
+            mha_q_pe = self.rotary_emb(positions, q_pe)[0] if self._fp8_query else mqa_q
+            mha_q = torch.cat((q_nope, mha_q_pe), dim=-1)
+            self.forward_impl(
+                mha_q,
+                kv_c,
+                k_pe.unsqueeze(1),
+                kv_cache,
+                attn_metadata,
+                output,
+            )
             return
 
         if self._fp8_kv_needs_view:
