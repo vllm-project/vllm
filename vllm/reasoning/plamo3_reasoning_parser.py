@@ -46,7 +46,7 @@ EOT_TAG = "<|plamo:tag|>"
 BEGIN_THINK_TAG = "<|plamo:begin_think:plamo|>"
 END_THINK_TAG = "<|plamo:end_think:plamo|>"
 
-_ALL_SPECIAL_TAGS: list[str] = [
+_ALL_SPECIAL_TAGS: tuple[str, ...] = (
     BEGIN_TOOL_REQUESTS_TAG,
     END_TOOL_REQUESTS_TAG,
     BEGIN_TOOL_REQUEST_TAG,
@@ -60,7 +60,7 @@ _ALL_SPECIAL_TAGS: list[str] = [
     EOT_TAG,
     BEGIN_THINK_TAG,
     END_THINK_TAG,
-]
+)
 
 _SPECIAL_TOKEN_PREFIX = "<|plamo:"
 
@@ -81,47 +81,29 @@ def strip_at_eot(text: str) -> str:
     return text.split(EOT_TAG, maxsplit=1)[0]
 
 
-def compute_safe_until(buf: str, floor: int, tags: list[tuple[str, str]]) -> int:
+def compute_safe_until(buf: str, floor: int, tags: Sequence[str]) -> int:
     """Compute the maximum buffer index that is safe to flush.
 
     Holds back the tail of `buf` if it matches any tag prefix.
-    Uses a fast `rfind` for long prefixes (Step 1) and a fallback
-    `endswith` check for prefixes shorter than the anchor (Step 2).
+    Step 1 optimizes the common-anchor case. Step 2 is required to retain
+    tag prefixes shorter than that anchor.
     """
     buf_len = len(buf)
-    max_hold = 0
-    for tag, anchor in tags:
-        # Anchor must be a prefix of tag for correct fallback slicing.
-        assert len(anchor) <= len(tag) and tag.startswith(anchor), (
-            f"anchor {anchor!r} must be a prefix of tag {tag!r}"
-        )
-        anchor_len = len(anchor)
-        check_len = min(len(tag) - 1, buf_len)
-        # Step 1: Fast search for partial tags >= anchor_len.
-        if check_len >= anchor_len:
-            search_end = buf_len
-            search_start = buf_len - check_len
-            while True:
-                p = buf.rfind(anchor, search_start, search_end)
-                if p == -1:
-                    break
-                k = buf_len - p
-                if buf[p:] == tag[:k]:
-                    if k > max_hold:
-                        max_hold = k
-                    break
-                search_end = p
-        # Step 2: Fallback for prefixes < anchor_len.
-        # Skip if a longer match was already found.
-        if max_hold < anchor_len:
-            max_short = min(anchor_len - 1, buf_len)
-            for k in range(max_short, 0, -1):
-                if buf.endswith(tag[:k]):
-                    if k > max_hold:
-                        max_hold = k
-                    break
-    safe_until = max(buf_len - max_hold, floor)
-    assert safe_until <= buf_len, f"floor={floor} exceeds buffer length={buf_len}"
+    assert floor <= buf_len, f"floor={floor} exceeds buffer length={buf_len}"
+    # Step 1: Optimize checking tag prefixes containing the common anchor.
+    prefix_start = buf.rfind(_SPECIAL_TOKEN_PREFIX, floor)
+    if prefix_start != -1:
+        tail = buf[prefix_start:]
+        if any(tag.startswith(tail) and tail != tag for tag in tags):
+            return max(prefix_start, floor)
+
+    # Step 2: Required correctness check for shorter tag prefixes.
+    max_short_prefix = min(len(_SPECIAL_TOKEN_PREFIX) - 1, buf_len)
+    for length in range(max_short_prefix, 0, -1):
+        if buf.endswith(_SPECIAL_TOKEN_PREFIX[:length]):
+            return max(buf_len - length, floor)
+
+    safe_until = buf_len
     return safe_until
 
 
@@ -317,7 +299,7 @@ class Plamo3ReasoningParser(ReasoningParser):
                     safe_until = compute_safe_until(
                         current_text,
                         search_offset,
-                        [(END_THINK_TAG, "<|plamo:end_")],
+                        (END_THINK_TAG,),
                     )
                     if safe_until > search_offset:
                         self._stream_emit_pos = safe_until

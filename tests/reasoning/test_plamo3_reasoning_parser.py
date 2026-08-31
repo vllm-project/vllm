@@ -500,15 +500,15 @@ def test_init_rejects_empty_think_tag_tokenization():
 @pytest.mark.parametrize(
     ("buf", "floor", "additional_tags", "expected"),
     [
-        ("abc", 0, [], 3),
-        ("reasoning text<|pla", 0, [], 14),
-        ("reasoning text<|plamo:end_thin", 0, [], 14),
-        (f"reasoning text{END_THINK_TAG}", 0, [], 39),
-        ("abc<|pla", 7, [], 7),
-        ("x<|plamo:end_ztext<|pla", 0, [], 18),
-        ("content<|plamo:b", 0, [(BEGIN_TOOL_REQUESTS_TAG, "<|plamo:begin_")], 7),
+        ("abc", 0, (), 3),
+        ("reasoning text<|pla", 0, (), 14),
+        ("reasoning text<|plamo:end_thin", 0, (), 14),
+        (f"reasoning text{END_THINK_TAG}", 0, (), 39),
+        ("abc<|pla", 7, (), 7),
+        ("x<|plamo:end_ztext<|pla", 0, (), 18),
+        ("content<|plamo:b", 0, (BEGIN_TOOL_REQUESTS_TAG,), 7),
     ],
 )
 def test_compute_safe_until(buf, floor, additional_tags, expected):
-    tags = [(END_THINK_TAG, "<|plamo:end_"), *additional_tags]
+    tags = (END_THINK_TAG, *additional_tags)
     assert compute_safe_until(buf, floor=floor, tags=tags) == expected

@@ -246,7 +246,7 @@ class Plamo3ToolParser(ToolParser):
                         safe_until = compute_safe_until(
                             current_text,
                             state.content_emit_pos,
-                            [(BEGIN_TOOL_REQUESTS_TAG, "<|plamo:begin_")],
+                            (BEGIN_TOOL_REQUESTS_TAG,),
                         )
                         self._emit_content_delta(current_text, safe_until, output)
                     break
@@ -316,7 +316,7 @@ class Plamo3ToolParser(ToolParser):
                     safe_until = compute_safe_until(
                         current_text,
                         state.argument_emit_pos,
-                        [(END_TOOL_ARGS_TAG, "<|plamo:end_")],
+                        (END_TOOL_ARGS_TAG,),
                     )
                     if safe_until > state.argument_emit_pos:
                         output.add_tool_arguments(
