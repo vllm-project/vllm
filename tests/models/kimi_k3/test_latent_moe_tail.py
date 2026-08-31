@@ -23,6 +23,9 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.models.kimi_k3.nvidia import latent_moe_runner
 from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import KimiK3LatentMoETailOp
+from vllm.models.kimi_k3.nvidia.ops.sp_shared_reduce import (
+    KimiK3SPPublishedTailOp,
+)
 from vllm.platforms import current_platform
 
 HIDDEN_SIZE = 7168
@@ -413,6 +416,41 @@ def _test_latent_moe_tail_worker(
         atol=8e-2,
         rtol=3e-2,
     )
+
+    # Sequence-parallel ranks own different routed tokens. DeepGEMM publishes
+    # full-hidden shared partials by destination token, so the local tail must
+    # sum the source-rank dimension while running the replicated up-projection
+    # and must not multicast columns from unrelated tokens.
+    sp_op = KimiK3SPPublishedTailOp.initialize(
+        hidden_size=HIDDEN_SIZE,
+        latent_size=LATENT_SIZE,
+        max_num_tokens=128,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    sp_workspace, sp_flags, _ = sp_op.published_workspace()
+    torch.manual_seed(3400 + rank)
+    routed_sp = torch.randn(
+        16,
+        LATENT_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    torch.manual_seed(3500 + rank)
+    shared_sp_partials = torch.randn(
+        16,
+        tp_size,
+        HIDDEN_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    sp_generation = int(sp_flags[0].item())
+    sp_workspace[sp_generation, :16].copy_(shared_sp_partials)
+    expected_sp = F.linear(routed_sp, up_weight)
+    expected_sp.add_(shared_sp_partials.float().sum(dim=1).to(torch.bfloat16))
+    actual_sp = sp_op(routed_sp, up_weight)
+    torch.testing.assert_close(actual_sp, expected_sp, atol=8e-2, rtol=3e-2)
+    assert actual_sp.is_contiguous()
 
 
 def _run_latent_moe_tail_test(
