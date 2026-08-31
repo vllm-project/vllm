@@ -962,7 +962,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_request_num_preemptions = self._histogram_cls(
             name="vllm:request_num_preemptions",
             documentation="Histogram of the number of times a request was preempted.",
-            buckets=[0, 1, 2, 3, 4, 5, 10, 20],
+            buckets=[1, 2, 3, 4, 5, 10, 20],
             labelnames=labelnames,
         )
         self.histogram_request_num_preemptions = create_metric_per_engine(
