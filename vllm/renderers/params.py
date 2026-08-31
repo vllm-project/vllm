@@ -462,9 +462,13 @@ class TokenizeParams:
 
     def _validate_tokens(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply all validators to a token sequence."""
+        # Truncation runs before padding, matching the Transformers pipeline
+        # these parameters are named after. Padding first would let a
+        # subsequent left-side truncation keep only the pad tokens it just
+        # appended, discarding the prompt entirely.
         for validator in (
-            self._token_padding,
             self._token_truncation,
+            self._token_padding,
             self._token_len_check,
         ):
             tokens = validator(tokenizer, tokens)
