@@ -11,8 +11,6 @@ table follows the main KV-cache lifecycle. Their physical tensor storage is
 shared by the generic cache-layout planner.
 """
 
-from __future__ import annotations
-
 import math
 from dataclasses import dataclass
 from functools import cache
@@ -214,6 +212,7 @@ def _build_qsa_metadata_kernel(
     block_table_ptr,
     token_to_req_ptr,
     logical_positions_ptr,
+    visible_blocks_ptr,
     slot_mapping_ptr,
     k_work_metadata_ptr,
     block_table_stride_0: tl.constexpr,
@@ -269,6 +268,14 @@ def _build_qsa_metadata_kernel(
         logical_position,
         mask=store_mask,
     )
+    visible_blocks = tl.maximum(
+        0,
+        tl.minimum(
+            (logical_position + 1) // compress_ratio,
+            seq_len // compress_ratio,
+        ),
+    ).to(tl.int32)
+    tl.store(visible_blocks_ptr + token_idx, visible_blocks, mask=store_mask)
 
     # circular_buffer_size is constexpr, so each builder instance compiles out
     # the other QSA cache owner's slot-mapping rule.
@@ -383,6 +390,7 @@ def build_qsa_metadata_triton(
     common_attn_metadata: CommonAttentionMetadata,
     token_to_req_buffer: torch.Tensor,
     logical_positions_buffer: torch.Tensor,
+    visible_blocks_buffer: torch.Tensor,
     slot_mapping_buffer: torch.Tensor,
     *,
     storage_block_size: int,
@@ -390,12 +398,13 @@ def build_qsa_metadata_triton(
     circular_buffer_size: int = 0,
     k_work_metadata_buffer: torch.Tensor | None = None,
     request_capacity: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build QSA side-cache and optional pre-indexer work metadata."""
     num_tokens = common_attn_metadata.num_actual_tokens
     num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
     token_to_req = token_to_req_buffer[:num_tokens]
     logical_positions = logical_positions_buffer[:num_tokens]
+    visible_blocks = visible_blocks_buffer[:num_tokens]
     slot_mapping = slot_mapping_buffer[:num_tokens]
     num_reqs = common_attn_metadata.query_start_loc.shape[0] - 1
     assert num_reqs > 0
@@ -412,7 +421,7 @@ def build_qsa_metadata_triton(
         max_num_work = 0
 
     if num_tokens == 0 and k_work_metadata_buffer is None:
-        return token_to_req, logical_positions, slot_mapping
+        return token_to_req, logical_positions, visible_blocks, slot_mapping
 
     block_table = common_attn_metadata.block_table_tensor
     num_search_steps = int(math.ceil(math.log2(num_reqs)))
@@ -429,6 +438,7 @@ def build_qsa_metadata_triton(
         block_table,
         token_to_req,
         logical_positions,
+        visible_blocks,
         slot_mapping,
         k_work_metadata_buffer,
         block_table.stride(0),
@@ -451,13 +461,14 @@ def build_qsa_metadata_triton(
     )
     if circular_buffer_size == 0 and compress_ratio == 1:
         slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
-    return token_to_req, logical_positions, slot_mapping
+    return token_to_req, logical_positions, visible_blocks, slot_mapping
 
 
 def _build_qsa_metadata_torch(
     common_attn_metadata: CommonAttentionMetadata,
     token_to_req_buffer: torch.Tensor,
     logical_positions_buffer: torch.Tensor,
+    visible_blocks_buffer: torch.Tensor,
     slot_mapping_buffer: torch.Tensor,
     *,
     storage_block_size: int,
@@ -465,11 +476,12 @@ def _build_qsa_metadata_torch(
     circular_buffer_size: int = 0,
     k_work_metadata_buffer: torch.Tensor | None = None,
     request_capacity: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     del request_capacity
     num_tokens = common_attn_metadata.num_actual_tokens
     num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
     logical_positions = logical_positions_buffer[:num_tokens]
+    visible_blocks = visible_blocks_buffer[:num_tokens]
 
     token_to_req = common_attn_metadata.token_to_req_indices(token_to_req_buffer)[
         :num_tokens
@@ -484,6 +496,15 @@ def _build_qsa_metadata_torch(
     )
     if num_mapped_tokens < num_tokens:
         logical_positions[num_mapped_tokens:].fill_(-1)
+    row_seq_lens = common_attn_metadata.seq_lens.index_select(0, token_to_req.long())
+    visible_blocks.copy_(
+        torch.minimum(
+            (logical_positions + 1) // compress_ratio,
+            row_seq_lens // compress_ratio,
+        )
+        .clamp_min_(0)
+        .to(torch.int32)
+    )
     if circular_buffer_size > 0:
         slot_mapping = circular_qsa_slot_mapping(
             common_attn_metadata.block_table_tensor,
@@ -542,7 +563,7 @@ def _build_qsa_metadata_torch(
         k_work_metadata_buffer[:, 1].copy_(
             torch.where(active, work_in_request, -1).to(torch.int32)
         )
-    return token_to_req, logical_positions, slot_mapping
+    return token_to_req, logical_positions, visible_blocks, slot_mapping
 
 
 # Resolve the fallback outside the per-step metadata hot path.
@@ -561,12 +582,14 @@ class QSAForwardMetadata(AttentionMetadata):
     query_start_loc: torch.Tensor
     token_to_req: torch.Tensor
     logical_positions: torch.Tensor
+    visible_blocks: torch.Tensor
     k_work_metadata: torch.Tensor
     num_actual_tokens: int
     num_decodes: int
     num_decode_tokens: int
     num_prefills: int
     num_prefill_tokens: int
+    max_query_len: int
     decode_query_len: int
     storage_block_size: int
     compress_ratio: int
@@ -606,6 +629,9 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         )
         self.logical_positions_buffer = torch.empty(
             max_tokens, dtype=torch.int64, device=device
+        )
+        self.visible_blocks_buffer = torch.empty(
+            max_tokens, dtype=torch.int32, device=device
         )
         max_requests = vllm_config.scheduler_config.max_num_seqs
         self.request_capacity = max_requests
@@ -659,18 +685,21 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
                 num_tokens + (self.compress_ratio - 1) * num_requests
             ) // self.compress_ratio
             k_work_metadata = self.k_work_metadata_buffer[:max_num_work]
-        token_to_req, logical_positions, slot_mapping = build_qsa_metadata(
-            common_attn_metadata,
-            self.token_to_req_buffer,
-            self.logical_positions_buffer,
-            self.slot_mapping_buffer,
-            storage_block_size=self.storage_block_size,
-            compress_ratio=self.compress_ratio,
-            circular_buffer_size=(
-                self.kv_cache_spec.block_size if self.is_circular_buffer else 0
-            ),
-            k_work_metadata_buffer=k_work_metadata if build_k_work else None,
-            request_capacity=request_capacity,
+        token_to_req, logical_positions, visible_blocks, slot_mapping = (
+            build_qsa_metadata(
+                common_attn_metadata,
+                self.token_to_req_buffer,
+                self.logical_positions_buffer,
+                self.visible_blocks_buffer,
+                self.slot_mapping_buffer,
+                storage_block_size=self.storage_block_size,
+                compress_ratio=self.compress_ratio,
+                circular_buffer_size=(
+                    self.kv_cache_spec.block_size if self.is_circular_buffer else 0
+                ),
+                k_work_metadata_buffer=k_work_metadata if build_k_work else None,
+                request_capacity=request_capacity,
+            )
         )
         return QSAForwardMetadata(
             block_table=common_attn_metadata.block_table_tensor,
@@ -679,12 +708,14 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             query_start_loc=common_attn_metadata.query_start_loc,
             token_to_req=token_to_req,
             logical_positions=logical_positions,
+            visible_blocks=visible_blocks,
             k_work_metadata=k_work_metadata,
             num_actual_tokens=num_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
+            max_query_len=common_attn_metadata.max_query_len,
             decode_query_len=decode_query_len,
             storage_block_size=self.storage_block_size,
             compress_ratio=self.compress_ratio,

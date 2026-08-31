@@ -82,7 +82,6 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
         block_table,
         num_heads=indexer.index_n_heads,
         head_dim=indexer.index_head_dim,
-        compress_ratio=indexer.compress_ratio,
         max_decode_query_len=int(max_dql),
         max_num_reqs=int(runner.max_num_reqs),
         max_num_batched_tokens=int(runner.max_num_tokens),

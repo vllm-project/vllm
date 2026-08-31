@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen4Exp weight-free QSA indexer."""
 
-from __future__ import annotations
-
 from typing import cast
 
 import torch
@@ -233,6 +231,7 @@ class QSAIndexer(nn.Module):
 
         from .ops.qsa import qsa_compress_groups_with_ratio, qsa_store_cache_rows
         from .ops.qsa_indexer import (
+            expand_qsa_block_indices,
             qsa_select_paged_decode,
             qsa_select_paged_prefill,
         )
@@ -367,6 +366,13 @@ class QSAIndexer(nn.Module):
 
         num_decode_tokens = compressed_metadata.num_decode_tokens
         decode_query_len = compressed_metadata.decode_query_len
+        visible_blocks = compressed_metadata.visible_blocks[:num_tokens]
+        block_indices = torch.empty(
+            num_tokens,
+            self.token_topk // self.compress_ratio,
+            dtype=torch.int32,
+            device=q.device,
+        )
 
         # Decode requests occupy the leading rows and share one query length.
         if num_decode_tokens:
@@ -378,30 +384,36 @@ class QSAIndexer(nn.Module):
                 q[decode_slice],
                 compressed_key_cache,
                 compressed_metadata.block_table[:num_decodes],
-                compressed_metadata.token_to_req[decode_slice],
-                compressed_metadata.logical_positions[decode_slice],
-                compressed_metadata.seq_lens[:num_decodes],
+                visible_blocks[decode_slice],
                 self.token_topk,
                 self.compress_ratio,
                 decode_query_len,
-                out[decode_slice],
+                block_indices[decode_slice],
             )
 
         # Prefill requests follow the leading decode rows in the reordered batch.
         if num_decode_tokens < num_tokens:
+            num_decodes = compressed_metadata.num_decodes
             prefill_slice = slice(num_decode_tokens, num_tokens)
             qsa_select_paged_prefill(
                 q[prefill_slice],
                 compressed_key_cache,
-                compressed_metadata.block_table,
-                compressed_metadata.token_to_req[prefill_slice],
-                compressed_metadata.logical_positions[prefill_slice],
-                compressed_metadata.seq_lens,
+                compressed_metadata.block_table[num_decodes:],
+                compressed_metadata.query_start_loc[num_decodes:],
+                visible_blocks[prefill_slice],
                 self.token_topk,
                 self.compress_ratio,
-                out[prefill_slice],
+                compressed_metadata.max_query_len,
+                block_indices[prefill_slice],
             )
-        return out
+        return expand_qsa_block_indices(
+            block_indices,
+            compressed_metadata.logical_positions[:num_tokens],
+            visible_blocks,
+            self.compress_ratio,
+            self.token_topk,
+            out,
+        )
 
 
 __all__ = ["QSAIndexer", "apply_qsa_rope"]
