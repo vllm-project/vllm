@@ -651,19 +651,18 @@ def materialize_replayssm_prefix(
     """Materialize FlashInfer ReplaySSM SSM state for align column copies.
 
     Writes destination SSM from the source checkpoint plus ring, then resets
-    destination trackers. No-ops when there is nothing to copy or no
-    FlashInfer ReplaySSM mixers. Convolution state is left to the caller.
-    """
-    if not forward_context or num_reqs == 0:
-        return
-    if not any(col >= 0 for col in src_cols[:num_reqs]):
-        return
+    destination trackers. Convolution state is left to the caller.
 
+    The caller must invoke this only for FlashInfer ReplaySSM when STP
+    copies across a block column.
+    """
     grouped = _flashinfer_replayssm_mixers_by_group(
         kv_cache_config, mamba_group_ids, forward_context
     )
     if not grouped:
-        return
+        raise RuntimeError(
+            "materialize_replayssm_prefix requires FlashInfer ReplaySSM mixers"
+        )
 
     replayssm_materialize = _load_replayssm_materialize()
     batch_req_ids = req_ids[:num_reqs]
@@ -704,7 +703,6 @@ def _materialize_replayssm_prefix_group(
 
     src_phys = [0] * num_reqs
     dst_phys = [0] * num_reqs
-    copied_any = False
     for i, req_id in enumerate(req_ids):
         src_col = src_cols[i]
         if src_col < 0:
@@ -712,9 +710,6 @@ def _materialize_replayssm_prefix_group(
         block_ids = requests[req_id].block_ids[gid]
         src_phys[i] = int(block_ids[src_col])
         dst_phys[i] = int(block_ids[dst_cols[i]])
-        copied_any = True
-    if not copied_any:
-        return
 
     device = ssm.device
     src_row = torch.tensor(src_phys, dtype=torch.int32, device=device)

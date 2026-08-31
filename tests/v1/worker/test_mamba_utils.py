@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncsByType,
@@ -179,6 +180,10 @@ def test_preprocess_mamba_calls_flashinfer_replayssm_materialize(monkeypatch):
     sched = _make_scheduler_output(set(), None, set())
     sched.num_scheduled_tokens = {"r0": 1}
 
+    mixer = MagicMock(use_replayssm=True)
+    mixer.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    forward_context = {"mixer": mixer}
+
     seen: dict[str, Any] = {}
 
     def fake_materialize(
@@ -215,7 +220,7 @@ def test_preprocess_mamba_calls_flashinfer_replayssm_materialize(monkeypatch):
         mamba_state_idx,
         input_batch,
         requests,
-        {},
+        forward_context,
         {},
         copy_bufs,
     )
@@ -223,6 +228,50 @@ def test_preprocess_mamba_calls_flashinfer_replayssm_materialize(monkeypatch):
     assert seen["src_cols"] == [0]
     assert seen["dst_cols"] == [1]
     assert seen["num_reqs"] == 1
+
+
+def test_preprocess_mamba_skips_materialize_without_flashinfer(monkeypatch):
+    """Triton ReplaySSM block copies must not launch FlashInfer materialize."""
+    spec = MagicMock(block_size=4, num_speculative_blocks=0)
+    cache_config = MagicMock(enable_prefix_caching=True, use_replayssm=True)
+    input_batch = MagicMock()
+    input_batch.req_ids = ["r0"]
+    input_batch.num_accepted_tokens_cpu = np.array([1], dtype=np.int32)
+    copy_bufs = MagicMock(mamba_group_ids=[0], mamba_spec=spec)
+    requests = {"r0": MagicMock(num_computed_tokens=4)}
+    mamba_state_idx: dict[str, int] = {"r0": 0}
+    sched = _make_scheduler_output(set(), None, set())
+    sched.num_scheduled_tokens = {"r0": 1}
+
+    mixer = MagicMock(use_replayssm=True)
+    mixer.mamba_config.backend = MambaBackendEnum.TRITON
+    called = []
+    monkeypatch.setattr(
+        "vllm.v1.worker.mamba_utils.materialize_replayssm_prefix",
+        lambda *args, **kwargs: called.append(True),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.mamba_utils.collect_mamba_copy_meta",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.mamba_utils.do_mamba_copy_block",
+        lambda _copy_bufs: None,
+    )
+
+    preprocess_mamba(
+        sched,
+        MagicMock(),
+        cache_config,
+        mamba_state_idx,
+        input_batch,
+        requests,
+        {"mixer": mixer},
+        {},
+        copy_bufs,
+    )
+
+    assert called == []
 
 
 # -----------------------------------------------------------------------------

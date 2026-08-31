@@ -8,6 +8,7 @@ from typing import Any, NamedTuple
 import torch
 
 from vllm.config import CacheConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncsByType,
@@ -1433,6 +1434,27 @@ def _resolve_fused_precopy(
     )
 
 
+def _should_materialize_replayssm_prefix(
+    cache_config: CacheConfig,
+    forward_context: dict[str, Any],
+    src_cols: list[int],
+    num_reqs: int,
+) -> bool:
+    """True for FlashInfer ReplaySSM STP copies that cross a block column."""
+    if getattr(cache_config, "use_replayssm", False) is not True:
+        return False
+    if not any(col >= 0 for col in src_cols[:num_reqs]):
+        return False
+    for layer in forward_context.values():
+        mamba_config = getattr(layer, "mamba_config", None)
+        if (
+            getattr(layer, "use_replayssm", False)
+            and getattr(mamba_config, "backend", None) == MambaBackendEnum.FLASHINFER
+        ):
+            return True
+    return False
+
+
 def preprocess_mamba(
     scheduler_output: SchedulerOutput,
     kv_cache_config: KVCacheConfig,
@@ -1542,16 +1564,19 @@ def preprocess_mamba(
         )
     else:
         do_mamba_copy_block(copy_bufs)
-        materialize_replayssm_prefix(
-            kv_cache_config,
-            mamba_group_ids,
-            forward_context,
-            input_batch.req_ids,
-            requests,
-            src_cols,
-            dst_cols,
-            num_reqs,
-        )
+        if _should_materialize_replayssm_prefix(
+            cache_config, forward_context, src_cols, num_reqs
+        ):
+            materialize_replayssm_prefix(
+                kv_cache_config,
+                mamba_group_ids,
+                forward_context,
+                input_batch.req_ids,
+                requests,
+                src_cols,
+                dst_cols,
+                num_reqs,
+            )
 
 
 def postprocess_mamba_all(
