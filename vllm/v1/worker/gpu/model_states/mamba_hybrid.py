@@ -10,6 +10,10 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
+from vllm.model_executor.layers.mamba.ops.gdn_index_prep import (
+    GDNBlockIdxPrepBuffers,
+    gdn_inkernel_ckpt_idx_enabled,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -42,6 +46,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
     prev_last_scheduled_idx: torch.Tensor | None = None
+    block_idx_prep: "GDNBlockIdxPrepBuffers | None" = None
 
     def get_extra_common_attn_kwargs(
         self,
@@ -80,7 +85,24 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             extra_kwargs["prev_last_scheduled_idx"] = self.prev_last_scheduled_idx[
                 :num_reqs
             ]
+        if self.block_idx_prep is not None and isinstance(
+            attn_metadata_builder, GDNAttentionMetadataBuilder
+        ):
+            extra_kwargs["block_idx_prep"] = self.block_idx_prep
         return extra_kwargs
+
+    def get_capture_extra_attn_kwargs(
+        self,
+        attn_metadata_builder: Any,
+        num_reqs: int,
+    ) -> dict[str, Any]:
+        # Captured decode graphs must bake the shared prep-buffer addresses so
+        # the once-per-step prep launch feeds them between replays.
+        if self.block_idx_prep is not None and isinstance(
+            attn_metadata_builder, GDNAttentionMetadataBuilder
+        ):
+            return {"block_idx_prep": self.block_idx_prep}
+        return {}
 
 
 class MambaHybridModelState(DefaultModelState):
@@ -144,6 +166,15 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_prev_last_scheduled_idx_staged = torch.full(
                 (self.max_num_reqs,), -1, dtype=torch.int32, device=self.device
             )
+        # All-mode fused block-index prep (VLLM_GDN_INKERNEL_CKPT_IDX): one
+        # Triton launch per step into shared persistent buffers consumed by
+        # every GDN metadata builder, replacing the eager per-builder anchor
+        # math. Lazily allocated once GDN groups are known.
+        self._gdn_block_idx_prep: GDNBlockIdxPrepBuffers | None = None
+        self._gdn_block_idx_prep_enabled = (
+            self.cache_config.mamba_cache_mode == "all"
+            and gdn_inkernel_ckpt_idx_enabled()
+        )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -378,11 +409,20 @@ class MambaHybridModelState(DefaultModelState):
                 for group_idx, builder in aligned_index_builders:
                     builder.mamba_aligned_state_indices = all_group_indices[group_idx]
 
+        block_idx_prep = self._prepare_gdn_block_idx(
+            input_batch,
+            num_reqs,
+            attn_groups,
+            kv_cache_config,
+            prev_last_scheduled_idx,
+        )
+
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
             prev_last_scheduled_idx=prev_last_scheduled_idx,
+            block_idx_prep=block_idx_prep,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
@@ -409,6 +449,54 @@ class MambaHybridModelState(DefaultModelState):
                 for_capture=for_capture,
             )
         return attn_metadata
+
+    def _prepare_gdn_block_idx(
+        self,
+        input_batch: InputBatch,
+        num_reqs: int,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        prev_last_scheduled_idx: torch.Tensor | None,
+    ) -> GDNBlockIdxPrepBuffers | None:
+        """All-mode GDN (VLLM_GDN_INKERNEL_CKPT_IDX): run the once-per-step
+        block-index prep kernel into shared persistent buffers consumed by
+        every GDN metadata builder (the V2 counterpart of the V1 runner's
+        _prepare_gdn_block_idx). Runs during cudagraph capture too, so the
+        captured metadata bakes the shared buffer addresses; spec-decode
+        anchor outputs are only written on real steps, when
+        prev_last_scheduled_idx is provided.
+        """
+        if not self._gdn_block_idx_prep_enabled:
+            return None
+        if self._gdn_block_idx_prep is None:
+            # attn_groups may be mamba-stripped (is_profile dummy runs), so a
+            # negative probe must NOT be memoized — re-probe until real
+            # groups show a GDN builder.
+            has_gdn = any(
+                isinstance(group.get_metadata_builder(0), GDNAttentionMetadataBuilder)
+                for groups in attn_groups
+                for group in groups
+            )
+            if not has_gdn:
+                return None
+            self._gdn_block_idx_prep = GDNBlockIdxPrepBuffers(
+                self.max_num_reqs * (self.vllm_config.num_speculative_tokens + 1),
+                self.device,
+            )
+        _, mamba_spec = self._get_mamba_group_info(kv_cache_config)
+        seq_lens = input_batch.seq_lens[:num_reqs]
+        query_lens = (
+            input_batch.query_start_loc[1 : num_reqs + 1]
+            - input_batch.query_start_loc[:num_reqs]
+        )
+        self._gdn_block_idx_prep.prepare(
+            seq_lens,
+            seq_lens - query_lens,
+            prev_last_scheduled_idx,
+            mamba_spec.block_size,
+            num_reqs,
+        )
+        return self._gdn_block_idx_prep
 
     def postprocess_state(
         self,

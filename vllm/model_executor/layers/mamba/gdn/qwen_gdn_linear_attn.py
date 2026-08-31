@@ -42,6 +42,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.gdn_scatter import (
+    gdn_inkernel_ckpt_write_enabled,
+    gdn_scatter_block_checkpoints_triton,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -1370,7 +1374,21 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ns_block_idx_first_scheduled = ns_block_idx_last_scheduled = None
         ns_num_computed_tokens = None
         if is_all_mode and attn_metadata.num_prefills > 0:
-            if attn_metadata.spec_sequence_masks is not None:
+            if attn_metadata.ns_all_state_indices_sel is not None:
+                # Builder pre-selected these once per step with the CPU spec
+                # mask — no per-layer device-mask nonzero syncs.
+                ns_all_state_indices = attn_metadata.ns_all_state_indices_sel
+                ns_block_idx_last_computed = (
+                    attn_metadata.ns_block_idx_last_computed_sel
+                )
+                ns_block_idx_first_scheduled = (
+                    attn_metadata.ns_block_idx_first_scheduled_sel
+                )
+                ns_block_idx_last_scheduled = (
+                    attn_metadata.ns_block_idx_last_scheduled_sel
+                )
+                ns_num_computed_tokens = attn_metadata.ns_num_computed_tokens_sel
+            elif attn_metadata.spec_sequence_masks is not None:
                 _ns = ~attn_metadata.spec_sequence_masks
                 ns_all_state_indices = attn_metadata.all_state_indices_tensor[_ns]
                 ns_block_idx_last_computed = (
@@ -1425,6 +1443,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         spec_table = None
         spec_block_idx_prev_step = None
         spec_block_idx_last_scheduled = None
+        # Packed (read, write) anchor pairs (single 64-bit anchor load in the
+        # kernels), populated by the builder only with the prep kernel on:
+        # the SSM pair reads the prev-step anchor, the conv pair the last
+        # computed block.
+        spec_packed_anchors = None
+        conv_spec_packed_anchors = None
         if spec_sequence_masks is not None:
             # spec_state_indices_tensor is always set when spec_sequence_masks is set
             assert spec_state_indices_tensor is not None
@@ -1453,6 +1477,26 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     spec_block_idx_prev_step = (
                         attn_metadata.block_idx_last_scheduled_token_prev_step
                     )
+                    spec_packed_anchors = attn_metadata.block_idx_packed_anchors_spec
+                    conv_spec_packed_anchors = attn_metadata.block_idx_packed_anchors
+                elif attn_metadata.spec_all_state_indices_sel is not None:
+                    # Builder pre-selected (CPU spec mask, no device sync).
+                    spec_table = attn_metadata.spec_all_state_indices_sel
+                    spec_block_idx_last_scheduled = (
+                        attn_metadata.spec_block_idx_last_scheduled_sel
+                    )
+                    spec_block_idx_last_computed = (
+                        attn_metadata.spec_block_idx_last_computed_sel
+                    )
+                    spec_block_idx_prev_step = (
+                        attn_metadata.spec_block_idx_prev_step_sel
+                    )
+                    spec_packed_anchors = (
+                        attn_metadata.spec_block_idx_packed_anchors_spec_sel
+                    )
+                    conv_spec_packed_anchors = (
+                        attn_metadata.spec_block_idx_packed_anchors_sel
+                    )
                 else:
                     spec_table = attn_metadata.all_state_indices_tensor[
                         spec_sequence_masks
@@ -1470,6 +1514,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                             spec_sequence_masks
                         ]
                     )
+                    if attn_metadata.block_idx_packed_anchors_spec is not None:
+                        spec_packed_anchors = (
+                            attn_metadata.block_idx_packed_anchors_spec[
+                                spec_sequence_masks
+                            ]
+                        )
+                        conv_spec_packed_anchors = (
+                            attn_metadata.block_idx_packed_anchors[
+                                spec_sequence_masks
+                            ]
+                        )
                 # The conv reads its initial state from the last *computed*
                 # block and writes to the last *scheduled* block in-kernel.
                 mixed_qkv_spec = causal_conv1d_update(
@@ -1479,8 +1534,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     self.conv1d.bias,
                     self.activation,
                     conv_state_indices=spec_table,
-                    block_idx_last_scheduled_token=spec_block_idx_last_scheduled,
-                    initial_state_idx=spec_block_idx_last_computed,
+                    block_idx_last_scheduled_token=(
+                        None
+                        if conv_spec_packed_anchors is not None
+                        else spec_block_idx_last_scheduled
+                    ),
+                    initial_state_idx=(
+                        None
+                        if conv_spec_packed_anchors is not None
+                        else spec_block_idx_last_computed
+                    ),
+                    packed_anchors=conv_spec_packed_anchors,
                     num_accepted_tokens=num_accepted_tokens,
                     query_start_loc=spec_query_start_loc,
                     # True spec query width (num_spec_tokens + 1), NOT the block-table
@@ -1547,6 +1611,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # conv): read the running conv state from the last computed
                 # block, write to the last scheduled block, in-kernel. Only
                 # buffer views are consumed — cudagraph-capturable.
+                decode_conv_packed = attn_metadata.block_idx_packed_anchors
                 mixed_qkv_non_spec = causal_conv1d_update(
                     mixed_qkv_non_spec,
                     conv_state,
@@ -1557,11 +1622,24 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         :num_actual_tokens
                     ],
                     block_idx_last_scheduled_token=(
-                        attn_metadata.block_idx_last_scheduled_token[:num_actual_tokens]
+                        None
+                        if decode_conv_packed is not None
+                        else attn_metadata.block_idx_last_scheduled_token[
+                            :num_actual_tokens
+                        ]
                     ),
-                    initial_state_idx=attn_metadata.block_idx_last_computed_token[
-                        :num_actual_tokens
-                    ],
+                    initial_state_idx=(
+                        None
+                        if decode_conv_packed is not None
+                        else attn_metadata.block_idx_last_computed_token[
+                            :num_actual_tokens
+                        ]
+                    ),
+                    packed_anchors=(
+                        None
+                        if decode_conv_packed is None
+                        else decode_conv_packed[:num_actual_tokens]
+                    ),
                     validate_data=False,
                 )
             else:
@@ -1680,8 +1758,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         None if is_all_mode else spec_state_indices_tensor
                     ),
                     block_table=spec_table,
-                    read_anchor=spec_block_idx_prev_step,
-                    write_anchor=spec_block_idx_last_scheduled,
+                    read_anchor=(
+                        None
+                        if spec_packed_anchors is not None
+                        else spec_block_idx_prev_step
+                    ),
+                    write_anchor=(
+                        None
+                        if spec_packed_anchors is not None
+                        else spec_block_idx_last_scheduled
+                    ),
+                    packed_anchors=spec_packed_anchors,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
                 )
@@ -1708,13 +1795,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 assert ns_all_state_indices is not None
                 decode_state_indices = None
                 decode_block_table = ns_all_state_indices
-                decode_read_anchor = ns_block_idx_last_computed
-                decode_write_anchor = ns_block_idx_last_scheduled
+                decode_packed_anchors = attn_metadata.block_idx_packed_anchors
+                if decode_packed_anchors is not None:
+                    decode_read_anchor = None
+                    decode_write_anchor = None
+                else:
+                    decode_read_anchor = ns_block_idx_last_computed
+                    decode_write_anchor = ns_block_idx_last_scheduled
             else:
                 decode_state_indices = non_spec_state_indices_tensor
                 decode_block_table = None
                 decode_read_anchor = None
                 decode_write_anchor = None
+                decode_packed_anchors = None
             core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
                 A_log=self.A_log,
                 a=a[:num_decode_tokens],
@@ -1737,6 +1830,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 block_table=decode_block_table,
                 read_anchor=decode_read_anchor,
                 write_anchor=decode_write_anchor,
+                packed_anchors=decode_packed_anchors,
                 use_qk_l2norm_in_kernel=True,
             )
         else:
@@ -1798,18 +1892,33 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # from the per-chunk exports). Replaces the blanket
                 # final-state write below.
                 assert attn_metadata.chunk_offsets is not None
-                gdn_scatter_block_checkpoints(
-                    ssm_state,
-                    inter_states.squeeze(0),
-                    last_recurrent_state,
-                    p_all_state_indices,
-                    p_block_idx_first_scheduled,
-                    p_block_idx_last_scheduled,
-                    p_num_computed_tokens,
-                    attn_metadata.chunk_offsets,
-                    self.cache_config.mamba_block_size,
-                    FLA_CHUNK_SIZE,
-                )
+                if gdn_inkernel_ckpt_write_enabled():
+                    gdn_scatter_block_checkpoints_triton(
+                        ssm_state,
+                        inter_states.squeeze(0),
+                        last_recurrent_state,
+                        p_all_state_indices,
+                        p_block_idx_first_scheduled,
+                        p_block_idx_last_scheduled,
+                        p_num_computed_tokens,
+                        attn_metadata.chunk_offsets,
+                        self.cache_config.mamba_block_size,
+                        FLA_CHUNK_SIZE,
+                        attn_metadata.num_prefill_tokens,
+                    )
+                else:
+                    gdn_scatter_block_checkpoints(
+                        ssm_state,
+                        inter_states.squeeze(0),
+                        last_recurrent_state,
+                        p_all_state_indices,
+                        p_block_idx_first_scheduled,
+                        p_block_idx_last_scheduled,
+                        p_num_computed_tokens,
+                        attn_metadata.chunk_offsets,
+                        self.cache_config.mamba_block_size,
+                        FLA_CHUNK_SIZE,
+                    )
             else:
                 core_attn_out_non_spec, last_recurrent_state = outputs
                 # Init cache
@@ -1833,13 +1942,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # fresh block. Buffer views only — cudagraph-capturable.
                 decode_state_indices = None
                 decode_block_table = attn_metadata.all_state_indices_tensor
-                decode_read_anchor = attn_metadata.block_idx_last_computed_token
-                decode_write_anchor = attn_metadata.block_idx_last_scheduled_token
+                decode_packed_anchors = attn_metadata.block_idx_packed_anchors
+                if decode_packed_anchors is not None:
+                    decode_read_anchor = None
+                    decode_write_anchor = None
+                else:
+                    decode_read_anchor = attn_metadata.block_idx_last_computed_token
+                    decode_write_anchor = attn_metadata.block_idx_last_scheduled_token
             else:
                 decode_state_indices = non_spec_state_indices_tensor
                 decode_block_table = None
                 decode_read_anchor = None
                 decode_write_anchor = None
+                decode_packed_anchors = None
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -1859,6 +1974,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     block_table=decode_block_table,
                     read_anchor=decode_read_anchor,
                     write_anchor=decode_write_anchor,
+                    packed_anchors=decode_packed_anchors,
                     use_qk_l2norm_in_kernel=True,
                 )
             )
@@ -1979,6 +2095,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         block_table = None
         read_anchor = None
         write_anchor = None
+        packed_anchors = None
         if attn_metadata.all_state_indices_tensor is not None:
             # all-mode decode dual anchor: both the conv update and the
             # packed recurrent decode kernels derive their state slots from
@@ -1988,8 +2105,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             # block-boundary crossing the state migrates into the fresh
             # block. Buffer views only — cudagraph-capturable.
             block_table = attn_metadata.all_state_indices_tensor
-            read_anchor = attn_metadata.block_idx_last_computed_token
-            write_anchor = attn_metadata.block_idx_last_scheduled_token
+            packed_anchors = attn_metadata.block_idx_packed_anchors
+            if packed_anchors is None:
+                read_anchor = attn_metadata.block_idx_last_computed_token
+                write_anchor = attn_metadata.block_idx_last_scheduled_token
         self_kv_cache = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
@@ -2007,8 +2126,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         if block_table is not None:
             block_table = block_table[:num_actual_tokens]
-            read_anchor = read_anchor[:num_actual_tokens]
-            write_anchor = write_anchor[:num_actual_tokens]
+            if packed_anchors is not None:
+                packed_anchors = packed_anchors[:num_actual_tokens]
+            else:
+                read_anchor = read_anchor[:num_actual_tokens]
+                write_anchor = write_anchor[:num_actual_tokens]
 
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
@@ -2026,6 +2148,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             ),
             block_idx_last_scheduled_token=write_anchor,
             initial_state_idx=read_anchor,
+            packed_anchors=packed_anchors,
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
@@ -2046,6 +2169,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             block_table=block_table,
             read_anchor=read_anchor,
             write_anchor=write_anchor,
+            packed_anchors=packed_anchors,
             use_qk_l2norm_in_kernel=True,
         )
         return

@@ -287,10 +287,16 @@ def test_all_mode_spec_prev_step_fallback_when_not_plumbed():
     assert meta.block_idx_last_scheduled_token_prev_step.tolist() == [2, 1]
 
 
-def test_all_mode_full_cudagraph_spec_uses_persistent_buffers():
+@pytest.mark.parametrize("inkernel_write", [True, False])
+def test_all_mode_full_cudagraph_spec_uses_persistent_buffers(
+    monkeypatch, inkernel_write
+):
     """FULL cudagraph + all-mode pure-spec batch: the block-index metadata
-    must be views of the builder's persistent buffers (stable device pointers
-    across steps) with request-level padding."""
+    must be views of stable device pointers with request-level padding —
+    the builder's staging buffers with VLLM_GDN_INKERNEL_CKPT_WRITE off, or
+    (block table only) the runner-persistent table directly when the staging
+    copy is skipped by the in-kernel checkpoint-write path."""
+    monkeypatch.setenv("VLLM_GDN_INKERNEL_CKPT_WRITE", "1" if inkernel_write else "0")
     builder = _create_gdn_builder(
         num_speculative_tokens=3,
         full_cuda_graph=True,
@@ -300,10 +306,16 @@ def test_all_mode_full_cudagraph_spec_uses_persistent_buffers():
     meta = _build(builder, batch, num_decode_draft_tokens=[3, 3])
 
     assert meta.num_spec_decodes == batch.batch_size
-    assert (
-        meta.all_state_indices_tensor.data_ptr()
-        == builder.all_state_indices_tensor.data_ptr()
-    )
+    if inkernel_write:
+        assert (
+            meta.all_state_indices_tensor.data_ptr()
+            != builder.all_state_indices_tensor.data_ptr()
+        )
+    else:
+        assert (
+            meta.all_state_indices_tensor.data_ptr()
+            == builder.all_state_indices_tensor.data_ptr()
+        )
     assert (
         meta.block_idx_last_scheduled_token.data_ptr()
         == builder.block_idx_last_scheduled_token.data_ptr()
@@ -321,18 +333,29 @@ def test_all_mode_full_cudagraph_spec_uses_persistent_buffers():
     assert meta.block_idx_last_scheduled_token.tolist() == [4, 5]
 
 
-def test_all_mode_full_cudagraph_decode_uses_persistent_buffers():
+@pytest.mark.parametrize("inkernel_write", [True, False])
+def test_all_mode_full_cudagraph_decode_uses_persistent_buffers(
+    monkeypatch, inkernel_write
+):
     """FULL cudagraph + all-mode non-spec decode batch takes the second
-    capture branch and must also land in the persistent buffers."""
+    capture branch; block-table staging follows the in-kernel
+    checkpoint-write gate (see the spec variant above)."""
+    monkeypatch.setenv("VLLM_GDN_INKERNEL_CKPT_WRITE", "1" if inkernel_write else "0")
     builder = _create_gdn_builder(full_cuda_graph=True, mamba_cache_mode="all")
     batch = BatchSpec(seq_lens=[40, 30], query_lens=[1, 1])
     meta = _build(builder, batch)
 
     assert meta.num_decodes == batch.batch_size
-    assert (
-        meta.all_state_indices_tensor.data_ptr()
-        == builder.all_state_indices_tensor.data_ptr()
-    )
+    if inkernel_write:
+        assert (
+            meta.all_state_indices_tensor.data_ptr()
+            != builder.all_state_indices_tensor.data_ptr()
+        )
+    else:
+        assert (
+            meta.all_state_indices_tensor.data_ptr()
+            == builder.all_state_indices_tensor.data_ptr()
+        )
     assert (
         meta.block_idx_last_scheduled_token.data_ptr()
         == builder.block_idx_last_scheduled_token.data_ptr()

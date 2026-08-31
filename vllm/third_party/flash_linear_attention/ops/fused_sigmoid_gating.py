@@ -20,6 +20,7 @@ from vllm.triton_utils import tl, triton
         or args["block_table"] is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
         "HAS_TABLE": lambda args: args["block_table"] is not None,
+        "HAS_PACKED_ANCHORS": lambda args: args["packed_anchors"] is not None,
         "PACKED": lambda args: args["mixed_qkv"] is not None,
     }
 )
@@ -45,6 +46,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     block_table,
     read_anchor,
     write_anchor,
+    packed_anchors,
     scale,
     N: tl.int64,  # num of sequences
     T: tl.int64,  # num of tokens
@@ -69,6 +71,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     HAS_TABLE: tl.constexpr,
+    HAS_PACKED_ANCHORS: tl.constexpr,
     PACKED: tl.constexpr,
     IS_KDA: tl.constexpr,
 ):
@@ -89,6 +92,14 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     if T == 0:
         # no tokens to process for this sequence
         return
+
+    if HAS_PACKED_ANCHORS:
+        # Packed (read, write) anchor pair: one 64-bit load, low word = read
+        # anchor, high word = write anchor. The write-side block-table base is
+        # hoisted out of the token loop (loop-invariant).
+        b_pair = tl.load(packed_anchors + i_n)
+        o_anchor_r = b_pair & 0xFFFFFFFF
+        p_bt_w = block_table + i_n * stride_block_table_seq + (b_pair >> 32)
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -128,7 +139,11 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             else:
                 i_t = 0
             # Load state index and check for invalid entries
-            if HAS_TABLE:
+            if HAS_PACKED_ANCHORS:
+                state_idx = tl.load(
+                    block_table + i_n * stride_block_table_seq + o_anchor_r + i_t
+                ).to(tl.int64)
+            elif HAS_TABLE:
                 # Derive the read slot in-kernel from the block table:
                 # block_table[i_n, read_anchor[i_n] + i_t].
                 o_r = tl.load(read_anchor + i_n).to(tl.int64)
@@ -185,7 +200,9 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         # keep the states for multi-query tokens
         if INPLACE_FINAL_STATE:
             # Load state index and check for invalid entries
-            if HAS_TABLE:
+            if HAS_PACKED_ANCHORS:
+                final_state_idx = tl.load(p_bt_w + i_t).to(tl.int64)
+            elif HAS_TABLE:
                 # Derive the write slot in-kernel from the block table:
                 # block_table[i_n, write_anchor[i_n] + i_t].
                 o_w = tl.load(write_anchor + i_n).to(tl.int64)
@@ -240,6 +257,7 @@ def fused_sigmoid_gating_delta_rule_update(
     block_table: torch.Tensor | None = None,
     read_anchor: torch.Tensor | None = None,
     write_anchor: torch.Tensor | None = None,
+    packed_anchors: torch.Tensor | None = None,
     mixed_qkv: torch.Tensor | None = None,
     num_qk_heads: int | None = None,
     head_qk_dim: int | None = None,
@@ -260,6 +278,10 @@ def fused_sigmoid_gating_delta_rule_update(
     ``num_accepted_tokens`` in spec mode) and write slot
     ``block_table[i, write_anchor[i] + i_t]`` per token — equivalent to the
     host-side ``block_table.gather(1, anchor.unsqueeze(1) + arange(T))``.
+    The two anchors may instead be given packed as ``packed_anchors``
+    (``(num_seqs, 2)`` int32, ``[:, 0]`` read / ``[:, 1]`` write): the kernel
+    then fetches both with a single 64-bit load and hoists the write-side
+    table base out of the token loop. Results are identical.
 
     When ``mixed_qkv`` (2D ``(num_tokens, 2 * key_dim + value_dim)``, the
     packed conv output) is given instead of ``q``/``k``/``v``, the kernel
@@ -356,10 +378,27 @@ def fused_sigmoid_gating_delta_rule_update(
         assert ssm_state_indices is None and ssm_state_indices_output is None, (
             "block_table and ssm_state_indices are mutually exclusive"
         )
-        assert read_anchor is not None and write_anchor is not None
+        if packed_anchors is not None:
+            assert read_anchor is None and write_anchor is None, (
+                "packed_anchors and read_anchor/write_anchor are "
+                "mutually exclusive"
+            )
+            assert (
+                packed_anchors.ndim == 2
+                and packed_anchors.shape[-1] == 2
+                and packed_anchors.dtype == torch.int32
+                and packed_anchors.stride(-1) == 1
+                and packed_anchors.stride(0) == 2
+            ), "packed_anchors must be a contiguous (num_seqs, 2) int32 tensor"
+            # Reinterpret each (read, write) int32 pair as one int64 so the
+            # kernel fetches both anchors with a single load.
+            packed_anchors = packed_anchors.view(torch.int64).squeeze(-1)
+        else:
+            assert read_anchor is not None and write_anchor is not None
         assert block_table.stride(-1) == 1
         stride_block_table_seq = block_table.stride(0)
     else:
+        assert packed_anchors is None, "packed_anchors requires block_table"
         stride_block_table_seq = 0
 
     grid = (NK, NV, N * HV)
@@ -384,6 +423,7 @@ def fused_sigmoid_gating_delta_rule_update(
         block_table=block_table,
         read_anchor=read_anchor,
         write_anchor=write_anchor,
+        packed_anchors=packed_anchors,
         scale=scale,
         N=N,
         T=T,

@@ -315,8 +315,17 @@ def build_attn_metadata(
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             if for_cudagraph_capture:
+                capture_extra_kwargs = (
+                    model_specific_attn_metadata.get_capture_extra_attn_kwargs(
+                        attn_metadata_builder,
+                        num_reqs,
+                    )
+                    if model_specific_attn_metadata is not None
+                    else {}
+                )
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(
-                    common_attn_metadata
+                    common_attn_metadata,
+                    **capture_extra_kwargs,
                 )
             else:
                 attn_metadata_extra_kwargs = (

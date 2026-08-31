@@ -41,6 +41,16 @@ class ModelSpecificAttnMetadata:
     ) -> dict[str, Any]:
         return {}
 
+    def get_capture_extra_attn_kwargs(
+        self,
+        attn_metadata_builder: Any,
+        num_reqs: int,
+    ) -> dict[str, Any]:
+        """Extra kwargs for build_for_cudagraph_capture. Only kwargs the
+        builder's capture signature accepts may be returned (capture builds
+        synthesize the rest themselves)."""
+        return {}
+
 
 class ModelState(ABC):
     supports_prompt_embeds: ClassVar[bool] = False
