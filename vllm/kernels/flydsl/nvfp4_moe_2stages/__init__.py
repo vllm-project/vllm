@@ -31,7 +31,6 @@ def _validate_common(
     sorted_token_ids: torch.Tensor,
     sorted_expert_ids: torch.Tensor,
     num_valid_ids: torch.Tensor,
-    *,
     expected_k: int,
 ) -> None:
     if activations.dtype != torch.bfloat16:
@@ -88,7 +87,6 @@ def nvfp4_moe_stage1(
     sorted_token_ids: torch.Tensor,
     sorted_expert_ids: torch.Tensor,
     num_valid_ids: torch.Tensor,
-    *,
     topk: int,
     inter_dim: int,
     tile_m: int,
@@ -217,7 +215,6 @@ def nvfp4_moe_stage2(
     sorted_token_ids: torch.Tensor,
     sorted_expert_ids: torch.Tensor,
     num_valid_ids: torch.Tensor,
-    *,
     topk: int,
     model_dim: int,
     tile_m: int,

@@ -51,7 +51,6 @@ from .utils import (
 
 @functools.lru_cache(maxsize=1024)
 def compile_moe_gemm1(
-    *,
     model_dim: int,
     inter_dim: int,
     experts: int,
@@ -625,7 +624,6 @@ def compile_moe_gemm1(
                 b_gate_tile_in,
                 b_up_tile_in,
                 lds_base,
-                *,
                 prefetch_epilogue: bool = False,
                 a0_prefetch=None,
             ):

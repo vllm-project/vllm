@@ -41,7 +41,7 @@ TILE_MS = (16, 32, 64, 128)
 TILE_NS = (64, 128)
 TILE_KS = (64, 128, 256)
 K_BATCHES = (1, 2, 4, 7, 14)
-DEFAULT_TOKENS = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096)
+DEFAULT_TOKENS = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384)
 NUM_WARMUP = 10
 NUM_ITERS = 100
 LDS_CAP_BYTES = {"gfx942": 65536, "gfx950": 163840}
@@ -617,7 +617,6 @@ def main() -> None:
     parser.add_argument("--tokens", type=int, nargs="+", default=DEFAULT_TOKENS)
     parser.add_argument("--iters", type=int, default=NUM_ITERS)
     parser.add_argument("--warmup", type=int, default=NUM_WARMUP)
-    parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--timeout",
         type=int,
