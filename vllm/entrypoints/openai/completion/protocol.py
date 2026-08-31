@@ -13,7 +13,7 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     OpenAIBaseModel,
-    PerRequestTimingMetrics,
+    PerRequestMetrics,
     StopParam,
     StreamOptions,
     UsageInfo,
@@ -199,6 +199,7 @@ class CompletionRequest(OpenAIBaseModel):
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -526,9 +527,13 @@ class CompletionRequest(OpenAIBaseModel):
                     parameter="prompt_logprobs",
                     value=prompt_logprobs,
                 )
-        if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
+        if (
+            (logprobs := data.get("logprobs")) is not None
+            and logprobs < 0
+            and logprobs != -1
+        ):
             raise VLLMValidationError(
-                "`logprobs` must be a positive value.",
+                "`logprobs` must be a positive value or -1.",
                 parameter="logprobs",
                 value=logprobs,
             )
@@ -656,7 +661,7 @@ class CompletionResponse(OpenAIBaseModel):
     ec_transfer_params: dict[str, Any] | None = Field(
         default=None, description="ECTransfer parameters."
     )
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -688,4 +693,4 @@ class CompletionStreamResponse(OpenAIBaseModel):
     # Set only on the final chunk of a stream to mirror non-streaming responses
     # without the per-chunk serialization overhead.
     system_fingerprint: str | None = None
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None
