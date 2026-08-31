@@ -77,7 +77,7 @@ class ProcessorInputs:
                         hash_algorithm,
                         model_id=model_id,
                         **{modality: item},
-                        **hash_factor_kwargs,
+                        **(hash_factors if has_hash_factors else {}),
                     )
                     for item in data_items.get_all_items_for_hash()
                 ]
