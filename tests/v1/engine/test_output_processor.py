@@ -3,6 +3,7 @@
 
 import math
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,7 +15,7 @@ from tests.v1.engine.utils import (
     MockEngineCore,
 )
 from vllm import PoolingParams
-from vllm.logprobs import PromptLogprobs, SampleLogprobs
+from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -26,8 +27,37 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
+from vllm.v1.engine.output_processor import (
+    OutputProcessor,
+    RequestOutputCollector,
+    RequestState,
+)
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+
+
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+def test_delta_output_without_new_tokens_returns_empty_logprobs(
+    flat_logprobs: bool,
+) -> None:
+    accumulated = FlatLogprobs() if flat_logprobs else []
+    accumulated.append({1: Logprob(logprob=-0.5, rank=1)})
+
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = ""
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = accumulated
+    state.logprobs_processor.cumulative_logprob = -0.5
+    state.output_kind = RequestOutputKind.DELTA
+    state.request_index = 0
+    state.sampling_mask_chunks = []
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+
+    output = state._new_completion_output([], None, None)
+
+    assert isinstance(output.logprobs, FlatLogprobs if flat_logprobs else list)
+    assert len(output.logprobs) == 0
 
 
 def _ref_convert_id_to_token(
@@ -411,7 +441,7 @@ def _validate_logprobs(
                 ref_prompt_logprob_toks,
                 ref_prompt_logprob_vals,
                 ref_prompt_token_ranks,
-                _,
+                *_,
             ) = ref_prompt_logprobs
             for idx, (prompt_token, pos_logprob_dict) in enumerate(
                 zip(prompt_token_ids[1:], prompt_logprobs[1:])

@@ -174,12 +174,20 @@ class XpuMemAllocator:
 
         total_bytes = 0
         backup_bytes = 0
+        has_policy_conflict = False
 
         for ptr, data in self.pointer_to_data.items():
+            if data.is_asleep:
+                requests_offload = data.tag in offload_tags
+                was_offloaded = data.cpu_backup_tensor is not None
+                if requests_offload != was_offloaded:
+                    has_policy_conflict = True
+                continue
             size_in_bytes = data.handle[1]
             total_bytes += size_in_bytes
             if data.tag not in offload_tags:
                 unmap_and_release(data.handle)
+                data.is_asleep = True
                 continue
 
             backup_bytes += size_in_bytes
@@ -201,6 +209,7 @@ class XpuMemAllocator:
             data.cpu_backup_tensor = cpu_backup_tensor
 
             unmap_and_release(data.handle)
+            data.is_asleep = True
 
         logger.info(
             "XpuMemAllocator: sleep freed %.2f GiB memory in total, of which "
@@ -211,16 +220,56 @@ class XpuMemAllocator:
             (total_bytes - backup_bytes) / 1024**3,
         )
 
+        if has_policy_conflict:
+            logger.warning(
+                "XpuMemAllocator: sleep cannot change the policy of "
+                "already-asleep allocations; the existing policy was kept."
+            )
+
         gc.collect()
         xpu_empty_cache = getattr(torch.xpu, "empty_cache", None)
         if callable(xpu_empty_cache):
             xpu_empty_cache()
 
+    def discard(self, tags: tuple[str, ...] | str) -> None:
+        """Discard mapped allocations with the given tags without CPU backup."""
+        if isinstance(tags, str):
+            tags = (tags,)
+
+        discarded_bytes = 0
+        has_policy_conflict = False
+        for data in self.pointer_to_data.values():
+            if data.tag not in tags:
+                continue
+            if data.is_asleep:
+                if data.cpu_backup_tensor is not None:
+                    has_policy_conflict = True
+                continue
+            torch.accelerator.synchronize(data.handle[0])
+            unmap_and_release(data.handle)
+            data.is_asleep = True
+            discarded_bytes += data.handle[1]
+
+        logger.info(
+            "XpuMemAllocator: discarded %.2f GiB for tags %s.",
+            discarded_bytes / 1024**3,
+            tags,
+        )
+
+        if has_policy_conflict:
+            logger.warning(
+                "XpuMemAllocator: discard cannot change the policy of "
+                "already-asleep allocations; the existing policy was kept."
+            )
+
     def wake_up(self, tags: list[str] | None = None) -> None:
         for ptr, data in self.pointer_to_data.items():
+            if not data.is_asleep:
+                continue
             if tags is not None and data.tag not in tags:
                 continue
             create_and_allocate(data.handle)
+            data.is_asleep = False
 
             cpu_backup_tensor = data.cpu_backup_tensor
             if cpu_backup_tensor is None:
