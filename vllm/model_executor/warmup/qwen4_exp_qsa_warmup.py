@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Connect loaded Qwen4Exp QSA modules to their kernel-owned warmup."""
 
+import sys
 from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.models.qwen4_exp.nvidia.indexer_qsa import QSAIndexer
@@ -17,7 +17,10 @@ logger = init_logger(__name__)
 
 
 def _get_qsa_indexer(worker: "Worker") -> "QSAIndexer | None":
-    from vllm.models.qwen4_exp.nvidia.indexer_qsa import QSAIndexer
+    module = sys.modules.get("vllm.models.qwen4_exp.nvidia.indexer_qsa")
+    if module is None:
+        return None
+    QSAIndexer = module.QSAIndexer
 
     return next(
         (
@@ -52,8 +55,6 @@ def _get_compressed_block_table(
 def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
     """Warm every reachable QSA decode-query-length specialization."""
 
-    if not current_platform.is_cuda():
-        return
     indexer = _get_qsa_indexer(worker)
     if indexer is None:
         return

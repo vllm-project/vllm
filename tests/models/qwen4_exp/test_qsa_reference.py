@@ -748,12 +748,14 @@ def test_qsa_block_expansion_matches_test_reference() -> None:
         sequence_lengths.index_select(0, token_to_req.long()) // 4,
     ).to(torch.int32)
 
-    actual = qsa_indexer_ops.expand_qsa_block_indices(
+    actual = torch.empty((2, 11), device="cuda", dtype=torch.int32)
+    qsa_indexer_ops.expand_qsa_block_indices(
         blocks,
         query_positions,
         visible_blocks,
         compress_ratio=4,
         token_topk=8,
+        out=actual,
     )
     expected = _expand_qsa_indices_reference(
         blocks,
@@ -843,12 +845,16 @@ def test_qsa_sparse_paged_attention_matches_test_reference(
         (query_positions + 1) // indexer_compress_ratio,
         sequence_lengths.index_select(0, token_to_req.long()) // indexer_compress_ratio,
     ).to(torch.int32)
-    logical_indices = qsa_indexer_ops.expand_qsa_block_indices(
+    logical_indices = torch.empty(
+        (num_rows, selection_width), device="cuda", dtype=torch.int32
+    )
+    qsa_indexer_ops.expand_qsa_block_indices(
         block_indices,
         query_positions,
         visible_blocks,
         indexer_compress_ratio,
         indexer_budget,
+        logical_indices,
     )
     assert logical_indices.shape == (num_rows, selection_width)
     scale = q.shape[-1] ** -0.5
@@ -974,12 +980,16 @@ def test_qsa_split_selection_matches_test_reference(
         query_lens[-1],
         block_indices[prefill_slice],
     )
-    actual = qsa_indexer_ops.expand_qsa_block_indices(
+    actual = torch.empty(
+        (rows, token_topk + compress_ratio - 1), device="cuda", dtype=torch.int32
+    )
+    qsa_indexer_ops.expand_qsa_block_indices(
         block_indices,
         query_positions,
         visible_blocks,
         compress_ratio,
         token_topk,
+        actual,
     )
     expected = _qsa_select_paged_tokens_reference(
         q,
@@ -1003,7 +1013,8 @@ def test_qsa_selection_handles_no_complete_compressed_blocks(workspace_init) -> 
     query_positions = torch.tensor([1, 2], device="cuda", dtype=torch.int32)
     visible_blocks = torch.zeros(2, device="cuda", dtype=torch.int32)
 
-    block_indices = qsa_indexer_ops.qsa_select_paged_prefill(
+    block_indices = torch.empty((2, 512), device="cuda", dtype=torch.int32)
+    qsa_indexer_ops.qsa_select_paged_prefill(
         q,
         cache,
         page_table,
@@ -1012,13 +1023,16 @@ def test_qsa_selection_handles_no_complete_compressed_blocks(workspace_init) -> 
         token_topk=2048,
         compress_ratio=4,
         max_query_len=2,
+        block_indices=block_indices,
     )
-    selected = qsa_indexer_ops.expand_qsa_block_indices(
+    selected = torch.empty((2, 2051), device="cuda", dtype=torch.int32)
+    qsa_indexer_ops.expand_qsa_block_indices(
         block_indices,
         query_positions,
         visible_blocks,
         compress_ratio=4,
         token_topk=2048,
+        out=selected,
     )
 
     assert selected[0, :2].tolist() == [0, 1]

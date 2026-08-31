@@ -406,7 +406,7 @@ class QSAIndexer(nn.Module):
                 compressed_metadata.max_query_len,
                 block_indices[prefill_slice],
             )
-        return expand_qsa_block_indices(
+        expand_qsa_block_indices(
             block_indices,
             compressed_metadata.logical_positions[:num_tokens],
             visible_blocks,
@@ -414,6 +414,7 @@ class QSAIndexer(nn.Module):
             self.token_topk,
             out,
         )
+        return out
 
 
 __all__ = ["QSAIndexer", "apply_qsa_rope"]

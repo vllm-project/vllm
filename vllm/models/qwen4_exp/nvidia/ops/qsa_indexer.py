@@ -278,11 +278,6 @@ def _expand_qsa_indices_kernel(
     )
 
 
-def _validate_mqa(q: torch.Tensor) -> None:
-    if q.ndim != 3 or q.shape[1] <= 0 or q.shape[2] <= 0:
-        raise ValueError("QSA query must be [rows, heads, head_dim]")
-
-
 def _qsa_decode_warmup_profiles(
     max_dql: int,
     max_num_reqs: int,
@@ -347,8 +342,6 @@ def warmup_qsa_mqa_paged_decode(
     if not profiles:
         return ()
 
-    warmup = getattr(_qsa_mqa_paged_uniform_kernel, "warmup", None)
-    assert warmup is not None
     page_size = k_cache.shape[1]
     page_table_width = page_table.shape[1]
     columns = page_table_width * page_size
@@ -377,7 +370,7 @@ def warmup_qsa_mqa_paged_decode(
             decode_query_len=decode_query_len,
             num_requests=num_requests,
         )
-        warmup(
+        _qsa_mqa_paged_uniform_kernel.warmup(
             q_ptr,
             k_cache_ptr,
             page_table_ptr,
@@ -414,28 +407,10 @@ def qsa_mqa_paged_decode(
 ) -> torch.Tensor:
     """Score a request-major uniform decode or speculative-decode batch."""
 
-    _validate_mqa(q)
-    if decode_query_len <= 0:
-        raise ValueError("QSA decode query length must be positive")
-    if q.shape[0] % decode_query_len:
-        raise ValueError("QSA decode rows must be divisible by the query length")
+    assert decode_query_len > 0 and q.shape[0] % decode_query_len == 0
     num_requests = q.shape[0] // decode_query_len
-    if page_table.ndim != 2 or page_table.shape[0] != num_requests:
-        raise ValueError("QSA decode page table must have one row per request")
-    if visible_blocks.shape != (q.shape[0],):
-        raise ValueError("QSA decode visibility must match query rows")
-    if k_cache.ndim != 4 or k_cache.shape[2] != 1:
-        raise ValueError("QSA cache must be [pages, page_size, 1, head_dim]")
-    if k_cache.shape[3] != q.shape[2]:
-        raise ValueError("QSA decode scoring received incompatible dimensions")
-    if q.stride(2) != 1:
-        raise ValueError("QSA decode query head dimension must be contiguous")
-    if k_cache.stride(3) != 1:
-        raise ValueError("QSA decode cache head dimension must be contiguous")
-    if page_table.stride(1) != 1:
-        raise ValueError("QSA decode page-table rows must be contiguous")
-    if visible_blocks.stride(0) != 1:
-        raise ValueError("QSA decode row metadata must be contiguous")
+    assert page_table.shape[0] == num_requests
+    assert visible_blocks.shape == (q.shape[0],)
     columns = page_table.shape[1] * k_cache.shape[1]
     logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
     if not q.shape[0] or not columns:
@@ -491,29 +466,9 @@ def _launch_qsa_mqa_paged_prefill(
     query_offset: int,
     num_queries: int,
 ) -> torch.Tensor:
-    _validate_mqa(q)
-    if k_cache.ndim != 4 or k_cache.shape[2] != 1:
-        raise ValueError("QSA cache must be [pages, page_size, 1, head_dim]")
-    if k_cache.shape[3] != q.shape[2]:
-        raise ValueError("QSA prefill scoring received incompatible dimensions")
-    if page_table.ndim != 2:
-        raise ValueError("QSA prefill page table must be two-dimensional")
-    if query_start_loc.ndim != 1 or query_start_loc.shape[0] < 2:
-        raise ValueError("QSA prefill query starts must include a terminal offset")
-    if visible_blocks.shape != (q.shape[0],):
-        raise ValueError("QSA prefill visibility must match packed query tokens")
-    if query_start_loc.shape[0] != page_table.shape[0] + 1:
-        raise ValueError("QSA prefill query starts must match the page table")
-    if query_offset < 0 or query_offset + num_queries > q.shape[0]:
-        raise ValueError("QSA prefill query span is outside the packed batch")
-    if q.stride(2) != 1:
-        raise ValueError("QSA prefill query head dimension must be contiguous")
-    if k_cache.stride(3) != 1:
-        raise ValueError("QSA prefill cache head dimension must be contiguous")
-    if page_table.stride(1) != 1:
-        raise ValueError("QSA prefill page-table rows must be contiguous")
-    if query_start_loc.stride(0) != 1 or visible_blocks.stride(0) != 1:
-        raise ValueError("QSA prefill token metadata must be contiguous")
+    assert query_start_loc.shape == (page_table.shape[0] + 1,)
+    assert visible_blocks.shape == (q.shape[0],)
+    assert 0 <= query_offset <= query_offset + num_queries <= q.shape[0]
 
     columns = page_table.shape[1] * k_cache.shape[1]
     logits = torch.empty((num_queries, columns), dtype=torch.float32, device=q.device)
@@ -588,28 +543,18 @@ def expand_qsa_block_indices(
     visible_blocks: torch.Tensor,
     compress_ratio: int,
     token_topk: int,
-    out: torch.Tensor | None = None,
-) -> torch.Tensor:
+    out: torch.Tensor,
+) -> None:
     """Expand compressed blocks and compact the causal tail of the open group."""
 
-    if token_topk % compress_ratio:
-        raise ValueError("QSA token top-k must be divisible by compression ratio")
+    assert token_topk % compress_ratio == 0
     block_topk = token_topk // compress_ratio
     output_width = token_topk + compress_ratio - 1
-    if block_indices.shape != (query_positions.numel(), block_topk):
-        raise ValueError("QSA compressed top-k has an invalid shape")
-    if visible_blocks.shape != query_positions.shape:
-        raise ValueError("QSA visible blocks must match query positions")
-    if out is None:
-        out = torch.empty(
-            (block_indices.shape[0], output_width),
-            dtype=torch.int32,
-            device=block_indices.device,
-        )
-    elif out.shape != (block_indices.shape[0], output_width):
-        raise ValueError("QSA expansion output has an invalid shape")
+    assert block_indices.shape == (query_positions.numel(), block_topk)
+    assert visible_blocks.shape == query_positions.shape
+    assert out.shape == (block_indices.shape[0], output_width)
     if not block_indices.shape[0]:
-        return out
+        return
     column_block = 256
     _expand_qsa_indices_kernel[
         (block_indices.shape[0], triton.cdiv(output_width, column_block))
@@ -630,24 +575,6 @@ def expand_qsa_block_indices(
         COLUMN_BLOCK=column_block,
         num_warps=4,
     )
-    return out
-
-
-def _selection_output(
-    q: torch.Tensor,
-    token_topk: int,
-    compress_ratio: int,
-    out: torch.Tensor | None,
-) -> torch.Tensor:
-    rows = q.shape[0]
-    if token_topk % compress_ratio:
-        raise ValueError("QSA token top-k must be divisible by compression ratio")
-    output_width = token_topk // compress_ratio
-    if out is None:
-        out = torch.empty((rows, output_width), dtype=torch.int32, device=q.device)
-    if out.shape != (rows, output_width):
-        raise ValueError("QSA selection output has an invalid shape")
-    return out
 
 
 def _selection_workspace(device: torch.device) -> torch.Tensor:
@@ -692,8 +619,8 @@ def qsa_select_paged_decode(
     token_topk: int,
     compress_ratio: int,
     decode_query_len: int,
-    out: torch.Tensor | None = None,
-) -> torch.Tensor:
+    block_indices: torch.Tensor,
+) -> None:
     """Score and select compressed blocks for a request-major decode batch.
 
     Args:
@@ -706,16 +633,13 @@ def qsa_select_paged_decode(
         token_topk: Number of logical tokens selected per query.
         compress_ratio: Number of logical tokens represented by a cache row.
         decode_query_len: Number of query tokens per request.
-        out: Optional compressed-index output buffer.
-
-    Returns:
-        Request-relative compressed block indices shaped ``[num_queries,
-        token_topk // compress_ratio]``.
+        block_indices: Compressed-index output buffer.
     """
 
-    out = _selection_output(q, token_topk, compress_ratio, out)
+    assert token_topk % compress_ratio == 0
+    assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     if not q.shape[0]:
-        return out
+        return
     topk_workspace = _selection_workspace(q.device)
     logits = qsa_mqa_paged_decode(
         q,
@@ -729,10 +653,9 @@ def qsa_select_paged_decode(
         visible_blocks,
         token_topk,
         compress_ratio,
-        out,
+        block_indices,
         topk_workspace,
     )
-    return out
 
 
 def qsa_select_paged_prefill(
@@ -744,8 +667,8 @@ def qsa_select_paged_prefill(
     token_topk: int,
     compress_ratio: int,
     max_query_len: int,
-    out: torch.Tensor | None = None,
-) -> torch.Tensor:
+    block_indices: torch.Tensor,
+) -> None:
     """Score and select compressed prefill blocks in bounded chunks.
 
     Args:
@@ -759,16 +682,14 @@ def qsa_select_paged_prefill(
         token_topk: Number of logical tokens selected per query.
         compress_ratio: Number of logical tokens represented by a cache row.
         max_query_len: Maximum number of query tokens in one request.
-        out: Optional compressed-index output buffer.
-    Returns:
-        Request-relative compressed block indices shaped ``[num_tokens,
-        token_topk // compress_ratio]``.
+        block_indices: Compressed-index output buffer.
     """
 
-    out = _selection_output(q, token_topk, compress_ratio, out)
+    assert token_topk % compress_ratio == 0
+    assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     rows = q.shape[0]
     if not rows:
-        return out
+        return
     columns = page_table.shape[1] * k_cache.shape[1]
     rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
     topk_workspace = _selection_workspace(q.device)
@@ -791,10 +712,9 @@ def qsa_select_paged_prefill(
             visible_blocks[query_slice],
             token_topk,
             compress_ratio,
-            out[query_slice],
+            block_indices[query_slice],
             topk_workspace,
         )
-    return out
 
 
 __all__ = [
