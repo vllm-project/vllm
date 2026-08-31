@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-ARG RUST_VERSION=1.95
-
-FROM rust:${RUST_VERSION}-bookworm AS builder
+FROM rust:bookworm AS builder
 
 WORKDIR /workspace
+
+COPY rust-toolchain.toml rust-toolchain.toml
+RUN rustc --version
 
 COPY rust rust
 
@@ -20,10 +21,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 FROM debian:bookworm-slim
 
+RUN useradd --uid 2000 --gid 0 --create-home vllm
+
 COPY --from=builder \
     /workspace/rust/target/release/vllm-mock-engine \
     /usr/local/bin/vllm-mock-engine
 
-USER 65532:65532
+ENV HOME=/home/vllm
+WORKDIR /home/vllm
+USER 2000
 
 ENTRYPOINT ["vllm-mock-engine"]

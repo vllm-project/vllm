@@ -42,15 +42,16 @@ docker build \
   --tag vllm-mock-engine .
 ```
 
-On Linux, use host networking to connect to a frontend running on the host:
+On Linux, host networking lets the container reach a frontend listening on the
+mock engine's default address, `tcp://127.0.0.1:29550`:
 
 ```bash
-docker run --rm --network host vllm-mock-engine \
-  --handshake-address tcp://127.0.0.1:29550
+docker run --rm --network host vllm-mock-engine
 ```
 
-For other network layouts, use an address reachable from the container, such
-as the frontend container's name on a shared Docker network.
+Pass `--handshake-address` when the frontend uses another address or port. For
+other network layouts, use an address reachable from the container, such as the
+frontend container's name on a shared Docker network.
 
 ## Rust Frontend
 

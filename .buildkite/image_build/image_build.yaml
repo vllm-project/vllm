@@ -110,8 +110,9 @@ steps:
       - "rust/src/mock-engine/"
       - "rust-toolchain.toml"
     commands:
-      - docker build --file rust/src/mock-engine/Dockerfile --tag vllm-mock-engine:ci .
-      - docker run --rm vllm-mock-engine:ci --help
+      - docker build --file rust/src/mock-engine/Dockerfile --tag vllm-mock-engine:$BUILDKITE_COMMIT .
+      - docker run --rm vllm-mock-engine:$BUILDKITE_COMMIT --help
+      - test "$(docker run --rm --entrypoint id vllm-mock-engine:$BUILDKITE_COMMIT -u)" = 2000
     env:
       DOCKER_BUILDKIT: "1"
     retry:
