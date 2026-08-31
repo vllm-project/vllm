@@ -10,8 +10,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -194,6 +196,7 @@ class MoeFusedMulSumKernel(VllmTritonJitKernel["MoeFusedMulSumKernel.CompileKey"
             expert_map=int32_ptr if compile_key.has_expert_map else None,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         inputs: torch.Tensor,
@@ -201,7 +204,7 @@ class MoeFusedMulSumKernel(VllmTritonJitKernel["MoeFusedMulSumKernel.CompileKey"
         outputs: torch.Tensor,
         topk_ids: torch.Tensor | None,
         expert_map: torch.Tensor | None,
-    ) -> None:
+    ) -> LaunchSpec:
         num_tokens, top_k, size = inputs.shape
         compile_key = self.dispatch(
             num_tokens=num_tokens,
@@ -215,20 +218,15 @@ class MoeFusedMulSumKernel(VllmTritonJitKernel["MoeFusedMulSumKernel.CompileKey"
             triton.cdiv(size, compile_key.block_k),
             triton.cdiv(num_tokens, compile_key.block_m),
         )
-        self._launch(
-            grid,
-            inputs,
-            topk_weights,
-            outputs,
-            topk_ids,
-            expert_map,
-            num_tokens,
-            top_k * size,
-            expert_map is not None,
-            top_k,
-            size,
-            compile_key.block_m,
-            compile_key.block_k,
+        return grid, dict(
+            top_ids_ptr=topk_ids,
+            num_tokens=num_tokens,
+            stride_m=top_k * size,
+            has_expert_map=expert_map is not None,
+            top_k=top_k,
+            size=size,
+            BLOCK_M=compile_key.block_m,
+            BLOCK_K=compile_key.block_k,
             num_warps=compile_key.num_warps,
             num_stages=compile_key.num_stages,
         )

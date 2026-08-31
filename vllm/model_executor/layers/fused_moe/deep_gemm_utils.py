@@ -18,8 +18,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -255,6 +257,7 @@ class DeepGemmEPScatterStartKernel(
             align_m=compile_key.align_m,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         num_recv_tokens_per_expert: torch.Tensor,
@@ -262,17 +265,13 @@ class DeepGemmEPScatterStartKernel(
         m_indices: torch.Tensor,
         *,
         align_m: int,
-    ) -> None:
+    ) -> LaunchSpec:
         num_experts = num_recv_tokens_per_expert.shape[0]
         compile_key = self.dispatch(
             num_experts=num_experts,
             align_m=align_m,
         )
-        self._launch(
-            (num_experts,),
-            num_recv_tokens_per_expert,
-            expert_start_loc,
-            m_indices,
+        return (num_experts,), dict(
             num_experts=num_experts,
             num_warps=8,
             BLOCK_E=compile_key.block_e,
@@ -518,6 +517,7 @@ class DeepGemmEPScatterCopyKernel(
             pack_ue8m0=compile_key.pack_ue8m0,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         recv_x: torch.Tensor,
@@ -531,7 +531,7 @@ class DeepGemmEPScatterCopyKernel(
         *,
         block_size: int,
         pack_ue8m0: bool,
-    ) -> None:
+    ) -> LaunchSpec:
         hidden_size = recv_x.shape[1]
         compile_key = self.dispatch(
             total_token_num=recv_x.shape[0],
@@ -541,30 +541,21 @@ class DeepGemmEPScatterCopyKernel(
             block_size=block_size,
             pack_ue8m0=pack_ue8m0,
         )
-        self._launch(
-            (min(recv_topk.shape[0], 1024 * 8),),
-            recv_topk.shape[0],
-            expert_start_loc,
-            recv_x,
-            recv_x.stride(0),
-            recv_x.stride(1),
-            recv_x_scale,
-            recv_x_scale.stride(0),
-            recv_x_scale.stride(1),
-            recv_topk,
-            recv_topk.stride(0),
-            recv_topk.stride(1),
-            output_tensor,
-            output_tensor.stride(0),
-            output_tensor.stride(1),
-            output_tensor_scale,
-            output_tensor_scale.stride(0),
-            output_tensor_scale.stride(1),
-            output_index,
-            output_index.stride(0),
-            output_index.stride(1),
+        return (min(recv_topk.shape[0], 1024 * 8),), dict(
+            total_token_num=recv_topk.shape[0],
+            recv_x_stride0=recv_x.stride(0),
+            recv_x_stride1=recv_x.stride(1),
+            recv_x_scale_stride0=recv_x_scale.stride(0),
+            recv_x_scale_stride1=recv_x_scale.stride(1),
+            recv_topk_stride0=recv_topk.stride(0),
+            recv_topk_stride1=recv_topk.stride(1),
+            output_tensor_stride0=output_tensor.stride(0),
+            output_tensor_stride1=output_tensor.stride(1),
+            output_tensor_scale_stride0=output_tensor_scale.stride(0),
+            output_tensor_scale_stride1=output_tensor_scale.stride(1),
+            output_index_stride0=output_index.stride(0),
+            output_index_stride1=output_index.stride(1),
             topk_num=compile_key.topk_num,
-            expert_map=expert_map,
             HAS_EXPERT_MAP=compile_key.has_expert_map,
             num_warps=8,
             HIDDEN_SIZE=compile_key.hidden_size,
@@ -766,6 +757,7 @@ class DeepGemmEPGatherKernel(VllmTritonJitKernel["DeepGemmEPGatherKernel.Compile
             ),
         )
 
+    @kernel_launcher
     def __call__(
         self,
         input_tensor: torch.Tensor,
@@ -774,7 +766,7 @@ class DeepGemmEPGatherKernel(VllmTritonJitKernel["DeepGemmEPGatherKernel.Compile
         input_index: torch.Tensor,
         expert_map: torch.Tensor | None,
         output_tensor: torch.Tensor,
-    ) -> None:
+    ) -> LaunchSpec:
         num_warps = 2
         num_tokens = output_tensor.shape[0]
         hidden_size = input_tensor.shape[1]
@@ -782,26 +774,19 @@ class DeepGemmEPGatherKernel(VllmTritonJitKernel["DeepGemmEPGatherKernel.Compile
         assert hidden_size % block_d == 0
         grid = (triton.cdiv(hidden_size, block_d), min(num_tokens, 1024))
 
-        self._launch(
-            grid,
-            num_tokens,
-            input_tensor,
-            input_tensor.stride(0),
-            input_tensor.stride(1),
-            recv_topk_ids,
-            recv_topk_ids.stride(0),
-            recv_topk_ids.stride(1),
-            recv_topk_weight,
-            recv_topk_weight.stride(0),
-            recv_topk_weight.stride(1),
-            input_index,
-            input_index.stride(0),
-            input_index.stride(1),
-            output_tensor,
-            output_tensor.stride(0),
-            output_tensor.stride(1),
+        return grid, dict(
+            total_token_num=num_tokens,
+            input_tensor_stride0=input_tensor.stride(0),
+            input_tensor_stride1=input_tensor.stride(1),
+            recv_topk_ids_stride0=recv_topk_ids.stride(0),
+            recv_topk_ids_stride1=recv_topk_ids.stride(1),
+            recv_topk_weight_stride0=recv_topk_weight.stride(0),
+            recv_topk_weight_stride1=recv_topk_weight.stride(1),
+            input_index_stride0=input_index.stride(0),
+            input_index_stride1=input_index.stride(1),
+            output_tensor_stride0=output_tensor.stride(0),
+            output_tensor_stride1=output_tensor.stride(1),
             topk_num=recv_topk_ids.shape[1],
-            expert_map=expert_map,
             HAS_EXPERT_MAP=expert_map is not None,
             num_warps=num_warps,
             BLOCK_D=block_d,

@@ -12,8 +12,10 @@ import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -516,16 +518,14 @@ class ComputeSlotMappingKernel(
         )
         return args, {}
 
+    @kernel_launcher
     def __call__(
         self,
         num_reqs: int,
         *args: Any,
-    ) -> None:
-        self._launch(
-            (num_reqs + 1,),
-            *args,
-            PAD_ID=PAD_SLOT_ID,
-            BLOCK_SIZE=self.triton_block_size,
+    ) -> LaunchSpec:
+        return (num_reqs + 1,), dict(
+            PAD_ID=PAD_SLOT_ID, BLOCK_SIZE=self.triton_block_size
         )
 
 

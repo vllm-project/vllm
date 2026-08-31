@@ -172,10 +172,14 @@ def test_count_expert_num_tokens_compile_matches_optional_pointer(
 ) -> None:
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     kernel = CountExpertNumTokensKernel()
+    arg_names = kernel.kernel.arg_names
     monkeypatch.setattr(
         kernel,
         "kernel",
-        SimpleNamespace(warmup=lambda *args, **kwargs: calls.append((args, kwargs))),
+        SimpleNamespace(
+            arg_names=arg_names,
+            warmup=lambda *args, **kwargs: calls.append((args, kwargs)),
+        ),
     )
     compile_key = kernel.CompileKey(
         num_experts=16,
@@ -186,7 +190,7 @@ def test_count_expert_num_tokens_compile_matches_optional_pointer(
 
     kernel.compile(compile_key)
 
-    assert (calls[0][0][4] is not None) is has_expert_map
+    assert (calls[0][1]["expert_map"] is not None) is has_expert_map
 
 
 @pytest.mark.parametrize(

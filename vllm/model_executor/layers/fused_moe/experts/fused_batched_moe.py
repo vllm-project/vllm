@@ -44,8 +44,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
@@ -670,6 +672,7 @@ class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"])
             num_stages=compile_key.num_stages,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         A: torch.Tensor,
@@ -685,26 +688,13 @@ class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"])
         USE_TD: bool,
         num_warps: int,
         num_stages: int,
-    ) -> Any:
+    ) -> LaunchSpec:
         grid = (
             expert_num_tokens.size(0),
             triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
         )
-        return self._launch(
-            grid,
-            A,
-            B,
-            C,
-            expert_num_tokens,
-            compute_type,
-            max_num_tokens,
-            *args,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            BLOCK_K=BLOCK_K,
-            USE_TD=USE_TD,
-            num_warps=num_warps,
-            num_stages=num_stages,
+        return grid, dict(
+            a_ptr=A, b_ptr=B, c_ptr=C, num_warps=num_warps, num_stages=num_stages
         )
 
 

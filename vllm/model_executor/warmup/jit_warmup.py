@@ -752,12 +752,12 @@ class JitWarmupRegistry:
         for kernel, registrations in self._registrations.items():
             compile_keys: dict[Any, None] = {}
             for args, kwargs in registrations:
-                if not args and not kwargs:
-                    # Inject config only when the key method requires an argument.
-                    try:
-                        inspect.signature(kernel.get_warmup_keys).bind()
-                    except TypeError:
-                        args = (self.vllm_config,)
+                if (
+                    not args
+                    and not kwargs
+                    and inspect.signature(kernel.get_warmup_keys).parameters
+                ):
+                    args = (self.vllm_config,)
                 for compile_key in kernel.get_warmup_keys(*args, **kwargs):
                     compile_keys[compile_key] = None
             if compile_keys:

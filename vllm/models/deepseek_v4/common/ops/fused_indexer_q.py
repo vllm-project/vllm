@@ -7,8 +7,10 @@ from typing import Any
 import torch
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -268,6 +270,7 @@ class FusedIndexerQRopeQuantTritonKernel(
             use_fnuz=compile_key.use_fnuz,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         positions: torch.Tensor,
@@ -281,32 +284,25 @@ class FusedIndexerQRopeQuantTritonKernel(
         *,
         fp8_max: float,
         use_fnuz: bool,
-    ) -> None:
+    ) -> LaunchSpec:
         num_tokens = positions.shape[0]
         num_index_q_heads = index_q.shape[1]
-        self._launch(
-            (num_tokens, num_index_q_heads),
-            positions,
-            index_q,
-            index_q.stride(0),
-            index_q.stride(1),
-            index_q_cos_sin_cache,
-            index_q_cos_sin_cache.stride(0),
-            index_q_cos_sin_cache.shape[-1] // 2,
-            index_q_fp8,
-            index_q_fp8.stride(0),
-            index_q_fp8.stride(1),
-            index_q.shape[2],
-            index_weights,
-            index_weights.stride(0),
-            index_weights_softmax_scale,
-            index_weights_head_scale,
-            index_weights_out,
-            index_weights_out.stride(0),
+        return (num_tokens, num_index_q_heads), dict(
+            pos_ptr=positions,
+            index_q_stride0=index_q.stride(0),
+            index_q_stride1=index_q.stride(1),
+            index_q_cos_sin_ptr=index_q_cos_sin_cache,
+            index_q_cos_sin_stride=index_q_cos_sin_cache.stride(0),
+            INDEX_Q_HALF_ROT_DIM=index_q_cos_sin_cache.shape[-1] // 2,
+            index_q_fp8_stride0=index_q_fp8.stride(0),
+            index_q_fp8_stride1=index_q_fp8.stride(1),
+            INDEX_Q_HEAD_DIM=index_q.shape[2],
+            index_weights_stride=index_weights.stride(0),
+            index_weights_out_stride=index_weights_out.stride(0),
             FP8_MAX=fp8_max,
             USE_FNUZ=use_fnuz,
             USE_EXPLICIT_FMA=current_platform.is_rocm(),
-            num_warps=1,  # TODO: Tune this
+            num_warps=1,
         )
 
 
@@ -494,6 +490,7 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             ),
         )
 
+    @kernel_launcher
     def __call__(
         self,
         positions: torch.Tensor,
@@ -505,33 +502,26 @@ class FusedIndexerQRopeMxFp4TritonKernel(
         index_q_packed: torch.Tensor,
         index_q_scale: torch.Tensor,
         index_weights_out: torch.Tensor,
-    ) -> None:
+    ) -> LaunchSpec:
         num_tokens = positions.shape[0]
         num_index_q_heads = index_q.shape[1]
-        self._launch(
-            (num_tokens, num_index_q_heads),
-            positions,
-            index_q,
-            index_q.stride(0),
-            index_q.stride(1),
-            index_q_cos_sin_cache,
-            index_q_cos_sin_cache.stride(0),
-            index_q_cos_sin_cache.shape[-1] // 2,
-            index_q_packed,
-            index_q_packed.stride(0),
-            index_q_packed.stride(1),
-            index_q_scale,
-            index_q_scale.stride(0),
-            index_q_scale.stride(1),
-            index_q.shape[2],
-            MXFP4_BLOCK_SIZE,
-            index_weights,
-            index_weights.stride(0),
-            index_weights_softmax_scale,
-            index_weights_head_scale,
-            index_weights_out,
-            index_weights_out.stride(0),
-            num_warps=1,  # TODO: Tune this
+        return (num_tokens, num_index_q_heads), dict(
+            pos_ptr=positions,
+            index_q_stride0=index_q.stride(0),
+            index_q_stride1=index_q.stride(1),
+            index_q_cos_sin_ptr=index_q_cos_sin_cache,
+            index_q_cos_sin_stride=index_q_cos_sin_cache.stride(0),
+            INDEX_Q_HALF_ROT_DIM=index_q_cos_sin_cache.shape[-1] // 2,
+            index_q_mxfp4_ptr=index_q_packed,
+            index_q_mxfp4_stride0=index_q_packed.stride(0),
+            index_q_mxfp4_stride1=index_q_packed.stride(1),
+            index_q_scale_stride0=index_q_scale.stride(0),
+            index_q_scale_stride1=index_q_scale.stride(1),
+            INDEX_Q_HEAD_DIM=index_q.shape[2],
+            MXFP4_BLOCK=MXFP4_BLOCK_SIZE,
+            index_weights_stride=index_weights.stride(0),
+            index_weights_out_stride=index_weights_out.stride(0),
+            num_warps=1,
         )
 
 

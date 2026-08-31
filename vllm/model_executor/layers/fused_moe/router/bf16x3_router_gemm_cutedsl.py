@@ -27,8 +27,10 @@ from vllm.model_executor.warmup.jit_warmup import (
 )
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -538,19 +540,17 @@ class BF16x3SplitKReduceKernel(
             ),
         )
 
-    def __call__(self, partials: torch.Tensor, out: torch.Tensor) -> None:
+    @kernel_launcher
+    def __call__(self, partials: torch.Tensor, out: torch.Tensor) -> LaunchSpec:
         split_k, N, M = partials.shape
         split_stride = partials.stride(0)
         compile_key = self.dispatch(M=M, split_k=split_k, USE_PDL=True)
         grid = (triton.cdiv(N, compile_key.bn), triton.cdiv(M, compile_key.bm))
-        self._launch(
-            grid,
-            partials,
-            out,
-            N,
-            M,
-            split_stride,
-            split_k,
+        return grid, dict(
+            N=N,
+            M=M,
+            split_stride=split_stride,
+            k_splits=split_k,
             BN=compile_key.bn,
             BM=compile_key.bm,
             BS=compile_key.bs,

@@ -46,8 +46,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
@@ -222,22 +224,19 @@ class CountExpertNumTokensKernel(
             expert_map=int32_ptr if compile_key.has_expert_map else None,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         topk_ids: torch.Tensor,
         expert_num_tokens: torch.Tensor,
         num_local_experts: int,
         expert_map: torch.Tensor | None,
-    ) -> None:
+    ) -> LaunchSpec:
         block_size = min(topk_ids.numel(), 1024)
         block_size = triton.next_power_of_2(block_size)
-        self._launch(
-            (num_local_experts,),
-            topk_ids,
-            expert_num_tokens,
-            num_local_experts,
-            topk_ids.numel(),
-            expert_map,
+        return (num_local_experts,), dict(
+            num_experts=num_local_experts,
+            topk_numel=topk_ids.numel(),
             HAS_EXPERT_MAP=expert_map is not None,
             BLOCK_SIZE=block_size,
         )
@@ -612,6 +611,7 @@ class PackTopkIdsWeightsKernel(
             use_gdc=compile_key.use_gdc,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         ids_flat: torch.Tensor,
@@ -620,14 +620,12 @@ class PackTopkIdsWeightsKernel(
         *,
         block_size: int,
         use_gdc: bool,
-    ) -> None:
+    ) -> LaunchSpec:
         grid = (triton.cdiv(ids_flat.numel(), block_size),)
-        self._launch(
-            grid,
-            ids_flat,
-            weights_flat,
-            output,
-            ids_flat.numel(),
+        return grid, dict(
+            topk_ids_ptr=ids_flat,
+            topk_weights_ptr=weights_flat,
+            n_elements=ids_flat.numel(),
             BLOCK_SIZE=block_size,
             USE_GDC=use_gdc,
             launch_pdl=use_gdc,
@@ -789,6 +787,7 @@ class SwigluLimitPadAwareKernel(
             expert_map=int32_ptr if compile_key.has_expert_map else None,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         output: torch.Tensor,
@@ -796,21 +795,15 @@ class SwigluLimitPadAwareKernel(
         topk_ids: torch.Tensor,
         swiglu_limit: float,
         expert_map: torch.Tensor | None,
-    ) -> None:
+    ) -> LaunchSpec:
         num_tokens, gate_up_size = input.shape
         hidden_size = gate_up_size // 2
         block_size = 1024
         grid = (min(num_tokens, 256), triton.cdiv(hidden_size, block_size))
-        self._launch(
-            grid,
-            input,
-            output,
-            topk_ids,
-            expert_map,
-            hidden_size,
-            gate_up_size,
-            num_tokens,
-            swiglu_limit,
+        return grid, dict(
+            hidden_size=hidden_size,
+            input_row_stride=gate_up_size,
+            num_tokens=num_tokens,
             HAS_LIMIT=swiglu_limit > 0,
             HAS_EXPERT_MAP=expert_map is not None,
             BLOCK_SIZE=block_size,

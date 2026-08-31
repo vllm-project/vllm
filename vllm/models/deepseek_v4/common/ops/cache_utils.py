@@ -26,9 +26,11 @@ from vllm.model_executor.warmup.jit_warmup import (
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonPointerInputVariant,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
@@ -430,6 +432,7 @@ class DequantizeAndGatherKCacheKernel(
             use_fnuz=compile_key.use_fnuz,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         out: torch.Tensor,
@@ -441,18 +444,11 @@ class DequantizeAndGatherKCacheKernel(
         offset: int,
         *,
         use_fnuz: bool = False,
-    ) -> None:
+    ) -> LaunchSpec:
         num_reqs = seq_lens.shape[0]
-        self._launch(
-            (num_reqs, self.NUM_WORKERS),
-            out,
-            out.stride(0),
-            out.stride(1),
-            k_cache,
-            seq_lens,
-            block_table,
-            offset,
-            gather_lens,
+        return (num_reqs, self.NUM_WORKERS), dict(
+            out_stride0=out.stride(0),
+            out_stride1=out.stride(1),
             max_blocks_per_seq=block_table.shape[-1],
             fp8_dim=448,
             bf16_dim=64,
@@ -464,7 +460,6 @@ class DequantizeAndGatherKCacheKernel(
             output_dim=512,
             fp8_max=448.0,
             n_quant_blocks=7,
-            use_fnuz=use_fnuz,
         )
 
 
@@ -666,6 +661,7 @@ class ComputeGlobalTopkIndicesAndLensKernel(
             is_valid_token=TritonWarmupTensor(torch.bool),
         )
 
+    @kernel_launcher
     def __call__(
         self,
         global_topk_indices: torch.Tensor,
@@ -675,21 +671,13 @@ class ComputeGlobalTopkIndicesAndLensKernel(
         block_table: torch.Tensor,
         block_size: int,
         is_valid_token: torch.Tensor,
-    ) -> None:
+    ) -> LaunchSpec:
         num_tokens = topk_indices.shape[0]
-        self._launch(
-            (num_tokens,),
-            global_topk_indices,
-            global_topk_indices.stride(0),
-            topk_lens,
-            topk_indices,
-            topk_indices.stride(0),
-            topk_indices.shape[-1],
-            token_to_req_indices,
-            block_table,
-            block_table.stride(0),
-            block_size,
-            is_valid_token,
+        return (num_tokens,), dict(
+            global_topk_indices_stride=global_topk_indices.stride(0),
+            topk_indices_stride=topk_indices.stride(0),
+            topk=topk_indices.shape[-1],
+            block_table_stride=block_table.stride(0),
             TRITON_BLOCK_SIZE=self.TRITON_BLOCK_SIZE,
         )
 
@@ -936,6 +924,7 @@ class CombineTopkSwaIndicesKernel(
             WINDOW_SIZE=compile_key.window_size,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         combined_indices: torch.Tensor,
@@ -950,23 +939,11 @@ class CombineTopkSwaIndicesKernel(
         TOP_K: int,
         COMPRESS_RATIO: int,
         WINDOW_SIZE: int,
-    ) -> None:
+    ) -> LaunchSpec:
         num_reqs = seq_lens.shape[0]
-        self._launch(
-            (num_reqs, self.NUM_WORKERS),
-            combined_indices,
-            combined_indices.stride(0),
-            combined_lens,
-            topk_indices,
-            topk_indices.stride(0),
-            query_start_loc,
-            seq_lens,
-            gather_lens,
-            M,
-            N,
-            TOP_K=TOP_K,
-            COMPRESS_RATIO=COMPRESS_RATIO,
-            WINDOW_SIZE=WINDOW_SIZE,
+        return (num_reqs, self.NUM_WORKERS), dict(
+            combined_indices_stride=combined_indices.stride(0),
+            topk_indices_stride=topk_indices.stride(0),
             PADDED_TOP_K=next_power_of_2(topk_indices.shape[-1]),
         )
 
@@ -1489,6 +1466,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
             num_warps=num_warps,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         sparse_indices: torch.Tensor,
@@ -1521,32 +1499,14 @@ class BuildFlashinferMixedSparseIndicesKernel(
         window_block_size: int,
         topk_block_size: int,
         num_warps: int,
-    ) -> None:
+    ) -> LaunchSpec:
         num_tokens = sparse_indices.shape[0]
-        self._launch(
-            (num_tokens,),
-            sparse_indices,
-            sparse_indices.stride(0),
-            sparse_topk_lens,
-            decode_swa_indices,
-            decode_swa_indices.stride(0),
-            decode_compressed_indices,
-            decode_compressed_indices.stride(0),
-            decode_compressed_topk_lens,
-            decode_is_valid_token,
-            prefill_topk_indices,
-            prefill_topk_stride,
-            query_start_loc,
-            seq_lens,
-            token_to_req_indices,
-            swa_block_table,
-            swa_block_table.stride(0),
-            swa_block_size,
-            swa_block_span,
-            compressed_block_table,
-            compressed_block_table.stride(0),
-            compressed_block_size,
-            compressed_block_span,
+        return (num_tokens,), dict(
+            sparse_indices_stride=sparse_indices.stride(0),
+            decode_swa_stride=decode_swa_indices.stride(0),
+            decode_compressed_stride=decode_compressed_indices.stride(0),
+            swa_block_table_stride=swa_block_table.stride(0),
+            compressed_block_table_stride=compressed_block_table.stride(0),
             NUM_DECODE_TOKENS=num_decode_tokens,
             WINDOW_SIZE=window_size,
             SWA_INDEX_WIDTH=swa_index_width,

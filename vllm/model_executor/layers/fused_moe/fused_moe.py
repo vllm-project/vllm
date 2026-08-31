@@ -37,8 +37,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
@@ -1016,6 +1018,7 @@ class FusedMoeTritonKernel(VllmTritonJitKernel["FusedMoeTritonKernel.CompileKey"
             num_stages=compile_key.num_stages,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         A: torch.Tensor,
@@ -1052,43 +1055,18 @@ class FusedMoeTritonKernel(VllmTritonJitKernel["FusedMoeTritonKernel.CompileKey"
         USE_TD: bool = False,
         num_warps: int,
         num_stages: int,
-    ) -> Any:
+    ) -> LaunchSpec:
         grid = lambda META: (
             triton.cdiv(EM, META["BLOCK_SIZE_M"])
             * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
         )
-        return self._launch(
-            grid,
-            A,
-            B,
-            C,
-            B_bias,
-            A_scale,
-            B_scale,
-            topk_weights,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            N,
-            K,
-            EM,
-            *args,
-            MUL_ROUTED_WEIGHT=MUL_ROUTED_WEIGHT,
-            top_k=top_k,
-            compute_type=compute_type,
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a8=use_int8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            per_channel_quant=per_channel_quant,
-            naive_block_assignment=naive_block_assignment,
-            HAS_BIAS=HAS_BIAS,
-            BLOCK_SIZE_M=BLOCK_SIZE_M,
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
-            BLOCK_SIZE_K=BLOCK_SIZE_K,
-            GROUP_SIZE_M=GROUP_SIZE_M,
-            SPLIT_K=SPLIT_K,
-            SWAP_AB=SWAP_AB,
-            USE_TD=USE_TD,
+        return grid, dict(
+            a_ptr=A,
+            b_ptr=B,
+            c_ptr=C,
+            b_bias_ptr=B_bias,
+            a_scale_ptr=A_scale,
+            b_scale_ptr=B_scale,
             num_warps=num_warps,
             num_stages=num_stages,
         )
@@ -1583,6 +1561,7 @@ class ComputeIdentityKernel(VllmTritonJitKernel["ComputeIdentityKernel.CompileKe
             scales_stride=compile_key.scales_stride,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         *,
@@ -1593,7 +1572,7 @@ class ComputeIdentityKernel(VllmTritonJitKernel["ComputeIdentityKernel.CompileKe
         output: torch.Tensor,
         hidden_dim: int,
         scales_stride: int,
-    ) -> Any:
+    ) -> LaunchSpec:
         compile_key = self.dispatch(
             top_k=top_k,
             hidden_dim=hidden_dim,
@@ -1601,17 +1580,7 @@ class ComputeIdentityKernel(VllmTritonJitKernel["ComputeIdentityKernel.CompileKe
             scales_stride=scales_stride,
         )
         grid = lambda meta: (num_tokens * (hidden_dim // meta["BLOCK_SIZE"]),)
-        return self._launch(
-            grid,
-            top_k,
-            hidden_states,
-            expert_scales,
-            num_tokens,
-            output,
-            hidden_dim,
-            scales_stride,
-            BLOCK_SIZE=compile_key.block_size,
-        )
+        return grid, dict(BLOCK_SIZE=compile_key.block_size)
 
 
 def zero_experts_compute_triton(

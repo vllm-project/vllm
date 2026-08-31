@@ -13,8 +13,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -319,6 +321,7 @@ class ConvertReqIndexToGlobalIndexKernel(
             DCP_INTERLEAVE=compile_key.dcp_interleave,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         req_id: torch.Tensor,
@@ -340,36 +343,23 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_SIZE: int,
         DCP_RANK: int,
         DCP_INTERLEAVE: int,
-    ) -> None:
+    ) -> LaunchSpec:
         single_tile, block_n, tiles_per_row, num_warps = _remap_tiling(
             NUM_TOPK_TOKENS, BLOCK_N, COUNT_VALID
         )
-        self._launch(
-            (req_id.shape[0], tiles_per_row),
-            req_id,
-            block_table,
-            token_indices,
-            out,
-            valid_counts,
-            prefill_workspace_request_ids,
-            prefill_workspace_starts,
-            max_num_blocks_per_req,
-            BLOCK_SIZE,
-            BLOCK_STRIDE_ROWS,
-            block_n,
-            HAS_PREFILL_WORKSPACE,
-            COUNT_VALID,
-            single_tile,
-            COMPACT_TO_FRONT,
-            DCP_SIZE,
-            DCP_RANK,
-            DCP_INTERLEAVE,
-            block_table.stride(0),
-            block_table.stride(1),
-            token_indices.stride(0),
-            token_indices.stride(1),
-            out.stride(0),
-            out.stride(1),
+        return (req_id.shape[0], tiles_per_row), dict(
+            valid_count_ptr=valid_counts,
+            prefill_request_id_ptr=prefill_workspace_request_ids,
+            workspace_starts_ptr=prefill_workspace_starts,
+            BLOCK_N=block_n,
+            HAS_PREFILL=HAS_PREFILL_WORKSPACE,
+            SINGLE_TILE=single_tile,
+            bt_stride0=block_table.stride(0),
+            bt_stride1=block_table.stride(1),
+            ti_stride0=token_indices.stride(0),
+            ti_stride1=token_indices.stride(1),
+            out_stride0=out.stride(0),
+            out_stride1=out.stride(1),
             num_warps=num_warps,
         )
 

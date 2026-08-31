@@ -10,8 +10,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
@@ -185,6 +187,7 @@ class SavePartialStatesKernel(
             pdl_kwargs=({"launch_pdl": True} if compile_key.launch_pdl else None),
         )
 
+    @kernel_launcher
     def __call__(
         self,
         kv: torch.Tensor,
@@ -197,7 +200,7 @@ class SavePartialStatesKernel(
         state_width: int,
         compress_ratio: int,
         pdl_kwargs: dict | None = None,
-    ) -> None:
+    ) -> LaunchSpec:
         """Write packed [kv, score+ape] partial states into the compressor cache.
 
         One program per token; pads (slot_id == -1) are skipped.
@@ -216,20 +219,13 @@ class SavePartialStatesKernel(
             block_size=block_size,
             launch_pdl=bool((pdl_kwargs or {}).get("launch_pdl", False)),
         )
-        self._launch(
-            (num_actual,),
-            kv,
-            compile_key.kv_stride,
-            score,
-            compile_key.score_stride,
-            ape,
-            compile_key.ape_stride,
-            positions,
-            state_cache,
-            compile_key.state_cache_stride0,
-            compile_key.state_cache_stride1,
-            slot_mapping,
-            compile_key.block_size,
+        return (num_actual,), dict(
+            kv_stride=compile_key.kv_stride,
+            score_stride=compile_key.score_stride,
+            ape_stride=compile_key.ape_stride,
+            state_cache_stride0=compile_key.state_cache_stride0,
+            state_cache_stride1=compile_key.state_cache_stride1,
+            block_size=compile_key.block_size,
             HEAD_SIZE=compile_key.head_size,
             TRITON_BLOCK_SIZE=compile_key.triton_block_size,
             STATE_WIDTH=compile_key.state_width,

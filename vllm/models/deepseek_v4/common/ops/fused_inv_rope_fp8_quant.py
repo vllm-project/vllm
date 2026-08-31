@@ -13,8 +13,10 @@ from typing import Any
 import torch
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -284,6 +286,7 @@ class FusedInvRopeFP8QuantKernel(
             grid=(1, compile_key.heads_per_group),
         )
 
+    @kernel_launcher
     def __call__(
         self,
         o: torch.Tensor,
@@ -302,16 +305,10 @@ class FusedInvRopeFP8QuantKernel(
         fp8_max: float,
         use_gdc: bool,
         grid: tuple[int, int],
-    ) -> None:
-        self._launch(
-            grid,
-            o,
-            positions,
-            cos_sin_cache,
-            fp8_buf,
-            scale_buf,
-            num_tokens,
-            heads_per_group=heads_per_group,
+    ) -> LaunchSpec:
+        return grid, dict(
+            fp8_ptr=fp8_buf,
+            scale_ptr=scale_buf,
             o_stride_token=o.stride(0),
             o_stride_head=o.stride(1),
             cache_stride_pos=cos_sin_cache.stride(0),
@@ -319,7 +316,6 @@ class FusedInvRopeFP8QuantKernel(
             fp8_stride_token=fp8_buf.stride(1),
             scale_stride_group=scale_buf.stride(0),
             scale_stride_k=scale_buf.stride(2),
-            fp8_max=fp8_max,
             eps=1e-10,
             QUANT_GROUP_SIZE=quant_group_size,
             CHUNKS_PER_HEAD=chunks_per_head,

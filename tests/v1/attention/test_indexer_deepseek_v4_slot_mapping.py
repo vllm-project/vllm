@@ -20,7 +20,7 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(compress_ratios=[0, 0, 4, 128, 0])
+            hf_config=SimpleNamespace(compress_ratios=[0, 0, 4, 128, 0], index_kpool=32)
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
@@ -30,13 +30,11 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
 
     keys = BuildPrefillChunkMetadataKernel().get_warmup_keys(config)
 
-    assert {key.compress_ratio for key in keys} == {1, 4, 128}
-    assert {
-        (key.query_slice_start, key.query_slice_stop) for key in keys
-    } == {
+    assert {key.compress_ratio for key in keys} == {1, 4, 32, 128}
+    assert {(key.query_slice_start, key.query_slice_stop) for key in keys} == {
         (query_slice_start, query_slice_stop)
-        for query_slice_start in (0, 1, 2)
-        for query_slice_stop in (1, 15, 16)
+        for query_slice_start in (1, 2, 16)
+        for query_slice_stop in (1, 2, 16)
     }
 
 

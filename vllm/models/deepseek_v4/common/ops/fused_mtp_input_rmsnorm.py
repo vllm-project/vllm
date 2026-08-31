@@ -23,8 +23,10 @@ from typing import Any
 import torch
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
@@ -163,6 +165,7 @@ class FusedMTPInputRMSNormKernel(
             hc_mult=compile_key.hc_mult,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         inputs_embeds: torch.Tensor,
@@ -172,7 +175,7 @@ class FusedMTPInputRMSNormKernel(
         hnorm_weight: torch.Tensor,
         eps: float,
         hc_mult: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> LaunchSpec:
         assert inputs_embeds.ndim == 2
         assert previous_hidden_states.ndim == 3
         assert previous_hidden_states.shape[1] == hc_mult
@@ -192,24 +195,21 @@ class FusedMTPInputRMSNormKernel(
         enorm_out = torch.empty_like(inputs_embeds)
         hnorm_out = torch.empty_like(previous_hidden_states)
         if num_tokens == 0:
-            return enorm_out, hnorm_out
+            return None, {}, (enorm_out, hnorm_out)
 
         compile_key = self.dispatch(hidden=hidden, hc_mult=hc_mult, eps=eps)
-        self._launch(
+        return (
             (num_tokens, hc_mult + 1),
-            inputs_embeds,
-            positions,
-            previous_hidden_states,
-            enorm_weight,
-            hnorm_weight,
-            enorm_out,
-            hnorm_out,
-            eps,
-            HIDDEN=compile_key.hidden,
-            HC_MULT=compile_key.hc_mult,
-            BLOCK_SIZE=compile_key.block_size,
+            dict(
+                prev_hidden_ptr=previous_hidden_states,
+                enorm_out_ptr=enorm_out,
+                hnorm_out_ptr=hnorm_out,
+                HIDDEN=compile_key.hidden,
+                HC_MULT=compile_key.hc_mult,
+                BLOCK_SIZE=compile_key.block_size,
+            ),
+            (enorm_out, hnorm_out),
         )
-        return enorm_out, hnorm_out
 
 
 class MTPSharedHeadRMSNormKernel(
@@ -280,31 +280,32 @@ class MTPSharedHeadRMSNormKernel(
             eps=compile_key.eps,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         hidden_states: torch.Tensor,
         weight: torch.Tensor,
         eps: float,
-    ) -> torch.Tensor:
+    ) -> LaunchSpec:
         assert hidden_states.ndim == 2
         assert hidden_states.is_contiguous()
         assert weight.is_contiguous()
         num_tokens, hidden = hidden_states.shape
         out = torch.empty_like(hidden_states)
         if num_tokens == 0:
-            return out
+            return None, {}, out
 
         compile_key = self.dispatch(hidden=hidden, eps=eps)
-        self._launch(
+        return (
             (num_tokens,),
-            hidden_states,
-            weight,
+            dict(
+                x_ptr=hidden_states,
+                out_ptr=out,
+                HIDDEN=compile_key.hidden,
+                BLOCK_SIZE=compile_key.block_size,
+            ),
             out,
-            eps,
-            HIDDEN=compile_key.hidden,
-            BLOCK_SIZE=compile_key.block_size,
         )
-        return out
 
 
 _FUSED_MTP_INPUT_RMSNORM_KERNEL = FusedMTPInputRMSNormKernel()

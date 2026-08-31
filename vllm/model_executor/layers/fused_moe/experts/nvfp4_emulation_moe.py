@@ -51,8 +51,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -515,6 +517,7 @@ class FusedMoeNvfp4EmulationKernel(
             GROUP_SIZE_M=compile_key.group_size_m,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         A: torch.Tensor,
@@ -539,33 +542,9 @@ class FusedMoeNvfp4EmulationKernel(
         BLOCK_SIZE_N: int,
         BLOCK_SIZE_K: int,
         GROUP_SIZE_M: int,
-    ) -> Any:
+    ) -> LaunchSpec:
         grid = (triton.cdiv(EM, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
-        return self._launch(
-            grid,
-            A,
-            B,
-            C,
-            B_scale,
-            w_global_scale,
-            topk_weights,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            N,
-            K,
-            EM,
-            *args,
-            block_k_diviable=block_k_diviable,
-            MUL_ROUTED_WEIGHT=MUL_ROUTED_WEIGHT,
-            top_k=top_k,
-            compute_type=compute_type,
-            group_size=group_size,
-            BLOCK_SIZE_M=BLOCK_SIZE_M,
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
-            BLOCK_SIZE_K=BLOCK_SIZE_K,
-            GROUP_SIZE_M=GROUP_SIZE_M,
-        )
+        return grid, dict(a_ptr=A, b_ptr=B, c_ptr=C, b_scale_ptr=B_scale)
 
 
 def invoke_fused_moe_nvfp4_emulation_kernel(

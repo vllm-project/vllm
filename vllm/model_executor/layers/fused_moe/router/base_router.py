@@ -12,8 +12,10 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
@@ -170,6 +172,7 @@ if current_platform.is_cuda_alike():
                 num_active_experts=compile_key.num_active_experts,
             )
 
+        @kernel_launcher
         def __call__(
             self,
             topk_ids: torch.Tensor,
@@ -184,7 +187,7 @@ if current_platform.is_cuda_alike():
             out_size: int,
             numel: int,
             num_active_experts: int,
-        ) -> None:
+        ) -> LaunchSpec:
             compile_key = self.dispatch(
                 has_num_unpadded=num_unpadded_tokens is not None,
                 num_logical_experts=num_logical_experts,
@@ -193,20 +196,10 @@ if current_platform.is_cuda_alike():
                 num_active_experts=num_active_experts,
             )
             grid = (triton.cdiv(numel, compile_key.block_size),)
-            self._launch(
-                grid,
-                topk_ids,
-                logical_replica_count,
-                logical_to_physical_map,
-                out,
-                expert_load_view,
-                record_enabled,
-                num_unpadded_tokens,
-                num_logical_experts,
-                map_slots,
-                out_size,
-                numel,
-                num_active_experts,
+            return grid, dict(
+                logical_to_physical_ptr=logical_to_physical_map,
+                out_ids_ptr=out,
+                out_ptr=expert_load_view,
                 HAS_NUM_UNPADDED=compile_key.has_num_unpadded,
                 BLOCK_SIZE=compile_key.block_size,
             )

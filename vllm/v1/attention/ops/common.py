@@ -6,8 +6,10 @@ from typing import Any
 import torch
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.triton_utils import tl, triton
 
@@ -119,6 +121,7 @@ class PackSeqTritonKernel(VllmTritonJitKernel["PackSeqTritonKernel.CompileKey"])
             block_d=compile_key.block_d,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         x_reshaped: torch.Tensor,
@@ -132,16 +135,11 @@ class PackSeqTritonKernel(VllmTritonJitKernel["PackSeqTritonKernel.CompileKey"])
         pad_is_uint8: bool,
         block_t: int,
         block_d: int,
-    ) -> None:
+    ) -> LaunchSpec:
         grid = (lengths.numel(), triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
-        self._launch(
-            grid,
-            x_reshaped,
-            out,
-            lengths.int(),
-            N,
-            D,
-            Lmax,
+        return grid, dict(
+            x_ptr=x_reshaped,
+            lengths_ptr=lengths.int(),
             PAD_VALUE=pad_value,
             PAD_IS_UINT8=pad_is_uint8,
             BLOCK_T=block_t,
@@ -298,6 +296,7 @@ class UnpackSeqTritonKernel(VllmTritonJitKernel["UnpackSeqTritonKernel.CompileKe
             block_d=compile_key.block_d,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         packed_reshaped: torch.Tensor,
@@ -309,16 +308,11 @@ class UnpackSeqTritonKernel(VllmTritonJitKernel["UnpackSeqTritonKernel.CompileKe
         D: int,
         block_t: int,
         block_d: int,
-    ) -> None:
+    ) -> LaunchSpec:
         grid = (B, triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
-        self._launch(
-            grid,
-            packed_reshaped,
-            out,
-            lengths.int(),
-            B,
-            Lmax,
-            D,
+        return grid, dict(
+            packed_ptr=packed_reshaped,
+            lengths_ptr=lengths.int(),
             BLOCK_T=block_t,
             BLOCK_D=block_d,
             num_warps=4,

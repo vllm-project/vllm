@@ -19,8 +19,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -541,13 +543,14 @@ class GlobalizeRecvTopkIdxKernel(
             num_experts=compile_key.num_experts,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         recv_topk_idx: torch.Tensor,
         psum_recv_per_rank: torch.Tensor,
         rank_expert_offset: int,
         num_experts: int,
-    ) -> Any:
+    ) -> LaunchSpec:
         num_tokens, topk = recv_topk_idx.shape
         compile_key = self.dispatch(
             num_tokens=num_tokens,
@@ -557,14 +560,11 @@ class GlobalizeRecvTopkIdxKernel(
             num_experts=num_experts,
         )
         grid = (triton.cdiv(compile_key.n_elements, compile_key.block),)
-        return self._launch(
-            grid,
-            recv_topk_idx,
-            psum_recv_per_rank,
-            compile_key.p,
-            rank_expert_offset,
-            num_experts,
-            compile_key.n_elements,
+        return grid, dict(
+            topk_idx_ptr=recv_topk_idx,
+            psum_ptr=psum_recv_per_rank,
+            P=compile_key.p,
+            n_elements=compile_key.n_elements,
             topk=topk,
             BLOCK=compile_key.block,
         )

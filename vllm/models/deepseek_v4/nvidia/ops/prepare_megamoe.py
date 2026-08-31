@@ -16,8 +16,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
@@ -252,6 +254,7 @@ class PrepareMegaMoeInputsKernel(
             ),
         )
 
+    @kernel_launcher
     def __call__(
         self,
         hidden_states: torch.Tensor,
@@ -264,10 +267,10 @@ class PrepareMegaMoeInputsKernel(
         is_padding: torch.Tensor | None = None,
         shared_x_sf: torch.Tensor | None = None,
         shared_block_m: int | None = None,
-    ) -> None:
+    ) -> LaunchSpec:
         num_tokens, hidden_size = hidden_states.shape
         if num_tokens == 0:
-            return
+            return None, {}, None
         if hidden_size % 128 != 0:
             raise ValueError(
                 "DeepSeek V4 MegaMoE input staging requires hidden_size to be "
@@ -306,36 +309,30 @@ class PrepareMegaMoeInputsKernel(
         block_topk = triton.next_power_of_2(top_k)
         grid = (num_tokens, triton.cdiv(hidden_size, block_k))
         padding_stride_m = is_padding.stride(0) if is_padding is not None else 0
-        self._launch(
-            grid,
-            hidden_states,
-            x_fp8,
-            x_sf,
-            shared_x_sf,
-            topk_ids,
-            topk_weights,
-            is_padding,
-            topk_idx_out,
-            topk_weights_out,
-            hidden_states.stride(0),
-            hidden_states.stride(1),
-            x_fp8.stride(0),
-            x_fp8.stride(1),
-            x_sf.stride(0),
-            x_sf.stride(1),
-            shared_x_sf.stride(0) if shared_x_sf is not None else 0,
-            shared_x_sf.stride(1) if shared_x_sf is not None else 0,
-            topk_ids.stride(0),
-            topk_ids.stride(1),
-            topk_weights.stride(0),
-            topk_weights.stride(1),
-            padding_stride_m,
-            topk_idx_out.stride(0),
-            topk_idx_out.stride(1),
-            topk_weights_out.stride(0),
-            topk_weights_out.stride(1),
-            hidden_size,
-            top_k,
+        return grid, dict(
+            hidden_stride_m=hidden_states.stride(0),
+            hidden_stride_k=hidden_states.stride(1),
+            x_stride_m=x_fp8.stride(0),
+            x_stride_k=x_fp8.stride(1),
+            x_sf_stride_m=x_sf.stride(0),
+            x_sf_stride_k=x_sf.stride(1),
+            shared_x_sf_stride_m=shared_x_sf.stride(0)
+            if shared_x_sf is not None
+            else 0,
+            shared_x_sf_stride_k=shared_x_sf.stride(1)
+            if shared_x_sf is not None
+            else 0,
+            topk_ids_stride_m=topk_ids.stride(0),
+            topk_ids_stride_k=topk_ids.stride(1),
+            topk_weights_stride_m=topk_weights.stride(0),
+            topk_weights_stride_k=topk_weights.stride(1),
+            is_padding_stride_m=padding_stride_m,
+            topk_idx_stride_m=topk_idx_out.stride(0),
+            topk_idx_stride_k=topk_idx_out.stride(1),
+            topk_weights_out_stride_m=topk_weights_out.stride(0),
+            topk_weights_out_stride_k=topk_weights_out.stride(1),
+            hidden_size=hidden_size,
+            top_k=top_k,
             BLOCK_K=block_k,
             GROUP_K=self.GROUP_K,
             BLOCK_TOPK=block_topk,

@@ -10,9 +10,11 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonPointerInputVariant,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
@@ -152,6 +154,7 @@ class PrepareUniformDecodeKernel(
             max_decode_len=compile_key.max_decode_len,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         seq_lens: torch.Tensor,
@@ -161,17 +164,10 @@ class PrepareUniformDecodeKernel(
         decode_lens: torch.Tensor,
         num_decode_tokens: int,
         max_decode_len: int,
-    ) -> None:
-        self._launch(
-            (num_decode_tokens,),
-            seq_lens,
-            decode_seq_lens,
-            block_table,
-            block_table.stride(0),
-            expanded_block_table,
-            expanded_block_table.stride(0),
-            decode_lens,
-            max_decode_len,
+    ) -> LaunchSpec:
+        return (num_decode_tokens,), dict(
+            block_table_stride=block_table.stride(0),
+            expanded_bt_stride=expanded_block_table.stride(0),
             BLOCK_SIZE=self.BLOCK_SIZE,
         )
 
@@ -387,19 +383,21 @@ class BuildPrefillChunkMetadataKernel(
     def dispatch(  # type: ignore[override]
         self,
         *,
+        query_slice_start: int,
+        query_slice_stop: int,
         DCP_RANK: int,
         DCP_WORLD: int,
         DCP_INTERLEAVE: int,
         BLOCK_SIZE: int,
         COMPRESS_RATIO: int,
         input_variant: TritonPointerInputVariant,
-        **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
-            **compile_key_fields,
-            dcp_rank=DCP_RANK,
-            dcp_world=DCP_WORLD,
-            dcp_interleave=DCP_INTERLEAVE,
+            query_slice_start=triton_scalar_specialization_rep(query_slice_start),
+            query_slice_stop=triton_scalar_specialization_rep(query_slice_stop),
+            dcp_rank=triton_scalar_specialization_rep(DCP_RANK),
+            dcp_world=triton_scalar_specialization_rep(DCP_WORLD),
+            dcp_interleave=triton_scalar_specialization_rep(DCP_INTERLEAVE),
             block_size=BLOCK_SIZE,
             compress_ratio=COMPRESS_RATIO,
             input_variant=input_variant,
@@ -413,8 +411,13 @@ class BuildPrefillChunkMetadataKernel(
         dcp_interleave = parallel_config.cp_kv_cache_interleave_size
         dcp_rank = get_dcp_group().rank_in_group if dcp_world > 1 else 0
         compress_ratios = tuple(
-            max(1, int(ratio))
-            for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
+            dict.fromkeys(
+                max(1, int(ratio))
+                for ratio in (
+                    *(getattr(hf_config, "compress_ratios", None) or (1,)),
+                    getattr(hf_config, "index_kpool", 1) or 1,
+                )
+            )
         )
         return self._trace_dispatch(self.dispatch)(
             # Cover Triton's divisible, exact-one, and generic i32 classes.
@@ -431,35 +434,47 @@ class BuildPrefillChunkMetadataKernel(
             ),
         )
 
-    def warmup_inputs(
-        self, compile_key: CompileKey
-    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        args = (
-            int32_ptr,
-            compile_key.input_variant.pointer("uncompressed_seq_lens", torch.int32),
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
-            int32_ptr,
-            compile_key.query_slice_start,
-            compile_key.query_slice_stop,
-            compile_key.dcp_rank,
-            compile_key.dcp_world,
-            compile_key.dcp_interleave,
+        return dict(
+            query_start_loc=int32_ptr,
+            uncompressed_seq_lens=compile_key.input_variant.pointer(
+                "uncompressed_seq_lens", torch.int32
+            ),
+            cu_compressed_seq_lens=int32_ptr,
+            row_start_cu_compressed_seq_lens=int32_ptr,
+            token_to_seq=int32_ptr,
+            cu_compressed_seq_len_ks=int32_ptr,
+            cu_compressed_seq_len_ke=int32_ptr,
+            query_slice_start=compile_key.query_slice_start,
+            query_slice_stop=compile_key.query_slice_stop,
+            DCP_RANK=compile_key.dcp_rank,
+            DCP_WORLD=compile_key.dcp_world,
+            DCP_INTERLEAVE=compile_key.dcp_interleave,
+            num_reqs=1,
+            COMPRESS_RATIO=compile_key.compress_ratio,
         )
-        return args, dict(num_reqs=1, COMPRESS_RATIO=compile_key.compress_ratio)
 
+    @kernel_launcher
     def __call__(
         self,
-        *args: Any,
+        query_start_loc: torch.Tensor,
+        uncompressed_seq_lens: torch.Tensor,
+        cu_compressed_seq_lens: torch.Tensor,
+        row_start_cu_compressed_seq_lens: torch.Tensor,
+        token_to_seq: torch.Tensor,
+        cu_compressed_seq_len_ks: torch.Tensor,
+        cu_compressed_seq_len_ke: torch.Tensor,
+        query_slice_start: int,
+        query_slice_stop: int,
+        DCP_RANK: int,
+        DCP_WORLD: int,
+        DCP_INTERLEAVE: int,
+        *,
         num_reqs: int,
         COMPRESS_RATIO: int,
-    ) -> None:
-        self._launch(
-            (num_reqs,),
-            *args,
+    ) -> LaunchSpec:
+        return (num_reqs,), dict(
             BLOCK_SIZE=self.BLOCK_SIZE,
             COMPRESS_RATIO=COMPRESS_RATIO,
         )

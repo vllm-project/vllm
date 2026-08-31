@@ -7,8 +7,10 @@ import torch
 
 from vllm.model_executor.warmup.jit_warmup import zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -123,6 +125,7 @@ class CompressedSlotMappingKernel(
             compress_ratio=compile_key.compress_ratio,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         slot_mapping: torch.Tensor,
@@ -131,16 +134,10 @@ class CompressedSlotMappingKernel(
         block_table: torch.Tensor,
         block_size: int,
         compress_ratio: int,
-    ) -> None:
-        self._launch(
-            (block_table.shape[0],),
-            slot_mapping,
-            query_start_loc,
-            seq_lens,
-            block_table,
-            block_table.stride(0),
-            block_size,
-            compress_ratio,
+    ) -> LaunchSpec:
+        return (block_table.shape[0],), dict(
+            block_table_stride=block_table.stride(0),
+            COMPRESS_RATIO=compress_ratio,
             PAD_ID=-1,
             TRITON_BLOCK_SIZE=self.TRITON_BLOCK_SIZE,
         )

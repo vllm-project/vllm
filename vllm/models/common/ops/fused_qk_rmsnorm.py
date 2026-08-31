@@ -6,8 +6,10 @@ from typing import Any
 import torch
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -142,6 +144,7 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
             eps=compile_key.eps,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         qr: torch.Tensor,
@@ -149,7 +152,7 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
         q_weight: torch.Tensor,
         kv_weight: torch.Tensor,
         eps: float,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> LaunchSpec:
         assert qr.ndim == 2 and kv.ndim == 2
         assert qr.shape[0] == kv.shape[0], (
             f"token dim mismatch: qr={qr.shape}, kv={kv.shape}"
@@ -163,7 +166,7 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
         qr_out = torch.empty_like(qr)
         kv_out = torch.empty_like(kv)
         if num_tokens == 0:
-            return qr_out, kv_out
+            return None, {}, (qr_out, kv_out)
 
         compile_key = self.dispatch(
             q_size=q_size,
@@ -175,25 +178,24 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
             eps=eps,
             launch_pdl=current_platform.is_arch_support_pdl(),
         )
-        self._launch(
+        return (
             (num_tokens, 2),
-            qr,
-            qr_out,
-            q_weight,
-            compile_key.q_in_stride,
-            compile_key.q_out_stride,
-            kv,
-            kv_out,
-            kv_weight,
-            compile_key.kv_in_stride,
-            compile_key.kv_out_stride,
-            compile_key.eps,
-            Q_SIZE=compile_key.q_size,
-            KV_SIZE=compile_key.kv_size,
-            BLOCK_SIZE=compile_key.block_size,
-            launch_pdl=compile_key.launch_pdl,
+            dict(
+                q_ptr=qr,
+                q_out_ptr=qr_out,
+                q_in_stride=compile_key.q_in_stride,
+                q_out_stride=compile_key.q_out_stride,
+                kv_out_ptr=kv_out,
+                kv_in_stride=compile_key.kv_in_stride,
+                kv_out_stride=compile_key.kv_out_stride,
+                eps=compile_key.eps,
+                Q_SIZE=compile_key.q_size,
+                KV_SIZE=compile_key.kv_size,
+                BLOCK_SIZE=compile_key.block_size,
+                launch_pdl=compile_key.launch_pdl,
+            ),
+            (qr_out, kv_out),
         )
-        return qr_out, kv_out
 
 
 _FUSED_Q_KV_RMSNORM_KERNEL = FusedQKVRMSNormKernel()

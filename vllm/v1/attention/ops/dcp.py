@@ -20,8 +20,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -296,6 +298,7 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
             is_base_e=compile_key.is_base_e,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         outputs: torch.Tensor,
@@ -306,29 +309,25 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
         ctx: Any,
         *,
         is_base_e: bool,
-    ) -> None:
+    ) -> LaunchSpec:
         num_tokens, num_heads, head_dim = outputs.shape
         n_rounded = lses.shape[0]
         outputs_stride_b, outputs_stride_h, outputs_stride_d = outputs.stride()
         lses_stride_n, lses_stride_b, lses_stride_h = lses.stride()
         grid = (num_tokens, num_heads, 1)
-        self._launch(
-            grid,
-            outputs,
-            new_output,
-            lses,
-            vlse,
-            outputs_stride_b,
-            outputs_stride_h,
-            outputs_stride_d,
-            lses_stride_n,
-            lses_stride_b,
-            lses_stride_h,
-            lse_idx,
+        return grid, dict(
+            outputs_stride_B=outputs_stride_b,
+            outputs_stride_H=outputs_stride_h,
+            outputs_stride_D=outputs_stride_d,
+            lses_stride_N=lses_stride_n,
+            lses_stride_B=lses_stride_b,
+            lses_stride_H=lses_stride_h,
             HEAD_DIM=head_dim,
             N_ROUNDED=n_rounded,
             IS_BASE_E=is_base_e,
             _runtime_launcher=None if self._warming else ctx.call_kernel,
+            # CPTritonContext caches the non-constexpr positional prefix.
+            _runtime_launcher_arg_count=11,
         )
 
 

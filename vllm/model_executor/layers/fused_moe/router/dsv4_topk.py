@@ -7,8 +7,10 @@ from typing import Any
 import torch
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -167,19 +169,20 @@ class DSV4TopKKernel(VllmTritonJitKernel["DSV4TopKKernel.CompileKey"]):
             routed_scaling_factor=compile_key.routed_scaling_factor,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         gating_output: torch.Tensor,
         correction_bias: torch.Tensor,
         indices_dtype: torch.dtype,
         routed_scaling_factor: float,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> LaunchSpec:
         num_tokens, num_experts = gating_output.shape
         shape = (num_tokens, self.TOP_K)
         topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
         topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
         if num_tokens == 0:
-            return topk_weights, topk_ids
+            return None, {}, (topk_weights, topk_ids)
 
         compile_key = self.dispatch(
             num_experts=num_experts,
@@ -187,19 +190,19 @@ class DSV4TopKKernel(VllmTritonJitKernel["DSV4TopKKernel.CompileKey"]):
             routed_scaling_factor=routed_scaling_factor,
             launch_pdl=current_platform.is_arch_support_pdl(),
         )
-        self._launch(
+        return (
             (num_tokens,),
-            gating_output,
-            correction_bias,
-            topk_weights,
-            topk_ids,
-            compile_key.routed_scaling_factor,
-            NUM_EXPERTS=compile_key.num_experts,
-            BLOCK_N=compile_key.block_n,
-            num_warps=1,
-            launch_pdl=compile_key.launch_pdl,
+            dict(
+                topk_weights_ptr=topk_weights,
+                topk_ids_ptr=topk_ids,
+                routed_scaling_factor=compile_key.routed_scaling_factor,
+                NUM_EXPERTS=compile_key.num_experts,
+                BLOCK_N=compile_key.block_n,
+                num_warps=1,
+                launch_pdl=compile_key.launch_pdl,
+            ),
+            (topk_weights, topk_ids),
         )
-        return topk_weights, topk_ids
 
 
 _DSV4_TOPK_KERNEL = DSV4TopKKernel()

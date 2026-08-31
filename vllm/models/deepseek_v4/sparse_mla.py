@@ -10,8 +10,10 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
@@ -485,6 +487,7 @@ class BuildC128ATopkMetadataKernel(
             slot_mapping=TritonWarmupTensor(torch.int64),
         )
 
+    @kernel_launcher
     def __call__(
         self,
         global_decode_buffer: torch.Tensor,
@@ -498,23 +501,14 @@ class BuildC128ATopkMetadataKernel(
         block_table: torch.Tensor,
         block_size: int,
         slot_mapping: torch.Tensor,
-    ) -> None:
-        self._launch(
-            (positions.shape[0],),
-            global_decode_buffer,
-            global_decode_buffer.stride(0),
-            decode_lens_buffer,
-            prefill_buffer,
-            prefill_buffer.stride(0),
-            positions,
-            compress_ratio,
-            max_compressed_tokens,
-            num_decode_tokens,
-            token_to_req_indices,
-            block_table,
-            block_table.stride(0),
-            block_size,
-            slot_mapping,
+    ) -> LaunchSpec:
+        return (positions.shape[0],), dict(
+            global_decode_ptr=global_decode_buffer,
+            global_decode_stride=global_decode_buffer.stride(0),
+            decode_lens_ptr=decode_lens_buffer,
+            prefill_local_ptr=prefill_buffer,
+            prefill_local_stride=prefill_buffer.stride(0),
+            block_table_stride=block_table.stride(0),
             BLOCK_SIZE=1024,
         )
 

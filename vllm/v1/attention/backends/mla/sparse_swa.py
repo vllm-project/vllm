@@ -11,8 +11,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -349,6 +351,7 @@ class ComputePrefillMetadataKernel(
             window_size=1,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         prefill_gather_lens: torch.Tensor,
@@ -357,16 +360,9 @@ class ComputePrefillMetadataKernel(
         num_prefills: int,
         num_decodes: int,
         window_size: int,
-    ) -> None:
+    ) -> LaunchSpec:
         compile_key = self.dispatch(num_prefills=num_prefills)
-        self._launch(
-            (1,),
-            prefill_gather_lens,
-            seq_lens,
-            query_start_loc,
-            num_prefills,
-            num_decodes,
-            window_size,
+        return (1,), dict(
             BLOCK_SIZE=compile_key.block_size,
         )
 
@@ -880,6 +876,7 @@ class ComputeSWAIndicesAndLensKernel(
             token_offset=0,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         swa_indices: torch.Tensor,
@@ -894,21 +891,10 @@ class ComputeSWAIndicesAndLensKernel(
         *,
         num_tokens: int,
         token_offset: int,
-    ) -> None:
-        self._launch(
-            (num_tokens,),
-            swa_indices,
-            swa_indices.stride(0),
-            swa_lens,
-            window_size,
-            query_start_loc,
-            seq_lens,
-            token_to_req_indices,
-            is_valid_token,
-            block_table,
-            block_table.stride(0),
-            block_size,
-            token_offset,
+    ) -> LaunchSpec:
+        return (num_tokens,), dict(
+            swa_indices_stride=swa_indices.stride(0),
+            block_table_stride=block_table.stride(0),
             TRITON_BLOCK_SIZE=1024,
         )
 
@@ -1046,6 +1032,7 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
             token_offset=0,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         swa_indices: torch.Tensor,
@@ -1061,22 +1048,10 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
         *,
         num_tokens: int,
         token_offset: int,
-    ) -> None:
-        self._launch(
-            (num_tokens,),
-            swa_indices,
-            swa_indices.stride(0),
-            swa_lens,
-            window_size,
-            index_width,
-            query_start_loc,
-            seq_lens,
-            token_to_req_indices,
-            is_valid_token,
-            block_table,
-            block_table.stride(0),
-            block_size,
-            token_offset,
+    ) -> LaunchSpec:
+        return (num_tokens,), dict(
+            swa_indices_stride=swa_indices.stride(0),
+            block_table_stride=block_table.stride(0),
             TRITON_BLOCK_SIZE=1024,
         )
 

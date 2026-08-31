@@ -44,8 +44,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
     trtllm_moe_pack_topk_ids_weights,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -126,13 +128,14 @@ class TrtLlmLoraUnpermuteActivationKernel(
             intermediate_size=compile_key.num_cols,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         act_permuted: torch.Tensor,
         idx_map: torch.Tensor,
         out: torch.Tensor,
         intermediate_size: int,
-    ) -> Any:
+    ) -> LaunchSpec:
         compile_key = self.dispatch(
             dtype=act_permuted.dtype,
             intermediate_size=intermediate_size,
@@ -141,14 +144,12 @@ class TrtLlmLoraUnpermuteActivationKernel(
             out.shape[0],
             triton.cdiv(intermediate_size, compile_key.block_i),
         )
-        return self._launch(
-            grid,
-            act_permuted,
-            idx_map,
-            out,
-            intermediate_size,
-            act_permuted.stride(0),
-            out.stride(0),
+        return grid, dict(
+            act_ptr=act_permuted,
+            idx_ptr=idx_map,
+            num_cols=intermediate_size,
+            stride_ar=act_permuted.stride(0),
+            stride_or=out.stride(0),
             BLOCK_I=compile_key.block_i,
         )
 
@@ -260,6 +261,7 @@ class TrtLlmLoraFinalizeKernel(
             scale=1.0,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         gemm2_permuted: torch.Tensor,
@@ -270,7 +272,7 @@ class TrtLlmLoraFinalizeKernel(
         *,
         top_k: int,
         scale: float,
-    ) -> Any:
+    ) -> LaunchSpec:
         hidden_size = gemm2_permuted.size(1)
         compile_key = self.dispatch(
             dtype=gemm2_permuted.dtype,
@@ -281,19 +283,17 @@ class TrtLlmLoraFinalizeKernel(
             output.shape[0],
             triton.cdiv(hidden_size, compile_key.block_k),
         )
-        return self._launch(
-            grid,
-            gemm2_permuted,
-            expert_weights.reshape(-1),
-            idx_map,
-            w2_delta,
-            output,
-            hidden_size,
-            gemm2_permuted.stride(0),
-            w2_delta.stride(0),
-            w2_delta.stride(1),
-            output.stride(0),
-            scale,
+        return grid, dict(
+            gemm2_ptr=gemm2_permuted,
+            weight_ptr=expert_weights.reshape(-1),
+            idx_ptr=idx_map,
+            delta_ptr=w2_delta,
+            out_ptr=output,
+            K=hidden_size,
+            stride_g0=gemm2_permuted.stride(0),
+            stride_d0=w2_delta.stride(0),
+            stride_d1=w2_delta.stride(1),
+            stride_o0=output.stride(0),
             TOP_K=compile_key.top_k,
             BLOCK_K=compile_key.block_k,
         )

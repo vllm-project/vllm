@@ -17,8 +17,10 @@ from vllm.model_executor.warmup.jit_warmup import (
 )
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.triton_utils import tl, triton
 
@@ -212,6 +214,7 @@ class PackDCPTopkCandidatesKernel(
             block_size=compile_key.block_size,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         logits: torch.Tensor,
@@ -233,22 +236,10 @@ class PackDCPTopkCandidatesKernel(
         has_row_starts: bool,
         topk: int,
         block_size: int,
-    ) -> None:
+    ) -> LaunchSpec:
         grid = (topk_indices.shape[0], triton.cdiv(topk, block_size))
-        self._launch(
-            grid,
-            logits,
-            topk_indices,
-            packed,
-            row_starts_arg,
-            logits_stride0,
-            logits_stride1,
-            topk_stride0,
-            topk_stride1,
-            packed_stride0,
-            packed_stride1,
-            packed_stride2,
-            num_cols,
+        return grid, dict(
+            row_starts=row_starts_arg,
             DCP_RANK=dcp_rank,
             DCP_WORLD_SIZE=dcp_world_size,
             CP_INTERLEAVE=cp_interleave,
