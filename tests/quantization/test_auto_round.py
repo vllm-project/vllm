@@ -22,10 +22,14 @@ from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.inc.config_parser import INCLayerConfig
 from vllm.model_executor.layers.quantization.inc.inc_linear import INCLinearMethod
 from vllm.model_executor.layers.quantization.inc.schemes import (
+    INCFp8Scheme,
     INCMxfp4Scheme,
     INCMxfp8Scheme,
     INCWna16Scheme,
     resolve_scheme,
+)
+from vllm.model_executor.layers.quantization.inc.schemes.inc_fp8_linear import (
+    INCFp8LinearScheme,
 )
 from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear import (
     INCMxfp8LinearScheme,
@@ -77,6 +81,14 @@ MODELS = [
         ),
         id="auto_round:llm_compressor_mxfp8",
     ),
+    pytest.param(
+        "INC4AI/Qwen3-8B-fp-w8g128x128-for-ut",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_cuda()),
+            reason="Block-wise AutoRound model only supports CUDA backend for now.",
+        ),
+        id="auto_round:block_wise_fp8_on_cuda",
+    ),
 ]
 
 QWEN3_AUTOROUND_MODELS = [
@@ -125,6 +137,10 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
     },
     "INC4AI/Qwen3-8B-MXFP8-AR": {
         "block_size": 64,
+        "gpu_memory_utilization": 0.8,
+        "max_model_len": 512,
+    },
+    "INC4AI/Qwen3-8B-fp-w8g128x128-for-ut": {
         "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },
@@ -188,6 +204,27 @@ def make_layer_config(**overrides) -> INCLayerConfig:
     }
     kwargs.update(overrides)
     return INCLayerConfig(**kwargs)
+
+
+def make_block_fp8_raw_config(**overrides) -> dict[str, object]:
+    kwargs = {
+        "bits": 8,
+        "group_size": [128, 128],
+        "sym": True,
+        "packing_format": "auto_round:fp8",
+        "quant_method": "auto-round",
+        "data_type": "fp",
+        "act_bits": 8,
+        "act_data_type": "fp",
+        "act_group_size": 128,
+        "act_sym": True,
+        "act_dynamic": True,
+        "activation_scheme": "dynamic",
+        "fmt": "e4m3",
+        "weight_block_size": [128, 128],
+    }
+    kwargs.update(overrides)
+    return kwargs
 
 
 def make_qwen3_autoround_config(kind: str) -> INCConfig:
@@ -478,6 +515,52 @@ def test_inc_layer_config_mx_fp_helpers() -> None:
 
     assert layer_config.is_mxfp4 is True
     assert layer_config.is_mxfp8 is False
+
+
+def test_inc_config_accepts_block_fp8() -> None:
+    config = INCConfig.from_config(make_block_fp8_raw_config())
+
+    assert config.weight_bits == 8
+    assert config.group_size == (128, 128)
+    assert config.sym is True
+    assert config.data_type == "fp"
+    assert config.packing_format == "auto_round:fp8"
+
+
+def test_inc_config_rejects_invalid_block_fp8_activation_config() -> None:
+    with pytest.raises(AssertionError, match="act_dynamic=True"):
+        INCConfig.from_config(make_block_fp8_raw_config(act_dynamic=False))
+
+
+def test_inc_layer_config_fp8_block_helper() -> None:
+    layer_config = INCLayerConfig(
+        bits=8,
+        group_size=(128, 128),
+        sym=True,
+        packing_format="auto_round:fp8",
+        backend="auto",
+        data_type="fp",
+        quantized=True,
+    )
+
+    assert layer_config.is_fp8_block is True
+    assert layer_config.is_wna16_int is False
+
+
+def test_inc_resolve_scheme_selects_fp8_block() -> None:
+    layer_config = INCLayerConfig(
+        bits=8,
+        group_size=(128, 128),
+        sym=True,
+        packing_format="auto_round:fp8",
+        backend="auto",
+        data_type="fp",
+        quantized=True,
+    )
+
+    scheme = resolve_scheme(layer_config)
+
+    assert isinstance(scheme, INCFp8Scheme)
 
 
 def test_inc_resolve_scheme_selects_wna16() -> None:
@@ -1053,6 +1136,89 @@ def test_inc_linear_method_delegates() -> None:
     ]
 
 
+def test_inc_fp8_linear_scheme_delegates_to_fp8_linear_method(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class DummyMethod:
+        def __init__(self, quant_config) -> None:
+            captured["quant_config"] = quant_config
+            captured["method"] = self
+            self.calls: list[tuple] = []
+            self.marlin_input_dtype = None
+
+        def create_weights(
+            self,
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        ) -> None:
+            self.calls.append(
+                (
+                    "create_weights",
+                    layer,
+                    input_size_per_partition,
+                    output_partition_sizes,
+                    input_size,
+                    output_size,
+                    params_dtype,
+                    extra_weight_attrs,
+                )
+            )
+
+        def process_weights_after_loading(self, layer) -> None:
+            self.calls.append(("process_weights_after_loading", layer))
+
+        def apply(self, layer, x, bias=None):
+            self.calls.append(("apply", layer, x, bias))
+            return "applied"
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_fp8_linear."
+        "Fp8LinearMethod",
+        DummyMethod,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_fp8_linear."
+        "get_marlin_input_dtype",
+        lambda _prefix: "fp8-marlin",
+    )
+
+    scheme = INCFp8LinearScheme(
+        prefix="layers.0.mlp.down_proj",
+        weight_block_size=(128, 128),
+    )
+    layer = torch.nn.Module()
+
+    scheme.create_weights(
+        layer=layer,
+        input_size_per_partition=128,
+        output_partition_sizes=[64, 64],
+        input_size=128,
+        output_size=128,
+        params_dtype=torch.bfloat16,
+        weight_loader=lambda *args, **kwargs: None,
+    )
+    scheme.process_weights_after_loading(layer)
+    result = scheme.apply_weights(layer, torch.randn(1, 128), None)
+
+    assert captured["quant_config"].is_checkpoint_fp8_serialized is True
+    assert captured["quant_config"].activation_scheme == "dynamic"
+    assert captured["quant_config"].weight_block_size == [128, 128]
+    assert captured["method"].marlin_input_dtype == "fp8-marlin"
+    assert result == "applied"
+    assert [call[0] for call in captured["method"].calls] == [
+        "create_weights",
+        "process_weights_after_loading",
+        "apply",
+    ]
+
+
 def test_wna16_xpu_prefers_ark_when_available(monkeypatch) -> None:
     class DummyQuantLinear:
         pass
@@ -1284,7 +1450,7 @@ def test_wna16_linear_gptq_uses_auto_gptq_when_supported(monkeypatch) -> None:
 
     scheme = INCWNA16LinearScheme(make_layer_config())
 
-    assert isinstance(scheme.inner_method, DummyMethod)
+    assert isinstance(scheme.linear_method, DummyMethod)
     assert isinstance(captured["cfg"], AutoGPTQConfig)
     assert captured["cfg"].weight_bits == 4
     assert captured["cfg"].group_size == 128
