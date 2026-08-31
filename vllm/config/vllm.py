@@ -78,6 +78,8 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
         "DeepSeekV4MTPModel",
+        "Dots3NoteForCausalLM",
+        "Dots3NoteMTPModel",
         "GlmMoeDsaForCausalLM",
         "HYV4ForCausalLM",
         "HYV4MTPModel",
@@ -1974,10 +1976,9 @@ class VllmConfig:
 
         `max_num_batched_tokens` is also appended to the list if it fits
         within `max_cudagraph_capture_size`, so the max batch size is captured
-        even when off-stride. Likewise, when the uniform decode query length
-        exceeds one, the widest uniform decode batch (`max_num_seqs *
-        decode_query_len`) is appended when it fits, since it need not land on
-        an 8- or 16-token stride.
+        even when off-stride. Uniform decode sizes are appended when they fit
+        within the platform's default capture ceiling, since they need not land
+        on an 8- or 16-token stride.
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
         will be the final sizes to capture cudagraph (in ascending order).
@@ -2106,6 +2107,7 @@ class VllmConfig:
                             n * query_len
                             for query_len, tier_max_reqs in decode_tiers
                             for n in request_counts(tier_max_reqs)
+                            if n * query_len <= max_cudagraph_capture_size
                         }
                     )
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
@@ -2155,10 +2157,9 @@ class VllmConfig:
                     and max_num_tokens not in cudagraph_capture_sizes
                 ):
                     cudagraph_capture_sizes.append(max_num_tokens)
-                # These extend past the token-strided ceiling, which counts one
-                # token per request. valid_max_size below raises the final
-                # max_cudagraph_capture_size to the widest of them. They remain
-                # filtered by max_num_tokens.
+                # Preserve the platform's default capture ceiling. Larger
+                # uniform decode batches fall back to eager execution unless
+                # users explicitly configure wider capture sizes.
                 cudagraph_capture_sizes += [
                     size for size in uniform_decode_sizes if size <= max_num_tokens
                 ]
