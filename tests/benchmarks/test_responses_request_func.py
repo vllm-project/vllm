@@ -40,14 +40,23 @@ GAP_FINALIZE = 0.3
 
 
 def sse(event_type: str, payload: dict) -> bytes:
-    """Frame one event the way ``/v1/responses`` does, with an ``event:`` line."""
-    data = json.dumps({"type": event_type, **payload})
+    """Frame one event the way ``/v1/responses`` does, with an ``event:`` line.
+
+    ``ensure_ascii=False`` matches the server, whose pydantic
+    ``model_dump_json`` emits non-ASCII characters unescaped.
+    """
+    data = json.dumps({"type": event_type, **payload}, ensure_ascii=False)
     return f"event: {event_type}\ndata: {data}\n\n".encode()
 
 
-def usage_event(input_tokens: int, output_tokens: int, status: str = "completed"):
+def usage_event(
+    input_tokens: int,
+    output_tokens: int,
+    event_type: str = "response.completed",
+    status: str = "completed",
+):
     return sse(
-        f"response.{status}",
+        event_type,
         {
             "response": {
                 "status": status,
@@ -69,11 +78,25 @@ def reasoning_delta(delta: str) -> bytes:
     return sse("response.reasoning_text.delta", {"delta": delta})
 
 
+# The metadata events the server sends before any token. None of these may
+# start the TTFT clock or contribute an ITL sample.
 PREAMBLE = (
     sse("response.created", {"response": {"status": "in_progress"}})
     + sse("response.in_progress", {"response": {"status": "in_progress"}})
     + sse("response.output_item.added", {"output_index": 0})
+    + sse("response.reasoning_part.added", {"output_index": 0})
     + sse("response.content_part.added", {"output_index": 0})
+)
+
+# The `.done` family the server sends after the last delta. These repeat the
+# accumulated text, so timing them would add bogus ITL samples and counting
+# their payload would duplicate the output.
+DONE_EVENTS = (
+    sse("response.reasoning_text.done", {"text": "The user asks "})
+    + sse("response.reasoning_part.done", {"output_index": 0})
+    + sse("response.output_text.done", {"text": "Rayleigh scattering."})
+    + sse("response.content_part.done", {"output_index": 0})
+    + sse("response.output_item.done", {"output_index": 0})
 )
 
 
@@ -99,6 +122,7 @@ async def _serve(
     async def handler(request: web.Request) -> web.StreamResponse:
         if seen is not None:
             seen["payload"] = await request.json()
+            seen["headers"] = dict(request.headers)
         if status != 200:
             return web.Response(status=status, reason="Bad Request")
 
@@ -168,14 +192,24 @@ def test_request_payload_is_accepted_by_the_server_schema():
         seen=seen,
         extra_body=sampling,
         ignore_eos=True,
+        model_name="served-alias",
+        request_id="bench-7",
+        extra_headers={"x-team": "perf"},
     )
 
     assert output.success
+    # --served-model-name wins over --model, as on the other backends.
+    assert seen["payload"]["model"] == "served-alias"
+    # The route is behind validate_json_request, which 415s a missing type.
+    assert seen["headers"]["Content-Type"] == "application/json"
+    assert seen["headers"]["x-request-id"] == "bench-7"
+    assert seen["headers"]["x-team"] == "perf"
     assert seen["payload"] == {
-        "model": MODEL,
+        "model": "served-alias",
         "input": "Why is the sky blue?",
         "max_output_tokens": 16,
         "stream": True,
+        "store": False,
         "ignore_eos": True,
         **sampling,
     }
@@ -198,6 +232,7 @@ def test_latency_is_measured_from_token_events_to_completion():
             GAP_TOKEN,
             text_delta("Rayleigh"),
             text_delta(" scattering."),
+            DONE_EVENTS,
             GAP_FINALIZE,
             usage_event(5, 8),
         ]
@@ -217,12 +252,17 @@ def test_latency_is_measured_from_token_events_to_completion():
     # One ITL per token event after the first: the gap before "Rayleigh" and
     # the back-to-back delta that follows it.
     assert len(output.itl) == 2
-    assert output.itl[0] >= GAP_TOKEN * 0.8
+    assert output.itl[0] >= GAP_TOKEN * 0.5
     assert output.itl[1] < GAP_TOKEN * 0.5
 
-    # E2EL runs to response.completed, not to the last token.
+    # E2EL runs to response.completed, not to the last token. The bound is
+    # half the gap: asyncio.sleep deadlines are absolute, so a scheduling
+    # stall between the last delta and the client reading it shrinks this
+    # margin one for one.
     last_token_at = output.ttft + sum(output.itl)
-    assert output.latency >= last_token_at + GAP_FINALIZE * 0.8
+    assert output.latency >= last_token_at + GAP_FINALIZE * 0.5
+
+    assert output.start_time > 0.0
 
 
 def test_usage_is_taken_from_the_terminal_event():
@@ -233,10 +273,19 @@ def test_usage_is_taken_from_the_terminal_event():
     assert output.output_tokens == 4
 
 
-def test_incomplete_response_is_a_successful_request():
-    """Hitting max_output_tokens is the Responses form of finish_reason=length."""
+@pytest.mark.parametrize("event_type", ["response.completed", "response.incomplete"])
+def test_incomplete_response_is_a_successful_request(event_type: str):
+    """Hitting max_output_tokens is the Responses form of finish_reason=length.
+
+    vLLM reports it as `response.completed` carrying `status: "incomplete"`.
+    The spec's dedicated `response.incomplete` event is accepted as well.
+    """
     output = run(
-        [PREAMBLE, text_delta("truncated"), usage_event(17, 16, status="incomplete")]
+        [
+            PREAMBLE,
+            text_delta("truncated"),
+            usage_event(17, 16, event_type=event_type, status="incomplete"),
+        ]
     )
 
     assert output.success
@@ -256,6 +305,77 @@ def test_output_survives_transport_chunk_boundaries(chunk_size: int):
     assert output.success
     assert output.generated_text == text
     assert output.output_tokens == 6
+
+
+@pytest.mark.parametrize(
+    "char", ["\u2028", "\u2029", "\u0085"], ids=["u2028", "u2029", "u0085"]
+)
+def test_unicode_line_separators_do_not_truncate_the_payload(char: str):
+    """The server emits these unescaped and they are legal inside a JSON string.
+
+    `str.splitlines()` treats them as line breaks, which would cut the `data:`
+    line short and fail the request on valid model output.
+    """
+    text = f"before{char}after"
+    output = run([PREAMBLE, text_delta(text), usage_event(5, 3)])
+
+    assert output.success, output.error
+    assert output.generated_text == text
+
+
+def test_empty_data_line_is_skipped():
+    """A bare `data:` line carries no JSON and must not fail the request."""
+    output = run([PREAMBLE, b"data:\n\n", text_delta("ok"), usage_event(5, 1)])
+
+    assert output.success, output.error
+    assert output.generated_text == "ok"
+
+
+def test_prompt_len_falls_back_when_usage_is_absent():
+    """A terminal event without usage keeps the locally computed prompt length."""
+    output = run(
+        [
+            PREAMBLE,
+            text_delta("hi"),
+            sse("response.completed", {"response": {"status": "completed"}}),
+        ]
+    )
+
+    assert output.success, output.error
+    assert output.prompt_len == 5
+
+
+def test_multi_line_data_payload_is_joined_with_newlines():
+    """The SSE spec allows one payload to span several `data:` lines."""
+    script: list[bytes | float] = [
+        PREAMBLE,
+        b"event: response.output_text.delta\n"
+        b'data: {"type": "response.output_text.delta",\n'
+        b'data:  "delta": "ok"}\n\n',
+        usage_event(5, 1),
+    ]
+    output = run(script)
+
+    assert output.success, output.error
+    assert output.generated_text == "ok"
+
+
+def test_done_sentinel_is_skipped():
+    """vLLM sends no `[DONE]`, but other Responses servers do."""
+    output = run([PREAMBLE, text_delta("ok"), usage_event(5, 1), b"data: [DONE]\n\n"])
+
+    assert output.success, output.error
+    assert output.generated_text == "ok"
+
+
+def test_error_before_any_token_reports_the_server_error():
+    """The server's message must win over the generic no-TTFT message."""
+    output = run(
+        [PREAMBLE, b'event: error\ndata: {"type": "error", "message": "boom"}\n\n']
+    )
+
+    assert not output.success
+    assert "boom" in output.error
 
 
 def test_http_error_is_not_reported_as_success():
@@ -282,7 +402,12 @@ def test_truncated_stream_is_not_reported_as_success():
 
 
 def test_mid_stream_error_is_not_reported_as_success():
-    """vLLM reports a generation failure as an error payload mid-stream."""
+    """An error payload mid-stream must not be counted as a success.
+
+    vLLM cannot emit this today: its streaming error path fails to validate
+    against the event union, so a generation failure truncates the stream
+    instead. Proxies and other Responses servers do send it.
+    """
     output = run(
         [
             PREAMBLE,

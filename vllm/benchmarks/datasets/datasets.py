@@ -2161,7 +2161,9 @@ def get_samples(
             dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
         )
         # For the "sonnet" dataset, formatting depends on the backend.
-        if args.backend == "openai-chat":
+        # Chat-style backends leave templating to the server; completions
+        # backends need the prompt rendered client side.
+        if args.backend in ("openai-chat", "openai-responses"):
             input_requests = sonnet_dataset.sample(
                 num_requests=args.num_prompts,
                 input_len=args.sonnet_input_len,

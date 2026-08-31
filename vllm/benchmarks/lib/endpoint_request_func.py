@@ -451,9 +451,12 @@ def _extract_sse_data(message: str) -> str | None:
         The payload, with multi-line payloads joined by newlines as required
         by the SSE spec, or None if the message carries no ``data:`` line.
     """
+    # NOTE: split on "\n" rather than using splitlines(), which also breaks on
+    # U+2028, U+2029 and U+0085. Those are legal inside a JSON string and the
+    # server emits them unescaped, so splitlines() would truncate the payload.
     data_lines = [
         line.removeprefix("data:").removeprefix(" ")
-        for line in message.splitlines()
+        for line in message.split("\n")
         if line.startswith("data:")
     ]
     if not data_lines:
@@ -472,9 +475,10 @@ _RESPONSES_TOKEN_DELTA_EVENTS = frozenset(
     }
 )
 
-# Responses events that end a request. `response.incomplete` is the Responses
-# equivalent of finishing with `finish_reason="length"`, so it is a normal
-# outcome for a benchmark that caps the output length.
+# Responses events that end a request. Truncation at the output length limit
+# is a normal benchmark outcome: vLLM reports it as `response.completed` with
+# `status: "incomplete"`, while the spec also defines a dedicated
+# `response.incomplete` terminal event.
 _RESPONSES_TERMINAL_EVENTS = frozenset(
     {
         "response.completed",
@@ -482,6 +486,8 @@ _RESPONSES_TERMINAL_EVENTS = frozenset(
     }
 )
 
+# The spec's failure terminals. vLLM does not emit them today, but
+# `vllm bench serve` can be pointed at other Responses servers.
 _RESPONSES_ERROR_EVENTS = frozenset({"error", "response.failed"})
 
 
@@ -500,6 +506,11 @@ async def async_request_openai_responses(
         "input": request_func_input.prompt,
         "max_output_tokens": request_func_input.output_len,
         "stream": True,
+        # `store` defaults to true. A server started with
+        # VLLM_ENABLE_RESPONSES_API_STORE=1 keeps every stored response for
+        # the lifetime of the process, which would grow its heap over a long
+        # benchmark run.
+        "store": False,
     }
     _update_payload_common(payload, request_func_input)
 
@@ -527,9 +538,9 @@ async def async_request_openai_responses(
                 async for chunk_bytes in response.content.iter_any():
                     for message in handler.add_chunk(chunk_bytes):
                         # NOTE: `_extract_sse_data` returns None for SSE
-                        # comments, which the server sends as keep-alives.
+                        # comments, which servers may send as keep-alives.
                         chunk = _extract_sse_data(message)
-                        if chunk is None or chunk == "[DONE]":
+                        if not chunk or chunk == "[DONE]":
                             continue
 
                         timestamp = time.perf_counter()
