@@ -639,16 +639,26 @@ def test_qsa_decode_scoring_matches_test_reference(
     heads, head_dim = 4, 128
     rows = num_requests * decode_query_len
     q = torch.randn(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
-    num_pages = num_requests * 20
-    cache = torch.randn(num_pages, 4, 1, head_dim, device="cuda", dtype=torch.bfloat16)
+    page_size, pages_per_request, max_sequence_length = (
+        (16, 40, 2560) if num_requests > 32 else (4, 20, 320)
+    )
+    num_pages = num_requests * pages_per_request
+    cache = torch.randn(
+        num_pages,
+        page_size,
+        1,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
     page_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
-        num_requests, 20
+        num_requests, pages_per_request
     )
     token_to_req = torch.repeat_interleave(
         torch.arange(num_requests, device="cuda", dtype=torch.int32),
         decode_query_len,
     )
-    sequence_lengths = 320 - 4 * (
+    sequence_lengths = max_sequence_length - 4 * (
         torch.arange(num_requests, device="cuda", dtype=torch.int32) % 8
     )
     query_positions = torch.cat(
@@ -689,14 +699,14 @@ def test_qsa_prefill_scoring_matches_test_reference() -> None:
     query_lens = [3, 33]
     rows, heads, head_dim = sum(query_lens), 4, 128
     q = torch.randn(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
-    cache = torch.randn(40, 4, 1, head_dim, device="cuda", dtype=torch.bfloat16)
-    page_table = torch.randperm(40, device="cuda", dtype=torch.int32).reshape(2, 20)
+    cache = torch.randn(160, 16, 1, head_dim, device="cuda", dtype=torch.bfloat16)
+    page_table = torch.randperm(160, device="cuda", dtype=torch.int32).reshape(2, 80)
     token_to_req = torch.repeat_interleave(
         torch.arange(2, device="cuda", dtype=torch.int32),
         torch.tensor(query_lens, device="cuda"),
     )
     query_start_loc = torch.tensor([0, 3, 36], device="cuda", dtype=torch.int32)
-    sequence_lengths = torch.tensor([320, 264], device="cuda", dtype=torch.int32)
+    sequence_lengths = torch.tensor([5120, 4224], device="cuda", dtype=torch.int32)
     query_positions = torch.cat(
         [
             torch.arange(length - query_len, length, device="cuda", dtype=torch.int32)
