@@ -1714,9 +1714,7 @@ class SpeculativeConfig:
 
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()
-        
         return self
-        
 
     def verify_equal_vocab_size_if_draft_model(self):
         if (

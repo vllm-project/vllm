@@ -40,6 +40,7 @@ from .nemotron_h import (
     NemotronHMoEDecoderLayer,
 )
 
+
 class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
     def __init__(
         self,
@@ -354,11 +355,8 @@ class NemotronHMTP(nn.Module, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
         )
 
+        # LM head for generating logits
         self.has_own_lm_head = False
-
-        # Construct from the draft checkpoint's quantization configuration.
-        # Weight loading below determines whether the checkpoint owns this head;
-        # otherwise, the proposer replaces it with the target head.
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,
             self.config.hidden_size,
@@ -437,7 +435,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
             is_lm_head_weight = name.startswith("lm_head.")
             if is_lm_head_weight:
                 self.has_own_lm_head = True
-            # Only process MTP weights - skip all non-MTP weights
+            # Only process MTP and LM head weights - skip all non-MTP and non-LM head weights
             if (
                 not name.startswith("mtp.")
                 and "embeddings" not in name
@@ -456,8 +454,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
                     name = name.replace("backbone.", "model.")
 
             if "scale" in name:
-                # ModelOpt serializes KV-cache scales next to k_proj/v_proj,
-                # while vLLM registers them on the Attention module.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
