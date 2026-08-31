@@ -24,3 +24,12 @@ def test_watermarker_contract(algorithm: str, prf_name: WatermarkPRFName):
     assert first.token_ids.shape == (2,)
     assert first.logits.shape == logits.shape
     assert torch.equal(first.token_ids, second.token_ids)
+
+
+def test_large_context_width_warns_but_is_allowed():
+    config = WatermarkConfig(key=42, context_width=17)
+
+    with pytest.warns(UserWarning, match="reduce robustness to edits"):
+        watermarker = create_watermarker(config)
+
+    assert watermarker.context_width == 17
