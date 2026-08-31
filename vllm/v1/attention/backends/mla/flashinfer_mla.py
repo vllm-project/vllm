@@ -15,11 +15,13 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
+    MLACommonDecodeMetadata,
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
@@ -113,6 +115,75 @@ def _get_multi_ctas_kv_counter_buffer(
             min_bytes, dtype=torch.uint8, device=device
         )
     return _fi_multi_ctas_kv_counter
+
+
+@torch.inference_mode()
+def flashinfer_mla_decode_autotune(
+    layer: Any,
+    block_table: torch.Tensor,
+    batch_size: int,
+    query_len: int,
+    max_seq_len: int,
+) -> None:
+    """Run only the dense MLA decode dispatcher for an autotune sweep.
+
+    A full-model dummy forward also reaches every linear and MoE operator in
+    the model. This helper instead recreates the tensors passed to
+    ``forward_mqa`` from the initialized attention layer and KV cache, so an
+    MLA-only tuning pass cannot retrigger unrelated operator autotuning.
+    """
+    impl = layer.impl
+    assert isinstance(impl, FlashInferMLAImpl)
+    assert batch_size > 0 and query_len > 0
+    assert block_table.shape[0] == batch_size
+
+    kv_cache = layer.kv_cache
+    assert kv_cache.numel() > 0
+    query_dtype = kv_cache.dtype
+    if is_quantized_kv_cache(layer.kv_cache_dtype):
+        query_dtype = current_platform.fp8_dtype()
+        kv_cache = kv_cache.view(query_dtype)
+
+    num_tokens = batch_size * query_len
+    query = torch.zeros(
+        num_tokens,
+        impl.num_heads,
+        layer.kv_lora_rank + layer.qk_rope_head_dim,
+        dtype=query_dtype,
+        device=kv_cache.device,
+    )
+    query_start_loc = torch.arange(
+        0,
+        num_tokens + 1,
+        query_len,
+        dtype=torch.int32,
+        device=kv_cache.device,
+    )
+    seq_lens = torch.full(
+        (batch_size,),
+        max_seq_len,
+        dtype=torch.int32,
+        device=kv_cache.device,
+    )
+    metadata = MLACommonMetadata(
+        num_reqs=batch_size,
+        max_query_len=query_len,
+        max_seq_len=max_seq_len,
+        num_actual_tokens=num_tokens,
+        query_start_loc=query_start_loc,
+        slot_mapping=torch.full(
+            (num_tokens,), -1, dtype=torch.int64, device=kv_cache.device
+        ),
+        num_decodes=batch_size,
+        num_decode_tokens=num_tokens,
+        num_prefills=0,
+        decode=MLACommonDecodeMetadata(
+            block_table=block_table.zero_(),
+            seq_lens=seq_lens,
+            dcp_tot_seq_lens=None,
+        ),
+    )
+    impl.forward_mqa(query, kv_cache, metadata, layer)
 
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):

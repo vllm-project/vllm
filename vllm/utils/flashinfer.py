@@ -218,6 +218,9 @@ flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
 flashinfer_b12x_fused_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "b12x_fused_moe"
 )
+flashinfer_get_hybrid_num_tokens_buckets = _lazy_import_wrapper(
+    "flashinfer.fused_moe.utils", "get_hybrid_num_tokens_buckets"
+)
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
