@@ -1268,6 +1268,13 @@ class OffloadingConnectorScheduler:
             # Filter out chunks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.
             new_offload_keys: list[OffloadKey] = []
+
+            reachable_boundaries: tuple[int, ...] = ()
+            if self.config.retention_interval is not None:
+                reachable_boundaries = (req.num_prompt_tokens - 1,)
+                if req.shared_prefix_boundary:
+                    reachable_boundaries += (req.shared_prefix_boundary,)
+
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states
             ):
@@ -1295,11 +1302,6 @@ class OffloadingConnectorScheduler:
                 # (SWA/Mamba sparsity + retention interval).
                 # reachable_block_mask operates in KV-block coordinates,
                 # so convert chunk indices to block indices.
-                reachable_boundaries: tuple[int, ...] = ()
-                if self.config.retention_interval is not None:
-                    reachable_boundaries = (req.num_prompt_tokens - 1,)
-                    if req.shared_prefix_boundary:
-                        reachable_boundaries += (req.shared_prefix_boundary,)
                 manager_cls = KVCacheSpecRegistry.get_manager_class(
                     group_config.kv_cache_spec
                 )
