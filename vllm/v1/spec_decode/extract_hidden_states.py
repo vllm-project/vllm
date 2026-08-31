@@ -208,14 +208,17 @@ class ExtractHiddenStatesProposer:
         # TODO(Flechman): support DBO ubatching
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
-                coordinate_batch_across_dp(
-                    num_tokens_unpadded=num_tokens,
-                    parallel_config=self.vllm_config.parallel_config,
-                    allow_microbatching=False,
-                    num_tokens_padded=num_tokens_padded,
-                    cudagraph_mode=cudagraph_mode.value,
-                )
+            (
+                should_ubatch,
+                num_tokens_across_dp,
+                _,
+                synced_cudagraph_mode,
+            ) = coordinate_batch_across_dp(
+                num_tokens_unpadded=num_tokens,
+                parallel_config=self.vllm_config.parallel_config,
+                allow_microbatching=False,
+                num_tokens_padded=num_tokens_padded,
+                cudagraph_mode=cudagraph_mode.value,
             )
             assert not should_ubatch, (
                 "DBO ubatching not implemented for extract_hidden_states"
