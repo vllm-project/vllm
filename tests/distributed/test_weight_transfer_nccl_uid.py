@@ -272,8 +272,7 @@ def trainer_broadcast_tensor_uid(
     reuse the real send protocol by injecting the communicator into a sender
     engine, exercising the worker-side UID path end to end.
     """
-    import base64
-
+    import pybase64 as base64
     import torch
 
     _set_ray_assigned_device()
@@ -343,10 +342,9 @@ def trainer_broadcast_tensor_torch_free(
     after ``ncclCommInitRank``; that is a collective, so this peer must issue the
     matching all_reduce before the broadcast or both ranks deadlock.
     """
-    import base64
-
     import cupy as cp
     import numpy as np
+    import pybase64 as base64
 
     device = _set_ray_assigned_device()
     cp.cuda.Device(device.index).use()
