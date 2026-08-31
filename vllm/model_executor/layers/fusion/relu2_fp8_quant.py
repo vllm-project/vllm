@@ -3,6 +3,8 @@
 
 import torch
 
+from vllm.config import get_cached_compilation_config
+from vllm.config.compilation import CompilationMode
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -28,10 +30,11 @@ def _bf16_relu2_static_fp8_quant_kernel(
     relu = tl.maximum(x, 0.0)
     # Preserve the standalone ReLU2 kernel's BF16 output boundary.
     activated = (relu * relu).to(tl.bfloat16).to(tl.float32)
+    # Match O2's Inductor-compiled QuantFP8 reciprocal-then-multiply.
     quantized = activated * (1.0 / tl.load(scale_ptr))
     quantized = tl.maximum(tl.minimum(quantized, FP8_MAX), FP8_MIN)
-    # Match native ReLU2 propagation followed by CUDA fminf/fmaxf saturation.
-    quantized = tl.where(input_is_nan, FP8_MAX, quantized)
+    # Match the O2 native chain by preserving NaN through the FP8 conversion.
+    quantized = tl.where(input_is_nan, x, quantized)
     tl.store(output_ptr + offsets, quantized, mask=mask)
 
 
@@ -39,8 +42,8 @@ def _bf16_relu2_static_fp8_quant_kernel(
 class Bf16ReLUSquaredStaticFp8Quant(CustomOp):
     """ReLU2 followed by static per-tensor FP8 quantization.
 
-    The intermediate is rounded to BF16 to match the default compiled/native
-    ReLU2 and static quantization path exactly.
+    The intermediate is rounded to BF16 to match the O2 native ReLU2 and
+    static-quantization path exactly.
     """
 
     def __init__(self) -> None:
@@ -49,6 +52,16 @@ class Bf16ReLUSquaredStaticFp8Quant(CustomOp):
         # ReLU2-plus-quantization boundary exactly.
         super().__init__(enforce_enable=True)
         self.fp8_min, self.fp8_max = get_fp8_min_max()
+
+    @classmethod
+    def is_supported_in_current_config(cls) -> bool:
+        """Check the measured O2 dispatch and honor an explicit opt-out."""
+        config = get_cached_compilation_config()
+        return (
+            config.mode == CompilationMode.VLLM_COMPILE
+            and config.backend == "inductor"
+            and f"-{cls.name}" not in config.custom_ops
+        )
 
     def forward_native(self, x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         assert x.dtype == torch.bfloat16
@@ -61,8 +74,6 @@ class Bf16ReLUSquaredStaticFp8Quant(CustomOp):
         quantized = activated.to(torch.float32).mul(
             scale.to(torch.float32).reciprocal()
         )
-        # CUDA's fminf/fmaxf static quantizer saturates NaN to FP8_MAX.
-        quantized = torch.where(torch.isnan(quantized), self.fp8_max, quantized)
         return quantized.clamp(self.fp8_min, self.fp8_max).to(
             current_platform.fp8_dtype()
         )

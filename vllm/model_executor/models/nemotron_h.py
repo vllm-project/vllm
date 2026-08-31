@@ -25,7 +25,12 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+    get_current_vllm_config_or_none,
+)
 from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
@@ -58,6 +63,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
@@ -124,10 +130,15 @@ class NemotronHMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = ReLUSquaredActivation()
+        # This producer matches the compiled-native ReLU2 and QuantFP8 pair,
+        # so retain either CUDA custom-op path when it is explicitly enabled.
         self.relu2_fp8_quant = (
             Bf16ReLUSquaredStaticFp8Quant()
             if enable_relu2_fp8_quant
             and current_platform.is_cuda()
+            and not self.act_fn.enabled()
+            and not QuantFP8.enabled()
+            and Bf16ReLUSquaredStaticFp8Quant.is_supported_in_current_config()
             and get_tensor_model_parallel_world_size() == 1
             and getattr(self.down_proj, "input_quant_key", None) == kFp8StaticTensorSym
             and hasattr(self.down_proj, "input_scale")
@@ -174,6 +185,10 @@ class NemotronHMoE(nn.Module):
         )
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        vllm_config = get_current_vllm_config_or_none()
+        is_lora_enabled = (
+            vllm_config is not None and vllm_config.lora_config is not None
+        )
 
         self.gate = GateLinear(
             config.hidden_size,
@@ -208,7 +223,8 @@ class NemotronHMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 is_sequence_parallel=self.is_sequence_parallel,
-                enable_relu2_fp8_quant=True,
+                # LoRA needs the BF16 activation for its adapter branch.
+                enable_relu2_fp8_quant=not is_lora_enabled,
                 prefix=f"{prefix}.shared_experts",
             )
 
