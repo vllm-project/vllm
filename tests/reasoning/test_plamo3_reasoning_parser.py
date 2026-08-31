@@ -251,79 +251,44 @@ def test_streaming_reasoning_extraction(
     assert reconstructor.other_content == expected_content
 
 
-def _call_reasoning_streaming(parser, previous_text, current_text, delta_text):
-    return parser.extract_reasoning_streaming(
-        previous_text=previous_text,
-        current_text=current_text,
-        delta_text=delta_text,
-        previous_token_ids=[],
-        current_token_ids=[],
-        delta_token_ids=[],
-    )
-
-
-def test_delta_message_kinds(tokenizer):
+@pytest.mark.parametrize(
+    "steps",
+    [
+        [
+            (BEGIN_THINK_TAG, None, None),
+            ("abc", "abc", None),
+            ("thk<|plamo:end_thin", "thk", None),
+            ("k:plamo|>", None, None),
+            ("X", None, "X"),
+        ],
+        [
+            ("", None, None),
+            (BEGIN_THINK_TAG + END_THINK_TAG, None, None),
+            ("answer", None, "answer"),
+        ],
+        [("reasoning in progress", "reasoning in progress", None)],
+        [(BEGIN_THINK_TAG + "reasoning" + EOT_TAG + "ignored", "reasoning", None)],
+    ],
+)
+def test_streaming_reasoning_edge_deltas(tokenizer, steps):
     parser = Plamo3ReasoningParser(tokenizer)
-    steps = [
-        ("", BEGIN_THINK_TAG, BEGIN_THINK_TAG, None, None),
-        (BEGIN_THINK_TAG, BEGIN_THINK_TAG + "abc", "abc", "abc", None),
-        (
-            BEGIN_THINK_TAG + "abc",
-            BEGIN_THINK_TAG + "abc" + "thk<|plamo:end_thin",
-            "thk<|plamo:end_thin",
-            "thk",
-            None,
-        ),
-        (
-            BEGIN_THINK_TAG + "abc" + "thk<|plamo:end_thin",
-            BEGIN_THINK_TAG + "abc" + "thk" + END_THINK_TAG,
-            "k:plamo|>",
-            None,
-            None,
-        ),
-        (
-            BEGIN_THINK_TAG + "abc" + "thk" + END_THINK_TAG,
-            BEGIN_THINK_TAG + "abc" + "thk" + END_THINK_TAG + "X",
-            "X",
-            None,
-            "X",
-        ),
-    ]
-    for prev, cur, delta, exp_reasoning, exp_content in steps:
-        msg = _call_reasoning_streaming(parser, prev, cur, delta)
-        actual_reasoning = msg.reasoning if msg else None
-        actual_content = msg.content if msg else None
-        assert actual_reasoning == exp_reasoning, (
-            f"reasoning mismatch for delta={delta!r}, got {msg}"
-        )
-        assert actual_content == exp_content, (
-            f"content mismatch for delta={delta!r}, got {msg}"
+    current_text = ""
+    for delta_text, expected_reasoning, expected_content in steps:
+        previous_text = current_text
+        current_text += delta_text
+        message = parser.extract_reasoning_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
         )
 
-
-def test_streaming_empty_and_immediate_reasoning_end(tokenizer):
-    parser = Plamo3ReasoningParser(tokenizer)
-
-    assert _call_reasoning_streaming(parser, "", "", "") is None
-    assert (
-        _call_reasoning_streaming(
-            parser,
-            "",
-            BEGIN_THINK_TAG + END_THINK_TAG,
-            BEGIN_THINK_TAG + END_THINK_TAG,
-        )
-        is None
-    )
-
-    message = _call_reasoning_streaming(
-        parser,
-        BEGIN_THINK_TAG + END_THINK_TAG,
-        BEGIN_THINK_TAG + END_THINK_TAG + "answer",
-        "answer",
-    )
-    assert message is not None
-    assert message.reasoning is None
-    assert message.content == "answer"
+        actual_reasoning = message.reasoning if message else None
+        actual_content = message.content if message else None
+        assert actual_reasoning == expected_reasoning
+        assert actual_content == expected_content
 
 
 @pytest.mark.parametrize(
@@ -450,36 +415,27 @@ def _run_named_tool_stream(tokenizer, chunks):
 @pytest.mark.parametrize(
     "chunks",
     [
-        pytest.param(
-            [
-                (BEGIN_THINK_TAG, _BEGIN_IDS),
-                ("reasoning", [100]),
-                (END_THINK_TAG, _END_IDS),
-                ("answer-1", [200]),
-                ("answer-2", [201]),
-            ],
-            id="end_and_content_separate",
-        ),
-        pytest.param(
-            [
-                (BEGIN_THINK_TAG, _BEGIN_IDS),
-                ("reasoning", [100]),
-                (END_THINK_TAG + "answer-1", _END_IDS + [200]),
-                ("answer-2", [201]),
-            ],
-            id="end_and_first_content_same_chunk",
-        ),
-        pytest.param(
-            [
-                (BEGIN_THINK_TAG, _BEGIN_IDS),
-                ("reasoning", [100]),
-                ("<|plamo:end_", [_END0]),
-                ("", [_END1]),
-                ("think:plamo|>answer-1", [_END2, 200]),
-                ("answer-2", [201]),
-            ],
-            id="end_spans_chunks_first_content_with_final_token",
-        ),
+        [
+            (BEGIN_THINK_TAG, _BEGIN_IDS),
+            ("reasoning", [100]),
+            (END_THINK_TAG, _END_IDS),
+            ("answer-1", [200]),
+            ("answer-2", [201]),
+        ],
+        [
+            (BEGIN_THINK_TAG, _BEGIN_IDS),
+            ("reasoning", [100]),
+            (END_THINK_TAG + "answer-1", _END_IDS + [200]),
+            ("answer-2", [201]),
+        ],
+        [
+            (BEGIN_THINK_TAG, _BEGIN_IDS),
+            ("reasoning", [100]),
+            ("<|plamo:end_", [_END0]),
+            ("", [_END1]),
+            ("think:plamo|>answer-1", [_END2, 200]),
+            ("answer-2", [201]),
+        ],
     ],
 )
 def test_named_tool_streaming_content_survives_reasoning_end(tokenizer, chunks):
