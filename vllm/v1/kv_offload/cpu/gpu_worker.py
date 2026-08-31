@@ -248,7 +248,6 @@ class SingleDirectionOffloadingHandler:
         blocks_per_chunk: int,
         layer_refs_per_group: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
-        mmap_region: SharedOffloadRegion | None = None,
         canonical_layout: bool = False,
     ):
         """
@@ -326,8 +325,6 @@ class SingleDirectionOffloadingHandler:
         self._scratch_bases_src = np.empty(num_scratch_blocks, dtype=np.uint64)
         self._scratch_bases_dst = np.empty(num_scratch_blocks, dtype=np.uint64)
 
-        # mmap_region to clean up on shutdown (gpu_to_cpu handler owns it)
-        self._mmap_region = mmap_region
         # job_id -> event
         self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
@@ -637,9 +634,11 @@ class SingleDirectionOffloadingHandler:
             else torch.Event(enable_timing=True)
         )
 
-        if self.gpu_to_cpu:
-            # wait for model computation to finish before offloading
-            stream.wait_stream(current_platform.current_stream())
+        # Stores must wait for the model to finish writing the KV they read.
+        # Loads must wait for pending writes (including zeroing) to their
+        # destination blocks; otherwise an earlier transfer can be overwritten
+        # by compute-stream work that was already queued when the load began.
+        stream.wait_stream(current_platform.current_stream())
         if self._transfers:
             last_transfer: Transfer = self._transfers[-1]
             last_event = last_transfer.end_event
@@ -711,18 +710,31 @@ class SingleDirectionOffloadingHandler:
                 event.synchronize()
 
     def shutdown(self) -> None:
+        """Drain this direction and release its transfer-side resources."""
+        sync_error: Exception | None = None
         while self._transfers:
-            transfer = self._transfers.popleft()
-            transfer.end_event.synchronize()
+            transfer = self._transfers[0]
+            try:
+                transfer.end_event.synchronize()
+            except Exception as e:
+                logger.exception(
+                    "Failed to synchronize transfer end event; "
+                    "skipping %d remaining transfers",
+                    len(self._transfers) - 1,
+                )
+                self._transfers.clear()
+                sync_error = e
+                break
+            self._transfers.popleft()
+
         self._transfer_events.clear()
         self._stream_pool.clear()
         self._event_pool.clear()
         self._buffer_pool.clear()
         self.src_tensors.clear()
         self.dst_tensors.clear()
-        if self._mmap_region is not None:
-            self._mmap_region.cleanup()
-            self._mmap_region = None
+        if sync_error is not None:
+            raise sync_error
 
 
 class CPUOffloadingWorker(OffloadingWorker):
@@ -742,6 +754,10 @@ class CPUOffloadingWorker(OffloadingWorker):
         canonical_layout: bool = False,
     ):
         assert not canonical_layout or mmap_region is not None
+        # The caller owns mmap_region until this constructor returns. After a
+        # successful construction, the worker is the sole owner and releases
+        # it after both transfer directions have stopped.
+        self._mmap_region = mmap_region
         pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
@@ -794,7 +810,6 @@ class CPUOffloadingWorker(OffloadingWorker):
             blocks_per_chunk=blocks_per_chunk,
             layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=True,
-            mmap_region=mmap_region,
             canonical_layout=canonical_layout,
         )
 
@@ -827,5 +842,28 @@ class CPUOffloadingWorker(OffloadingWorker):
         self._load_handler.wait(job_ids)
 
     def shutdown(self) -> None:
-        self._store_handler.shutdown()
-        self._load_handler.shutdown()
+        handler_failed = False
+        try:
+            self._store_handler.shutdown()
+        except Exception:
+            logger.exception("Failed to shut down store offloading handler")
+            handler_failed = True
+
+        try:
+            self._load_handler.shutdown()
+        except Exception:
+            logger.exception("Failed to shut down load offloading handler")
+            handler_failed = True
+
+        if self._mmap_region is not None:
+            if handler_failed:
+                try:
+                    torch.accelerator.synchronize()
+                except Exception:
+                    logger.warning(
+                        "Device sync before mmap cleanup failed; "
+                        "proceeding with cleanup anyway",
+                        exc_info=True,
+                    )
+            self._mmap_region.cleanup()
+            self._mmap_region = None

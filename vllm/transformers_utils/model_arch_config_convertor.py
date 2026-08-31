@@ -24,9 +24,15 @@ logger = init_logger(__name__)
 
 
 class ModelArchConfigConvertorBase:
-    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+    def __init__(
+        self,
+        hf_config: PretrainedConfig,
+        hf_text_config: PretrainedConfig,
+        revision: str | None = None,
+    ):
         self.hf_config = hf_config
         self.hf_text_config = hf_text_config
+        self.revision = revision
 
     def get_per_layer_hf_configs(
         self,
@@ -122,7 +128,7 @@ class ModelArchConfigConvertorBase:
         model_path = self.hf_config.name_or_path
         if not model_path:
             return qk_rope_head_dim
-        raw = get_hf_file_to_dict("config.json", model_path)
+        raw = get_hf_file_to_dict("config.json", model_path, self.revision)
         if raw and "qk_rope_head_dim" in raw:
             correct = raw["qk_rope_head_dim"]
             if correct != qk_rope_head_dim:
@@ -311,6 +317,7 @@ class ModelArchConfigConvertorBase:
             "deepseek_v3",
             "deepseek_v32",
             "deepseek_v4",
+            "dots3_note",
             "deepseek_mtp",
             "k3_dspark",
             "glm_moe_dsa",
@@ -325,6 +332,8 @@ class ModelArchConfigConvertorBase:
             "bailing_hybrid",
             "bailing_hybrid_mtp",
             "bailing_hybrid_v3_mtp",
+            "hy_v4",
+            "hy_v4_mtp",
         ):
             # check is deepseek_v4 model
             if hasattr(self.hf_text_config, "compress_ratios"):
@@ -366,7 +375,6 @@ class ModelArchConfigConvertorBase:
             "molmo2",
             "moondream3",
             "paligemma",
-            "umm",
         )
         if not hasattr(self.hf_config, "model_type"):
             return False
@@ -538,13 +546,6 @@ class FalconModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return super().get_total_num_kv_heads()
 
 
-class MPTModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_total_num_kv_heads(self) -> int:
-        if "kv_n_heads" in self.hf_text_config.attn_config:
-            return self.hf_text_config.attn_config["kv_n_heads"]
-        return self.hf_text_config.num_attention_heads
-
-
 class DbrxModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_total_num_kv_heads(self) -> int:
         return getattr(
@@ -595,16 +596,26 @@ def _strip_mimo_v2_attention_chunk_size(
 
 
 class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+    def __init__(
+        self,
+        hf_config: PretrainedConfig,
+        hf_text_config: PretrainedConfig,
+        revision: str | None = None,
+    ):
         if getattr(hf_config, "vision_config", None):
             hf_config.architectures = ["MiMoV2OmniForCausalLM"]
-        super().__init__(hf_config, hf_text_config)
+        super().__init__(hf_config, hf_text_config, revision)
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
 
 
 class MimoV2MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
-        super().__init__(hf_config, hf_text_config)
+    def __init__(
+        self,
+        hf_config: PretrainedConfig,
+        hf_text_config: PretrainedConfig,
+        revision: str | None = None,
+    ):
+        super().__init__(hf_config, hf_text_config, revision)
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
 
     def get_num_hidden_layers(self) -> int:
@@ -629,6 +640,15 @@ class ErnieMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 class Qwen3NextMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
+
+
+class Qwen4ExpMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_num_hidden_layers(self) -> int:
+        return getattr(
+            self.hf_text_config,
+            "mtp_num_hidden_layers",
+            getattr(self.hf_text_config, "num_nextn_predict_layers", 0),
+        )
 
 
 class BailingHybridMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -775,12 +795,12 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "mimo_v2_mtp": MimoV2MTPModelArchConfigConvertor,
     "mimo_v2_omni_mtp": MimoV2MTPModelArchConfigConvertor,
     "moss_audio": MossAudioModelArchConfigConvertor,
-    "mpt": MPTModelArchConfigConvertor,
     "nemotron-nas": NemotronNasModelArchConfigConvertor,
     "bailing_hybrid_v3_mtp": BailingHybridV3MTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
+    "qwen4_exp_mtp": Qwen4ExpMTPModelArchConfigConvertor,
     "RefinedWeb": FalconModelArchConfigConvertor,
     "RefinedWebModel": FalconModelArchConfigConvertor,
     "step3p5_mtp": Step3p5MTPModelArchConfigConvertor,

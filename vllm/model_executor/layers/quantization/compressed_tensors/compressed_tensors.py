@@ -384,17 +384,17 @@ class CompressedTensorsConfig(QuantizationConfig):
                 supported = capability == min_capability
                 if error and not supported:
                     raise RuntimeError(
-                        "Quantization scheme is not supported for ",
-                        "the current GPU. Required capability: ",
-                        f"{min_capability}. Current capability: {capability}.",
+                        "Quantization scheme is not supported for the current GPU. "
+                        f"Required capability: {min_capability}. "
+                        f"Current capability: {capability}."
                     )
             else:
                 supported = capability >= min_capability
                 if error and not supported:
                     raise RuntimeError(
-                        "Quantization scheme is not supported for ",
-                        f"the current GPU. Min capability: {min_capability}. ",
-                        f"Current capability: {capability}.",
+                        "Quantization scheme is not supported for the current GPU. "
+                        f"Min capability: {min_capability}. "
+                        f"Current capability: {capability}."
                     )
             return supported
         else:
@@ -737,8 +737,8 @@ class CompressedTensorsConfig(QuantizationConfig):
 
             if not self._is_nvfp4_format(input_quant):
                 raise ValueError(
-                    "For NVFP4 weights, input quantization must also be NVFP4 format, ",
-                    "None for NVFP4A16",
+                    "For NVFP4 weights, input quantization must also be NVFP4 "
+                    "format, None for NVFP4A16"
                 )
             return CompressedTensorsW4A4Fp4()
 
@@ -817,6 +817,15 @@ class CompressedTensorsConfig(QuantizationConfig):
                     is_fp8_w8a8_supported = config is not None and (
                         config.kernel_config.linear_backend in ("xpu", "torch")
                     )
+                    weight_quant_is_block_strategy = (
+                        weight_quant
+                        and weight_quant.strategy == QuantizationStrategy.BLOCK
+                    )
+                    if weight_quant_is_block_strategy and not is_fp8_w8a8_supported:
+                        # On XPU, block quantized weights always use the
+                        # W8A8 kernel, due to lack of w8a16 support.
+                        is_fp8_w8a8_supported = True
+
                 else:
                     is_fp8_w8a8_supported = self._check_scheme_supported(
                         CompressedTensorsW8A8Fp8.get_min_capability(), error=False

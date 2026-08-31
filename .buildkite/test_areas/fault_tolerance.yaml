@@ -2,7 +2,7 @@ group: Fault Tolerance
 depends_on:
   - image-build
 steps:
-- label: Fault Tolerance E2E (2xH100)
+- label: ":nvidia: (H100) Fault Tolerance E2E"
   key: fault-tolerance-e2e-2xh100
   timeout_in_minutes: 35
   device: h100
