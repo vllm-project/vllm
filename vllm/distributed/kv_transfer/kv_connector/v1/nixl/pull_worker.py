@@ -77,7 +77,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         while not self._ready_requests.empty():
             self._read_blocks_for_req(*self._ready_requests.get_nowait())
 
-        if self.pcp_rank > 0:
+        if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
             return
 
         # Keep around the requests that have been part of a batch. This is

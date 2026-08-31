@@ -1146,14 +1146,20 @@ class VllmConfig:
             self.kv_transfer_config is not None
             and self.kv_transfer_config.has_connector("NixlConnector")
         ):
-            assert self.parallel_config.prefill_context_parallel_size == 1, (
-                "NIXL does not support prefill context parallelism."
-            )
+            pcp_size = self.parallel_config.prefill_context_parallel_size
             dcp_size = self.parallel_config.decode_context_parallel_size
             tp_size = self.parallel_config.tensor_parallel_size
-            assert dcp_size in (1, tp_size), (
+            transfer_size = tp_size
+            if pcp_size > 1 and dcp_size > 1:
+                assert tp_size == 1 and dcp_size == pcp_size, (
+                    "NIXL PCP+DCP currently supports only TP1 with DCP spanning "
+                    f"the full PCP group; got TP={tp_size}, PCP={pcp_size}, "
+                    f"DCP={dcp_size}."
+                )
+                transfer_size = pcp_size
+            assert dcp_size in (1, transfer_size), (
                 f"decode_context_parallel_size={dcp_size} must be 1 or equal "
-                f"to tensor_parallel_size={tp_size} when using NixlConnector."
+                f"to the NIXL transfer parallel size={transfer_size}."
             )
             if self.model_config is not None:
                 assert self.model_config.use_mla or dcp_size == 1, (

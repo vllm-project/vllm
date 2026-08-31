@@ -391,9 +391,24 @@ class NixlBaseConnectorWorker:
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
 
+        # Replicated PCP exposes only its canonical rank. When DCP spans a TP1
+        # PCP group, every PCP rank owns a distinct sequence shard and must be
+        # addressable as a NIXL transfer rank.
+        self.pcp_dcp_sharded = self.pcp_size > 1 and self.dcp_size > 1
+        self.transfer_tp_size = (
+            self.world_size * self.pcp_size
+            if self.pcp_dcp_sharded
+            else self.world_size
+        )
+        self.transfer_tp_rank = (
+            self.pcp_rank * self.world_size + self.tp_rank
+            if self.pcp_dcp_sharded
+            else self.tp_rank
+        )
+
         # DCP support is scoped to MLA, with dcp_size in (1, tp_size): either fully
         # replicated or fully sharded. A DCP rank is always derivable this way.
-        self.dcp_rank = self.tp_rank % self.dcp_size
+        self.dcp_rank = self.transfer_tp_rank % self.dcp_size
         if self._has_mamba and self.dcp_size > 1:
             # Prefix-cache-aware DCP slicing isn't implemented for the Mamba group.
             raise ValueError("DCP is not supported for hybrid MLA+Mamba models.")
@@ -603,12 +618,22 @@ class NixlBaseConnectorWorker:
         local_dcp_size = self.dcp_size
         remote_pcp_size = agent_metadata.pcp_size
         remote_dcp_size = agent_metadata.dcp_size
-        if (local_pcp_size > 1 and remote_dcp_size > 1) or (
-            remote_pcp_size > 1 and local_dcp_size > 1
+        if local_pcp_size > 1 and local_dcp_size not in (1, local_pcp_size):
+            raise NotImplementedError(
+                "NixlConnector PCP+DCP requires DCP to span the full PCP group. "
+                f"Local PCP/DCP={local_pcp_size}/{local_dcp_size}; "
+                f"remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
+            )
+        if remote_pcp_size > 1 and remote_dcp_size not in (1, remote_pcp_size):
+            raise NotImplementedError(
+                "Remote NixlConnector PCP+DCP does not span the full PCP group. "
+                f"Remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
+            )
+        if (local_pcp_size > 1 and local_dcp_size == 1 and remote_dcp_size > 1) or (
+            remote_pcp_size > 1 and remote_dcp_size == 1 and local_dcp_size > 1
         ):
             raise NotImplementedError(
-                "NixlConnector PCP requires decode_context_parallel_size=1 "
-                "on both instances. "
+                "Replicated PCP cannot be paired with a DCP-sharded NIXL peer. "
                 f"Local PCP/DCP={local_pcp_size}/{local_dcp_size}; "
                 f"remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
             )
@@ -1012,8 +1037,8 @@ class NixlBaseConnectorWorker:
         """Register the KV Cache data in nixl."""
 
         self.transfer_topo = TransferTopology(
-            tp_rank=self.tp_rank,
-            tp_size=self.world_size,
+            tp_rank=self.transfer_tp_rank,
+            tp_size=self.transfer_tp_size,
             block_size=self.block_size,
             engine_id=self.engine_id,
             is_mla=self.use_mla,
