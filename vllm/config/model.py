@@ -511,6 +511,13 @@ class ModelConfig:
             factors["video_pruning"] = (
                 self.multimodal_config.is_multimodal_pruning_enabled()
             )
+            # Adding modality into the hashing method to take multimodal
+            # cache into consideration.
+            factors["mm_limit_per_prompt"] = {
+                modality: (opts if isinstance(opts, int) else opts.count)
+                for modality, opts in self.multimodal_config.limit_per_prompt.items()
+            }
+            factors["mm_enable_mm_embeds"] = self.multimodal_config.enable_mm_embeds
         return hash_factors(factors)
 
     def _update_nested(
