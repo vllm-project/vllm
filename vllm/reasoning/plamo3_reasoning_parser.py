@@ -67,14 +67,7 @@ _SPECIAL_TOKEN_PREFIX = "<|plamo:"
 
 def strip_trailing_partial_marker(text: str) -> str:
     """Strip a trailing incomplete PLaMo-3 special-token fragment from text."""
-    idx = text.rfind(_SPECIAL_TOKEN_PREFIX)
-    if idx == -1:
-        return text
-    tail = text[idx:]
-    for tag in _ALL_SPECIAL_TAGS:
-        if tag.startswith(tail) and tail != tag:
-            return text[:idx]
-    return text
+    return text[: compute_safe_until(text, floor=0, tags=_ALL_SPECIAL_TAGS)]
 
 
 def strip_at_eot(text: str) -> str:
