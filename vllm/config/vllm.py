@@ -1646,6 +1646,7 @@ class VllmConfig:
 
         self._resolve_allow_missing_mm_embeddings()
         self._resolve_mm_processor_device()
+        self._resolve_mm_video_decode_device()
         self._validate_mm_processor_device()
 
         if self.use_v2_model_runner:
@@ -2520,6 +2521,58 @@ class VllmConfig:
         logger.info_once(
             "EPD encoder instance: running the multi-modal processor on %s. "
             "Override with --mm-processor-device=cpu.",
+            device_type,
+        )
+
+    def _resolve_mm_video_decode_device(self) -> None:
+        """Default video decoding to NVDEC when the processor runs on the
+        accelerator (an EPD encode-only instance, see
+        `_resolve_mm_processor_device`).
+
+        The processor consumes the decoded frames on-device in that case, so
+        keeping the frames on the GPU skips the host round-trip through the
+        CPU media path. An explicit codec/backend choice in
+        `--media-io-kwargs` is left alone, and the default is skipped where
+        torchcodec (or its FFmpeg runtime) is unavailable.
+        """
+        model_config = self.model_config
+        if model_config is None:
+            return
+        mm_config = model_config.multimodal_config
+        if mm_config is None:
+            return
+
+        from vllm.platforms import current_platform
+
+        device_type = current_platform.device_type
+        if device_type in ("", "cpu"):
+            return
+        if mm_config.get_mm_processor_device_type() != device_type:
+            return
+
+        video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
+        if "backend" in video_kwargs or "device" in video_kwargs:
+            return
+
+        from vllm.utils.import_utils import check_torchcodec_available
+
+        try:
+            check_torchcodec_available()
+        except (ImportError, RuntimeError):
+            # torchcodec is not installed, or is installed without a usable
+            # FFmpeg runtime (it raises rather than returning False).
+            logger.info_once(
+                "EPD encoder instance: keeping CPU video decoding because "
+                "torchcodec is not available (needs a CUDA build with FFmpeg)."
+            )
+            return
+
+        video_kwargs["backend"] = "torchcodec"
+        video_kwargs["device"] = device_type
+        logger.info_once(
+            "EPD encoder instance: decoding video with NVDEC (torchcodec "
+            'device=%s). Override with --media-io-kwargs \'{"video": '
+            '{"backend": "opencv"}}\'.',
             device_type,
         )
 
