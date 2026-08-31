@@ -20,6 +20,7 @@ steps:
 
 - label: ":nvidia: (L4) Sharded RDT Weight Transfer"
   key: sharded-rdt-weight-transfer
+  device: l4
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_devices: 1
