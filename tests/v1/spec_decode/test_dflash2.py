@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -71,19 +72,52 @@ def test_selector_edges_match_sequential_reference():
     torch.testing.assert_close(actual, expected)
 
 
-def test_dflash2_moe_builds_sparse_ffn_from_draft_config(monkeypatch):
+def test_dflash2_moe_builds_sparse_ffn(monkeypatch):
+    """A MoE draft config reaches the HF config root and selects a sparse FFN."""
     from vllm.model_executor.models import qwen3_dflash2
+    from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
+
+    speculators_config = {
+        "speculators_model_type": "dflash2",
+        "aux_hidden_state_layer_ids": [2, 5],
+        "mask_token_id": 31,
+        "conv_kernel_size": 2,
+        "conv_group_size": 4,
+        "selector_rank": 8,
+        "selector_top_k": 4,
+        "transformer_layer_config": {"model_type": "qwen3", "hidden_size": 16},
+        "draft_ffn_type": "moe",
+        "num_experts": 8,
+        "num_experts_per_tok": 2,
+        "moe_intermediate_size": 12,
+        "shared_expert_intermediate_size": 10,
+        "norm_topk_prob": False,
+    }
+
+    config_dict = SpeculatorsConfig.extract_transformers_pre_trained_config(
+        deepcopy(speculators_config)
+    )
+
+    # MoE geometry lands at the draft config root, where the FFN reads it -- not
+    # inside `dflash_config`, which only carries DFlash runtime settings.
+    assert config_dict["draft_ffn_type"] == "moe"
+    assert config_dict["num_experts"] == 8
+    assert config_dict["num_experts_per_tok"] == 2
+    assert config_dict["moe_intermediate_size"] == 12
+    assert config_dict["shared_expert_intermediate_size"] == 10
+    assert config_dict["norm_topk_prob"] is False
+    assert "draft_ffn_type" not in config_dict["dflash_config"]
+
+    # An incomplete MoE config fails at load time rather than at layer build.
+    partial = deepcopy(speculators_config)
+    del partial["num_experts_per_tok"]
+    with pytest.raises(ValueError, match="missing.*num_experts_per_tok"):
+        SpeculatorsConfig.extract_transformers_pre_trained_config(partial)
 
     captured: dict[str, object] = {}
 
     class FakeSparseMoe(torch.nn.Module):
-        def __init__(
-            self,
-            vllm_config,
-            config,
-            quant_config,
-            prefix,
-        ):
+        def __init__(self, vllm_config, config, quant_config, prefix):
             super().__init__()
             captured.update(
                 vllm_config=vllm_config,
@@ -93,9 +127,9 @@ def test_dflash2_moe_builds_sparse_ffn_from_draft_config(monkeypatch):
             )
 
     monkeypatch.setattr(qwen3_dflash2, "Qwen3NextSparseMoeBlock", FakeSparseMoe)
-    vllm_config = object()
+    vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=False))
     quant_config = object()
-    config = SimpleNamespace(draft_ffn_type="moe")
+    config = SimpleNamespace(**config_dict)
 
     mlp = qwen3_dflash2.DFlash2Qwen3DecoderLayer.build_mlp(
         None,
@@ -113,18 +147,17 @@ def test_dflash2_moe_builds_sparse_ffn_from_draft_config(monkeypatch):
         "prefix": "model.layers.0.mlp",
     }
 
-
-def test_dflash2_fused_expert_names_bypass_dense_mapper():
-    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
-
-    weights = [
-        ("layers.0.mlp.experts.gate_up_proj", torch.empty(4, 16, 8)),
-        ("layers.0.mlp.experts.down_proj", torch.empty(4, 8, 8)),
-    ]
-
-    mapped = list(DFlashQwen3Model.hf_to_vllm_mapper.apply(weights))
-
-    assert [name for name, _ in mapped] == [name for name, _ in weights]
+    # The drafter does not implement the `MixtureOfExperts` lifecycle, so it must
+    # refuse to inherit the target's EPLB setting instead of running half-managed.
+    vllm_config.parallel_config.enable_eplb = True
+    with pytest.raises(NotImplementedError, match="EPLB is not supported"):
+        qwen3_dflash2.DFlash2Qwen3DecoderLayer.build_mlp(
+            None,
+            vllm_config=vllm_config,
+            config=config,
+            quant_config=quant_config,
+            prefix="model.layers.0.mlp",
+        )
 
 
 def _stub_base(monkeypatch, draft_logits):

@@ -105,6 +105,9 @@ class Qwen3NextSparseMoeBlock(nn.Module):
     ):
         super().__init__()
 
+        # When an explicit config is provided (e.g. a draft model), quant_config=None
+        # is intentional and must not fall back to the target model's quantization:
+        # a BF16 drafter in front of an FP8/NVFP4 target is a valid combination.
         if config is None:
             config = vllm_config.model_config.hf_text_config
             if quant_config is None:

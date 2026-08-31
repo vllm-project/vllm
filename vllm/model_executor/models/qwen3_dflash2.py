@@ -121,6 +121,14 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             )
         if draft_ffn_type != "moe":
             raise ValueError(f"Unsupported DFlash2 draft_ffn_type: {draft_ffn_type!r}")
+        if vllm_config.parallel_config.enable_eplb:
+            # `Qwen3NextSparseMoeBlock` picks up `enable_eplb` and the redundant
+            # expert count from the target's parallel config, but the DFlash2
+            # drafter does not implement the `MixtureOfExperts` lifecycle that
+            # drives rearrangement. Refuse rather than run half-managed.
+            raise NotImplementedError(
+                "EPLB is not supported for DFlash2 MoE draft models."
+            )
         return Qwen3NextSparseMoeBlock(
             vllm_config=vllm_config,
             config=config,
