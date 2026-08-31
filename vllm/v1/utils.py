@@ -339,6 +339,7 @@ class RustFrontendProcessManager:
         output_address: str,
         engine_start_index: int,
         engine_count: int,
+        data_parallel_size: int,
         stats_update_address: str | None = None,
     ):
         import os
@@ -360,6 +361,8 @@ class RustFrontendProcessManager:
             str(engine_start_index),
             "--engine-count",
             str(engine_count),
+            "--data-parallel-size",
+            str(data_parallel_size),
         ]
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
@@ -386,7 +389,12 @@ class RustFrontendProcessManager:
         args_json = json.dumps(args_dict, sort_keys=True)
         cmd.extend(["--args-json", args_json])
 
-        logger.info("Launching Rust frontend: %s", " ".join(cmd))
+        # The subprocess needs the real values, but the log must not carry
+        # credentials such as api_key or hf_token.
+        from vllm.entrypoints.serve.utils.api_utils import redact_sensitive_args
+
+        redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
+        logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
         self._proc = subprocess.Popen(cmd, pass_fds=(fd,))
 
         # Create a process wrapper with a sentinel fd for monitoring
@@ -500,7 +508,7 @@ def run_api_server_worker_proc(
 ) -> None:
     """Entrypoint for individual API server worker processes."""
 
-    from vllm.entrypoints.openai.api_server import run_server_worker
+    from vllm.entrypoints.launchers.api_server.entry import run_server_worker
 
     client_config = client_config or {}
     server_index = client_config.get("client_index", 0)
@@ -600,14 +608,18 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
         timeout = 5.0
 
     logger.debug(
-        "[shutdown] Process manager: start process_count=%d timeout=%ss",
+        "[shutdown] Process manager: start process_count=%d timeout=%ss names=%s",
         len(procs),
         timeout,
+        (",").join([proc.name for proc in procs]),
     )
 
     # Shutdown the process.
     for proc in procs:
         if proc.is_alive():
+            logger.info(
+                "[shutdown] Process manager: send sigterm to process %s", proc.name
+            )
             proc.terminate()
 
     # Allow time for remaining procs to terminate.
@@ -619,15 +631,22 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
         if proc.is_alive():
             proc.join(remaining)
 
-    remaining_pids = [
-        proc.pid for proc in procs if proc.is_alive() and proc.pid is not None
+    remaining_procs = [
+        (proc.pid, proc.name)
+        for proc in procs
+        if proc.is_alive() and proc.pid is not None
     ]
-    if remaining_pids:
+    if remaining_procs:
         logger.warning(
             "[shutdown] Process manager: force killing remaining processes count=%d",
-            len(remaining_pids),
+            len(remaining_procs),
         )
-    for pid in remaining_pids:
+    for pid, proc_name in remaining_procs:
+        logger.warning(
+            "[shutdown] Process manager: force killing remaining process %s pid %d",
+            proc_name,
+            pid,
+        )
         kill_process_tree(pid)
 
     logger.debug_once("[shutdown] Process manager: complete")

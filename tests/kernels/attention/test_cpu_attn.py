@@ -698,6 +698,42 @@ def test_varlen_encoder_attention_vec(
 )
 @pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("isa", ["neon"])
+@pytest.mark.skipif(
+    current_platform.get_cpu_architecture() != CpuArchEnum.ARM,
+    reason="Not an Arm CPU.",
+)
+def test_varlen_encoder_attention_neon(
+    seq_lens: list[int],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    isa: str,
+) -> None:
+    varlen_encoder_attention(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        isa=isa,
+    )
+
+
+@pytest.mark.parametrize("seq_lens", ENCODER_SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize(
+    "block_size",
+    [
+        128,
+    ],
+)
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("isa", ["amx"])
 @pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
 def test_varlen_encoder_attention_amx(

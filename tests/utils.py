@@ -63,6 +63,7 @@ from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import (
     set_random_seed,  # noqa: F401 - re-exported for use in test files
 )
+from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
 
 logger = init_logger(__name__)
 
@@ -131,12 +132,6 @@ else:
 VLLM_PATH = Path(__file__).parent.parent
 """Path to root of the vLLM repository."""
 
-# ROCm: disable skinny GEMM to avoid non-deterministic results from
-# atomic reductions in wvSplitKrc kernel.
-# See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
-ROCM_ENV_OVERRIDES = (
-    {"VLLM_ROCM_USE_SKINNY_GEMM": "0"} if current_platform.is_rocm() else {}
-)
 # ROCm: disable prefix caching and eliminate batch variance to reduce
 # test flakiness.
 ROCM_EXTRA_ARGS = (
@@ -243,6 +238,9 @@ class RemoteVLLMServer:
             model_loader = get_model_loader(load_config)
             model_loader.download_model(model_config)
 
+    def _get_process_termination_timeout(self) -> float:
+        return 15.0
+
     def __init__(
         self,
         model: str,
@@ -293,6 +291,7 @@ class RemoteVLLMServer:
         self.show_hidden_metrics = (
             getattr(args, "show_hidden_metrics_for_version", None) is not None
         )
+        self._request_shutdown_timeout = float(args.shutdown_timeout)
 
         with _temporarily_sanitized_pythonpath_env():
             self._pre_download_model(model, args)
@@ -422,7 +421,7 @@ class RemoteVLLMServer:
             print(f"[RemoteOpenAIServer] Sent SIGTERM to process {pid}")
 
         try:
-            self.proc.wait(timeout=15)
+            self.proc.wait(timeout=self._get_process_termination_timeout())
             print(f"[RemoteOpenAIServer] Server {pid} terminated gracefully")
         except subprocess.TimeoutExpired:
             # Phase 2: SIGKILL the entire process group
@@ -764,6 +763,14 @@ class RemoteVLLMServer:
 class RemoteOpenAIServer(RemoteVLLMServer):
     """Launches ``vllm serve`` for testing OpenAI-compatible endpoints."""
 
+    def _get_process_termination_timeout(self) -> float:
+        engine_timeout = get_engine_process_shutdown_timeout(
+            self._request_shutdown_timeout,
+            self._request_shutdown_timeout,
+        )
+        assert engine_timeout is not None
+        return engine_timeout + super()._get_process_termination_timeout()
+
     def _create_cli_subcommand(self):
         return ServeSubcommand()
 
@@ -895,7 +902,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
             self.proc.terminate()
             print(f"[RemoteOpenAIServerCustom] Sent SIGTERM to process {pid}")
 
-        self.proc.join(15)
+        self.proc.join(self._get_process_termination_timeout())
         if self.proc.is_alive():
             print(
                 f"[RemoteOpenAIServerCustom] Server {pid} did not respond "
@@ -1546,6 +1553,13 @@ def record_gpu_memory_usage_stats(
             mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
             gb_used = mem_info["vram_used"] / 2**10
             gb_total = mem_info["vram_total"] / 2**10
+        elif current_platform.is_xpu():
+            # nvml/amdsmi are unavailable on XPU. Query device memory through
+            # torch.accelerator.get_memory_info, which the XPU platform patches
+            # to return (free, total) bytes via Level Zero.
+            free_b, total_b = torch.accelerator.get_memory_info(device)
+            gb_used = (total_b - free_b) / 2**30
+            gb_total = total_b / 2**30
         else:
             dev_handle = get_nvml_device_handle(device)
             mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
@@ -1686,19 +1700,19 @@ def wait_for_gpu_memory_to_clear(
         time.sleep(poll_interval_s)
 
 
-def wait_for_rocm_memory_to_settle(
+def wait_for_memory_to_settle(
     *,
     threshold_ratio: float | dict[int, float] | None = 0.1,
     timeout_s: float = 240,
 ) -> None:
-    """Block until ROCm device VRAM usage drops below ``threshold_ratio``.
+    """Block until ROCm or XPU device VRAM usage drops below ``threshold_ratio``.
 
-    ROCm reclaims GPU memory more lazily than CUDA, so back-to-back model
+    ROCm and XPU reclaims GPU memory more lazily than CUDA, so back-to-back model
     loads in a single test process can OOM the *next* engine/model startup
     even after ``cleanup_dist_env_and_memory``. This gives the driver time to
     actually release VRAM before the next allocation. No-op off ROCm.
     """
-    if not current_platform.is_rocm():
+    if not current_platform.is_rocm() and not current_platform.is_xpu():
         return
 
     num_gpus = current_platform.device_count()
@@ -1983,7 +1997,10 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
 
     return pytest.mark.skipif(
         memory_gb < min_gb,
-        reason=f"Need at least {min_gb}GB GPU memory to run the test.",
+        reason=(
+            f"Need at least {min_gb}GB GPU memory to run the test "
+            f"(found {memory_gb}GB)."
+        ),
     )
 
 
@@ -2335,6 +2352,10 @@ class TestFP8Layer(torch.nn.Module):
         force_kernel: type[_KernelT] | None = None,
     ):
         super().__init__()
+        self.input_size_per_partition = weight_shape[1]
+        self.output_size_per_partition = weight_shape[0]
+        self.logical_widths = [self.output_size_per_partition]
+        self.orig_dtype = input_dtype
         act_scale_desc = activation_quant_key.scale
         weight_scale_desc = weight_quant_key.scale
         is_block_wise = act_scale_desc.group_shape.is_per_group()
@@ -2342,11 +2363,12 @@ class TestFP8Layer(torch.nn.Module):
             block_size = weight_scale_desc.group_shape.col
             weight_scale_shape = weight_shape[0] // block_size
             self.weight_scale_inv = torch.rand(
-                (weight_scale_shape, weight_scale_shape), dtype=torch.float32
+                (weight_scale_shape, weight_scale_shape),
+                dtype=torch.float32,
+                device=device,
             )
-            self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
+            self.weight = torch.rand(weight_shape, device=device).to(dtype=FP8_DTYPE)
             self.input_scale = None
-            self.weight_scale = None
             self.weight_block_size = [block_size, block_size]
             if transpose_weights:
                 self.weight = self.weight.t()

@@ -58,7 +58,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
-            use_flashinfer_allreduce = envs.VLLM_ALLREDUCE_USE_FLASHINFER
+            # FlashInfer all-reduce does not provide a fixed reduction order.
+            use_flashinfer_allreduce = (
+                envs.VLLM_ALLREDUCE_USE_FLASHINFER and not envs.VLLM_BATCH_INVARIANT
+            )
             use_aiter_allreduce = use_custom_allreduce and bool(
                 rocm_aiter_ops.is_custom_all_reduce_enabled()
             )
@@ -217,15 +220,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
         depends on the input tensor.
         """
         all_potential_ar_backends = [
+            "FLASHINFER",
             "NCCL_SYMM_MEM",
             "QUICK_REDUCE",
-            "FLASHINFER",
             "AITER_CUSTOM",
             "CUSTOM",
             "SYMM_MEM",
             "PYNCCL",
         ]
         enabled_ar_backends: list[str] = []
+        if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
+            enabled_ar_backends.append("FLASHINFER")
         # Mirror the static preconditions of `should_nccl_symm_mem_allreduce`:
         # VLLM_BATCH_INVARIANT off, NCCL symm mem enabled, world_size meets
         # min_world_size, and world_size either has a tuned entry in
@@ -252,8 +257,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
             enabled_ar_backends.append("NCCL_SYMM_MEM")
         if self.qr_comm is not None and not self.qr_comm.disabled:
             enabled_ar_backends.append("QUICK_REDUCE")
-        if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
-            enabled_ar_backends.append("FLASHINFER")
         if self.aiter_ar_comm is not None and not self.aiter_ar_comm.disabled:
             enabled_ar_backends.append("AITER_CUSTOM")
         if self.ca_comm is not None and not self.ca_comm.disabled:
@@ -273,16 +276,23 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
+        fi_ar_comm = self.fi_ar_comm
+        use_fi_ar = (
+            fi_ar_comm is not None
+            and not fi_ar_comm.disabled
+            and fi_ar_comm.should_use_fi_ar(input_)
+        )
+
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
-        if self.pynccl_comm is not None and should_nccl_symm_mem_allreduce(
-            self.pynccl_comm.world_size, input_
+        if (
+            self.pynccl_comm is not None
+            and not use_fi_ar
+            and should_nccl_symm_mem_allreduce(self.pynccl_comm.world_size, input_)
         ):
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
-        # always try quick reduce first, then flashinfer, then the AITER or vLLM
-        # custom allreduce, and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm
         if (
             qr_comm is not None
@@ -292,12 +302,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = qr_comm.quick_all_reduce(input_)
             assert out is not None
             return out
-        fi_ar_comm = self.fi_ar_comm
-        if (
-            fi_ar_comm is not None
-            and not fi_ar_comm.disabled
-            and fi_ar_comm.should_use_fi_ar(input_)
-        ):
+        if use_fi_ar:
+            assert fi_ar_comm is not None
             out = fi_ar_comm.all_reduce(input_)
             assert out is not None
             return out
@@ -339,6 +345,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = input_.clone()
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
+
+    def custom_all_gather(self, input_: torch.Tensor) -> torch.Tensor | None:
+        ca_comm = self.ca_comm
+        if ca_comm is None:
+            return None
+        return ca_comm.custom_all_gather(input_.contiguous())
+
+    def custom_reduce_scatter(self, input_: torch.Tensor) -> torch.Tensor | None:
+        ca_comm = self.ca_comm
+        if ca_comm is None:
+            return None
+        return ca_comm.custom_reduce_scatter(input_.contiguous())
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         # Route uniform dim-0 all-gathers through NVLS symmetric memory when
@@ -436,7 +454,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output = torch.empty(
                 output_shape, dtype=input_tensor.dtype, device=input_tensor.device
             )
-            if sizes is not None and sizes.count(sizes[0]) != len(sizes):
+            use_deterministic_rs = envs.VLLM_BATCH_INVARIANT and world_size > 2
+            if use_deterministic_rs:
+                # Reduce to a fixed root (0) for determinism
+                reduced = torch.empty_like(input_tensor)
+                sizes = sizes if sizes else [chunk_size] * world_size
+                pynccl_comm.reduce(reduced, input_tensor, root=0)
+                pynccl_comm.scatter(output, reduced, sizes, root=0)
+            elif sizes is not None and sizes.count(sizes[0]) != len(sizes):
                 pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
             else:
                 pynccl_comm.reduce_scatter(output, input_tensor)

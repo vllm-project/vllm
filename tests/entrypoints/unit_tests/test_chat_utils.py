@@ -15,6 +15,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    MEDIA_CONNECTOR_REGISTRY,
     AsyncMultiModalItemTracker,
     ConversationMessage,
     _postprocess_messages,
@@ -93,6 +94,16 @@ def qwen25omni_model_config_image_embeds():
         QWEN25OMNI_MODEL_ID,
         runner="generate",
         limit_mm_per_prompt={"image": 2},
+        enable_mm_embeds=True,
+    )
+
+
+@pytest.fixture(scope="function")
+def qwen25omni_model_config_video_embeds():
+    return ModelConfig(
+        QWEN25OMNI_MODEL_ID,
+        runner="generate",
+        limit_mm_per_prompt={"video": 2},
         enable_mm_embeds=True,
     )
 
@@ -710,6 +721,29 @@ def test_parse_chat_messages_empty_system(
 
 
 @pytest.mark.asyncio
+async def test_text_only_chat_does_not_initialize_media_connector(
+    mistral_model_config,
+    monkeypatch,
+):
+    load_connector = MagicMock()
+    monkeypatch.setattr(MEDIA_CONNECTOR_REGISTRY, "load", load_connector)
+    messages = [{"role": "user", "content": "Who are you?"}]
+
+    parse_chat_messages(
+        messages,
+        mistral_model_config,
+        content_format="string",
+    )
+    await parse_chat_messages_async(
+        messages,
+        mistral_model_config,
+        content_format="string",
+    )
+
+    load_connector.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_parse_chat_messages_single_image_async(
     phi3v_model_config,
     image_url,
@@ -943,6 +977,133 @@ async def test_parse_chat_messages_audio_embeds_async(
     assert mm_uuids is not None
     assert "audio" in mm_uuids
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[None])
+
+
+def test_parse_chat_messages_empty_video_embeds_with_uuid(
+    qwen25omni_model_config_video_embeds,
+):
+    """Test video_embeds with UUID (no actual embeds data)."""
+    uuid = "test-video-uuid-123"
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this video"},
+                    {"type": "video_embeds", "video_embeds": None, "uuid": uuid},
+                ],
+            }
+        ],
+        qwen25omni_model_config_video_embeds,
+        content_format="string",
+    )
+
+    # Should have video in mm_data as None (UUID provided)
+    assert mm_data is not None
+    assert "video" in mm_data
+    assert isinstance(mm_data["video"], list)
+    assert len(mm_data["video"]) == 1
+    assert mm_data["video"][0] is None
+
+    # UUID should be recorded
+    _assert_mm_uuids(mm_uuids, 1, modality="video", expected_uuids=[uuid])
+
+
+def test_parse_chat_messages_video_embeds_with_string(
+    qwen25omni_model_config_video_embeds,
+):
+    """Test video_embeds with base64 string embedding data."""
+    hidden_size = qwen25omni_model_config_video_embeds.get_inputs_embeds_size()
+    video_embedding = torch.randn(1, 128, hidden_size)
+
+    base64_video_embedding = tensor2base64(video_embedding)
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this video"},
+                    {
+                        "type": "video_embeds",
+                        "video_embeds": base64_video_embedding,
+                    },
+                ],
+            }
+        ],
+        qwen25omni_model_config_video_embeds,
+        content_format="string",
+    )
+
+    # Should have video embedding in mm_data (single tensor, not a list)
+    assert mm_data is not None
+    assert "video" in mm_data
+    assert isinstance(mm_data["video"], torch.Tensor)
+    assert mm_data["video"].shape == video_embedding.shape
+    # No UUID provided
+    assert mm_uuids is not None
+    assert "video" in mm_uuids
+    _assert_mm_uuids(mm_uuids, 1, modality="video", expected_uuids=[None])
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_video_embeds_async(
+    qwen25omni_model_config_video_embeds,
+):
+    """Test video_embeds with async futures."""
+    hidden_size = qwen25omni_model_config_video_embeds.get_inputs_embeds_size()
+    video_embedding = torch.randn(1, 128, hidden_size)
+
+    base64_video_embedding = tensor2base64(video_embedding)
+
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this video"},
+                    {
+                        "type": "video_embeds",
+                        "video_embeds": base64_video_embedding,
+                    },
+                ],
+            }
+        ],
+        qwen25omni_model_config_video_embeds,
+        content_format="string",
+    )
+
+    # Should have video embedding in mm_data (single tensor, not a list)
+    assert mm_data is not None
+    assert "video" in mm_data
+    assert isinstance(mm_data["video"], torch.Tensor)
+    assert mm_data["video"].shape == video_embedding.shape
+    # No UUID provided
+    assert mm_uuids is not None
+    assert "video" in mm_uuids
+    _assert_mm_uuids(mm_uuids, 1, modality="video", expected_uuids=[None])
+
+
+def test_parse_chat_messages_video_and_video_embeds_mixed(
+    qwen25omni_model_config_video_embeds,
+    video_url,
+):
+    """Test that mixing raw video and video_embeds is rejected."""
+    with pytest.raises(VLLMValidationError, match="Mixing raw video"):
+        parse_chat_messages(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video_url", "video_url": {"url": video_url}},
+                        {"type": "video_embeds", "video_embeds": None, "uuid": "x"},
+                    ],
+                }
+            ],
+            qwen25omni_model_config_video_embeds,
+            content_format="string",
+        )
 
 
 def test_parse_chat_messages_multiple_image_embeds(
@@ -1639,6 +1800,30 @@ def test_parse_chat_messages_multiple_images_interleave(
     _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
 
 
+def test_parse_chat_messages_interleave_placeholder_overcount_raises(
+    phi3v_model_config_mm_interleaved,
+    image_url,
+):
+    # Only one image is supplied, but the user's text also contains the internal
+    # image sentinel, so the interleaved prompt references more image
+    # placeholders than actual images. This must surface as a clear validation
+    # error rather than an IndexError from popping an empty list.
+    with pytest.raises(VLLMValidationError, match="placeholders in input prompt"):
+        parse_chat_messages(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": "<##IMAGE##>"},
+                    ],
+                }
+            ],
+            phi3v_model_config_mm_interleaved,
+            content_format="string",
+        )
+
+
 @pytest.mark.asyncio
 async def test_parse_chat_messages_multiple_images_interleave_async(
     phi3v_model_config_mm_interleaved,
@@ -2068,7 +2253,7 @@ def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
     image_url,
 ):
     with pytest.raises(
-        ValueError,
+        VLLMValidationError,
         match=r"Found more '<|image_1|>' placeholders in input prompt "
         "than actual multimodal data items.",
     ):
@@ -2782,3 +2967,120 @@ async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
         f"resolve_items left {len(leaked_tasks)} task(s) running after "
         f"raising: {leaked_tasks}"
     )
+
+
+def _assistant_tool_call(arguments, name="write"):
+    return [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }
+            ],
+        }
+    ]
+
+
+def _assistant_tool_calls(calls):
+    return [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": calls,
+        }
+    ]
+
+
+def test_tool_call_arguments_dict_passthrough(caplog):
+    messages = _assistant_tool_call({"a": 1})
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {"a": 1}
+    assert not caplog.records
+
+
+def test_tool_call_arguments_valid_object_string(caplog):
+    messages = _assistant_tool_call('{"a": 1}')
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {"a": 1}
+    assert not caplog.records
+
+
+def test_tool_call_arguments_malformed_json_small(caplog):
+    bad = '{"cmd": "mkdir -p /tmp/mmadtest && cat > /tmp/mmadtest'
+    messages = _assistant_tool_call(bad, name="exec")
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}
+
+    assert len(caplog.records) == 1
+    assert "exec" in caplog.records[0].message
+    assert "coercing to an empty object" in caplog.records[0].message
+
+
+def test_tool_call_arguments_malformed_json_large(caplog):
+    bad = '{"filepath": "src/main.py", "contents": "' + ("x" * 18000)
+    messages = _assistant_tool_call(bad, name="write")
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}
+
+    assert len(caplog.records) == 1
+    assert "write" in caplog.records[0].message
+    assert "coercing to an empty object" in caplog.records[0].message
+
+
+@pytest.mark.parametrize("non_obj", ["[]", "42", "true", '"hello"', "null"])
+def test_tool_call_arguments_valid_json_non_object(caplog, non_obj):
+    messages = _assistant_tool_call(non_obj, name="bad_tool")
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}
+
+    if non_obj == "null":
+        # null parses to None, so no warning is emitted according to requirements
+        assert not caplog.records
+    else:
+        assert len(caplog.records) == 1
+        assert "bad_tool" in caplog.records[0].message
+        assert "not a JSON object" in caplog.records[0].message
+
+
+@pytest.mark.parametrize("missing", [None, ""])
+def test_tool_call_arguments_missing_or_empty(caplog, missing):
+    messages = _assistant_tool_call(missing)
+    if missing is None:
+        del messages[0]["tool_calls"][0]["function"]["arguments"]
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}
+    assert not caplog.records
+
+
+def test_tool_call_arguments_multiple_independent(caplog):
+    calls = [
+        {
+            "id": "call_0",
+            "type": "function",
+            "function": {"name": "good", "arguments": '{"a": 1}'},
+        },
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bad", "arguments": '{"cmd": "'},
+        },
+    ]
+    messages = _assistant_tool_calls(calls)
+    _postprocess_messages(messages)
+
+    tool_calls = messages[0]["tool_calls"]
+    assert tool_calls[0]["function"]["arguments"] == {"a": 1}
+    assert tool_calls[1]["function"]["arguments"] == {}
+
+    assert len(caplog.records) == 1
+    assert "bad" in caplog.records[0].message

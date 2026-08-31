@@ -316,7 +316,7 @@ _PLACEHOLDER_ERROR_PATTERN: Final[str] = re.sub(
 def test_parse_chat_messages_rejects_placeholder_in_user_text(content):
     mc = _make_mock_model_config()  # enable_prompt_embeds=True by default
     messages = [{"role": "user", "content": content}]
-    with pytest.raises(ValueError, match=_PLACEHOLDER_ERROR_PATTERN):
+    with pytest.raises(VLLMValidationError, match=_PLACEHOLDER_ERROR_PATTERN):
         parse_chat_messages(messages, mc, content_format="openai")
 
 
