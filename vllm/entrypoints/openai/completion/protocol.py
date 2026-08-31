@@ -10,17 +10,16 @@ from pydantic import Field, model_validator
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
-    OpenAIBaseModel,
-    PerRequestTimingMetrics,
+    PerRequestMetrics,
     StopParam,
     StreamOptions,
-    UsageInfo,
     structured_outputs_from_response_format,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -199,6 +198,7 @@ class CompletionRequest(OpenAIBaseModel):
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -660,7 +660,7 @@ class CompletionResponse(OpenAIBaseModel):
     ec_transfer_params: dict[str, Any] | None = Field(
         default=None, description="ECTransfer parameters."
     )
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -692,4 +692,4 @@ class CompletionStreamResponse(OpenAIBaseModel):
     # Set only on the final chunk of a stream to mirror non-streaming responses
     # without the per-chunk serialization overhead.
     system_fingerprint: str | None = None
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None
