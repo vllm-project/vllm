@@ -62,7 +62,7 @@ def _make_profiling_runner(
     runner.cudagraph_manager = _FakeCudaGraphManager(
         needs_capture, num_full_descs, piecewise_only
     )
-    runner.vllm_config = SimpleNamespace()
+    runner.vllm_config = SimpleNamespace(compilation_config=runner.compilation_config)
 
     events: list[str] = []
     runner.events = events
@@ -250,12 +250,12 @@ def test_profile_cudagraph_memory_clears_captured_graphs(monkeypatch):
     monkeypatch.setattr(
         cgu.CUDAGraphWrapper,
         "clear_all_graphs",
-        classmethod(lambda cls: cleared.append("piecewise")),
+        classmethod(lambda cls, vllm_config=None: cleared.append("piecewise")),
     )
     monkeypatch.setattr(
         cgu.BreakableCUDAGraphWrapper,
         "clear_all_graphs",
-        classmethod(lambda cls: cleared.append("breakable")),
+        classmethod(lambda cls, vllm_config=None: cleared.append("breakable")),
     )
 
     cgu.profile_cudagraph_memory(runner)
@@ -276,20 +276,25 @@ def test_profile_cudagraph_memory_redirects_wrapper_pools(monkeypatch):
     runner = _make_profiling_runner(CUDAGraphMode.FULL_AND_PIECEWISE)
 
     class _FakeWrapper:
-        def __init__(self) -> None:
+        def __init__(self, compilation_config: Any) -> None:
+            self.compilation_config = compilation_config
             self.graph_pool: Any = GLOBAL_POOL
             self.pool_during_capture: Any = None
 
         def clear_graphs(self) -> None:
             pass
 
-    wrapper = _FakeWrapper()
+    wrapper = _FakeWrapper(runner.vllm_config.compilation_config)
+    # A wrapper from another engine in the same process must be left alone.
+    other_wrapper = _FakeWrapper(SimpleNamespace())
     cgu.CUDAGraphWrapper._all_instances.add(wrapper)
+    cgu.CUDAGraphWrapper._all_instances.add(other_wrapper)
     try:
         capture_model = runner.capture_model
 
         def _capture_model() -> int:
             wrapper.pool_during_capture = wrapper.graph_pool
+            other_wrapper.pool_during_capture = other_wrapper.graph_pool
             return capture_model()
 
         runner.capture_model = _capture_model
@@ -298,8 +303,11 @@ def test_profile_cudagraph_memory_redirects_wrapper_pools(monkeypatch):
 
         assert wrapper.pool_during_capture == THROWAWAY_POOL
         assert wrapper.graph_pool == GLOBAL_POOL
+        assert other_wrapper.pool_during_capture == GLOBAL_POOL
+        assert other_wrapper.graph_pool == GLOBAL_POOL
     finally:
         cgu.CUDAGraphWrapper._all_instances.discard(wrapper)
+        cgu.CUDAGraphWrapper._all_instances.discard(other_wrapper)
 
 
 def test_profile_cudagraph_memory_swaps_and_drops_speculator_managers(monkeypatch):
