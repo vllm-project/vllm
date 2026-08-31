@@ -215,6 +215,9 @@ class Pard2ForCausalLMMixin:
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self._draft_model_name = vllm_config.speculative_config.draft_model_config.model
+        self._draft_model_revision = (
+            vllm_config.speculative_config.draft_model_config.revision
+        )
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
@@ -272,7 +275,9 @@ class Pard2ForCausalLMMixin:
 
         from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 
-        data = get_hf_file_bytes("warp_model.bin", self._draft_model_name)
+        data = get_hf_file_bytes(
+            "warp_model.bin", self._draft_model_name, self._draft_model_revision
+        )
         if data is None:
             logger.warning("PARD-2: could not fetch warp_model.bin")
             return False
