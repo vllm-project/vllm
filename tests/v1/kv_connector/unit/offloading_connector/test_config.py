@@ -716,6 +716,7 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
             False,
             id="uniform-uncertifiable-inner",
         ),
+        pytest.param([], False, id="attention-free"),
     ],
 )
 def test_canonical_layout_gate(kv_cache_groups, certified):
