@@ -11,7 +11,7 @@ import torch.nn as nn
 import vllm.foundation.system.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.foundation.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,

@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.distributed import (
+from vllm.backends.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )

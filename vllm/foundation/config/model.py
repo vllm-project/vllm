@@ -1562,7 +1562,7 @@ class ModelConfig:
     def get_layers_start_end_indices(
         self, parallel_config: ParallelConfig
     ) -> tuple[int, int]:
-        from vllm.distributed.utils import get_pp_indices
+        from vllm.backends.distributed.utils import get_pp_indices
 
         total_num_hidden_layers = self.get_total_num_hidden_layers()
 

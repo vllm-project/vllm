@@ -289,7 +289,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     from flashinfer.autotuner import AutoTuner, set_autotune_process_group
 
     import vllm.foundation.utilities.flashinfer as fi_utils
-    from vllm.distributed.parallel_state import get_world_group
+    from vllm.backends.distributed.parallel_state import get_world_group
 
     world = get_world_group()
     is_leader = world.rank_in_group == 0

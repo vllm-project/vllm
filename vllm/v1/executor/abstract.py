@@ -9,9 +9,9 @@ from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import VllmConfig
-from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+from vllm.backends.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
+from vllm.backends.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
 from vllm.foundation.observability.logger import init_logger
@@ -26,7 +26,7 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+    from vllm.backends.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 
 logger = init_logger(__name__)
 

@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.distributed.ec_transfer.ec_transfer_state import (
-    ensure_ec_transfer_initialized,
-    ensure_ec_transfer_shutdown,
-    get_ec_transfer,
-    has_ec_transfer,
-)
+"""Compatibility shim: vllm.distributed/ec_transfer/ -> vllm.backends.distributed.ec_transfer (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-__all__ = [
-    "get_ec_transfer",
-    "ensure_ec_transfer_initialized",
-    "ensure_ec_transfer_shutdown",
-    "has_ec_transfer",
-]
+_real = _importlib.import_module("vllm.backends.distributed.ec_transfer")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

@@ -4,7 +4,7 @@
 
 from dataclasses import dataclass, field
 
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )

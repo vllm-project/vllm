@@ -34,7 +34,7 @@ from vllm.foundation.config.load import (
     DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     LoadConfig,
 )
-from vllm.distributed import get_tensor_model_parallel_rank, get_world_group
+from vllm.backends.distributed import get_tensor_model_parallel_rank, get_world_group
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,

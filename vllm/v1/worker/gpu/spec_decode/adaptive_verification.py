@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 import vllm.foundation.system.envs as envs
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.backends.distributed.parallel_state import get_tp_group
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import AttentionCGSupport

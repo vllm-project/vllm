@@ -35,7 +35,7 @@ import torch
 import vllm.foundation.system.envs as envs
 from vllm.backends.compiler.monitor import validate_cudagraph_capturing_enabled
 from vllm.foundation.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
+from vllm.backends.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
     BatchDescriptor,
     get_forward_context,

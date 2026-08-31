@@ -37,8 +37,8 @@ from transformers.conversion_mapping import (
 
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config.utils import getattr_iter
-from vllm.distributed import get_pp_group, get_tp_group
-from vllm.distributed.utils import get_pp_indices
+from vllm.backends.distributed import get_pp_group, get_tp_group
+from vllm.backends.distributed.utils import get_pp_indices
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import (
     Attention,

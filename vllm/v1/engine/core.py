@@ -23,7 +23,7 @@ import zmq
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import ParallelConfig, VllmConfig
 from vllm.foundation.config.pooler import POOLER_CONFIG_LOG_FIELDS
-from vllm.distributed import (
+from vllm.backends.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
@@ -2035,7 +2035,7 @@ class DPEngineCoreProc(EngineCoreProc):
         self.pending_pause = False
         self.ignore_start_dp_wave = False
 
-        from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
+        from vllm.backends.distributed.elastic_ep.elastic_state import ElasticEPScalingState
 
         self.eep_scaling_state: ElasticEPScalingState | None = None
 
@@ -2292,7 +2292,7 @@ class DPEngineCoreProc(EngineCoreProc):
     ) -> str:
         from copy import deepcopy
 
-        from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
+        from vllm.backends.distributed.elastic_ep.elastic_state import ElasticEPScalingState
 
         new_parallel_config = deepcopy(self.vllm_config.parallel_config)
         old_dp_size = new_parallel_config.data_parallel_size
@@ -2383,7 +2383,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 socket.send_multipart(encoder.encode(outputs))
 
     def _eep_scale_up_before_kv_init(self):
-        from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
+        from vllm.backends.distributed.elastic_ep.elastic_state import ElasticEPScalingState
 
         self.ignore_start_dp_wave = True
         state = ElasticEPScalingState(

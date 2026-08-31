@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Defines the base type for KV cache connectors."""
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+"""Compatibility shim: vllm.distributed/kv_transfer/kv_connector/base -> vllm.backends.distributed.kv_transfer.kv_connector.base (sys.modules alias)."""
+import importlib
+import sys
 
-KVConnectorBase = KVConnectorBase_V1
-KVConnectorBaseType = KVConnectorBase_V1
-
-__all__ = ["KVConnectorBase", "KVConnectorBaseType"]
+_real = importlib.import_module("vllm.backends.distributed.kv_transfer.kv_connector.base")
+sys.modules[__name__] = _real

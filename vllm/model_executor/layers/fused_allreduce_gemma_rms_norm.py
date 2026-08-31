@@ -16,8 +16,8 @@ numerically identical to the unfused model path.
 
 import torch
 
-from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
-from vllm.distributed.parallel_state import (
+from vllm.backends.distributed.communication_op import tensor_model_parallel_all_reduce
+from vllm.backends.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tp_group,
@@ -33,7 +33,7 @@ try:
     from vllm.backends.compiler.passes.fusion.allreduce_rms_fusion import (
         flashinfer_trtllm_fused_allreduce_norm,
     )
-    from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+    from vllm.backends.distributed.device_communicators.flashinfer_all_reduce import (
         flashinfer_comm,
         get_fi_ar_workspace,
     )

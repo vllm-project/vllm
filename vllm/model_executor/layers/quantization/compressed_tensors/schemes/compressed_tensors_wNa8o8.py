@@ -13,7 +13,7 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.compressors.pack_quantized.helpers import pack_to_int32
 
-from vllm.distributed.utils import verify_group_size_divides_partition
+from vllm.backends.distributed.utils import verify_group_size_divides_partition
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,

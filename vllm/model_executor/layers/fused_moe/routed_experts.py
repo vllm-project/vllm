@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import torch
 
-from vllm.distributed.eplb.eplb_state import EplbState
+from vllm.backends.distributed.eplb.eplb_state import EplbState
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.config import (

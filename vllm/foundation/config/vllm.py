@@ -1560,7 +1560,7 @@ class VllmConfig:
                 and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
             ):
                 # Lazy import to avoid circular dependencies
-                from vllm.distributed.kv_transfer.kv_connector.factory import (
+                from vllm.backends.distributed.kv_transfer.kv_connector.factory import (
                     KVConnectorFactory,
                 )
 
@@ -1812,7 +1812,7 @@ class VllmConfig:
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
             # Auto-disable HMA only when the connector config does not support it.
             if self.kv_transfer_config is not None:
-                from vllm.distributed.kv_transfer.kv_connector.factory import (
+                from vllm.backends.distributed.kv_transfer.kv_connector.factory import (
                     KVConnectorFactory,
                 )
 
@@ -2225,7 +2225,7 @@ class VllmConfig:
 
             max_size: int | None = None
             if rocm_aiter_ops.is_custom_all_reduce_enabled():
-                from vllm.distributed.device_communicators.aiter_custom_all_reduce import (  # noqa: E501
+                from vllm.backends.distributed.device_communicators.aiter_custom_all_reduce import (  # noqa: E501
                     AiterCustomAllreduce,
                 )
 

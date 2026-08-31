@@ -46,7 +46,7 @@ from transformers import BatchFeature
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.distributed import (
+from vllm.backends.distributed import (
     divide,
     get_pp_group,
     get_tensor_model_parallel_world_size,

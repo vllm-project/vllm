@@ -27,11 +27,11 @@ import torch
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import VllmConfig
-from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
-from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
-from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-from vllm.distributed.parallel_state import (
+from vllm.backends.distributed import destroy_distributed_environment, destroy_model_parallel
+from vllm.backends.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+from vllm.backends.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
+from vllm.backends.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.backends.distributed.parallel_state import (
     get_dcp_group,
     get_dp_group,
     get_ep_group,

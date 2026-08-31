@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vllm.foundation.config import ModelConfig, VllmConfig
-from vllm.distributed.weight_transfer.base import (
+from vllm.backends.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )

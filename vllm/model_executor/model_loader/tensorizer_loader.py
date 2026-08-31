@@ -119,7 +119,7 @@ class TensorizerLoader(BaseModelLoader):
         self._verify_config(model_config, parallel_config)
 
         if parallel_config.tensor_parallel_size > 1:
-            from vllm.distributed import get_tensor_model_parallel_rank
+            from vllm.backends.distributed import get_tensor_model_parallel_rank
 
             assert self.tensorizer_config.tensorizer_uri is not None
             self.tensorizer_config.tensorizer_uri = (

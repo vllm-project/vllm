@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.foundation.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.backends.distributed.parallel_state import get_dp_group
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,

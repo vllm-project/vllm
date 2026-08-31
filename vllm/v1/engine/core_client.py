@@ -1693,7 +1693,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             self._apply_ready_response(payload)
 
     def _setup_elastic_ep_reconfig_bootstrap(self) -> None:
-        from vllm.distributed.utils import create_tcp_store
+        from vllm.backends.distributed.utils import create_tcp_store
         from vllm.foundation.utilities.network_utils import get_open_ports_list
 
         parallel_config = self.vllm_config.parallel_config

@@ -8,8 +8,8 @@ from collections.abc import Iterable
 import torch
 import torch.nn as nn
 
-from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.distributed.utils import divide
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.distributed.utils import divide
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer

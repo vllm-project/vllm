@@ -14,7 +14,7 @@ from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn

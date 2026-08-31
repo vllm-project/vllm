@@ -27,7 +27,7 @@ import torch
 from torch import nn
 from torch.nn.parameter import Parameter
 
-from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.backends.distributed import get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.utils import set_weight_attrs
 

@@ -12,13 +12,13 @@ import torch.nn as nn
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.kernel import MEGA_MOE_BACKENDS
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.backends.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (

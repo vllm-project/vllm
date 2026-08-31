@@ -44,8 +44,8 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
-from vllm.distributed import utils as dist_utils
+from vllm.backends.distributed import parallel_state, tensor_model_parallel_all_gather
+from vllm.backends.distributed import utils as dist_utils
 from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU

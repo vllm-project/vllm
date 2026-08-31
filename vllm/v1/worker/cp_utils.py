@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed import get_dcp_group
+from vllm.backends.distributed import get_dcp_group
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_prefills_and_extends

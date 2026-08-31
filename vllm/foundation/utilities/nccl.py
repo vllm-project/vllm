@@ -85,7 +85,7 @@ def find_nccl_library_paths() -> list[str] | None:
 
 def query_nccl_gin_type(group: torch.distributed.ProcessGroup) -> int | None:
     """Return the GIN type for an initialized group, or ``None`` on failure."""
-    from vllm.distributed.device_communicators.pynccl_wrapper import (
+    from vllm.backends.distributed.device_communicators.pynccl_wrapper import (
         NCCL_COMM_PROPERTIES_LAYOUT_VERSION,
         NCCLLibrary,
         ncclCommProperties,

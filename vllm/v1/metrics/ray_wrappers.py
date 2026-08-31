@@ -3,7 +3,7 @@
 import copy
 import time
 
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorProm
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorProm
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.perf import PerfMetricsProm
 from vllm.v1.spec_decode.metrics import SpecDecodingProm

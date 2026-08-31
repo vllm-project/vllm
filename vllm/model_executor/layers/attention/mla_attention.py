@@ -225,7 +225,7 @@ from vllm.foundation.config import (
     get_current_vllm_config,
 )
 from vllm.foundation.config.cache import CacheDType
-from vllm.distributed.parallel_state import (
+from vllm.backends.distributed.parallel_state import (
     get_dcp_group,
     get_tp_group,
     is_global_first_rank,

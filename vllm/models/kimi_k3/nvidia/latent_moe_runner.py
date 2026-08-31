@@ -7,7 +7,7 @@ import torch
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import get_current_vllm_config
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     tensor_model_parallel_all_reduce,
 )

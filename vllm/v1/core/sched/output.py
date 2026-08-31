@@ -13,8 +13,8 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
-    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+    from vllm.backends.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
+    from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
     from vllm.frontend.processing.pooling_params import PoolingParams

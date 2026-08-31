@@ -731,7 +731,7 @@ class JitWarmupRegistry:
         """Expand registrations and compile each wrapper/key pair once."""
         from tqdm import tqdm
 
-        from vllm.distributed import is_global_first_rank
+        from vllm.backends.distributed import is_global_first_rank
 
         kernel_items: list[tuple[VllmJitKernel[Any], dict[Any, None]]] = []
         for kernel, registrations in self._registrations.items():

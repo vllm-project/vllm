@@ -1,20 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.distributed.kv_transfer.kv_transfer_state import (
-    KVConnectorBaseType,
-    ensure_kv_transfer_initialized,
-    ensure_kv_transfer_shutdown,
-    get_kv_transfer_group,
-    has_kv_transfer_group,
-    is_v1_kv_transfer_group,
-)
+"""Compatibility shim: vllm.distributed/kv_transfer/ -> vllm.backends.distributed.kv_transfer (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-__all__ = [
-    "get_kv_transfer_group",
-    "has_kv_transfer_group",
-    "is_v1_kv_transfer_group",
-    "ensure_kv_transfer_initialized",
-    "ensure_kv_transfer_shutdown",
-    "KVConnectorBaseType",
-]
+_real = _importlib.import_module("vllm.backends.distributed.kv_transfer")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

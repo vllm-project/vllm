@@ -11,8 +11,8 @@ import numpy as np
 
 import vllm.backends.platform
 from vllm.foundation.config import ParallelConfig
-from vllm.distributed import get_pp_group
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.backends.distributed import get_pp_group
+from vllm.backends.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
 from vllm.sequence import IntermediateTensors

@@ -18,8 +18,8 @@ from vllm.backends.compiler.passes.fusion.rms_quant_fusion import (
 )
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.utils import Range
-from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
-from vllm.distributed.parallel_state import (
+from vllm.backends.distributed import get_tp_group, tensor_model_parallel_all_reduce
+from vllm.backends.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -177,7 +177,7 @@ def _select_flashinfer_allreduce_use_oneshot(
 
 
 if flashinfer_comm is not None:
-    from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+    from vllm.backends.distributed.device_communicators.flashinfer_all_reduce import (
         destroy_fi_ar_workspace,
         get_fi_ar_quant_workspace,
         get_fi_ar_workspace,

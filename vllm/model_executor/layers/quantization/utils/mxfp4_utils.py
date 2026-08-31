@@ -21,7 +21,7 @@ def should_use_cdna4_mx_scale_swizzle() -> bool:
     be off. Used by both the weight-load swizzle in `_swizzle_mxfp4` and
     the kernel-argument gate in `aiter_mxfp4_w4a8_moe`; they must agree.
     """
-    from vllm.distributed import get_tensor_model_parallel_world_size
+    from vllm.backends.distributed import get_tensor_model_parallel_world_size
     from vllm.backends.platform.rocm import on_gfx950
 
     return on_gfx950() and get_tensor_model_parallel_world_size() <= 2

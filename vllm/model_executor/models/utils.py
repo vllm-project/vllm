@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch.nn.modules.module import register_module_module_registration_hook
 
 from vllm.foundation.config import VllmConfig
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -845,8 +845,8 @@ def make_layers(
     Returns:
         Tuple of (start_layer, end_layer, modules).
     """
-    from vllm.distributed.parallel_state import get_pp_group
-    from vllm.distributed.utils import get_pp_indices
+    from vllm.backends.distributed.parallel_state import get_pp_group
+    from vllm.backends.distributed.utils import get_pp_indices
     from vllm.model_executor.offloader import get_offloader
 
     start_layer, end_layer = get_pp_indices(

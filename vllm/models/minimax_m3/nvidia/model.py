@@ -21,7 +21,7 @@ from transformers import PretrainedConfig
 from vllm import _custom_ops as ops
 from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
 from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.backends.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import Attention

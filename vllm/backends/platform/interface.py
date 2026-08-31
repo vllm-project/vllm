@@ -1054,7 +1054,7 @@ class Platform:
         """
         Get device specific communicator class for distributed communication.
         """
-        return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
+        return "vllm.backends.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
     def is_integrated_gpu(cls, device_id: int = 0) -> bool:

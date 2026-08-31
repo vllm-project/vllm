@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.foundation.config import ModelConfig
-from vllm.distributed.eplb.eplb_state import EplbState
+from vllm.backends.distributed.eplb.eplb_state import EplbState
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     get_mixture_of_experts_model,

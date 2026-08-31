@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from vllm.distributed.weight_transfer.base import (
+from vllm.backends.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )

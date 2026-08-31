@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import torch
 from torch import fx, nn
 
-from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.backends.distributed import tensor_model_parallel_all_gather
 from vllm.model_executor.layers.fused_moe import GateLinear
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.transformers.fx_utils import (

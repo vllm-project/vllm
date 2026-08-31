@@ -7,7 +7,7 @@ import torch
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,

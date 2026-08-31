@@ -9,7 +9,7 @@ import torch
 
 import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
-from vllm.distributed.utils import verify_group_size_divides_partition
+from vllm.backends.distributed.utils import verify_group_size_divides_partition
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig

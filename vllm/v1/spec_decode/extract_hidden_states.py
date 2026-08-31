@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.foundation.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
-from vllm.distributed.eplb.eplb_state import EplbState
+from vllm.backends.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model

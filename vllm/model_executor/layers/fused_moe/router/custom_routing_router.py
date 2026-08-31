@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.backends.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 

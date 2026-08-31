@@ -2028,10 +2028,10 @@ class rocm_aiter_ops:
         """Return the TP device communicator's AITER custom-allreduce if it has
         one, return None otherwise
         """
-        from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
+        from vllm.backends.distributed.device_communicators.aiter_custom_all_reduce import (
             AiterCustomAllreduce,
         )
-        from vllm.distributed.parallel_state import get_tp_group
+        from vllm.backends.distributed.parallel_state import get_tp_group
 
         device_comm = get_tp_group().device_communicator
         aiter_ar_comm = getattr(device_comm, "aiter_ar_comm", None)

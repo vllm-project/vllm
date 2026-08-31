@@ -29,7 +29,7 @@ from vllm.foundation.config import (
     get_current_vllm_config_or_none,
 )
 from vllm.foundation.config.cache import CacheDType
-from vllm.distributed.parallel_state import get_dcp_group
+from vllm.backends.distributed.parallel_state import get_dcp_group
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,

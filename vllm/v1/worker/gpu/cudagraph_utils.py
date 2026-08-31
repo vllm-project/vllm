@@ -20,8 +20,8 @@ from vllm.backends.compiler.counter import compilation_counter
 from vllm.backends.compiler.cuda_graph import CUDAGraphWrapper
 from vllm.foundation.config import VllmConfig, set_current_vllm_config
 from vllm.foundation.config.compilation import CUDAGraphMode
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
-from vllm.distributed.parallel_state import (
+from vllm.backends.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
+from vllm.backends.distributed.parallel_state import (
     get_pp_group,
     graph_capture,
     is_global_first_rank,

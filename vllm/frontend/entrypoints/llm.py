@@ -28,7 +28,7 @@ from vllm.foundation.config.model import (
     TokenizerMode,
 )
 from vllm.foundation.config.quantization import QuantizationConfigArgs
-from vllm.distributed.weight_transfer.base import (
+from vllm.backends.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )

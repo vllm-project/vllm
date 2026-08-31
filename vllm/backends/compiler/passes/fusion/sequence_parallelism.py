@@ -14,8 +14,8 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 import vllm.backends.compute.ir.ops
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.utils import Range
-from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
-from vllm.distributed.parallel_state import (
+from vllm.backends.distributed import get_tp_group, tensor_model_parallel_all_reduce
+from vllm.backends.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )

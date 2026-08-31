@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config, replace
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.backends.distributed.parallel_state import get_pp_group
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.foundation.utilities.torch_utils import current_stream

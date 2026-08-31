@@ -58,7 +58,7 @@ from vllm.foundation.config import (
     get_layers_from_vllm_config,
 )
 from vllm.foundation.config.cache import CacheDType
-from vllm.distributed.parallel_state import get_dcp_group
+from vllm.backends.distributed.parallel_state import get_dcp_group
 from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform.interface import DeviceCapability
 from vllm.foundation.utilities.math_utils import cdiv, round_up
@@ -454,7 +454,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         )
 
         try:
-            from vllm.distributed.parallel_state import get_dcp_group
+            from vllm.backends.distributed.parallel_state import get_dcp_group
 
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group

@@ -8,8 +8,8 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from vllm.foundation.config import VllmConfig
-from vllm.distributed.kv_events import KVCacheEvent
-from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
+from vllm.backends.distributed.kv_events import KVCacheEvent
+from vllm.backends.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool

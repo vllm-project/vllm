@@ -1,19 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1,
-    KVConnectorRole,
-    SupportsHMA,
-    supports_hma,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import (  # noqa: E501
-    DecodeBenchConnector,
-)
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-__all__ = [
-    "KVConnectorRole",
-    "KVConnectorBase_V1",
-    "supports_hma",
-    "SupportsHMA",
-    "DecodeBenchConnector",
-]
+"""Compatibility shim: vllm.distributed/kv_transfer/kv_connector/v1/ -> vllm.backends.distributed.kv_transfer.kv_connector.v1 (lazy __getattr__ delegation)."""
+import importlib as _importlib
+
+_real = _importlib.import_module("vllm.backends.distributed.kv_transfer.kv_connector.v1")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

@@ -9,14 +9,14 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.distributed.parallel_state import in_the_same_node_as
+from vllm.backends.distributed.parallel_state import in_the_same_node_as
 from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
 
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
-    from vllm.distributed.parallel_state import GroupCoordinator
+    from vllm.backends.distributed.parallel_state import GroupCoordinator
 
 logger = init_logger(__name__)
 

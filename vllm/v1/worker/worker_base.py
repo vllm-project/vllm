@@ -9,7 +9,7 @@ import torch.nn as nn
 
 import vllm.backends.compute.ir
 from vllm.foundation.config import VllmConfig, set_current_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
+from vllm.backends.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY

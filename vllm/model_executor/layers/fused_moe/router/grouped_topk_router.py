@@ -7,7 +7,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm import envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.backends.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,

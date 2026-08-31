@@ -27,9 +27,9 @@ from torch import nn
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.foundation.config.parallel import ParallelConfig
-from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
-from vllm.distributed.communication_op import tensor_model_parallel_all_gather
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.backends.distributed import get_ep_group, get_tensor_model_parallel_world_size
+from vllm.backends.distributed.communication_op import tensor_model_parallel_all_gather
+from vllm.backends.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (

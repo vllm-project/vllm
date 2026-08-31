@@ -151,7 +151,7 @@ class XPUWorker(Worker):
             )
 
         if is_start and self.profiler is None:
-            from vllm.distributed.utils import get_worker_rank_suffix
+            from vllm.backends.distributed.utils import get_worker_rank_suffix
 
             rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
             trace_name = (

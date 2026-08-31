@@ -11,7 +11,7 @@ import torch
 from typing_extensions import override
 
 import vllm.foundation.system.envs as envs
-from vllm.distributed.device_communicators.shm_object_storage import (
+from vllm.backends.distributed.device_communicators.shm_object_storage import (
     MsgpackSerde,
     SingleWriterShmObjectStorage,
     SingleWriterShmRingBuffer,

@@ -4,7 +4,7 @@ import inspect
 from collections.abc import Callable
 from functools import wraps
 
-from vllm.distributed.kv_transfer import (
+from vllm.backends.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
     is_v1_kv_transfer_group,

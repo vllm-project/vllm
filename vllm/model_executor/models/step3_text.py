@@ -11,7 +11,7 @@ from torch import nn
 
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )

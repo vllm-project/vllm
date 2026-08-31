@@ -10,8 +10,8 @@ from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY, MultiModalR
 if TYPE_CHECKING:
     from vllm.foundation.config import VllmConfig
     from vllm.foundation.config.kv_events import KVEventsConfig
-    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
-    from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+    from vllm.backends.distributed.ec_transfer.ec_connector.base import ECConnectorBase
+    from vllm.backends.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.kv_cache_interface import KVCacheConfig

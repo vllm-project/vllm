@@ -21,7 +21,7 @@ from torch import nn
 
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import VllmConfig, replace, set_current_vllm_config
-from vllm.distributed import get_pp_group
+from vllm.backends.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )

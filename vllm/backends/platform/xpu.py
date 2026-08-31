@@ -471,7 +471,7 @@ class XPUPlatform(Platform):
                 "xccl is not enabled in this torch build, communication"
                 " is not available."
             )
-        return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
+        return "vllm.backends.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
 
     @classmethod
     def supports_fp8(cls) -> bool:

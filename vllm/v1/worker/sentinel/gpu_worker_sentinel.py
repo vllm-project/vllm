@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, cast
 import torch
 
 from vllm.foundation.config import set_current_vllm_config
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_dp_group,
     stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,

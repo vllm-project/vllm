@@ -9,7 +9,7 @@ from transformers import PretrainedConfig
 
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.backends.distributed import tensor_model_parallel_all_gather
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )

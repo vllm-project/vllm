@@ -7,8 +7,8 @@ import torch
 from torch import nn
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
-from vllm.distributed.parallel_state import (
+from vllm.backends.distributed.communication_op import tensor_model_parallel_all_reduce
+from vllm.backends.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tp_group,

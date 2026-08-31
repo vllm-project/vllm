@@ -12,7 +12,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.foundation.config import ModelConfig, MultiModalConfig, get_current_vllm_config_or_none
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,

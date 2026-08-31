@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.distributed.parallel_state import (
+from vllm.backends.distributed.parallel_state import (
     get_pcp_group,
     get_tp_group,
 )

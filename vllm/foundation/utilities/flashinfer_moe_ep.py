@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from vllm.foundation.config.kernel import FLASHINFER_MOE_EP_BACKENDS
-from vllm.distributed import get_ep_group
+from vllm.backends.distributed import get_ep_group
 from vllm.backends.platform import current_platform
 
 if TYPE_CHECKING:

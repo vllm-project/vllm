@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.distributed.utils import verify_group_size_divides_partition
+from vllm.backends.distributed.utils import verify_group_size_divides_partition
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,

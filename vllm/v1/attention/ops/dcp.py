@@ -13,7 +13,7 @@ import torch.distributed as dist
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import VllmConfig
-from vllm.distributed import get_dcp_group
+from vllm.backends.distributed import get_dcp_group
 from vllm.foundation.observability.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.cp_common import (
@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
-    from vllm.distributed.parallel_state import GroupCoordinator
+    from vllm.backends.distributed.parallel_state import GroupCoordinator
 
 
 # LSE/output combine

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.backends.distributed.parallel_state import get_pp_group
 from vllm.backends.platform import current_platform
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch

@@ -28,7 +28,7 @@ from transformers import AutoModel
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.backends.distributed.parallel_state import get_tp_group
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor

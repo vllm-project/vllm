@@ -12,7 +12,7 @@ from torch.distributed import TCPStore
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import VllmConfig
-from vllm.distributed.device_communicators.shm_broadcast import (
+from vllm.backends.distributed.device_communicators.shm_broadcast import (
     Handle,
     MessageQueue,
 )
@@ -356,7 +356,7 @@ class RayExecutorV2(MultiprocExecutor):
         wt_cfg = self.vllm_config.weight_transfer_config
         extra_actor_options: dict[str, object] = {}
         if wt_cfg is not None and wt_cfg.backend == "sharded_rdt":
-            from vllm.distributed.weight_transfer.sharded_rdt_common import (
+            from vllm.backends.distributed.weight_transfer.sharded_rdt_common import (
                 check_ray_rdt_version,
             )
 

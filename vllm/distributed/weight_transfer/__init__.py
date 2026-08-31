@@ -1,36 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Weight transfer engines for syncing model weights from trainers
-to inference workers.
-"""
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.distributed.weight_transfer.base import (
-    ModuleSource,
-    ParamMeta,
-    TrainerWeightTransferEngine,
-    VLLMWeightSyncClient,
-    WeightSource,
-    WeightTransferEngine,
-)
-from vllm.distributed.weight_transfer.clients import (
-    HTTPVLLMWeightSyncClient,
-    RayVLLMWeightSyncClient,
-)
-from vllm.distributed.weight_transfer.factory import (
-    WeightTransferEngineFactory,
-    WeightTransferTrainerFactory,
-)
+"""Compatibility shim: vllm.distributed/weight_transfer/ -> vllm.backends.distributed.weight_transfer (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-__all__ = [
-    "WeightTransferEngine",
-    "WeightTransferEngineFactory",
-    "TrainerWeightTransferEngine",
-    "WeightTransferTrainerFactory",
-    "VLLMWeightSyncClient",
-    "HTTPVLLMWeightSyncClient",
-    "RayVLLMWeightSyncClient",
-    "ParamMeta",
-    "WeightSource",
-    "ModuleSource",
-]
+_real = _importlib.import_module("vllm.backends.distributed.weight_transfer")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

@@ -4,7 +4,7 @@ from typing import cast
 
 import torch
 
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     tensor_model_parallel_all_reduce,
 )

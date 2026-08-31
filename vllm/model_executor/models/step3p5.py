@@ -12,7 +12,7 @@ from torch.nn.parameter import Parameter
 
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_dp_group,
     get_ep_group,
     get_pp_group,

@@ -199,7 +199,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     def determine_available_memory(self) -> list[int]:  # in bytes
         # we need to get the min across all ranks.
         memory = super().determine_available_memory()
-        from vllm.distributed.parallel_state import get_world_group
+        from vllm.backends.distributed.parallel_state import get_world_group
 
         cpu_group = get_world_group().cpu_group
         memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)

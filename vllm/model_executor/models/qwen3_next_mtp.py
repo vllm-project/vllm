@@ -9,7 +9,7 @@ from torch import nn
 
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import VllmConfig
-from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
+from vllm.backends.distributed import get_pp_group, tensor_model_parallel_all_gather
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,

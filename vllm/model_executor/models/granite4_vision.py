@@ -25,7 +25,7 @@ from transformers.models.llava_next.modeling_llava_next import (
 
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, VllmConfig
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.backends.distributed.parallel_state import get_pp_group
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig

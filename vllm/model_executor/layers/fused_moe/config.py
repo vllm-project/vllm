@@ -8,7 +8,7 @@ import torch
 
 from vllm.foundation.config import ParallelConfig, SchedulerConfig
 from vllm.foundation.config.kernel import MoEBackend
-from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
+from vllm.backends.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (

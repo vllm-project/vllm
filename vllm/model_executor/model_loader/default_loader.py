@@ -381,7 +381,7 @@ class DefaultModelLoader(BaseModelLoader):
         # EP size/rank computation mirrors FusedMoEParallelConfig.make():
         #   ep_size = dp_size * pcp_size * tp_size (flattened)
         #   ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
-        from vllm.distributed import (
+        from vllm.backends.distributed import (
             get_dp_group,
             get_pcp_group,
             get_tensor_model_parallel_rank,

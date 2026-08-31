@@ -11,7 +11,7 @@ from torch import nn
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.cache import CacheDType
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,

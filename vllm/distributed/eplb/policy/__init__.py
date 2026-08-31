@@ -1,19 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import get_args
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.foundation.config.parallel import EPLBPolicyOption
+"""Compatibility shim: vllm.distributed/eplb/policy/ -> vllm.backends.distributed.eplb.policy (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-from .abstract import AbstractEplbPolicy
-from .default import DefaultEplbPolicy
+_real = _importlib.import_module("vllm.backends.distributed.eplb.policy")
 
-EPLB_POLICIES = {"default": DefaultEplbPolicy}
+def __getattr__(name):
+    return getattr(_real, name)
 
-# Ensure that the EPLB_POLICIES keys match the EPLBPolicyOption values
-assert set(EPLB_POLICIES.keys()) == set(get_args(EPLBPolicyOption))
+def __dir__():
+    return dir(_real)
 
-__all__ = [
-    "AbstractEplbPolicy",
-    "DefaultEplbPolicy",
-    "EPLB_POLICIES",
-]
+__all__ = getattr(_real, "__all__", [])

@@ -67,7 +67,7 @@ class EncoderRunner:
         manager = self.cudagraph_manager
         assert manager is not None
 
-        from vllm.distributed.parallel_state import graph_capture
+        from vllm.backends.distributed.parallel_state import graph_capture
         from vllm.backends.platform import current_platform
 
         with graph_capture(device=self.device):

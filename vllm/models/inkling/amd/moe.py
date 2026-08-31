@@ -28,7 +28,7 @@ from torch.nn.parameter import Parameter
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import get_current_vllm_config
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_dp_group,
     get_pcp_group,
     get_tensor_model_parallel_rank,

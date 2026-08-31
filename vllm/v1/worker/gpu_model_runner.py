@@ -39,13 +39,13 @@ from vllm.foundation.config import (
 from vllm.foundation.config.cache import CacheConfig
 from vllm.foundation.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.foundation.config.model import PROCESSED_LOGPROBS_MODES
-from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
-from vllm.distributed.eplb.eplb_state import EplbState
-from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.kv_transfer.kv_connector.utils import (
+from vllm.backends.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
+from vllm.backends.distributed.eplb.eplb_state import EplbState
+from vllm.backends.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.backends.distributed.kv_transfer.kv_connector.utils import (
     copy_kv_blocks,
 )
-from vllm.distributed.parallel_state import (
+from vllm.backends.distributed.parallel_state import (
     GraphCaptureContext,
     get_dcp_group,
     get_pp_group,
@@ -6920,7 +6920,7 @@ class GPUModelRunner(
         set_cudagraph_capturing_enabled(True)
 
         # Setup torch profiler for graph capture traces (conditional)
-        from vllm.distributed.parallel_state import get_world_group
+        from vllm.backends.distributed.parallel_state import get_world_group
 
         local_rank = get_world_group().local_rank
         enable_profiler = (

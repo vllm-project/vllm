@@ -16,7 +16,7 @@ from vllm.foundation.config import (
     VllmConfig,
     get_current_vllm_config,
 )
-from vllm.distributed import (
+from vllm.backends.distributed import (
     divide,
 )
 from vllm.forward_context import ForwardContext, get_forward_context

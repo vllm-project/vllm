@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Backward-compatible re-export of NixlPullConnectorWorker."""
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
-    NixlPullConnectorWorker,
-)
+"""Compatibility shim: vllm.distributed/kv_transfer/kv_connector/v1/nixl/worker -> vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.worker (sys.modules alias)."""
+import importlib
+import sys
 
-# Backward compatibility: NixlConnectorWorker is the pull-based worker.
-NixlConnectorWorker = NixlPullConnectorWorker
-
-
-__all__ = ["NixlConnectorWorker", "NixlPullConnectorWorker"]
+_real = importlib.import_module("vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.worker")
+sys.modules[__name__] = _real

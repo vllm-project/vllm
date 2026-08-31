@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.foundation.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.backends.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )

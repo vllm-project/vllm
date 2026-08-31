@@ -4,7 +4,7 @@
 import torch.nn as nn
 
 from vllm.foundation.config import ModelConfig, VllmConfig, replace
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.backends.distributed.parallel_state import get_pp_group
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 

@@ -106,7 +106,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
         )
         return False
 
-    from vllm.distributed.parallel_state import get_world_group
+    from vllm.backends.distributed.parallel_state import get_world_group
 
     world = get_world_group()
     is_leader = world.rank_in_group == 0

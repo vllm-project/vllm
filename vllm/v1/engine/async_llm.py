@@ -14,7 +14,7 @@ import torch
 import vllm.foundation.system.envs as envs
 from vllm import TokensPrompt
 from vllm.foundation.config import VllmConfig
-from vllm.distributed.weight_transfer.base import (
+from vllm.backends.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )

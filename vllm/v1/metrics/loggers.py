@@ -11,7 +11,7 @@ from prometheus_client import Counter, Gauge, Histogram
 import vllm.foundation.system.envs as envs
 from vllm.backends.compiler.cuda_graph import CUDAGraphLogging
 from vllm.foundation.config import SupportsMetricsInfo, VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging,
     KVConnectorProm,
 )

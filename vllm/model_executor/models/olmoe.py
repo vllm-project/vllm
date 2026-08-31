@@ -23,13 +23,13 @@ from torch import nn
 
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import VllmConfig
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.distributed.utils import split_tensor_along_last_dim
+from vllm.backends.distributed.utils import split_tensor_along_last_dim
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory

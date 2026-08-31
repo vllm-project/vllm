@@ -3,7 +3,7 @@
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from vllm.distributed.kv_events import (
+from vllm.backends.distributed.kv_events import (
     MEDIUM_GPU,
     AllBlocksCleared,
     BlockRemoved,

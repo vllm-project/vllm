@@ -43,7 +43,7 @@ from transformers import PretrainedConfig
 
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.backends.distributed import get_pp_group
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import (

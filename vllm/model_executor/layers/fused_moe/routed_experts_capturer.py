@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from vllm.foundation.config import VllmConfig
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.backends.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.backends.platform import current_platform
 from vllm.v1.kv_cache_interface import KVCacheConfig, is_full_attention_spec

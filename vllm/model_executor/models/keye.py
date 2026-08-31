@@ -18,7 +18,7 @@ from transformers.utils import torch_int
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import (

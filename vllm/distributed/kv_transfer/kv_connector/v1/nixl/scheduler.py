@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Backward-compatible re-export of NixlPullConnectorScheduler."""
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
-    NixlPullConnectorScheduler,
-)
+"""Compatibility shim: vllm.distributed/kv_transfer/kv_connector/v1/nixl/scheduler -> vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.scheduler (sys.modules alias)."""
+import importlib
+import sys
 
-# Backward compatibility: NixlConnectorScheduler is the pull-based scheduler.
-NixlConnectorScheduler = NixlPullConnectorScheduler
-
-__all__ = ["NixlConnectorScheduler", "NixlPullConnectorScheduler"]
+_real = importlib.import_module("vllm.backends.distributed.kv_transfer.kv_connector.v1.nixl.scheduler")
+sys.modules[__name__] = _real

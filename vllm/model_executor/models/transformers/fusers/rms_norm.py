@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING
 import torch
 from torch import fx, nn
 
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.distributed.parallel_state import model_parallel_is_initialized
-from vllm.distributed.utils import split_tensor_along_last_dim
+from vllm.backends.distributed.parallel_state import model_parallel_is_initialized
+from vllm.backends.distributed.utils import split_tensor_along_last_dim
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.transformers.fusers.base import BaseFuser
 from vllm.model_executor.models.transformers.fx_utils import (

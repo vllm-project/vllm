@@ -8,7 +8,7 @@ that doesn't fire for models running eager (or under a breakable CUDA graph).
 
 import torch
 
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )

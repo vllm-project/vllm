@@ -9,8 +9,8 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import TYPE_CHECKING
 
 from vllm.foundation.config import VllmConfig
-from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.backends.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.backends.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.v1.outputs import (
     KVConnectorOutput,

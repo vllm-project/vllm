@@ -11,7 +11,7 @@ import numpy
 import torch
 from torch import fx
 
-from vllm.distributed.parallel_state import get_ep_group, get_tp_group
+from vllm.backends.distributed.parallel_state import get_ep_group, get_tp_group
 from vllm.backends.platform import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -81,7 +81,7 @@ def amax_for_moe_activation_quant(
     """
     a_max = a_scale.max().to(torch.float32)
     if enable_eplb:
-        from vllm.distributed.parallel_state import get_ep_group
+        from vllm.backends.distributed.parallel_state import get_ep_group
 
         torch.distributed.all_reduce(
             a_max,

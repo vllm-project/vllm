@@ -8,7 +8,7 @@ from torch import nn
 from vllm import _custom_ops as ops
 from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
 from vllm.foundation.config import VllmConfig
-from vllm.distributed import divide
+from vllm.backends.distributed import divide
 from vllm.forward_context import get_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.linear import (

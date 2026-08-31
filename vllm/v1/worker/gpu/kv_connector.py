@@ -5,12 +5,12 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.foundation.config import VllmConfig
-from vllm.distributed.kv_transfer import (
+from vllm.backends.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
     kv_transfer_state,
 )
-from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.backends.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,

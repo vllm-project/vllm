@@ -9,21 +9,21 @@ from typing import Any
 
 from vllm.backends.compiler.cuda_graph import CUDAGraphStat
 from vllm.foundation.config import KVEventsConfig, VllmConfig
-from vllm.distributed.ec_transfer.ec_connector.base import (
+from vllm.backends.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
     ECConnectorRole,
 )
-from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
-from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
-from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
-from vllm.distributed.kv_transfer.kv_connector.v1 import (
+from vllm.backends.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
+from vllm.backends.distributed.kv_events import EventPublisherFactory, KVEventBatch
+from vllm.backends.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.backends.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsManager,

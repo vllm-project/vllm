@@ -20,7 +20,7 @@ from vllm import envs
 from vllm.foundation.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.backends.platform import current_platform
-from vllm.ray.ray_env import get_env_vars_to_copy
+from vllm.backends.distributed.ray.ray_env import get_env_vars_to_copy
 from vllm.foundation.utilities import numa_utils
 from vllm.foundation.utilities.network_utils import (
     get_open_port,
@@ -458,7 +458,7 @@ class CoreEngineActorManager:
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_elastic_ep:
-            from vllm.distributed.utils import create_tcp_store
+            from vllm.backends.distributed.utils import create_tcp_store
 
             ip = parallel_config.data_parallel_master_ip
             store = create_tcp_store(

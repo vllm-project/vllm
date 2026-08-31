@@ -8,8 +8,8 @@ import torch.nn as nn
 from einops import rearrange
 from transformers import PretrainedConfig
 
-from vllm.distributed import parallel_state
-from vllm.distributed import utils as dist_utils
+from vllm.backends.distributed import parallel_state
+from vllm.backends.distributed import utils as dist_utils
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,

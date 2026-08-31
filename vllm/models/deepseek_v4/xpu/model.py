@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.foundation.config import VllmConfig
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,

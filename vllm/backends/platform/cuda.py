@@ -564,7 +564,7 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return (
-            "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
+            "vllm.backends.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
         )
 
     @classmethod

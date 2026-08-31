@@ -1,39 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from abc import ABC, abstractmethod
+"""Compatibility shim: vllm.distributed/eplb/policy/abstract -> vllm.backends.distributed.eplb.policy.abstract (sys.modules alias)."""
+import importlib
+import sys
 
-import torch
-
-
-class AbstractEplbPolicy(ABC):
-    @classmethod
-    @abstractmethod
-    def rebalance_experts(
-        cls,
-        weight: torch.Tensor,
-        num_replicas: int,
-        num_groups: int,
-        num_nodes: int,
-        num_ranks: int,
-        old_global_expert_indices: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """
-        Entry point for expert-parallelism load balancer.
-
-        Parameters:
-            weight: [layers, num_logical_experts], the load statistics
-                for all logical experts
-            num_replicas: number of physical experts, must be a multiple of
-                `num_ranks`
-            num_groups: number of expert groups
-            num_nodes: number of server nodes
-            num_ranks: number of ranks, must be a multiple of `num_nodes`
-            old_global_expert_indices: [layers, num_logical_experts], the old global
-                expert indices. Used to avoid unnecessary weight copying
-                for experts moving within one rank.
-        Returns:
-            physical_to_logical_map: [layers, num_replicas], the expert
-                index of each replica
-        """
-        raise NotImplementedError
+_real = importlib.import_module("vllm.backends.distributed.eplb.policy.abstract")
+sys.modules[__name__] = _real

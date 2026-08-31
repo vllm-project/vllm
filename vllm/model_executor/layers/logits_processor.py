@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm.foundation.config import get_current_vllm_config
-from vllm.distributed import (
+from vllm.backends.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )

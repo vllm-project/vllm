@@ -8,7 +8,7 @@ from compressed_tensors.quantization import (
     QuantizationStrategy,
 )
 
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,

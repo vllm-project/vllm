@@ -12,7 +12,7 @@ from torch.nn.parameter import Parameter
 from vllm import _custom_ops as ops
 from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
 from vllm.foundation.config import VllmConfig
-from vllm.distributed import divide, get_tensor_model_parallel_rank
+from vllm.backends.distributed import divide, get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.linear import (

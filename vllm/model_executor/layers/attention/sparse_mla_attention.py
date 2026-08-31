@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_dcp_group,
     get_tensor_model_parallel_world_size,
 )

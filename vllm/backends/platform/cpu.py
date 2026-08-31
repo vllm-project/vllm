@@ -531,7 +531,7 @@ class CpuPlatform(Platform):
         """
         Get device specific communicator class for distributed communication.
         """
-        return "vllm.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa
+        return "vllm.backends.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa
 
     @classmethod
     def supports_structured_output(cls) -> bool:

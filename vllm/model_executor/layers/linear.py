@@ -11,7 +11,7 @@ from typing_extensions import TypeIs
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import get_current_vllm_config, get_current_vllm_config_or_none
-from vllm.distributed import (
+from vllm.backends.distributed import (
     divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,

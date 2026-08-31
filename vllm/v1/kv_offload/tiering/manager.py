@@ -28,7 +28,7 @@ from typing import NamedTuple
 import numpy as np
 from typing_extensions import override
 
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.foundation.observability.logger import init_logger

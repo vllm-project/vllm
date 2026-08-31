@@ -21,7 +21,7 @@ from cutlass.cutlass_dsl import dsl_user_op
 from cutlass.utils import get_smem_capacity_in_bytes
 
 from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
-from vllm.distributed import get_tp_group
+from vllm.backends.distributed import get_tp_group
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
 

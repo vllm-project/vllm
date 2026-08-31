@@ -7,8 +7,8 @@ import numpy as np
 import torch
 import torch.distributed
 
-from vllm.distributed.communication_op import tensor_model_parallel_all_gather
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.backends.distributed.communication_op import tensor_model_parallel_all_gather
+from vllm.backends.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.outputs import LogprobsTensors

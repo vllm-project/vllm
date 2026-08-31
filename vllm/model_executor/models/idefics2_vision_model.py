@@ -28,7 +28,7 @@ from transformers.models.idefics2.configuration_idefics2 import (
     Idefics2VisionConfig,
 )
 
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer

@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import GELUActivation
 
-from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.backends.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention

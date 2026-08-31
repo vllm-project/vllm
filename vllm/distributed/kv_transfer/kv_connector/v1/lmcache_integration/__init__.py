@@ -1,20 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
+"""Compatibility shim: vllm.distributed/kv_transfer/kv_connector/v1/lmcache_integration/ -> vllm.backends.distributed.kv_transfer.kv_connector.v1.lmcache_integration (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-from . import multi_process_adapter, vllm_v1_adapter
-from .multi_process_adapter import (
-    LMCacheMPSchedulerAdapter,
-    LMCacheMPWorkerAdapter,
-    LoadStoreOp,
-    ParallelStrategy,
-)
+_real = _importlib.import_module("vllm.backends.distributed.kv_transfer.kv_connector.v1.lmcache_integration")
 
-__all__ = [
-    "vllm_v1_adapter",
-    "multi_process_adapter",
-    "LMCacheMPSchedulerAdapter",
-    "LMCacheMPWorkerAdapter",
-    "LoadStoreOp",
-    "ParallelStrategy",
-]
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

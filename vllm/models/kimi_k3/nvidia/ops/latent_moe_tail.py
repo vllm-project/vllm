@@ -8,7 +8,7 @@ from typing import ClassVar
 import torch
 import torch.distributed as dist
 
-from vllm.distributed import get_tp_group
+from vllm.backends.distributed import get_tp_group
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.warmup.cutedsl_warmup import (
     CuTeDSLCompileUnit,

@@ -32,8 +32,8 @@ from torchvision.transforms import v2
 from transformers.utils import logging
 
 from vllm.foundation.config import VllmConfig
-from vllm.distributed import parallel_state
-from vllm.distributed import utils as dist_utils
+from vllm.backends.distributed import parallel_state
+from vllm.backends.distributed import utils as dist_utils
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm

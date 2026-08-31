@@ -7,7 +7,7 @@ from typing import Any
 import torch
 
 from vllm.foundation.config import get_current_vllm_config
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_ep_group,
 )
 from vllm.foundation.observability.logger import init_logger
@@ -106,7 +106,7 @@ if current_platform.is_cuda_alike():
 
 def get_ep_all2all_manager(eep_stage: bool = False) -> Any:
     if eep_stage:
-        from vllm.distributed.elastic_ep.standby_state import get_standby_ep_group
+        from vllm.backends.distributed.elastic_ep.standby_state import get_standby_ep_group
 
         ep_group = get_standby_ep_group()
         assert ep_group is not None

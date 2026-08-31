@@ -1203,7 +1203,7 @@ def validate_fp8_block_shape(
     block_size: list[int],
 ) -> None:
     """Validate block quantization shapes for tensor parallelism."""
-    from vllm.distributed import get_tensor_model_parallel_world_size
+    from vllm.backends.distributed import get_tensor_model_parallel_world_size
 
     if getattr(layer, "allow_fp8_block_shape_mismatch", False):
         logger.debug(

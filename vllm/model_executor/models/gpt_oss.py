@@ -10,7 +10,7 @@ from transformers import GptOssConfig
 
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, VllmConfig
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_dp_group,
     get_ep_group,
     get_pcp_group,

@@ -34,7 +34,7 @@ try:
         python_create_and_map,
         python_unmap_and_release,
     )
-    from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+    from vllm.backends.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 
     lib_name = find_loaded_library("cumem_allocator")
     libcudart = CudaRTLibrary()

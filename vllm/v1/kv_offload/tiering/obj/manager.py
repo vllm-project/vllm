@@ -7,8 +7,8 @@ import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
-from vllm.distributed.nixl_utils import NixlWrapper as nixl_agent
-from vllm.distributed.nixl_utils import nixl_agent_config
+from vllm.backends.distributed.nixl_utils import NixlWrapper as nixl_agent
+from vllm.backends.distributed.nixl_utils import nixl_agent_config
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.kv_offload.base import (
     Locality,

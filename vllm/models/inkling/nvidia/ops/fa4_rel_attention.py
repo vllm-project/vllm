@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
     WarmupIntRange,

@@ -20,33 +20,33 @@ import vllm.foundation.system.envs as envs
 from vllm.foundation.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.foundation.config.compilation import CompilationMode
 from vllm.backends.platform.device_allocator import get_mem_allocator_instance
-from vllm.distributed import (
+from vllm.backends.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
     set_custom_all_reduce,
 )
-from vllm.distributed.ec_transfer import (
+from vllm.backends.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
     ensure_ec_transfer_shutdown,
 )
-from vllm.distributed.eplb.eplb_utils import override_envs_for_eplb
-from vllm.distributed.kv_transfer import (
+from vllm.backends.distributed.eplb.eplb_utils import override_envs_for_eplb
+from vllm.backends.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     ensure_kv_transfer_shutdown,
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
-from vllm.distributed.parallel_state import (
+from vllm.backends.distributed.parallel_state import (
     Handle,
     checkpoint_prepare_distributed_state,
     checkpoint_restore_distributed_state,
     get_pp_group,
     get_tp_group,
 )
-from vllm.distributed.weight_transfer import (
+from vllm.backends.distributed.weight_transfer import (
     WeightTransferEngine,
     WeightTransferEngineFactory,
 )
@@ -193,7 +193,7 @@ class Worker(WorkerBase):
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
         torch.set_float32_matmul_precision(precision)
 
-        from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
+        from vllm.backends.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
 
         self.elastic_ep_executor = ElasticEPScalingExecutor(self)
         self.worker_sentinel: WorkerSentinel | None = None
@@ -1207,7 +1207,7 @@ class Worker(WorkerBase):
         if is_start:
             profiler_type = self.profiler_config.profiler
             # Generate the trace name by combining prefix with comprehensive rank suffix
-            from vllm.distributed.utils import get_worker_rank_suffix
+            from vllm.backends.distributed.utils import get_worker_rank_suffix
 
             rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
 

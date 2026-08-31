@@ -108,7 +108,7 @@ class ShardedStateLoader(BaseModelLoader):
         self._prepare_weights(model_config.model, model_config.revision)
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        from vllm.distributed import get_tensor_model_parallel_rank
+        from vllm.backends.distributed import get_tensor_model_parallel_rank
 
         model_weights = model_config.model
         if model_weights_override := model_config.model_weights:
@@ -184,7 +184,7 @@ class ShardedStateLoader(BaseModelLoader):
     ) -> None:
         from safetensors.torch import save_file
 
-        from vllm.distributed import get_tensor_model_parallel_rank
+        from vllm.backends.distributed import get_tensor_model_parallel_rank
 
         if pattern is None:
             pattern = ShardedStateLoader.DEFAULT_PATTERN

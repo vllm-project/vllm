@@ -14,7 +14,7 @@ from transformers import BatchFeature
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -1356,7 +1356,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             # Each GPU stores n_experts/tp_size experts
             # Note: Only 3D weights are MoE, 2D weights are standard MLP
             if ".mlp.fc1.weight" in name and loaded_weight.dim() == 3:
-                from vllm.distributed import get_tensor_model_parallel_rank
+                from vllm.backends.distributed import get_tensor_model_parallel_rank
 
                 tp_size = get_tensor_model_parallel_world_size()
                 tp_rank = get_tensor_model_parallel_rank()
@@ -1370,7 +1370,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 name = name.replace(".mlp.fc1.weight", ".mlp.fc1_weight")
 
             if ".mlp.fc2.weight" in name and loaded_weight.dim() == 3:
-                from vllm.distributed import get_tensor_model_parallel_rank
+                from vllm.backends.distributed import get_tensor_model_parallel_rank
 
                 tp_size = get_tensor_model_parallel_world_size()
                 tp_rank = get_tensor_model_parallel_rank()
@@ -1388,7 +1388,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             # tau_wq: [num_heads, qkv_dim] -> [num_heads/tp, qkv_dim/tp]
             # tau_wv: [num_heads, qkv_dim] -> [num_heads/tp, qkv_dim/tp]
             if ".tau_alpha" in name:
-                from vllm.distributed import get_tensor_model_parallel_rank
+                from vllm.backends.distributed import get_tensor_model_parallel_rank
 
                 tp_size = get_tensor_model_parallel_world_size()
                 tp_rank = get_tensor_model_parallel_rank()
@@ -1399,7 +1399,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 loaded_weight = loaded_weight[start:end].contiguous()
 
             if ".tau_wq" in name or ".tau_wv" in name:
-                from vllm.distributed import get_tensor_model_parallel_rank
+                from vllm.backends.distributed import get_tensor_model_parallel_rank
 
                 tp_size = get_tensor_model_parallel_world_size()
                 tp_rank = get_tensor_model_parallel_rank()

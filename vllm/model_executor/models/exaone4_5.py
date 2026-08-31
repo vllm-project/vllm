@@ -32,8 +32,8 @@ from vllm.backends.compiler.decorators import (
     support_torch_compile,
 )
 from vllm.foundation.config import VllmConfig
-from vllm.distributed import parallel_state
-from vllm.distributed import utils as dist_utils
+from vllm.backends.distributed import parallel_state
+from vllm.backends.distributed import utils as dist_utils
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm

@@ -8,7 +8,7 @@ from typing import Any
 import torch
 
 from vllm.foundation.config import VllmConfig
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,

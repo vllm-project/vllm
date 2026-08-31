@@ -9,12 +9,12 @@ import torch.nn.functional as F
 
 from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.foundation.config.parallel import ExpertPlacementStrategy
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_ep_group,
     get_pcp_group,
     tensor_model_parallel_all_reduce,
 )
-from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.backends.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import (
     ForwardContext,
     get_forward_context,

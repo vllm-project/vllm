@@ -59,7 +59,7 @@ from vllm.foundation.config.multimodal import (
     VideoDummyOptions,
     VideoPruningMethod,
 )
-from vllm.distributed import get_pp_group, parallel_state
+from vllm.backends.distributed import get_pp_group, parallel_state
 from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY

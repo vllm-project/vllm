@@ -3,8 +3,8 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.distributed import get_ep_group
-from vllm.distributed.device_communicators.base_device_communicator import (
+from vllm.backends.distributed import get_ep_group
+from vllm.backends.distributed.device_communicators.base_device_communicator import (
     All2AllManagerBase,
 )
 from vllm.forward_context import get_forward_context

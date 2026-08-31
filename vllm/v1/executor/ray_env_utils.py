@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 
-from vllm.ray.ray_env import RAY_NON_CARRY_OVER_ENV_VARS
+from vllm.backends.distributed.ray.ray_env import RAY_NON_CARRY_OVER_ENV_VARS
 
 _RAY_WORKER_PRE_IMPORT_ENV_VARS = frozenset({"VLLM_USE_BREAKABLE_CUDAGRAPH"})
 

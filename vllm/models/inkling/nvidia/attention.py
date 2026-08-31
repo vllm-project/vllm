@@ -9,7 +9,7 @@ from torch import nn
 
 from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
 from vllm.foundation.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (

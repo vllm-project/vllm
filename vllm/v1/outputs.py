@@ -15,12 +15,12 @@ from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
-    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
-    from vllm.distributed.kv_events import KVConnectorKVEvents
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    from vllm.backends.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
+    from vllm.backends.distributed.kv_events import KVConnectorKVEvents
+    from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+    from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 else:
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object

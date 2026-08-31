@@ -10,8 +10,8 @@ import itertools
 from collections.abc import Iterable
 from typing import Any, NamedTuple
 
-from vllm.distributed.nixl_utils import NixlWrapper as _NixlAgent
-from vllm.distributed.nixl_utils import nixl_agent_config as _NixlAgentConfig
+from vllm.backends.distributed.nixl_utils import NixlWrapper as _NixlAgent
+from vllm.backends.distributed.nixl_utils import nixl_agent_config as _NixlAgentConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.kv_offload.tiering.p2p.data.base import (
     CancelMode,

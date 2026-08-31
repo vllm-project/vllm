@@ -1,30 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
+"""Compatibility shim: vllm.ray/lazy_utils -> vllm.backends.distributed.ray.lazy_utils (sys.modules alias)."""
+import importlib
+import sys
 
-def is_ray_initialized():
-    """Check if Ray is initialized."""
-    try:
-        import ray
-
-        return ray.is_initialized()
-    except ImportError:
-        return False
-    except AttributeError:
-        return False
-
-
-def is_in_ray_actor():
-    """Check if we are in a Ray actor."""
-
-    try:
-        import ray
-
-        return (
-            ray.is_initialized()
-            and ray.get_runtime_context().get_actor_id() is not None
-        )
-    except ImportError:
-        return False
-    except AttributeError:
-        return False
+_real = importlib.import_module("vllm.backends.distributed.ray.lazy_utils")
+sys.modules[__name__] = _real

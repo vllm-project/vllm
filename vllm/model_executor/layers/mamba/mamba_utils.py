@@ -11,7 +11,7 @@ import torch
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config.cache import MambaDType
 from vllm.foundation.config.model import ModelDType
-from vllm.distributed import divide
+from vllm.backends.distributed import divide
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,

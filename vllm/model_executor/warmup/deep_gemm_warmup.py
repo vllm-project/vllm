@@ -10,7 +10,7 @@ import torch
 from tqdm import tqdm
 
 import vllm.foundation.system.envs as envs
-from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
+from vllm.backends.distributed.parallel_state import get_dp_group, is_global_first_rank
 from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
 )

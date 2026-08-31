@@ -12,7 +12,7 @@ from transformers import Qwen3Config
 from vllm import _custom_ops as ops
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )

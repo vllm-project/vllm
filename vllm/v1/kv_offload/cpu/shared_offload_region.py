@@ -9,7 +9,7 @@ from collections.abc import Callable
 import numpy as np
 import torch
 
-from vllm.distributed.device_communicators.shm_broadcast import (
+from vllm.backends.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
 from vllm.foundation.observability.logger import init_logger

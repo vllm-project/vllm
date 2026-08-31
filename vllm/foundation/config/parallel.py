@@ -624,7 +624,7 @@ class ParallelConfig:
         if not self._coord_store_port:
             return self.get_next_dp_init_port(), None
 
-        from vllm.distributed.utils import get_cached_tcp_store_client
+        from vllm.backends.distributed.utils import get_cached_tcp_store_client
 
         store = get_cached_tcp_store_client(
             self.data_parallel_master_ip, self._coord_store_port
@@ -661,7 +661,7 @@ class ParallelConfig:
         # with a fresh port whenever this specific error is observed.
         from torch.distributed import DistNetworkError
 
-        from vllm.distributed.utils import (
+        from vllm.backends.distributed.utils import (
             stateless_init_torch_distributed_process_group,
         )
 
@@ -887,7 +887,7 @@ class ParallelConfig:
                     "server and core client to coordinate scale up/down."
                 )
             if self.eplb_config.use_async:
-                from vllm.distributed.nixl_utils import is_nixl_available
+                from vllm.backends.distributed.nixl_utils import is_nixl_available
 
                 if not is_nixl_available():
                     raise ValueError(
@@ -1010,7 +1010,7 @@ class ParallelConfig:
             # is incompatible with async EPLB (multi-stream conflicts) and
             # batched isend/irecv hangs under high load.
             # See https://github.com/pytorch/pytorch/issues/174288
-            from vllm.distributed.nixl_utils import is_nixl_available
+            from vllm.backends.distributed.nixl_utils import is_nixl_available
 
             if is_nixl_available():
                 self.eplb_config.communicator = "nixl"

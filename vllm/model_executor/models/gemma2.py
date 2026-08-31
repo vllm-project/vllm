@@ -25,7 +25,7 @@ from transformers import Gemma2Config
 
 from vllm.backends.compiler.decorators import support_torch_compile
 from vllm.foundation.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.backends.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.attention import Attention

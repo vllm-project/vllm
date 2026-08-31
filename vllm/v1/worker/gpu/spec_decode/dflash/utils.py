@@ -3,7 +3,7 @@
 import torch.nn as nn
 
 from vllm.foundation.config import VllmConfig, replace
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.backends.distributed.parallel_state import get_pp_group
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     _should_share,

@@ -6,7 +6,7 @@ from typing import Any
 import torch
 
 import vllm.foundation.system.envs as envs
-from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.backends.distributed.eplb.eplb_state import EplbLayerState
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter

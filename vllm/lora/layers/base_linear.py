@@ -8,7 +8,7 @@ from transformers import PretrainedConfig
 from vllm import envs
 from vllm.foundation.config import get_current_vllm_config
 from vllm.foundation.config.lora import LoRAConfig
-from vllm.distributed.utils import divide
+from vllm.backends.distributed.utils import divide
 from vllm.forward_context import (
     ForwardContext,
     get_forward_context,

@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
-from vllm.distributed.kv_events import BlockStored, KVCacheEvent
+from vllm.backends.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.core.kv_cache_coordinator import (

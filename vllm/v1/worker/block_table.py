@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.backends.distributed import get_dcp_group, get_pcp_group
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,

@@ -13,7 +13,7 @@ from vllm.foundation.config import (
     get_current_vllm_config,
     str_dtype_to_torch_dtype,
 )
-from vllm.distributed import (
+from vllm.backends.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,

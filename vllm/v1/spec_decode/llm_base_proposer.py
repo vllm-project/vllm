@@ -19,8 +19,8 @@ from vllm.foundation.config import (
 if TYPE_CHECKING:
     from vllm.v1.spec_decode.vocab_mapping import VocabMapping
 
-from vllm.distributed.eplb.eplb_state import EplbState
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.backends.distributed.eplb.eplb_state import EplbState
+from vllm.backends.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase

@@ -11,8 +11,8 @@ import torch
 import vllm.foundation.system.envs as envs
 from vllm.backends.compiler.cuda_graph import CUDAGraphWrapper
 from vllm.foundation.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_ep_group
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
+from vllm.backends.distributed import get_ep_group
+from vllm.backends.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
     DPMetadata,
     create_forward_context,

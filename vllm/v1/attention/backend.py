@@ -838,7 +838,7 @@ class AttentionImplBase(ABC, Generic[T]):
         # use __new__ so that all subclasses will call this
         self = super().__new__(cls)
         try:
-            from vllm.distributed.parallel_state import get_dcp_group
+            from vllm.backends.distributed.parallel_state import get_dcp_group
 
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
@@ -847,7 +847,7 @@ class AttentionImplBase(ABC, Generic[T]):
             self.dcp_world_size = 1
             self.dcp_rank = 0
         try:
-            from vllm.distributed.parallel_state import get_pcp_group
+            from vllm.backends.distributed.parallel_state import get_pcp_group
 
             self.pcp_world_size = get_pcp_group().world_size
             self.pcp_rank = get_pcp_group().rank_in_group
