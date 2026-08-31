@@ -79,9 +79,15 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         @property
         def max_token_id(self) -> int:
             # The vision variant (DeepSeek-V4-Flash-Vision-Exp) expands image
-            # placeholders into out-of-vocab sentinel ids (vocab_size + 0..4).
+            # placeholders into out-of-vocab sentinel ids (vocab_size + 0..4),
+            # where the model's vocab_size counts added special tokens
+            # (== len(tokenizer) here).
             base = getattr(super(), "max_token_id", 0)
-            return max(base, self.vocab_size + 4)
+            try:
+                total = len(self)
+            except TypeError:
+                total = self.vocab_size
+            return max(base, total) + 4
 
         def get_added_vocab(self) -> dict[str, int]:
             return added_vocab.copy()

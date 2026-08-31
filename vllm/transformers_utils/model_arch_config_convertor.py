@@ -580,13 +580,24 @@ class DeepSeekMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 
 class DeepseekV4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_architectures(self) -> list[str]:
+    def __init__(
+        self,
+        hf_config: PretrainedConfig,
+        hf_text_config: PretrainedConfig,
+        revision: str | None = None,
+    ):
         # DeepSeek-V4-Flash-Vision-Exp ships the same architectures/model_type
         # as the text-only DeepSeek-V4-Flash; route to the VL wrapper class
-        # when the config carries a vision tower.
-        if getattr(self.hf_config, "vision_n_layers", 0) > 0:
-            return ["DeepseekV4ForConditionalGeneration"]
-        return super().get_architectures()
+        # when the config carries a vision tower. Mutate (not just override
+        # get_architectures) because model-class resolution reads the raw
+        # hf_config.architectures (get_model_architecture).
+        # The VL wrapper marks the config copy it hands to the inner text
+        # backbone with _dsv4_vl_inner so this rewrite does not recurse.
+        if getattr(hf_config, "vision_n_layers", 0) > 0 and not getattr(
+            hf_config, "_dsv4_vl_inner", False
+        ):
+            hf_config.architectures = ["DeepseekV4ForConditionalGeneration"]
+        super().__init__(hf_config, hf_text_config, revision)
 
     def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
         # The vision variant needs the mm-prefix plumbing: it makes the

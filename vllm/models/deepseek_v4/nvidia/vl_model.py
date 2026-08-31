@@ -133,12 +133,20 @@ class DeepseekV4ForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
                 self.aligner.to(dtype=model_config.dtype)
 
         with self._mark_language_model(vllm_config):
-            self.language_model = init_vllm_registered_model(
-                vllm_config=vllm_config,
-                hf_config=config,
-                prefix=maybe_prefix(prefix, "language_model"),
-                architectures=["DeepseekV4ForCausalLM"],
-            )
+            # The arch convertor routes any config with a vision tower to
+            # this wrapper class; mark the copy handed to the text backbone
+            # so it resolves to DeepseekV4ForCausalLM instead of recursing
+            # (with_hf_config deepcopies the config, the marker survives).
+            config._dsv4_vl_inner = True  # type: ignore[attr-defined]
+            try:
+                self.language_model = init_vllm_registered_model(
+                    vllm_config=vllm_config,
+                    hf_config=config,
+                    prefix=maybe_prefix(prefix, "language_model"),
+                    architectures=["DeepseekV4ForCausalLM"],
+                )
+            finally:
+                del config._dsv4_vl_inner  # type: ignore[attr-defined]
         # The outer mapper (see load_weights) fully resolves HF names into
         # this wrapper's namespace before AutoWeightsLoader strips the
         # "language_model." prefix and delegates to the child's load_weights,
@@ -282,4 +290,15 @@ class DeepseekV4ForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         # must not run on a partially loaded model).
         mapped = sorted(self.hf_to_vllm_mapper.apply(weights), key=lambda x: x[0])
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(mapped)
+        loaded_params = loader.load_weights(mapped)
+        # The child's load_weights already ran its post-load finalization.
+        self._weights_finalized = True
+        return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        # Model-level post-load hook (called by the loader after any load
+        # format). Under DummyModelLoader the child's load_weights — and
+        # hence its finalize step — is bypassed, so run it here instead.
+        if getattr(self, "_weights_finalized", False):
+            return
+        self.language_model.process_weights_after_loading()
