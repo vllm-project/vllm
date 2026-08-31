@@ -21,12 +21,16 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.rdna3_mxfp4_moe import (
+    RDNA3Mxfp4Experts,
+)
 from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
     XPUExpertsMxFp4,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     B12X_BACKENDS,
     Mxfp4MoeBackend,
+    convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     select_mxfp4_moe_backend,
@@ -65,6 +69,10 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             self.mxfp4_backend = Mxfp4MoeBackend.XPU
             self.experts_cls = XPUExpertsMxFp4
             logger.info_once("Using XPUExpertsMxFp4 for MXFP4 MoE on XPU platform")
+        elif RDNA3Mxfp4Experts._supports_current_device():
+            self.mxfp4_backend = Mxfp4MoeBackend.RDNA3_MXFP4
+            self.experts_cls = RDNA3Mxfp4Experts
+            logger.info_once("Using RDNA3Mxfp4Experts (native gfx1100 HIP kernel)")
         else:
             logger.info_once("Using MarlinExperts for MXFP4 MoE")
             self.experts_cls = MarlinExperts
@@ -199,6 +207,24 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             )
         elif self.mxfp4_backend in B12X_BACKENDS or current_platform.is_xpu():
             pass
+        elif self.mxfp4_backend == Mxfp4MoeBackend.RDNA3_MXFP4:
+            # compressed-tensors keeps gate_proj/up_proj separate, so w13 is
+            # already contiguous after _load_w13.
+            w13, w2, w13_scale, w2_scale, _, _ = (
+                convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+                    mxfp4_backend=self.mxfp4_backend,
+                    layer=layer,
+                    w13_weight=layer.w13_weight,
+                    w2_weight=layer.w2_weight,
+                    w13_weight_scale=layer.w13_weight_scale,
+                    w2_weight_scale=layer.w2_weight_scale,
+                    gate_up_interleaved=False,
+                )
+            )
+            layer.w13_weight = torch.nn.Parameter(w13, requires_grad=False)
+            layer.w13_weight_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(w2, requires_grad=False)
+            layer.w2_weight_scale = torch.nn.Parameter(w2_scale, requires_grad=False)
         else:
             logger.warning_once(
                 "Your GPU does not have native support for FP4 computation "
