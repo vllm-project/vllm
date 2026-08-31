@@ -265,14 +265,19 @@ class SinusoidalPositionEncoder(torch.nn.Module):
         depth: int,
         dtype: torch.dtype = torch.float32,
     ):
+        # The log/exp/sin/cos below are computed in float32 regardless of
+        # the target dtype: at low precision (e.g. float16) the timescale
+        # exponents lose enough precision to produce large phase errors,
+        # scrambling the encoder's sense of position.
+        compute_dtype = torch.float32
         batch_size = positions.size(0)
-        positions = positions.type(dtype)
+        positions = positions.type(compute_dtype)
         device = positions.device
         log_timescale_increment = torch.log(
-            torch.tensor([10000], dtype=dtype, device=device)
+            torch.tensor([10000], dtype=compute_dtype, device=device)
         ) / (depth / 2 - 1)
         inv_timescales = torch.exp(
-            torch.arange(depth / 2, device=device).type(dtype)
+            torch.arange(depth / 2, device=device).type(compute_dtype)
             * (-log_timescale_increment)
         )
         inv_timescales = torch.reshape(inv_timescales, [batch_size, -1])
