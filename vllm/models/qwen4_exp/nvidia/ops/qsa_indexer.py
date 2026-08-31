@@ -4,15 +4,15 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-_LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
-_DECODE_TILE_GROUPING_MIN_REQUESTS = 33
+_DECODE_TILE_GROUPING_THRESHOLD = 32
 
 
 @triton.jit
@@ -34,14 +34,15 @@ def _qsa_mqa_paged_uniform_kernel(
     NUM_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     DECODE_QUERY_LEN: tl.constexpr,
-    DECODE_QUERY_LEN_PADDED: tl.constexpr,
-    NUM_HEADS_PADDED: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
     TILES_PER_PROG: tl.constexpr,
     STAGES: tl.constexpr,
 ) -> None:
-    num_columns: tl.constexpr = PAGE_TABLE_WIDTH * PAGE_SIZE
+    NUM_COLUMNS: tl.constexpr = PAGE_TABLE_WIDTH * PAGE_SIZE
+    DECODE_QUERY_LEN_PADDED: tl.constexpr = triton.next_power_of_2(DECODE_QUERY_LEN)
+    NUM_HEADS_PADDED: tl.constexpr = triton.next_power_of_2(NUM_HEADS)
+    # tl.dot requires a reduction dimension of at least 16.
+    BLOCK_D: tl.constexpr = max(16, triton.next_power_of_2(HEAD_DIM))
     request = tl.program_id(0)
     tile_start = tl.program_id(1) * TILES_PER_PROG
     query_offsets = tl.arange(0, DECODE_QUERY_LEN_PADDED)
@@ -56,7 +57,7 @@ def _qsa_mqa_paged_uniform_kernel(
     if tile_start * BLOCK_N >= max_visible:
         return
     tile_end = tl.minimum(tile_start + TILES_PER_PROG, tl.cdiv(max_visible, BLOCK_N))
-    tile_end = tl.minimum(tile_end, tl.cdiv(num_columns, BLOCK_N))
+    tile_end = tl.minimum(tile_end, tl.cdiv(NUM_COLUMNS, BLOCK_N))
 
     dims = tl.arange(0, BLOCK_D)
     n = tl.arange(0, DECODE_QUERY_LEN_PADDED * NUM_HEADS_PADDED)
@@ -105,7 +106,7 @@ def _qsa_mqa_paged_uniform_kernel(
             logits_ptr + rows[None, :] * stride_logits_row + columns[:, None],
             tl.where(valid, score, -float("inf")),
             mask=valid_query_offsets[None, :]
-            & (columns[:, None] < num_columns)
+            & (columns[:, None] < NUM_COLUMNS)
             & (columns[:, None] < visible[None, :]),
         )
 
@@ -130,15 +131,16 @@ def _qsa_mqa_paged_prefill_kernel(
     PAGE_SIZE: tl.constexpr,
     PAGE_TABLE_WIDTH: tl.constexpr,
     NUM_HEADS: tl.constexpr,
-    NUM_HEADS_PADDED: tl.constexpr,
     HEAD_DIM: tl.constexpr,
-    BLOCK_D: tl.constexpr,
     TILE_R: tl.constexpr,
     BLOCK_N: tl.constexpr,
     K_TILES: tl.constexpr,
     STAGES: tl.constexpr,
 ) -> None:
-    num_columns: tl.constexpr = PAGE_TABLE_WIDTH * PAGE_SIZE
+    NUM_COLUMNS: tl.constexpr = PAGE_TABLE_WIDTH * PAGE_SIZE
+    NUM_HEADS_PADDED: tl.constexpr = triton.next_power_of_2(NUM_HEADS)
+    # tl.dot requires a reduction dimension of at least 16.
+    BLOCK_D: tl.constexpr = max(16, triton.next_power_of_2(HEAD_DIM))
     request = tl.program_id(0)
     query_base = tl.load(query_start_loc_ptr)
     query_end = query_offset + num_rows
@@ -166,7 +168,7 @@ def _qsa_mqa_paged_prefill_kernel(
     if k_tile_start * BLOCK_N >= max_visible:
         return
     k_tile_end = tl.minimum(k_tile_start + K_TILES, tl.cdiv(max_visible, BLOCK_N))
-    k_tile_end = tl.minimum(k_tile_end, tl.cdiv(num_columns, BLOCK_N))
+    k_tile_end = tl.minimum(k_tile_end, tl.cdiv(NUM_COLUMNS, BLOCK_N))
 
     dims = tl.arange(0, BLOCK_D)
     m = tl.arange(0, TILE_R * NUM_HEADS_PADDED)
@@ -211,7 +213,7 @@ def _qsa_mqa_paged_prefill_kernel(
         store_mask = (
             valid_rows[None, :]
             & (columns[:, None] < visible[None, :])
-            & (columns[:, None] < num_columns)
+            & (columns[:, None] < NUM_COLUMNS)
         )
         tl.store(
             logits_ptr + rows[None, :] * stride_logits_row + columns[:, None],
@@ -234,7 +236,7 @@ def _expand_qsa_indices_kernel(
     COMPRESS_RATIO: tl.constexpr,
     COLUMN_BLOCK: tl.constexpr,
 ) -> None:
-    output_width: tl.constexpr = BLOCK_TOPK * COMPRESS_RATIO + COMPRESS_RATIO - 1
+    OUTPUT_WIDTH: tl.constexpr = BLOCK_TOPK * COMPRESS_RATIO + COMPRESS_RATIO - 1
     row = tl.program_id(0)
     columns = tl.program_id(1) * COLUMN_BLOCK + tl.arange(0, COLUMN_BLOCK)
     query_position = tl.load(query_positions_ptr + row)
@@ -261,11 +263,11 @@ def _expand_qsa_indices_kernel(
         & (tail_offset < COMPRESS_RATIO - 1)
     )
     token = tl.where(is_expanded, expanded, tail_start + tail_offset)
-    valid = (columns < output_width) & (is_expanded | is_tail) & (token >= 0)
+    valid = (columns < OUTPUT_WIDTH) & (is_expanded | is_tail) & (token >= 0)
     tl.store(
         output_ptr + row * stride_output_row + columns * stride_output_column,
         tl.where(valid, token, -1),
-        mask=columns < output_width,
+        mask=columns < OUTPUT_WIDTH,
     )
 
 
@@ -275,43 +277,16 @@ def _qsa_decode_warmup_profiles(
     max_num_batched_tokens: int,
 ) -> tuple[tuple[int, int], ...]:
     profiles = []
+    grouped_requests = _DECODE_TILE_GROUPING_THRESHOLD + 1
     for dql in range(1, max_dql + 1):
         if dql <= max_num_batched_tokens:
             profiles.append((dql, 1))
         if (
-            max_num_reqs >= _DECODE_TILE_GROUPING_MIN_REQUESTS
-            and dql * _DECODE_TILE_GROUPING_MIN_REQUESTS <= max_num_batched_tokens
+            max_num_reqs >= grouped_requests
+            and dql * grouped_requests <= max_num_batched_tokens
         ):
-            profiles.append((dql, _DECODE_TILE_GROUPING_MIN_REQUESTS))
+            profiles.append((dql, grouped_requests))
     return tuple(profiles)
-
-
-def _qsa_decode_kernel_config(
-    *,
-    page_size: int,
-    page_table_width: int,
-    num_heads: int,
-    head_dim: int,
-    decode_query_len: int,
-    num_requests: int,
-) -> dict[str, int]:
-    decode_query_len_padded = triton.next_power_of_2(decode_query_len)
-    num_heads_padded = triton.next_power_of_2(num_heads)
-    return {
-        "PAGE_SIZE": page_size,
-        "PAGE_TABLE_WIDTH": page_table_width,
-        "NUM_HEADS": num_heads,
-        "HEAD_DIM": head_dim,
-        "DECODE_QUERY_LEN": decode_query_len,
-        "DECODE_QUERY_LEN_PADDED": decode_query_len_padded,
-        "NUM_HEADS_PADDED": num_heads_padded,
-        "BLOCK_N": 64,
-        "BLOCK_D": max(16, triton.next_power_of_2(head_dim)),
-        "TILES_PER_PROG": (
-            1 if num_requests < _DECODE_TILE_GROUPING_MIN_REQUESTS else 8
-        ),
-        "STAGES": 2,
-    }
 
 
 def warmup_qsa_mqa_paged_decode(
@@ -354,92 +329,37 @@ def warmup_qsa_mqa_paged_decode(
             torch.float32,
             shape=(num_rows, columns),
         )
-        kernel_config = _qsa_decode_kernel_config(
-            page_size=page_size,
-            page_table_width=page_table_width,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            decode_query_len=decode_query_len,
-            num_requests=num_requests,
-        )
+        block_n = 64
+        tiles_per_program = 1 if num_requests <= _DECODE_TILE_GROUPING_THRESHOLD else 8
         _qsa_mqa_paged_uniform_kernel.warmup(
             q_ptr,
             k_cache_ptr,
             page_table_ptr,
             visible_blocks_ptr,
             logits_ptr,
-            q_ptr.stride()[0],
-            q_ptr.stride()[1],
-            k_cache_ptr.stride()[0],
-            k_cache_ptr.stride()[1],
-            page_table_ptr.stride()[0],
-            logits_ptr.stride()[0],
+            *q_ptr.stride()[:-1],
+            *k_cache_ptr.stride()[:2],
+            *page_table_ptr.stride()[:-1],
+            *logits_ptr.stride()[:-1],
             k_cache.shape[0],
-            **kernel_config,
+            PAGE_SIZE=page_size,
+            PAGE_TABLE_WIDTH=page_table_width,
+            NUM_HEADS=num_heads,
+            HEAD_DIM=head_dim,
+            DECODE_QUERY_LEN=decode_query_len,
+            BLOCK_N=block_n,
+            TILES_PER_PROG=tiles_per_program,
+            STAGES=2,
             num_warps=2,
             grid=(
                 num_requests,
-                triton.cdiv(
-                    columns,
-                    kernel_config["BLOCK_N"] * kernel_config["TILES_PER_PROG"],
-                ),
+                triton.cdiv(columns, block_n * tiles_per_program),
             ),
         )
     return profiles
 
 
-def qsa_mqa_paged_decode(
-    q: torch.Tensor,
-    k_cache: torch.Tensor,
-    page_table: torch.Tensor,
-    visible_blocks: torch.Tensor,
-    decode_query_len: int,
-) -> torch.Tensor:
-    """Score a request-major uniform decode or speculative-decode batch."""
-
-    assert decode_query_len > 0 and q.shape[0] % decode_query_len == 0
-    num_requests = q.shape[0] // decode_query_len
-    assert page_table.shape[0] == num_requests
-    assert visible_blocks.shape == (q.shape[0],)
-    columns = page_table.shape[1] * k_cache.shape[1]
-    logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
-    if not q.shape[0] or not columns:
-        return logits
-    kernel_config = _qsa_decode_kernel_config(
-        page_size=k_cache.shape[1],
-        page_table_width=page_table.shape[1],
-        num_heads=q.shape[1],
-        head_dim=q.shape[2],
-        decode_query_len=decode_query_len,
-        num_requests=num_requests,
-    )
-    grid = (
-        num_requests,
-        triton.cdiv(
-            columns,
-            kernel_config["BLOCK_N"] * kernel_config["TILES_PER_PROG"],
-        ),
-    )
-    _qsa_mqa_paged_uniform_kernel[grid](
-        q,
-        k_cache,
-        page_table,
-        visible_blocks,
-        logits,
-        q.stride(0),
-        q.stride(1),
-        k_cache.stride(0),
-        k_cache.stride(1),
-        page_table.stride(0),
-        logits.stride(0),
-        k_cache.shape[0],
-        **kernel_config,
-        num_warps=2,
-    )
-    return logits
-
-
-def _launch_qsa_mqa_paged_prefill(
+def _prefill_logits(
     q: torch.Tensor,
     k_cache: torch.Tensor,
     page_table: torch.Tensor,
@@ -455,15 +375,13 @@ def _launch_qsa_mqa_paged_prefill(
 
     columns = page_table.shape[1] * k_cache.shape[1]
     logits = torch.empty((num_queries, columns), dtype=torch.float32, device=q.device)
-    if not num_queries or not columns:
-        return logits
-    tile_r = 32
-    block_n = 128
+    TILE_R = 32
+    BLOCK_N = 64
     k_tiles = 8
     grid = (
         page_table.shape[0],
-        triton.cdiv(min(num_queries, max_query_len), tile_r),
-        triton.cdiv(columns, block_n * k_tiles),
+        triton.cdiv(min(num_queries, max_query_len), TILE_R),
+        triton.cdiv(columns, BLOCK_N * k_tiles),
     )
     _qsa_mqa_paged_prefill_kernel[grid](
         q,
@@ -472,50 +390,24 @@ def _launch_qsa_mqa_paged_prefill(
         query_start_loc,
         visible_blocks,
         logits,
-        q.stride(0),
-        q.stride(1),
-        k_cache.stride(0),
-        k_cache.stride(1),
-        page_table.stride(0),
-        logits.stride(0),
+        *q.stride()[:-1],
+        *k_cache.stride()[:2],
+        *page_table.stride()[:-1],
+        *logits.stride()[:-1],
         num_queries,
         k_cache.shape[0],
         query_offset,
         PAGE_SIZE=k_cache.shape[1],
         PAGE_TABLE_WIDTH=page_table.shape[1],
         NUM_HEADS=q.shape[1],
-        NUM_HEADS_PADDED=triton.next_power_of_2(q.shape[1]),
         HEAD_DIM=q.shape[2],
-        BLOCK_D=max(16, triton.next_power_of_2(q.shape[2])),
-        TILE_R=tile_r,
-        BLOCK_N=block_n,
+        TILE_R=TILE_R,
+        BLOCK_N=BLOCK_N,
         K_TILES=k_tiles,
         STAGES=2,
         num_warps=4,
     )
     return logits
-
-
-def qsa_mqa_paged_prefill(
-    q: torch.Tensor,
-    k_cache: torch.Tensor,
-    page_table: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    visible_blocks: torch.Tensor,
-    max_query_len: int,
-) -> torch.Tensor:
-    """Score a packed all-prefill batch."""
-
-    return _launch_qsa_mqa_paged_prefill(
-        q,
-        k_cache,
-        page_table,
-        query_start_loc,
-        visible_blocks,
-        max_query_len,
-        query_offset=0,
-        num_queries=q.shape[0],
-    )
 
 
 def expand_qsa_block_indices(
@@ -534,8 +426,6 @@ def expand_qsa_block_indices(
     assert block_indices.shape == (query_positions.numel(), block_topk)
     assert visible_blocks.shape == query_positions.shape
     assert out.shape == (block_indices.shape[0], output_width)
-    if not block_indices.shape[0]:
-        return
     column_block = 256
     _expand_qsa_indices_kernel[
         (block_indices.shape[0], triton.cdiv(output_width, column_block))
@@ -544,10 +434,8 @@ def expand_qsa_block_indices(
         query_positions,
         visible_blocks,
         out,
-        block_indices.stride(0),
-        block_indices.stride(1),
-        out.stride(0),
-        out.stride(1),
+        *block_indices.stride(),
+        *out.stride(),
         BLOCK_TOPK=block_topk,
         COMPRESS_RATIO=compress_ratio,
         COLUMN_BLOCK=column_block,
@@ -555,11 +443,7 @@ def expand_qsa_block_indices(
     )
 
 
-def _selection_workspace(device: torch.device) -> torch.Tensor:
-    return torch.empty((_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=device)
-
-
-def _select_qsa_scores(
+def _topk(
     logits: torch.Tensor,
     visible_blocks: torch.Tensor,
     token_topk: int,
@@ -616,23 +500,45 @@ def qsa_select_paged_decode(
 
     assert token_topk % compress_ratio == 0
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
-    if not q.shape[0]:
-        return
-    topk_workspace = _selection_workspace(q.device)
-    logits = qsa_mqa_paged_decode(
+    assert decode_query_len > 0 and q.shape[0] % decode_query_len == 0
+    num_requests = q.shape[0] // decode_query_len
+    assert page_table.shape[0] == num_requests
+    assert visible_blocks.shape == (q.shape[0],)
+
+    columns = page_table.shape[1] * k_cache.shape[1]
+    logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
+    block_n = 64
+    tiles_per_program = 1 if num_requests <= _DECODE_TILE_GROUPING_THRESHOLD else 8
+    _qsa_mqa_paged_uniform_kernel[
+        (num_requests, triton.cdiv(columns, block_n * tiles_per_program))
+    ](
         q,
         k_cache,
         page_table,
         visible_blocks,
-        decode_query_len,
+        logits,
+        *q.stride()[:-1],
+        *k_cache.stride()[:2],
+        *page_table.stride()[:-1],
+        *logits.stride()[:-1],
+        k_cache.shape[0],
+        PAGE_SIZE=k_cache.shape[1],
+        PAGE_TABLE_WIDTH=page_table.shape[1],
+        NUM_HEADS=q.shape[1],
+        HEAD_DIM=q.shape[2],
+        DECODE_QUERY_LEN=decode_query_len,
+        BLOCK_N=block_n,
+        TILES_PER_PROG=tiles_per_program,
+        STAGES=2,
+        num_warps=2,
     )
-    _select_qsa_scores(
+    _topk(
         logits,
         visible_blocks,
         token_topk,
         compress_ratio,
         block_indices,
-        topk_workspace,
+        torch.empty((_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device),
     )
 
 
@@ -666,16 +572,17 @@ def qsa_select_paged_prefill(
     assert token_topk % compress_ratio == 0
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     rows = q.shape[0]
-    if not rows:
-        return
     columns = page_table.shape[1] * k_cache.shape[1]
-    rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
-    topk_workspace = _selection_workspace(q.device)
+    max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    rows_per_chunk = max(1, max_logits_bytes // (columns * 4))
+    topk_workspace = torch.empty(
+        (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
+    )
 
     for query_start in range(0, rows, rows_per_chunk):
         query_end = min(query_start + rows_per_chunk, rows)
         query_slice = slice(query_start, query_end)
-        logits = _launch_qsa_mqa_paged_prefill(
+        logits = _prefill_logits(
             q,
             k_cache,
             page_table,
@@ -685,7 +592,7 @@ def qsa_select_paged_prefill(
             query_offset=query_start,
             num_queries=query_end - query_start,
         )
-        _select_qsa_scores(
+        _topk(
             logits,
             visible_blocks[query_slice],
             token_topk,
@@ -697,8 +604,6 @@ def qsa_select_paged_prefill(
 
 __all__ = [
     "expand_qsa_block_indices",
-    "qsa_mqa_paged_decode",
-    "qsa_mqa_paged_prefill",
     "qsa_select_paged_decode",
     "qsa_select_paged_prefill",
     "warmup_qsa_mqa_paged_decode",

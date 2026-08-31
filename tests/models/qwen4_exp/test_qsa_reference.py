@@ -632,7 +632,7 @@ def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
         (4, 33),
     ],
 )
-def test_qsa_decode_scoring_matches_test_reference(
+def test_qsa_decode_selection_matches_test_reference(
     decode_query_len: int, num_requests: int
 ) -> None:
     torch.manual_seed(1)
@@ -677,20 +677,32 @@ def test_qsa_decode_scoring_matches_test_reference(
         sequence_lengths.index_select(0, token_to_req.long()) // 4,
     )
 
-    actual = qsa_indexer_ops.qsa_mqa_paged_decode(
+    token_topk, compress_ratio = 2048, 4
+    actual = torch.empty(
+        (rows, token_topk // compress_ratio), device="cuda", dtype=torch.int32
+    )
+    qsa_indexer_ops.qsa_select_paged_decode(
         q,
         cache,
         page_table,
         visible_blocks,
-        decode_query_len=decode_query_len,
+        token_topk,
+        compress_ratio,
+        decode_query_len,
+        actual,
     )
-    expected = _qsa_mqa_paged_reference(
-        q, cache, page_table, token_to_req, visible_blocks
+    expected, _ = _qsa_select_paged_blocks_reference(
+        q,
+        cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        token_topk,
+        compress_ratio,
     )
 
-    columns = torch.arange(actual.shape[1], device=actual.device)
-    visible = columns[None, :] < visible_blocks[:, None]
-    torch.testing.assert_close(actual[visible], expected[visible], rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(actual.sort().values, expected.sort().values)
 
 
 @requires_qsa_kernels
@@ -720,13 +732,15 @@ def test_qsa_prefill_scoring_matches_test_reference() -> None:
         sequence_lengths.index_select(0, token_to_req.long()) // 4,
     )
 
-    actual = qsa_indexer_ops.qsa_mqa_paged_prefill(
+    actual = qsa_indexer_ops._prefill_logits(
         q,
         cache,
         page_table,
         query_start_loc,
         visible_blocks,
         max_query_len=max(query_lens),
+        query_offset=0,
+        num_queries=rows,
     )
     expected = _qsa_mqa_paged_reference(
         q, cache, page_table, token_to_req, visible_blocks
@@ -893,7 +907,7 @@ def test_qsa_prefill_scoring_matches_reference_across_query_chunks() -> None:
 
     actual = torch.cat(
         [
-            qsa_indexer_ops._launch_qsa_mqa_paged_prefill(
+            qsa_indexer_ops._prefill_logits(
                 q,
                 cache,
                 page_table,
