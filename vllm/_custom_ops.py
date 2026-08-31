@@ -2904,12 +2904,13 @@ def concat_and_cache_mla_grouped(
 
 def kimi_k3_attn_res(
     prefix: torch.Tensor,
-    delta: torch.Tensor,
+    delta: torch.Tensor | None,
     blocks: torch.Tensor,
     norm_weight: torch.Tensor,
     qk_weight: torch.Tensor,
-    output_norm_weight: torch.Tensor,
+    output_norm_weight: torch.Tensor | None,
     num_blocks: int,
+    block_write_idx: int,
     eps: float,
     output_norm_eps: float,
 ) -> torch.Tensor:
@@ -2923,6 +2924,7 @@ def kimi_k3_attn_res(
         output_norm_weight,
         output,
         num_blocks,
+        block_write_idx,
         eps,
         output_norm_eps,
     )

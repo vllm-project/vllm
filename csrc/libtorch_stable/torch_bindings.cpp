@@ -542,9 +542,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
   ops.def(
       "kimi_k3_attn_res("
-      "Tensor! prefix, Tensor delta, Tensor blocks, Tensor norm_weight, "
-      "Tensor qk_weight, Tensor output_norm_weight, Tensor! output, "
-      "int num_blocks, float eps, float output_norm_eps) -> ()");
+      "Tensor! prefix, Tensor? delta, Tensor! blocks, Tensor norm_weight, "
+      "Tensor qk_weight, Tensor? output_norm_weight, Tensor! output, "
+      "int num_blocks, "
+      "int block_write_idx, float eps, "
+      "float output_norm_eps) -> ()");
 #endif
 
   // Apply repetition penalties to logits in-place.
