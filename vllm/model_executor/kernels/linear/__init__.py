@@ -115,6 +115,7 @@ from vllm.model_executor.kernels.linear.mxfp8.emulation import (
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
+    FlashInferTrtllmMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.humming import (
     HummingMxfp8LinearKernel,
@@ -238,10 +239,7 @@ def _get_linear_backend() -> str:
     return "auto"
 
 
-# Mapping from linear_backend name to the set of kernel classes it covers.
-# When a user sets --linear-backend <name>, only kernels in the corresponding
-# set are considered candidates. If none can implement the layer config,
-# an error is raised to respect the user's explicit intent.
+# Kernel classes covered by each --linear-backend value.
 _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "b12x": {
         B12xFp8BlockScaledMMKernel,
@@ -269,6 +267,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         FlashInferCutedslMxfp8LinearKernel,
     },
     "flashinfer_trtllm": {
+        FlashInferTrtllmMxfp8LinearKernel,
         FlashInferTrtllmNvFp4LinearKernel,
     },
     "flashinfer_cudnn": {
@@ -345,9 +344,17 @@ def _filter_kernels_by_backend(
     backend: str,
     kernels: list[type],
 ) -> list[type]:
-    """Filter a kernel priority list to only those matching the backend."""
+    """Prefer matching kernels, falling back to auto by layer type."""
     backend_kernels = _LINEAR_BACKEND_KERNEL_MAP.get(backend, set())
-    return [k for k in kernels if k in backend_kernels]
+    filtered = [kernel for kernel in kernels if kernel in backend_kernels]
+    if not filtered:
+        logger.warning_once(
+            "--linear-backend=%s has no kernel for this linear layer type; "
+            "using automatic selection for that layer type.",
+            backend,
+        )
+        return kernels
+    return filtered
 
 
 def _resolve_backend_kernels(
@@ -511,6 +518,7 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         B12xMxfp8LinearKernel,
         EmulationMxfp8LinearKernel,
         HummingMxfp8LinearKernel,
+        FlashInferTrtllmMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
@@ -1220,6 +1228,7 @@ __all__ = [
     "MarlinMxFp4LinearKernel",
     "FlashInferCutedslMxfp8LinearKernel",
     "FlashInferCutlassMxfp8LinearKernel",
+    "FlashInferTrtllmMxfp8LinearKernel",
     "MarlinMxfp8LinearKernel",
     "XPUMxFp8LinearKernel",
     "EmulationMxfp8LinearKernel",
