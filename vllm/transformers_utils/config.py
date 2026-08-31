@@ -806,7 +806,8 @@ def _maybe_resolve_spec_model_config(
 ) -> dict[str, Any] | None:
     """Populate missing speculative settings from the draft checkpoint.
 
-    Explicit settings take precedence over checkpoint-declared defaults.
+    Checkpoint declarations fill missing settings. An explicit method must
+    match any method inferred from a registered draft architecture.
     """
     if not vllm_speculative_config:
         return vllm_speculative_config
@@ -843,11 +844,20 @@ def _maybe_resolve_spec_model_config(
             declared["method"] = declared_method
         resolved = declared
 
-    if resolved.get("method") is not None:
-        return resolved
-
     architectures = config_dict.get("architectures")
     method = _infer_speculative_method(architectures)
+    configured_method = resolved.get("method")
+    if configured_method is not None:
+        if method is not None and configured_method != method:
+            raise ValueError(
+                f"Configured speculative method {configured_method!r} conflicts "
+                f"with method {method!r} inferred from registered draft "
+                f"architectures={architectures!r} for draft model "
+                f"{draft_model!r}. Use method={method!r} or omit `method` to "
+                "infer it."
+            )
+        return resolved
+
     if method is None:
         raise ValueError(
             "Could not infer the speculative method for draft model "

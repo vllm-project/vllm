@@ -2161,6 +2161,7 @@ def test_spec_model_declaration_fills_missing_settings(
     ("architecture", "method"),
     [
         ("DFlash2DraftModel", "dflash"),
+        ("MuseGlimmerAssistantModel", "dflash"),
         ("Qwen3OmniDSparkModel", "dspark"),
         ("EagleDeepSeekMTPModel", "eagle"),
         ("PEagleDraftModel", "eagle3"),
@@ -2190,12 +2191,83 @@ def test_spec_model_architecture_infers_method(architecture, method):
     assert speculative_config == {"model": "draft/model", "method": method}
 
 
-def test_explicit_method_takes_precedence_over_draft_architecture():
+@pytest.mark.parametrize(
+    ("architecture", "method"),
+    [
+        ("Qwen3DSparkModel", "dspark"),
+        ("DeepSeekMTPModel", "mtp"),
+    ],
+)
+def test_explicit_method_matching_draft_architecture_is_preserved(architecture, method):
     from vllm.transformers_utils.config import maybe_override_with_speculators
 
     configs = {
         "target/model": {"architectures": ["LlamaForCausalLM"]},
-        "draft/model": {"architectures": ["Qwen3DSparkModel"]},
+        "draft/model": {"architectures": [architecture]},
+    }
+    explicit = {"model": "draft/model", "method": method}
+
+    with patch(
+        "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+        side_effect=lambda model, **kwargs: (configs[model], {}),
+    ):
+        _, _, speculative_config = maybe_override_with_speculators(
+            model="target/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config=explicit,
+        )
+
+    assert speculative_config == explicit
+
+
+@pytest.mark.parametrize(
+    ("architecture", "configured_method", "registered_method"),
+    [
+        ("MuseGlimmerAssistantModel", "draft_model", "dflash"),
+        ("DeepSeekMTPModel", "deepseek_mtp", "mtp"),
+    ],
+)
+def test_explicit_method_conflicting_with_draft_architecture_is_rejected(
+    architecture, configured_method, registered_method
+):
+    from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    configs = {
+        "target/model": {"architectures": ["LlamaForCausalLM"]},
+        "draft/model": {"architectures": [architecture]},
+    }
+
+    with (
+        patch(
+            "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+            side_effect=lambda model, **kwargs: (configs[model], {}),
+        ),
+        pytest.raises(
+            ValueError,
+            match=(
+                f"method '{configured_method}' conflicts with method "
+                f"'{registered_method}'"
+            ),
+        ),
+    ):
+        maybe_override_with_speculators(
+            model="target/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config={
+                "model": "draft/model",
+                "method": configured_method,
+            },
+        )
+
+
+def test_explicit_method_with_unrecognized_draft_architecture_is_preserved():
+    from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    configs = {
+        "target/model": {"architectures": ["LlamaForCausalLM"]},
+        "draft/model": {"architectures": ["LlamaForCausalLM"]},
     }
     explicit = {"model": "draft/model", "method": "draft_model"}
 
