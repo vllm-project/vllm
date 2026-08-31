@@ -772,25 +772,35 @@ class ParallelConfig:
         has_unfinished: bool,
         pending_pause: bool,
         local_prefillable: bool = False,
-    ) -> tuple[bool, bool, int]:
+        local_pending_prefill_tokens: int = 0,
+    ) -> tuple[bool, bool, int, int]:
         """Combined all-reduce for DP state synchronization.
 
-        Uses a single SUM all-reduce on a 3-element tensor:
+        Uses a single SUM all-reduce on a 4-element tensor:
           [0] = 1 if this rank has unfinished work, else 0.
                 SUM > 0 ≡ logical OR across ranks → any rank has work.
           [1] = 1 if this rank has a pending pause request, else 0.
                 SUM == dp_size ≡ all ranks reached pause consensus.
           [2] = 1 if this rank has a new prefill ready, else 0.
                 SUM ≡ number of prefillable ranks (for PrefillDelayer).
+          [3] = this rank's pending prefill tokens, capped at the token budget.
+                SUM ≡ total queued prefill tokens across ranks (for the
+                PrefillDelayer's fill-based coalescing gate).
 
         has_unfinished_global is true if any rank has unfinished work,
         or if some ranks are waiting for a pause consensus.
 
         Returns:
-            (has_unfinished_global, pause_consensus, prefillable_count)
+            (has_unfinished_global, pause_consensus, prefillable_count,
+             pending_prefill_tokens)
         """
         tensor = torch.tensor(
-            [int(has_unfinished), int(pending_pause), int(local_prefillable)],
+            [
+                int(has_unfinished),
+                int(pending_pause),
+                int(local_prefillable),
+                int(local_pending_prefill_tokens),
+            ],
             dtype=torch.int32,
             device="cpu",
         )
@@ -799,7 +809,13 @@ class ParallelConfig:
         pause_count = tensor[1].item()
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
         prefillable_count = tensor[2].item()
-        return has_unfinished_global, pause_count == dp_size, prefillable_count
+        pending_prefill_tokens = tensor[3].item()
+        return (
+            has_unfinished_global,
+            pause_count == dp_size,
+            prefillable_count,
+            pending_prefill_tokens,
+        )
 
     @staticmethod
     def sync_kv_cache_memory_size(dp_group: ProcessGroup, kv_cache_memory: int) -> int:

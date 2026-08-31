@@ -635,6 +635,7 @@ class EngineArgs:
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
     enable_prefill_delayer: bool = SchedulerConfig.enable_prefill_delayer
+    prefill_delayer_target_fill: float = SchedulerConfig.prefill_delayer_target_fill
     prefill_delayer_max_delay_passes: int = (
         SchedulerConfig.prefill_delayer_max_delay_passes
     )
@@ -1598,6 +1599,10 @@ class EngineArgs:
             **scheduler_kwargs["enable_prefill_delayer"],
         )
         scheduler_group.add_argument(
+            "--prefill-delayer-target-fill",
+            **scheduler_kwargs["prefill_delayer_target_fill"],
+        )
+        scheduler_group.add_argument(
             "--prefill-delayer-max-delay-passes",
             **scheduler_kwargs["prefill_delayer_max_delay_passes"],
         )
@@ -2380,6 +2385,7 @@ class EngineArgs:
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
             enable_prefill_delayer=self.enable_prefill_delayer,
+            prefill_delayer_target_fill=self.prefill_delayer_target_fill,
             prefill_delayer_max_delay_passes=self.prefill_delayer_max_delay_passes,
             prefill_delayer_max_delay_ms=self.prefill_delayer_max_delay_ms,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,

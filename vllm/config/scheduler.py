@@ -151,9 +151,18 @@ class SchedulerConfig:
     ready, so dense prefills fire together and reduce per-step padding waste.
     When enabled, this overrides `prefill_schedule_interval`."""
 
+    prefill_delayer_target_fill: float = Field(default=0.9, ge=0.0, le=1.0)
+    """Coalescing target for the PrefillDelayer: even when all DP ranks are
+    prefillable, hold new prefills until the queued prefill tokens fill this
+    fraction of an aligned forward's aggregate token budget
+    (`prefillable_ranks * max_num_batched_tokens`), then fire. Higher values
+    pack denser prefill forwards (fewer, more efficient forwards) at the cost of
+    a little extra queueing; the delay caps below bound the worst case. Set to
+    0.0 to disable coalescing (fire as soon as ranks are aligned)."""
+
     prefill_delayer_max_delay_passes: int = Field(default=30, ge=1)
-    """Max consecutive engine steps the PrefillDelayer will defer a prefill in a
-    mixed (skewed) state before force-allowing to bound worst-case TTFT."""
+    """Max consecutive engine steps the PrefillDelayer will defer a prefill
+    before force-allowing to bound worst-case TTFT."""
 
     prefill_delayer_max_delay_ms: float = Field(default=5000.0, ge=0.0)
     """Max wall-clock time the PrefillDelayer will defer a prefill in a mixed

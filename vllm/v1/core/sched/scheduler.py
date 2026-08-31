@@ -2382,6 +2382,29 @@ class Scheduler(SchedulerInterface):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting) + len(self.skipped_waiting)
 
+    def get_pending_prefill_tokens(self) -> int:
+        """Unprocessed prompt (prefill) tokens queued on this rank, capped at
+        one forward's token budget.
+
+        Sums remaining prompt tokens over waiting requests and in-flight
+        chunked prefills. The DP PrefillDelayer reduces this across ranks to
+        gauge how dense a coalesced, cross-rank-aligned prefill forward would
+        be. The per-rank cap mirrors the fact that a single forward cannot
+        exceed the token budget, so an already-saturated rank contributes at
+        most a full batch.
+        """
+        budget = self.max_num_scheduled_tokens
+        pending = 0
+        for request in itertools.chain(
+            self.waiting, self.skipped_waiting, self.running
+        ):
+            remaining = request.num_prompt_tokens - request.num_computed_tokens
+            if remaining > 0:
+                pending += remaining
+                if pending >= budget:
+                    return budget
+        return pending
+
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage

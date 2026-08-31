@@ -2061,6 +2061,8 @@ class DPEngineCoreProc(EngineCoreProc):
             # Needs to run after _init_data_parallel sets self.dp_size
             self._prefill_delayer = PrefillDelayer(
                 dp_size=self.dp_size,
+                prefill_token_budget=scheduler_config.max_num_batched_tokens,
+                target_fill=scheduler_config.prefill_delayer_target_fill,
                 max_delay_passes=scheduler_config.prefill_delayer_max_delay_passes,
                 max_delay_ms=scheduler_config.prefill_delayer_max_delay_ms,
             )
@@ -2304,17 +2306,25 @@ class DPEngineCoreProc(EngineCoreProc):
             self._prefill_delayer is not None
             and self.scheduler.get_request_counts()[1] > 0
         )
-        has_unfinished, pause_consensus, prefillable_count = (
+        local_pending_prefill_tokens = (
+            self.scheduler.get_pending_prefill_tokens()
+            if self._prefill_delayer is not None
+            else 0
+        )
+        has_unfinished, pause_consensus, prefillable_count, pending_prefill_tokens = (
             ParallelConfig.sync_dp_state(
                 self.dp_group,
                 has_unfinished=local_unfinished,
                 pending_pause=self.pending_pause,
                 local_prefillable=local_prefillable,
+                local_pending_prefill_tokens=local_pending_prefill_tokens,
             )
         )
 
         if self._prefill_delayer is not None:
-            self._prefill_delayer.update_throttle(prefillable_count)
+            self._prefill_delayer.update_throttle(
+                prefillable_count, pending_prefill_tokens
+            )
 
         if pause_consensus:
             self.ignore_start_dp_wave = True

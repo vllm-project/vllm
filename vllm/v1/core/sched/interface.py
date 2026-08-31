@@ -235,6 +235,14 @@ class SchedulerInterface(ABC):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         raise NotImplementedError
 
+    def get_pending_prefill_tokens(self) -> int:
+        """Returns queued prefill tokens, capped at one forward's token budget.
+
+        Used by the DP PrefillDelayer for its fill-based coalescing gate.
+        Defaults to 0 for schedulers that do not track this.
+        """
+        return 0
+
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return 0.0
