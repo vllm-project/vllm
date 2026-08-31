@@ -2206,6 +2206,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                 "Sampling parameters are only supported by openai-compatible backends."
             )
 
+        # The Responses API accepts every sampling parameter above except
+        # min_p, which it would silently drop as an unknown field.
+        if args.backend == "openai-responses" and "min_p" in sampling_params:
+            raise ValueError("--min-p is not supported by the Responses API.")
+
         if "temperature" not in sampling_params:
             print(
                 "WARNING: vllm bench serve no longer sets temperature==0 (greedy) "
