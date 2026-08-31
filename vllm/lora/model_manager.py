@@ -164,10 +164,12 @@ class LoRAModelManager:
                 for module_name, module in self.modules.items()
                 if isinstance(module, ClassificationHeadWithLoRA)
             ]
-            assert len(classification_heads) == 1, (
-                "Expected 1 classification head, but found {len(classification_heads)}."
-            )
-            self._classification_head = classification_heads[0]
+            if classification_heads:
+                assert len(classification_heads) == 1, (
+                    "Expected 1 classification head, but found "
+                    f"{len(classification_heads)}."
+                )
+                self._classification_head = classification_heads[0]
 
         self.moe_ep_load_spec: MoEEPLoadSpec | None = self._build_moe_ep_load_spec()
 
