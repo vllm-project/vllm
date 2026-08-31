@@ -195,6 +195,7 @@ class ServingGenerativeScoring(BaseServing):
         # Check if engine is alive
         if self.engine_client.errored:
             raise self.engine_client.dead_error
+        self.engine_client.check_admission(len(request.items))
 
         # Get tokenizer
         tokenizer = self.renderer.tokenizer
