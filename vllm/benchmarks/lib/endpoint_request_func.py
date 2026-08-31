@@ -513,6 +513,7 @@ async def async_request_openai_responses(
     # returned, matching how `openai-chat` handles `DeltaMessage.reasoning`.
     generated_text = ""
     stream_error: str | None = None
+    saw_terminal_event = False
     ttft = 0.0
     st = time.perf_counter()
     output.start_time = st
@@ -551,6 +552,7 @@ async def async_request_openai_responses(
                             most_recent_timestamp = timestamp
                             end_timestamp = timestamp
                         elif event_type in _RESPONSES_TERMINAL_EVENTS:
+                            saw_terminal_event = True
                             end_timestamp = timestamp
                             usage = (data.get("response") or {}).get("usage") or {}
                             if (n_output := usage.get("output_tokens")) is not None:
@@ -569,6 +571,15 @@ async def async_request_openai_responses(
                     output.success = False
                     output.error = (
                         "Never received a token delta to calculate TTFT."
+                        "This response will be marked as failed!"
+                    )
+                elif not saw_terminal_event:
+                    # Without the terminal event the response is truncated: the
+                    # usage block is missing and E2EL would stop at the last
+                    # token received before the stream was cut.
+                    output.success = False
+                    output.error = (
+                        "Stream ended without a terminal event."
                         "This response will be marked as failed!"
                     )
                 else:
