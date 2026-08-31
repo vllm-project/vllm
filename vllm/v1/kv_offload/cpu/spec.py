@@ -5,6 +5,10 @@ from typing import Any
 import torch
 from typing_extensions import override
 
+from vllm.distributed.parallel_state import (
+    get_inner_dp_world_group,
+    get_world_group,
+)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_offload.base import (
@@ -22,6 +26,13 @@ from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+
+
+def _get_mmap_barrier_group():
+    try:
+        return get_inner_dp_world_group()
+    except AssertionError:
+        return get_world_group()
 
 
 class CPUOffloadingSpec(OffloadingSpec):
@@ -149,24 +160,31 @@ class CPUOffloadingSpec(OffloadingSpec):
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
-        # num_blocks == 0 would size the region to zero bytes, which cannot be
-        # mmap'd; fall back to the tensor path (empty tensors) as before.
-        if self._uses_shared_region() and self.num_blocks > 0:
-            # Replicated layout puts all ranks on slot 0 (single MLA copy);
-            # otherwise each rank takes its own slot by physical device index.
-            if self.replicated_layout:
-                rank = 0
-            else:
-                world_size = self.config.parallel.world_size
-                rank = torch.accelerator.current_device_index() % world_size
-            mmap_region = SharedOffloadRegion(
-                engine_id=self.config.engine_id,
-                num_blocks=self.num_blocks,
-                rank=rank,
-                kv_bytes_per_block=self.kv_bytes_per_chunk,
-                cpu_page_size=self.cpu_page_size_per_worker,
-            )
         try:
+            # num_blocks == 0 would size the region to zero bytes, which cannot
+            # be mmap'd; fall back to the tensor path (empty tensors).
+            if self._uses_shared_region() and self.num_blocks > 0:
+                # Replicated layout puts all ranks on slot 0 (single MLA copy);
+                # otherwise each rank takes its own slot by physical device
+                # index.
+                if self.replicated_layout:
+                    rank = 0
+                else:
+                    world_size = self.config.parallel.world_size
+                    rank = torch.accelerator.current_device_index() % world_size
+                try:
+                    mmap_region = SharedOffloadRegion(
+                        engine_id=self.config.engine_id,
+                        num_blocks=self.num_blocks,
+                        rank=rank,
+                        kv_bytes_per_block=self.kv_bytes_per_chunk,
+                        cpu_page_size=self.cpu_page_size_per_worker,
+                        defer_population=True,
+                    )
+                finally:
+                    _get_mmap_barrier_group().barrier()
+                mmap_region.unlink()
+                mmap_region.populate()
             return CPUOffloadingWorker(
                 kv_caches=kv_caches,
                 blocks_per_chunk=self.blocks_per_chunk,

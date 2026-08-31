@@ -361,18 +361,29 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda_alike(monkeypatch):
     region = MagicMock()
     region_calls: list[dict[str, Any]] = []
     worker_calls: list[dict[str, Any]] = []
+    events: list[str] = []
 
     def fake_region_ctor(**kwargs):
+        events.append("map")
         region_calls.append(kwargs)
         return region
 
     def fake_worker_ctor(**kwargs):
+        events.append("worker")
         worker_calls.append(kwargs)
         return MagicMock()
+
+    barrier_group = MagicMock()
+    barrier_group.barrier.side_effect = lambda: events.append("barrier")
+    region.unlink.side_effect = lambda: events.append("unlink")
+    region.populate.side_effect = lambda: events.append("populate")
 
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
+    monkeypatch.setattr(
+        cpu_spec_module, "_get_mmap_barrier_group", lambda: barrier_group
+    )
     monkeypatch.setattr(
         cpu_spec_module.torch.accelerator, "current_device_index", lambda: 5
     )
@@ -382,8 +393,40 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda_alike(monkeypatch):
 
     assert region_calls[0]["engine_id"] == "test-engine"
     assert region_calls[0]["kv_bytes_per_block"] == worker_kv_bytes_per_block * 4
+    assert region_calls[0]["defer_population"] is True
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
+    assert events == ["map", "barrier", "unlink", "populate", "worker"]
+
+
+def test_cpu_spec_mmap_failure_still_enters_barrier(monkeypatch):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+    )
+    error = RuntimeError("mmap construction failed")
+    world_group = MagicMock()
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(
+        cpu_spec_module, "SharedOffloadRegion", MagicMock(side_effect=error)
+    )
+    monkeypatch.setattr(
+        cpu_spec_module,
+        "get_inner_dp_world_group",
+        MagicMock(side_effect=AssertionError),
+    )
+    monkeypatch.setattr(
+        cpu_spec_module, "get_world_group", MagicMock(return_value=world_group)
+    )
+
+    with pytest.raises(RuntimeError, match="mmap construction failed"):
+        spec.create_worker(MagicMock())
+
+    world_group.barrier.assert_called_once_with()
 
 
 def test_cpu_spec_create_worker_uses_tensor_path_off_cuda_alike(monkeypatch):
@@ -477,6 +520,7 @@ def test_cpu_spec_create_worker_rank_assignment(
 
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", MagicMock())
+    monkeypatch.setattr(cpu_spec_module, "_get_mmap_barrier_group", lambda: MagicMock())
     monkeypatch.setattr(
         cpu_spec_module.torch.accelerator, "current_device_index", lambda: device_index
     )

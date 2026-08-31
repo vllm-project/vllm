@@ -36,6 +36,10 @@ def _set_spawn_method(monkeypatch):
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 
+def _mmap_path(engine_id: str) -> str:
+    return f"/dev/shm/vllm_offload_{engine_id}.mmap"
+
+
 def _make_region(
     engine_id: str,
     num_blocks: int = 4,
@@ -161,6 +165,7 @@ def _mp_race_construct_and_write(
     fill_value: int,
     done_queue,
     cleanup_queue,
+    mmap_barrier=None,
 ) -> None:
     """Race to construct a SharedOffloadRegion, write fill_value, then wait
     for the parent's cleanup signal before tearing down.  The wait gives the
@@ -172,10 +177,17 @@ def _mp_race_construct_and_write(
             rank=rank,
             kv_bytes_per_block=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
+            defer_population=mmap_barrier is not None,
         )
+        if mmap_barrier is not None:
+            mmap_barrier.wait()
+            region.unlink()
+            region.populate()
         t = region.create_next_worker_view(cpu_page_size)
         t[:, :] = fill_value
-        done_queue.put({"rank": rank, "error": None})
+        done_queue.put(
+            {"rank": rank, "error": None, "inode": os.fstat(region.fd).st_ino}
+        )
         cleanup_queue.get()  # wait for parent's verification to finish
         del t  # release view before cleanup to avoid BufferError
         region.cleanup()
@@ -563,6 +575,77 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
     with pytest.raises(OSError) as exc_info:
         _make_region(iid)
     assert exc_info.value.errno == errno.EIO
+    assert not os.path.exists(_mmap_path(iid))
+
+
+# ---------------------------------------------------------------------------
+# Unlink after barrier
+# ---------------------------------------------------------------------------
+
+
+def test_unlink_preserves_existing_mappings(iid):
+    """Mappings remain shared after the creator unlinks the backing file."""
+    r0 = _make_region(iid, num_workers=2, rank=0)
+    try:
+        assert os.path.exists(r0.mmap_path)
+        r1 = _make_region(iid, num_workers=2, rank=1)
+        try:
+            r0.unlink()
+            assert not os.path.exists(r0.mmap_path)
+            r0.mmap_obj[0:1] = b"\xab"
+            assert memoryview(r1.mmap_obj)[0:1] == b"\xab"
+        finally:
+            r1.cleanup()
+    finally:
+        r0.cleanup()
+        _cleanup_file(r0.mmap_path)
+
+
+def test_sigkilled_workers_leave_nothing_behind(iid):
+    """After a hard kill (no cleanup() runs) the next start must be able to
+    create the region again instead of inheriting a leaked file."""
+    num_workers = 2
+    num_blocks = 2
+    path = _mmap_path(iid)
+
+    ctx = get_mp_context()
+    done_queue = ctx.Queue()
+    cleanup_queue = ctx.Queue()
+    mmap_barrier = ctx.Barrier(num_workers)
+    procs = [
+        ctx.Process(
+            target=_mp_race_construct_and_write,
+            args=(
+                iid,
+                num_blocks,
+                rank,
+                num_workers,
+                PAGE_SIZE,
+                rank + 1,
+                done_queue,
+                cleanup_queue,
+                mmap_barrier,
+            ),
+        )
+        for rank in range(num_workers)
+    ]
+    try:
+        for p in procs:
+            p.start()
+
+        results = [done_queue.get(timeout=30) for _ in range(num_workers)]
+        for r in results:
+            assert r["error"] is None, f"rank {r['rank']}: {r['error']}"
+        assert len({r["inode"] for r in results}) == 1, "workers mapped diff files"
+        assert not os.path.exists(path), "unlink must happen once all workers map"
+    finally:
+        for p in procs:
+            p.kill()  # SIGKILL: cleanup() never runs
+            p.join(timeout=10)
+
+    assert not os.path.exists(path)
+    with _region(iid) as restarted:
+        assert restarted._creator is True
 
 
 # ---------------------------------------------------------------------------
@@ -647,7 +730,7 @@ def test_multiprocess_race_construct_and_write(iid):
         assert r["error"] is None, f"rank {rank}: {r['error']}"
 
     # Read the raw file while all workers still hold it open.
-    mmap_path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    mmap_path = _mmap_path(iid)
     with open(mmap_path, "rb") as f:
         raw = f.read()
 

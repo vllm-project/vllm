@@ -71,7 +71,8 @@ class SharedOffloadRegion:
     the rest open the existing file and wait until it reaches the expected
     size.  Each worker then mmap()s the full file.
 
-    File path: /dev/shm/vllm_offload_{engine_id}.mmap
+    File path: /dev/shm/vllm_offload_{engine_id}.mmap. Once all workers have
+    mapped the file, the creator can unlink it while the mappings remain valid.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -83,6 +84,7 @@ class SharedOffloadRegion:
         rank: int | None,
         kv_bytes_per_block: int,
         cpu_page_size: int,
+        defer_population: bool = False,
     ) -> None:
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_block % self.page_size == 0
@@ -90,6 +92,7 @@ class SharedOffloadRegion:
         self.num_blocks = num_blocks
         self._row_stride = kv_bytes_per_block
         self.total_size_bytes = self.num_blocks * self._row_stride
+        self._cpu_page_size = cpu_page_size
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         self._creator = False  # set True only if this worker creates the file
@@ -139,22 +142,40 @@ class SharedOffloadRegion:
             prot=mmap.PROT_READ | mmap.PROT_WRITE,
         )
 
+        self._populated = False
+        self._base: torch.Tensor | None = None
+        self._views: list[torch.Tensor] = []
+        self._canonical_offset = 0
+        self.is_pinned: bool = False
+        try:
+            self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
+            if not defer_population:
+                self.populate()
+        except Exception:
+            self.cleanup()
+            raise
+
+    def populate(self) -> None:
+        """Pre-fault this worker's pages in the mapped region."""
+        if self._populated:
+            return
+        assert self.mmap_obj is not None
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 
-        if rank is not None:
+        if self.rank is not None:
             # Populate only this worker's pages (one slot per block row).
-            worker_offset = rank * cpu_page_size
+            worker_offset = self.rank * self._cpu_page_size
             _t0 = time.perf_counter()
             page_size = self.page_size
-            for block in range(num_blocks):
+            for block in range(self.num_blocks):
                 raw_offset = block * self._row_stride + worker_offset
                 aligned_offset = (raw_offset // page_size) * page_size
-                end = raw_offset + cpu_page_size
+                end = raw_offset + self._cpu_page_size
                 aligned_length = end - aligned_offset
                 populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
             logger.debug(
                 "MADV_POPULATE_WRITE loop: %d blocks in %.3f s",
-                num_blocks,
+                self.num_blocks,
                 time.perf_counter() - _t0,
             )
         else:
@@ -164,11 +185,7 @@ class SharedOffloadRegion:
             logger.debug(
                 "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
             )
-
-        self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
-        self._views: list[torch.Tensor] = []
-        self._canonical_offset = 0
-        self.is_pinned: bool = False
+        self._populated = True
 
     def create_next_worker_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
@@ -193,6 +210,7 @@ class SharedOffloadRegion:
             tensor_page_size: Bytes per block for this  tensor.
         """
         assert self.rank is not None
+        assert self._base is not None
         new_offset = self._worker_offset + tensor_page_size
         assert new_offset <= self._worker_area_end, (
             f"Worker offset {new_offset} exceeds worker area end "
@@ -241,6 +259,7 @@ class SharedOffloadRegion:
         Args:
             tensor_page_size: Canonical bytes per block for this tensor.
         """
+        assert self._base is not None
         new_offset = self._canonical_offset + tensor_page_size
         assert new_offset <= self._row_stride
         view = torch.as_strided(
@@ -259,6 +278,7 @@ class SharedOffloadRegion:
         Shape: (num_blocks, row_stride_bytes). Secondary tiers address
         block *b* as ``view[b]``.
         """
+        assert self._base is not None
         kv_tensor = self._base.view(self.num_blocks, self._row_stride)
         np_arr = kv_tensor.numpy()
         assert np_arr.ctypes.data == self._base.data_ptr(), (
@@ -266,6 +286,17 @@ class SharedOffloadRegion:
             "secondary tiers require zero-copy access to primary KV data"
         )
         return memoryview(np_arr)
+
+    def unlink(self) -> None:
+        """Unlink the backing file while keeping existing mappings valid."""
+        if not self._creator:
+            return
+        try:
+            os.unlink(self.mmap_path)
+            logger.info("Unlinked mmap file %s", self.mmap_path)
+        except FileNotFoundError:
+            pass
+        self._creator = False
 
     def cleanup(self) -> None:
         if self.is_pinned and self._base is not None:
@@ -302,6 +333,8 @@ class SharedOffloadRegion:
             try:
                 os.unlink(self.mmap_path)
                 logger.info("Removed mmap file %s", self.mmap_path)
+            except FileNotFoundError:
+                pass
             except Exception:
                 logger.warning(
                     "Failed to unlink path %s", self.mmap_path, exc_info=True
