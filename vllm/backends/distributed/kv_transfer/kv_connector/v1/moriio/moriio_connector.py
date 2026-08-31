@@ -65,7 +65,7 @@ from vllm.backends.distributed.parallel_state import (
     get_tp_group,
     get_world_group,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.network_utils import (
     make_zmq_path,

@@ -77,7 +77,7 @@ from vllm.frontend.processing.multimodal.video_prune.evs import (
     compute_retention_mask,
 )
 from vllm.frontend.processing.renderers import TokenizeParams
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.foundation.integrations.transformers_utils.configs.radio import RadioConfig
 from vllm.foundation.integrations.transformers_utils.processors.internvl import get_internvl_target_ratios

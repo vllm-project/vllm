@@ -782,7 +782,7 @@ def tensorize_lora_adapter(lora_path: str, tensorizer_config: TensorizerConfig):
     """
     import safetensors
 
-    from vllm.lora.utils import get_adapter_absolute_path
+    from vllm.runtime.modeling.lora.utils import get_adapter_absolute_path
 
     lora_dir = get_adapter_absolute_path(lora_path)
 

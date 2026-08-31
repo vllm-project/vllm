@@ -59,7 +59,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.config import set_default_rope_theta
 
 from .ernie45_moe import Ernie4_5_MoeMLP

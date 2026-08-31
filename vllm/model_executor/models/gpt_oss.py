@@ -48,7 +48,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.backends.platform import current_platform
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 

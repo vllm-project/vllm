@@ -49,7 +49,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 # Only used for type hinting.
 if TYPE_CHECKING:

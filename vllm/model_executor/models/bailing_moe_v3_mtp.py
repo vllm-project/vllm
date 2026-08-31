@@ -39,7 +39,7 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     maybe_prefix,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 
 def _get_draft_hf_config(vllm_config: VllmConfig) -> PretrainedConfig:

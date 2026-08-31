@@ -121,7 +121,7 @@ def _gdn_attention_core_xpu_impl(
     layer_name: str,
 ) -> None:
     """Custom op wrapping the XPU SYCL GDN kernel for torch.compile."""
-    from vllm.forward_context import get_forward_context
+    from vllm.runtime.execution.forward_context import get_forward_context
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
     forward_context = get_forward_context()

@@ -17,7 +17,7 @@ from vllm.frontend.entrypoints.serve.engine.typing import AnyRequest
 from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.foundation.system.exceptions import VLLMNotFoundError
 from vllm.frontend.processing.inputs import EngineInput
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.renderers.inputs.preprocess import (
     extract_prompt_components,
     extract_prompt_len,

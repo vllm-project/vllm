@@ -30,7 +30,7 @@ from vllm.model_executor.models.interfaces import (
     IsAttentionFree,
     SupportsMambaPrefixCaching,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .utils import (
     AutoWeightsLoader,

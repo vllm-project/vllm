@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from vllm.foundation.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
-from vllm.forward_context import get_forward_context
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear

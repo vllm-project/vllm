@@ -39,7 +39,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.backends.platform import current_platform
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .glm4 import Glm4DecoderLayer
 from .glm4_moe_lite_mtp import (

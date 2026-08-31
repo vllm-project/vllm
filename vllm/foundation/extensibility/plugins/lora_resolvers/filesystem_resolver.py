@@ -4,8 +4,8 @@ import json
 import os
 
 import vllm.foundation.system.envs as envs
-from vllm.lora.request import LoRARequest
-from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
+from vllm.runtime.modeling.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.resolver import LoRAResolver, LoRAResolverRegistry
 
 
 class FilesystemResolver(LoRAResolver):

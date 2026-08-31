@@ -24,7 +24,7 @@ from vllm.frontend.entrypoints.serve.elastic_ep.middleware import set_scaling_el
 from vllm.foundation.system.exceptions import VLLMClientError, VLLMValidationError
 from vllm.frontend.processing.inputs import EngineInput, PromptType
 from vllm.foundation.observability.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.frontend.processing.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.frontend.processing.pooling_params import PoolingParams

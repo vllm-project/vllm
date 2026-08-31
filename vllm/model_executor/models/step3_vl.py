@@ -37,7 +37,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.configs.step3_vl import Step3VisionEncoderConfig
 from vllm.foundation.integrations.transformers_utils.processors.step3_vl import (
     MAX_IMAGE_SIZE,

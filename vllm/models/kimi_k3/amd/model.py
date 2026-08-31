@@ -37,7 +37,7 @@ from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import NestedTensors
 from vllm.backends.platform import current_platform
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.configs.kimi_k3 import KimiK3Config
 
 from ..common.mm_preprocess import (

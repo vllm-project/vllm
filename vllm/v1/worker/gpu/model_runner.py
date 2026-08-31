@@ -36,7 +36,7 @@ from vllm.backends.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
 )
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.runtime.execution.forward_context import BatchDescriptor, set_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -59,7 +59,7 @@ from vllm.frontend.processing.multimodal.encoder_budget import (
     MultiModalBudget,
     get_dummy_encoder_profile_inputs,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tasks import SupportedTask
 from vllm.foundation.utilities.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.foundation.utilities.torch_utils import STR_DTYPE_TO_TORCH_DTYPE

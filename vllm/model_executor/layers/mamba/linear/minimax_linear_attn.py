@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from vllm.foundation.config import get_current_vllm_config
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.lightning_attn import (
     lightning_attention,

@@ -47,7 +47,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.configs.nemotron import NemotronConfig
 
 from .interfaces import SupportsLoRA, SupportsPP

@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from vllm.foundation.config import VllmConfig, replace
 from vllm.backends.distributed.parallel_state import get_pp_group
-from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.runtime.modeling.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model
 
 

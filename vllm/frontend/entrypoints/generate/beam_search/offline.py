@@ -10,7 +10,7 @@ from tqdm import tqdm
 from vllm import RequestOutput, TextPrompt, TokensPrompt
 from vllm.frontend.entrypoints.offline_utils import OfflineInferenceMixin
 from vllm.foundation.observability.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.frontend.processing.sampling_params import (
     BeamSearchParams,

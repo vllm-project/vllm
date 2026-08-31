@@ -24,7 +24,7 @@ from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_con
 from vllm.foundation.config.attention import IndexerKVDType
 from vllm.foundation.config.cache import CacheDType
 from vllm.backends.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.backends.platform import current_platform

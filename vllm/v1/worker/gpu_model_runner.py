@@ -53,12 +53,12 @@ from vllm.backends.distributed.parallel_state import (
     graph_capture,
     is_global_first_rank,
 )
-from vllm.forward_context import (
+from vllm.runtime.execution.forward_context import (
     BatchDescriptor,
     set_forward_context,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
+from vllm.runtime.modeling.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -120,7 +120,7 @@ from vllm.frontend.processing.multimodal.utils import (
 from vllm.backends.platform import current_platform
 from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.frontend.processing.sampling_params import SamplingType
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.foundation.observability.tracing import instrument
 from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds

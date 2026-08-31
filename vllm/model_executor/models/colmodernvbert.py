@@ -32,7 +32,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers.hf import HfTokenizer
 from vllm.foundation.integrations.transformers_utils.configs.colmodernvbert import ColModernVBertConfig
 

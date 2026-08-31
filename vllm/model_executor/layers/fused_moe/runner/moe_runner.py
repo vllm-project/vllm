@@ -15,7 +15,7 @@ from vllm.backends.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.backends.distributed.eplb.eplb_state import EplbLayerState
-from vllm.forward_context import (
+from vllm.runtime.execution.forward_context import (
     ForwardContext,
     get_forward_context,
     is_forward_context_available,

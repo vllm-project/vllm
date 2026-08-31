@@ -18,7 +18,7 @@ from vllm.model_executor.models.qwen3_asr import (
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 
 @default_pooling_type(tok_pooling_type="ALL")

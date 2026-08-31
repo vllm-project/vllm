@@ -35,7 +35,7 @@ from vllm.frontend.processing.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.processors.bagel import BagelProcessor
 from vllm.foundation.utilities.tensor_schema import TensorSchema
 

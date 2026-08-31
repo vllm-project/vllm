@@ -11,7 +11,7 @@ from vllm.backends.distributed.kv_transfer import (
     kv_transfer_state,
 )
 from vllm.backends.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
-from vllm.forward_context import (
+from vllm.runtime.execution.forward_context import (
     get_forward_context,
     is_forward_context_available,
     set_forward_context,

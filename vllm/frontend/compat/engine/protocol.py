@@ -12,7 +12,7 @@ from vllm.backends.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.frontend.processing.inputs import EngineInput, PromptType
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.outputs import PoolingRequestOutput, RequestOutput
 from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.frontend.processing.renderers import BaseRenderer

@@ -45,7 +45,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel

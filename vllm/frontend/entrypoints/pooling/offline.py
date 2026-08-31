@@ -10,7 +10,7 @@ from vllm.frontend.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.frontend.entrypoints.offline_utils import OfflineInferenceMixin
 from vllm.frontend.processing.inputs import DataPrompt, PromptType
 from vllm.foundation.observability.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.outputs import (
     ClassificationRequestOutput,
     EmbeddingRequestOutput,

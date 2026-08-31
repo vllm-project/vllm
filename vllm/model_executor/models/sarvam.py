@@ -51,7 +51,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .bailing_moe import BailingMoeForCausalLM
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP

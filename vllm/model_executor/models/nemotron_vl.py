@@ -23,7 +23,7 @@ from vllm.model_executor.models.internvl import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.processor import cached_image_processor_from_config
 from vllm.foundation.integrations.transformers_utils.processors.nemotron_vl import (
     LlamaNemotronNanoVLImageProcessor,

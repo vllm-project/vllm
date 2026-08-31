@@ -21,8 +21,8 @@ from vllm.frontend.entrypoints.serve.lora.protocol import (
 )
 from vllm.foundation.system.exceptions import LoRAAdapterNotFoundError
 from vllm.foundation.observability.logger import init_logger
-from vllm.lora.request import LoRARequest
-from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
+from vllm.runtime.modeling.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.foundation.utilities.counter import AtomicCounter
 
 logger = init_logger(__name__)

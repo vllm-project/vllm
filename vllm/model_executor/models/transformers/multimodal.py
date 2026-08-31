@@ -58,7 +58,7 @@ from vllm.frontend.processing.multimodal.processing import (
     TimingContext,
     cached_encode,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 
 if TYPE_CHECKING:

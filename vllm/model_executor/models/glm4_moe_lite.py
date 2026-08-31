@@ -66,7 +66,7 @@ from vllm.model_executor.models.glm4_moe import (
     Glm4MoeMLP,
 )
 from vllm.backends.platform import current_platform
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (

@@ -17,7 +17,7 @@ import torch.nn as nn
 
 from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.foundation.config.cache import CacheDType
-from vllm.forward_context import get_forward_context
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,

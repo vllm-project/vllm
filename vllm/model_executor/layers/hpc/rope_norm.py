@@ -14,7 +14,7 @@ from typing import Any
 import torch
 
 from vllm.foundation.config import get_current_vllm_config_or_none
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.hpc.hpc_module import HpcModule

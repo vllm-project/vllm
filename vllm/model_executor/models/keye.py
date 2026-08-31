@@ -57,7 +57,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 

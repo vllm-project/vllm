@@ -26,11 +26,11 @@ from vllm.backends.distributed.parallel_state import (
     graph_capture,
     is_global_first_rank,
 )
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.runtime.execution.forward_context import BatchDescriptor, set_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.backends.platform import current_platform
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.math_utils import round_up
 from vllm.foundation.utilities.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig

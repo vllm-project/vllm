@@ -7,7 +7,7 @@ from typing import cast
 import numpy as np
 import torch
 
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.sampling_params import SamplingType
 from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
 from vllm.foundation.utilities.collection_utils import swap_dict_values

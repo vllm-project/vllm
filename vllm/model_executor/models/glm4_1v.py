@@ -96,7 +96,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.processor import get_processor_cls_name_from_config
 from vllm.foundation.integrations.transformers_utils.utils import convert_model_repo_to_path
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape

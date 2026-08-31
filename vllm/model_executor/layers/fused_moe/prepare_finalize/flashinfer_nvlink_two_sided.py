@@ -8,7 +8,7 @@ from vllm.backends.distributed import get_ep_group
 from vllm.backends.distributed.device_communicators.base_device_communicator import (
     All2AllManagerBase,
 )
-from vllm.forward_context import get_forward_context
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.foundation.utilities.flashinfer import nvfp4_block_scale_interleave

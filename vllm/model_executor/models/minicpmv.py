@@ -91,7 +91,7 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     cached_encode,
 )
 from vllm.backends.platform import current_platform
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.processor import (
     _merge_mm_kwargs,
     cached_get_image_processor,

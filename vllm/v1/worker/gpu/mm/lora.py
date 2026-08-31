@@ -4,8 +4,8 @@ from typing import Any
 
 import numpy as np
 
-from vllm.lora.layers import LoRAMapping, LoRAMappingType
-from vllm.lora.worker_manager import WorkerLoRAManager
+from vllm.runtime.modeling.lora.layers import LoRAMapping, LoRAMappingType
+from vllm.runtime.modeling.lora.worker_manager import WorkerLoRAManager
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 

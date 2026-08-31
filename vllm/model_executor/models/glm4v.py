@@ -45,7 +45,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.configs.chatglm import ChatGLMConfig
 from vllm.foundation.integrations.transformers_utils.processors.glm4v import (
     GLM4VImageProcessorFast,

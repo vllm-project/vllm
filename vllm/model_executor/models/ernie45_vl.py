@@ -71,7 +71,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     cached_encode,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d

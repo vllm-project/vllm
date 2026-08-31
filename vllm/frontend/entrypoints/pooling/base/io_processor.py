@@ -14,7 +14,7 @@ from vllm.frontend.entrypoints.chat_utils import (
     ChatTemplateConfig,
 )
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.renderers import BaseRenderer, merge_kwargs
 from vllm.frontend.processing.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.foundation.utilities.async_utils import make_async

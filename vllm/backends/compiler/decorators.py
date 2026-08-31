@@ -24,9 +24,9 @@ from vllm.foundation.config import (
     set_current_vllm_config,
 )
 from vllm.foundation.config.compilation import DynamicShapesType
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.runtime.execution.forward_context import get_forward_context, is_forward_context_available
 from vllm.foundation.observability.logger import init_logger
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
 

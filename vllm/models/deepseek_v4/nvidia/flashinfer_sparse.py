@@ -8,7 +8,7 @@ import torch
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.cache import CacheDType
-from vllm.forward_context import get_forward_context
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
     build_flashinfer_mixed_sparse_indices,

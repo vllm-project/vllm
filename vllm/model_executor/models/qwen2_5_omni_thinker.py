@@ -45,7 +45,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.forward_context import set_forward_context
+from vllm.runtime.execution.forward_context import set_forward_context
 from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -88,7 +88,7 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 

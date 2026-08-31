@@ -54,7 +54,7 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.frontend.processing.tokenizers.mistral import MistralTokenizer
 from vllm.foundation.integrations.transformers_utils.processors.voxtral import (

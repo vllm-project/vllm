@@ -43,7 +43,7 @@ from vllm.frontend.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.frontend.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.frontend.processing.inputs import PromptType
 from vllm.foundation.observability.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.frontend.processing.outputs import PoolingRequestOutput, RequestOutput
 from vllm.backends.platform import current_platform

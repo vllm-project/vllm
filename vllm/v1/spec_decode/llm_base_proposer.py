@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 from vllm.backends.distributed.eplb.eplb_state import EplbState
 from vllm.backends.distributed.parallel_state import get_pp_group
-from vllm.forward_context import set_forward_context
+from vllm.runtime.execution.forward_context import set_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model

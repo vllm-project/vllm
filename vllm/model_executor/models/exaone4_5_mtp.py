@@ -23,7 +23,7 @@ from vllm.model_executor.models.exaone_moe_mtp import (
     ExaoneMoeMTP,
     ExaoneMoeMultiTokenPredictor,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .interfaces import (
     MultiModalEmbeddings,

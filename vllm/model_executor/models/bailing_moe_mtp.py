@@ -31,7 +31,7 @@ from vllm.model_executor.models.bailing_moe_linear import (
     BailingMoeV25,
     BailingMoeV25MLAAttention,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
 

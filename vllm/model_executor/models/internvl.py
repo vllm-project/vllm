@@ -45,7 +45,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     cached_encode,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.processors.internvl import (
     InternVLImageProcessor,
     InternVLProcessor,

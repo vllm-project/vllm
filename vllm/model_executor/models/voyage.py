@@ -10,7 +10,7 @@ import torch.nn as nn
 from vllm.foundation.config import VllmConfig
 from vllm.model_executor.models.qwen3 import Qwen3Model
 from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 WeightItem = tuple[str, torch.Tensor]
 

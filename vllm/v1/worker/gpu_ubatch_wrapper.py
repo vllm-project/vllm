@@ -13,7 +13,7 @@ from vllm.backends.compiler.cuda_graph import CUDAGraphWrapper
 from vllm.foundation.config import CUDAGraphMode, VllmConfig
 from vllm.backends.distributed import get_ep_group
 from vllm.backends.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
-from vllm.forward_context import (
+from vllm.runtime.execution.forward_context import (
     DPMetadata,
     create_forward_context,
     get_forward_context,
@@ -22,7 +22,7 @@ from vllm.forward_context import (
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.backends.platform import current_platform
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.deep_gemm import set_num_sms as deep_gemm_set_num_sms
 from vllm.foundation.utilities.import_utils import has_deep_gemm
 from vllm.foundation.utilities.platform_utils import num_compute_units

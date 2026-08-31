@@ -15,7 +15,7 @@ import torch
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.compilation import CUDAGraphMode
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.outputs import (
     ModelRunnerOutput,

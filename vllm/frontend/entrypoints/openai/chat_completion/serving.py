@@ -57,7 +57,7 @@ from vllm.frontend.entrypoints.serve.utils.tool_calls_utils import (
 from vllm.foundation.system.exceptions import GenerationError
 from vllm.frontend.processing.inputs import EngineInput, MultiModalPlaceholders
 from vllm.foundation.observability.logger import init_logger
-from vllm.logprobs import Logprob
+from vllm.runtime.generation.logprobs import Logprob
 from vllm.frontend.processing.outputs import RequestOutput
 from vllm.frontend.processing.parser import ParserManager
 from vllm.frontend.processing.parser.abstract_parser import Parser

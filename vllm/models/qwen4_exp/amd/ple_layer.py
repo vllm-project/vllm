@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
-from vllm.forward_context import get_forward_context
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (

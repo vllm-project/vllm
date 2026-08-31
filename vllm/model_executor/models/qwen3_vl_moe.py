@@ -38,7 +38,7 @@ from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tokenizers.registry import cached_tokenizer_from_config
 
 from .interfaces import MixtureOfExperts

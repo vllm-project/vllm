@@ -25,7 +25,7 @@ from vllm.benchmarks.datasets import (
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.frontend.processing.inputs import TextPrompt, TokensPrompt
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.outputs import RequestOutput
 from vllm.backends.platform import current_platform
 from vllm.frontend.processing.sampling_params import BeamSearchParams

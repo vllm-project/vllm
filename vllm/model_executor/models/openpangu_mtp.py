@@ -43,7 +43,7 @@ from vllm.model_executor.models.deepseek_mtp import (
     SharedHead,
 )
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .openpangu import OpenPanguDecoderLayer
 

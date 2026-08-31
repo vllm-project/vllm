@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import vllm.foundation.system.envs as envs
 from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
 from vllm.foundation.config import CUDAGraphMode
-from vllm.forward_context import get_forward_context
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.backends.platform import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.foundation.utilities.torch_utils import LayerNameType

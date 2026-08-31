@@ -33,7 +33,7 @@ from vllm.frontend.processing.multimodal.processing import (
     TimingContext,
 )
 from vllm.frontend.processing.renderers import TokenizeParams
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (

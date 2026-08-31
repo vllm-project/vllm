@@ -81,7 +81,7 @@ from vllm.frontend.processing.multimodal.video_prune.evs import (
     recompute_mrope_positions,
 )
 from vllm.backends.platform import current_platform
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.cache import LRUCache
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.foundation.utilities.torch_utils import PIN_MEMORY, async_tensor_h2d

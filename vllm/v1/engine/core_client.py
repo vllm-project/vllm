@@ -25,7 +25,7 @@ from vllm import envs
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.system.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.foundation.observability.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.tasks import SupportedTask
 from vllm.foundation.observability.tracing import instrument
 from vllm.foundation.utilities.async_utils import in_loop

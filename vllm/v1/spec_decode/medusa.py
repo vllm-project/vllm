@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from vllm.foundation.config import VllmConfig
-from vllm.forward_context import set_forward_context
+from vllm.runtime.execution.forward_context import set_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import is_mixture_of_experts

@@ -19,7 +19,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.exaone_moe import ExaoneMoeDecoderLayer
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 

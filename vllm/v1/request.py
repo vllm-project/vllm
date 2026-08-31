@@ -25,7 +25,7 @@ from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
-    from vllm.lora.request import LoRARequest
+    from vllm.runtime.modeling.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
 
 

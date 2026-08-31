@@ -35,7 +35,7 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
-from vllm.forward_context import ForwardContext
+from vllm.runtime.execution.forward_context import ForwardContext
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.block_pool import BlockPool

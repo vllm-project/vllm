@@ -41,7 +41,7 @@ def ckpt_uses_nvfp4_experts(vllm_config: VllmConfig) -> bool:
 
 
 def resolve_mega_moe_is_padding(num_tokens: int) -> torch.Tensor | None:
-    from vllm.forward_context import get_forward_context, is_forward_context_available
+    from vllm.runtime.execution.forward_context import get_forward_context, is_forward_context_available
 
     global _MOE_SKIP_PADDING
     if _MOE_SKIP_PADDING is None:

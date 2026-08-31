@@ -16,7 +16,7 @@ from vllm.backends.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.runtime.execution.forward_context import get_forward_context, is_forward_context_available
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
 from vllm.model_executor.layers.fused_moe import (
@@ -110,7 +110,7 @@ from vllm.models.kimi_k3.nvidia.ops import attn_res
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import NestedTensors
 from vllm.backends.platform import current_platform
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.foundation.utilities.math_utils import cdiv

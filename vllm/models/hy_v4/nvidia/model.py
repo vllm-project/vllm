@@ -61,7 +61,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.backends.platform import current_platform
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .attention import (
     HYV4MLAAttention,

@@ -11,7 +11,7 @@ import vllm.foundation.system.envs as envs
 from vllm.foundation.config import get_current_vllm_config
 from vllm.backends.distributed import get_dp_group, get_ep_group, get_pcp_group
 from vllm.backends.distributed.utils import StatelessProcessGroup
-from vllm.forward_context import get_forward_context
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.flashinfer import (
     has_flashinfer_nvlink_one_sided,

@@ -14,7 +14,7 @@ from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tasks import PoolingTask
 from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d

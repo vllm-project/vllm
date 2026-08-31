@@ -72,7 +72,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.frontend.processing.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.math_utils import round_down
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 

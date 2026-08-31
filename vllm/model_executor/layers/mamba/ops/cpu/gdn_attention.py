@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
     causal_conv1d_fn_cpu as causal_conv1d_torch,

@@ -30,7 +30,7 @@ from vllm.backends.distributed import (
 from vllm.foundation.system.envs import enable_envs_cache
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.logging_utils.dump_input import dump_engine_exception
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.cache import MultiModalCacheMissError
 from vllm.frontend.processing.tasks import POOLING_TASKS, SupportedTask

@@ -10,7 +10,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
 from vllm.foundation.config import CUDAGraphMode, get_current_vllm_config
 from vllm.backends.distributed import get_dcp_group, get_pcp_group
-from vllm.forward_context import get_forward_context
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (

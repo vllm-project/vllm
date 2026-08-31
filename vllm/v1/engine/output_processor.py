@@ -10,7 +10,7 @@ from typing import Any, cast
 import numpy as np
 import torch
 
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.outputs import (
     STREAM_FINISHED,
     CompletionOutput,

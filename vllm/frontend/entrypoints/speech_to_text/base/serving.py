@@ -29,7 +29,7 @@ from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.frontend.processing.inputs import EncoderDecoderInput, EngineInput
 from vllm.foundation.observability.logger import init_logger
-from vllm.logprobs import FlatLogprobs, Logprob
+from vllm.runtime.generation.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
 from vllm.frontend.processing.multimodal.audio import get_audio_duration, split_audio
 from vllm.frontend.processing.multimodal.media.audio import load_audio

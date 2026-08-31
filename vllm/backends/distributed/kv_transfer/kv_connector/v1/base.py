@@ -61,7 +61,7 @@ if TYPE_CHECKING:
         PromMetric,
         PromMetricT,
     )
-    from vllm.forward_context import ForwardContext
+    from vllm.runtime.execution.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig

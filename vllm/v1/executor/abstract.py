@@ -15,7 +15,7 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.tasks import SupportedTask
 from vllm.foundation.observability.tracing import instrument
 from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname

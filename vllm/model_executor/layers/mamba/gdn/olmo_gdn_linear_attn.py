@@ -11,7 +11,7 @@ from vllm.foundation.config import (
 from vllm.backends.distributed import (
     divide,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (

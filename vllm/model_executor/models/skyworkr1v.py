@@ -22,7 +22,7 @@ from vllm.model_executor.models.intern_vit import (
     InternVisionModel,
 )
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.processors.internvl import (
     InternVLImageProcessor,
     InternVLProcessor,

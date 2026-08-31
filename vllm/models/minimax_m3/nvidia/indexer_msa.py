@@ -27,7 +27,7 @@ from typing import ClassVar
 import torch
 
 from vllm.foundation.config import VllmConfig
-from vllm.forward_context import get_forward_context
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerBackend,
     MiniMaxM3IndexerDecodeMetadata,

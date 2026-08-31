@@ -524,7 +524,7 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_cpu.PunicaWrapperCPU"
+        return "vllm.runtime.modeling.lora.punica_wrapper.punica_cpu.PunicaWrapperCPU"
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:

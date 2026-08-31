@@ -17,7 +17,7 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     ProcessorInputs,
     TimingContext,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding, SupportsMultiModal, SupportsScoreTemplate
 from .qwen2_vl import (

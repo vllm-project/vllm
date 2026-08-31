@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
     from vllm.foundation.config import VllmConfig

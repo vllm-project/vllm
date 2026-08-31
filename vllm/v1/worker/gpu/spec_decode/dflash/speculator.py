@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from vllm.foundation.config import VllmConfig, replace
 from vllm.foundation.config.compilation import CUDAGraphMode
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.runtime.execution.forward_context import BatchDescriptor, set_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport

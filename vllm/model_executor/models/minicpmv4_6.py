@@ -38,7 +38,7 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     ResolvedPromptUpdate,
     cached_encode,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import (

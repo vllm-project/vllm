@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
+from vllm.runtime.modeling.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 
 @dataclass

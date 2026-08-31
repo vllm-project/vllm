@@ -10,7 +10,7 @@ from vllm.backends.compiler.breakable_cudagraph import eager_break_during_captur
 from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.backends.distributed import get_tensor_model_parallel_world_size
 from vllm.backends.distributed.parallel_state import get_tp_group
-from vllm.forward_context import get_forward_context
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm

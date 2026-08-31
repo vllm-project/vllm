@@ -17,7 +17,7 @@ from vllm.foundation.config import VllmConfig
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItem
 from vllm.frontend.processing.multimodal.parse import ImageSize
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel

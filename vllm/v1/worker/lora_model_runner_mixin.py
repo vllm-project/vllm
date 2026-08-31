@@ -15,9 +15,9 @@ import torch.nn as nn
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.lora import LoRAConfig
 from vllm.foundation.observability.logger import init_logger
-from vllm.lora.layers import LoRAMapping, LoRAMappingType
-from vllm.lora.request import LoRARequest
-from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+from vllm.runtime.modeling.lora.layers import LoRAMapping, LoRAMappingType
+from vllm.runtime.modeling.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
@@ -37,7 +37,7 @@ class LoRAModelRunnerMixin:
         if not self.lora_config:
             return
 
-        from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
+        from vllm.runtime.modeling.lora.layers.logits_processor import LogitsProcessorWithLoRA
 
         self.lora_manager.remove_all_adapters()
         for module in self.get_model().modules():

@@ -22,7 +22,7 @@ from vllm.foundation.utilities.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     from vllm.foundation.config import ModelConfig
-    from vllm.sequence import IntermediateTensors
+    from vllm.runtime.modeling.sequence import IntermediateTensors
 else:
     ModelConfig = object
     IntermediateTensors = object
@@ -885,7 +885,7 @@ def weak_ref_tensors(
         return tuple(weak_ref_tensor(t) for t in tensors)
 
     # For IntermediateTensors used in pipeline parallelism
-    from vllm.sequence import IntermediateTensors
+    from vllm.runtime.modeling.sequence import IntermediateTensors
 
     if isinstance(tensors, IntermediateTensors):
         ret = IntermediateTensors(

@@ -35,7 +35,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     cached_encode,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d

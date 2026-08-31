@@ -12,7 +12,7 @@ import torch
 
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
-from vllm.logits_process import LogitsProcessor as RequestLogitsProcessor
+from vllm.runtime.generation.logits_process import LogitsProcessor as RequestLogitsProcessor
 from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.foundation.utilities.torch_utils import guard_cuda_initialization
 from vllm.v1.sample.logits_processor.builtin import (

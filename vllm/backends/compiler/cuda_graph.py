@@ -16,7 +16,7 @@ from vllm.backends.compiler.counter import compilation_counter
 from vllm.backends.compiler.monitor import validate_cudagraph_capturing_enabled
 from vllm.foundation.config import CUDAGraphMode, VllmConfig
 from vllm.backends.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
-from vllm.forward_context import (
+from vllm.runtime.execution.forward_context import (
     BatchDescriptor,
     get_forward_context,
     is_forward_context_available,

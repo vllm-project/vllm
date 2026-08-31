@@ -38,7 +38,7 @@ from vllm.model_executor.layers.pooler.tokwise import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 

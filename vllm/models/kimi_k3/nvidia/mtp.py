@@ -10,7 +10,7 @@ import torch.nn as nn
 
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import VllmConfig
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.runtime.execution.forward_context import get_forward_context, is_forward_context_available
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -33,7 +33,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from ..common.mtp import fused_mtp_input

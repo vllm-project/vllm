@@ -19,7 +19,7 @@ from vllm.model_executor.model_loader.mtp_validation import (
     is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .step3p5 import Step3p5DecoderLayer
 from .utils import get_spec_layer_idx_from_weight_name, maybe_prefix

@@ -17,7 +17,7 @@ from vllm.backends.distributed.parallel_state import get_dp_group
 from vllm.frontend.compat.engine.arg_utils import EngineArgs
 from vllm.frontend.processing.inputs import EngineInput, PromptType
 from vllm.foundation.observability.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.frontend.processing.outputs import PoolingRequestOutput, RequestOutput
 from vllm.frontend.processing.pooling_params import PoolingParams

@@ -67,7 +67,7 @@ from vllm.frontend.processing.multimodal.processing import (
     cached_encode,
 )
 from vllm.frontend.processing.multimodal.processing.processor import ProcessorInputs
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 

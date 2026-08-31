@@ -8,7 +8,7 @@ import torch
 from typing_extensions import override
 
 from vllm.foundation.config import VllmConfig
-from vllm.forward_context import set_forward_context
+from vllm.runtime.execution.forward_context import set_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer

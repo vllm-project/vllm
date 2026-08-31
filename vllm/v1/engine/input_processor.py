@@ -15,7 +15,7 @@ from vllm.frontend.processing.inputs import (
     split_enc_dec_input,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.frontend.processing.multimodal.encoder_budget import MultiModalBudget
 from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec

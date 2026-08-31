@@ -11,8 +11,8 @@ from vllm.frontend.processing.inputs import (
     mm_input,
     tokens_input,
 )
-from vllm.logprobs import Logprob
-from vllm.lora.request import LoRARequest
+from vllm.runtime.generation.logprobs import Logprob
+from vllm.runtime.modeling.lora.request import LoRARequest
 
 
 @dataclass

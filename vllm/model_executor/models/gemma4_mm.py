@@ -72,7 +72,7 @@ from vllm.frontend.processing.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.foundation.utilities.torch_utils import async_tensor_h2d
@@ -2162,7 +2162,7 @@ class Gemma4ForConditionalGeneration(
         if not self._full_attn_layer_idxs:
             return
 
-        from vllm.forward_context import get_forward_context
+        from vllm.runtime.execution.forward_context import get_forward_context
 
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is None:

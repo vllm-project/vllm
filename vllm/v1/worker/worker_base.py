@@ -11,7 +11,7 @@ import vllm.backends.compute.ir
 from vllm.foundation.config import VllmConfig, set_current_vllm_config
 from vllm.backends.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.foundation.observability.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.foundation.observability.tracing import instrument
 from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname

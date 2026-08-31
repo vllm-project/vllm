@@ -43,7 +43,7 @@ from vllm.backends.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import ForwardContext
+from vllm.runtime.execution.forward_context import ForwardContext
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.backends.platform import current_platform

@@ -40,8 +40,8 @@ from vllm.benchmarks.datasets.utils import (
     get_sampling_params,
 )
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_adapter_absolute_path
+from vllm.runtime.modeling.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.utils import get_adapter_absolute_path
 from vllm.frontend.processing.multimodal.audio import get_audio_duration
 from vllm.frontend.processing.multimodal.image import convert_image_mode
 from vllm.frontend.processing.multimodal.utils import encode_image_url, fetch_image
@@ -182,7 +182,7 @@ class BenchmarkDataset(ABC):
                 If `None`, LoRA is not used.
 
         Returns:
-            A new [`LoRARequest`][vllm.lora.request.LoRARequest]
+            A new [`LoRARequest`][vllm.runtime.modeling.lora.request.LoRARequest]
             (or `None` if not applicable).
         """
         if max_loras is None or lora_path is None:
@@ -217,7 +217,7 @@ class BenchmarkDataset(ABC):
                 If `None`, LoRA is not used.
 
         Returns:
-            A new [`LoRARequest`][vllm.lora.request.LoRARequest]
+            A new [`LoRARequest`][vllm.runtime.modeling.lora.request.LoRARequest]
             (or `None` if not applicable).
         """
         if max_loras is None or lora_path is None:
@@ -250,7 +250,7 @@ class BenchmarkDataset(ABC):
                 'random' (default) or 'round-robin'.
 
         Returns:
-            A new [`LoRARequest`][vllm.lora.request.LoRARequest]
+            A new [`LoRARequest`][vllm.runtime.modeling.lora.request.LoRARequest]
             (or `None` if not applicable).
         """
         if lora_assignment == "round-robin":

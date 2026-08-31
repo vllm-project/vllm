@@ -107,7 +107,7 @@ from vllm.frontend.processing.multimodal.video import (
     VideoSourceMetadata,
     VideoTargetMetadata,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.processor import _merge_mm_kwargs
 from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
 from vllm.foundation.integrations.transformers_utils.utils import convert_model_repo_to_path

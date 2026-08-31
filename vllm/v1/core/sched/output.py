@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
     from vllm.backends.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
     from vllm.backends.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
-    from vllm.lora.request import LoRARequest
+    from vllm.runtime.modeling.lora.request import LoRARequest
     from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
     from vllm.frontend.processing.pooling_params import PoolingParams
     from vllm.frontend.processing.sampling_params import SamplingParams

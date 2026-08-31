@@ -1,6 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.lora.ops.xpu_ops.lora_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
+"""Compatibility shim: vllm.lora/ops/xpu_ops/ -> vllm.runtime.modeling.lora.ops.xpu_ops (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-__all__ = ["bgmv_expand", "bgmv_expand_slice", "bgmv_shrink"]
+_real = _importlib.import_module("vllm.runtime.modeling.lora.ops.xpu_ops")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

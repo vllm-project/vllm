@@ -32,7 +32,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptInsertion,
     PromptUpdate,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .blip import BlipVisionModel, get_blip_num_patches

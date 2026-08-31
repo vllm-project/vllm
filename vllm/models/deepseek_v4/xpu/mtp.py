@@ -44,7 +44,7 @@ from vllm.models.deepseek_v4.common.ops import (
     mtp_shared_head_rmsnorm,
 )
 from vllm.backends.platform import current_platform
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .model import (
     DeepseekV4DecoderLayer,

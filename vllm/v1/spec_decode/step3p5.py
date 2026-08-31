@@ -6,7 +6,7 @@ from copy import copy
 import torch
 
 from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config, replace
-from vllm.forward_context import set_forward_context
+from vllm.runtime.execution.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.utils import get_draft_quant_config
 from vllm.v1.attention.backend import CommonAttentionMetadata

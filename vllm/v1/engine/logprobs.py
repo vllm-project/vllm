@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.logprobs import (
+from vllm.runtime.generation.logprobs import (
     FlatLogprobs,
     PromptLogprobs,
     SampleLogprobs,

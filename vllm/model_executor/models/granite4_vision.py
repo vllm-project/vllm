@@ -55,7 +55,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.frontend.processing.multimodal.inputs import MultiModalFieldConfig
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .blip2 import Blip2QFormerModel
 

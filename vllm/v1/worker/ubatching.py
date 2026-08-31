@@ -5,7 +5,7 @@ import threading
 import torch
 
 from vllm import forward_context
-from vllm.forward_context import ForwardContext
+from vllm.runtime.execution.forward_context import ForwardContext
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.utilities.torch_utils import current_stream
 

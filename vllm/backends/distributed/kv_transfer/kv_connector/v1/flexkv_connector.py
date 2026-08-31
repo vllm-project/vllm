@@ -18,7 +18,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.backends.distributed.kv_events import KVCacheEvent
-    from vllm.forward_context import ForwardContext
+    from vllm.runtime.execution.forward_context import ForwardContext
     from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig

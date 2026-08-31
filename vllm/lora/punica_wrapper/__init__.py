@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
-from vllm.lora.punica_wrapper.punica_selector import get_punica_wrapper
+"""Compatibility shim: vllm.lora/punica_wrapper/ -> vllm.runtime.modeling.lora.punica_wrapper (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-__all__ = [
-    "PunicaWrapperBase",
-    "get_punica_wrapper",
-]
+_real = _importlib.import_module("vllm.runtime.modeling.lora.punica_wrapper")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

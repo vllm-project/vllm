@@ -19,7 +19,7 @@ from vllm.backends.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.forward_context import get_forward_context
+from vllm.runtime.execution.forward_context import get_forward_context
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import (
@@ -44,7 +44,7 @@ from vllm.models.inkling.common.mm_preprocess import (
 )
 from vllm.models.inkling.common.towers import InklingAudio, InklingVision
 from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from ..configs import InklingMMConfig, InklingModelConfig
 from .attention import InklingAttention, compute_log_scaling_tau

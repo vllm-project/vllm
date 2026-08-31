@@ -11,8 +11,8 @@ import torch
 from typing_extensions import TypeVar
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.logprobs import PromptLogprobs, SampleLogprobs
-from vllm.lora.request import LoRARequest
+from vllm.runtime.generation.logprobs import PromptLogprobs, SampleLogprobs
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 
 logger = init_logger(__name__)

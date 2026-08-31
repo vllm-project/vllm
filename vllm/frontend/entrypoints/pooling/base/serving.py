@@ -20,7 +20,7 @@ from vllm.frontend.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.frontend.entrypoints.serve.engine.serving import BaseServing
 from vllm.frontend.entrypoints.serve.engine.typing import AnyRequest
 from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.frontend.processing.renderers.base import BaseRenderer
 from vllm.foundation.observability.tracing import (
     contains_trace_headers,

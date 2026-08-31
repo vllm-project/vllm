@@ -5,7 +5,7 @@ import functools
 import torch
 
 from vllm.foundation.config import CacheConfig, VllmConfig
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention

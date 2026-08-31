@@ -82,7 +82,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.frontend.processing.renderers import TokenizeParams
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.processors.muse_glimmer import MuseGlimmerProcessor
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 

@@ -36,7 +36,7 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.scheduler 
 from vllm.backends.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
-from vllm.forward_context import ForwardContext
+from vllm.runtime.execution.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput

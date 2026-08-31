@@ -35,7 +35,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 
 from .rocm import DeepseekV32MLAAttention
 

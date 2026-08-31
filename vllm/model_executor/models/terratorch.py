@@ -60,7 +60,7 @@ from vllm.frontend.processing.multimodal.processing import (
     PromptUpdate,
     TimingContext,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 
 from .interfaces import IsAttentionFree, MultiModalEmbeddings, SupportsMultiModal

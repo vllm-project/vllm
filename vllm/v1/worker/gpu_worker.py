@@ -51,7 +51,7 @@ from vllm.backends.distributed.weight_transfer import (
     WeightTransferEngineFactory,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.frontend.processing.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.backends.platform import current_platform
@@ -60,7 +60,7 @@ from vllm.foundation.devtools.profiler.wrapper import (
     ProtonProfilerWrapper,
     TorchProfilerWrapper,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.frontend.processing.tasks import SupportedTask
 from vllm.foundation.observability.tracing import instrument
 from vllm.foundation.utilities.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback

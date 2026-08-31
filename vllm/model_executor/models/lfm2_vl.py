@@ -20,7 +20,7 @@ from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.forward_context import set_forward_context
+from vllm.runtime.execution.forward_context import set_forward_context
 from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -45,7 +45,7 @@ from vllm.frontend.processing.multimodal.processing import (
     cached_encode,
 )
 from vllm.frontend.processing.renderers import TokenizeParams
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (

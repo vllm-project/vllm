@@ -31,7 +31,7 @@ from vllm.model_executor.models.qwen3_next import (
     QwenNextMixtureOfExperts,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.configs.qwen3_5 import Qwen3_5TextConfig
 from vllm.foundation.integrations.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
 

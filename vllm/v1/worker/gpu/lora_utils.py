@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_captured_lora_counts
+from vllm.runtime.modeling.lora.request import LoRARequest
+from vllm.runtime.modeling.lora.utils import get_captured_lora_counts
 
 if TYPE_CHECKING:
     from vllm.foundation.config.compilation import CompilationConfig

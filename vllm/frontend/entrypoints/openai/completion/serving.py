@@ -40,7 +40,7 @@ from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.foundation.system.exceptions import GenerationError, VLLMValidationError
 from vllm.frontend.processing.inputs import EngineInput
 from vllm.foundation.observability.logger import init_logger
-from vllm.logprobs import Logprob
+from vllm.runtime.generation.logprobs import Logprob
 from vllm.frontend.processing.outputs import RequestOutput
 from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
 from vllm.frontend.processing.sampling_params import BeamSearchParams, SamplingParams

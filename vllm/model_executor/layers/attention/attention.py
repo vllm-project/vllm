@@ -10,7 +10,7 @@ import vllm.foundation.system.envs as envs
 from vllm.backends.compiler.breakable_cudagraph import eager_break_during_capture
 from vllm.foundation.config import CacheConfig, get_current_vllm_config
 from vllm.foundation.config.vllm import VllmConfig
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.runtime.execution.forward_context import ForwardContext, get_forward_context
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
@@ -493,7 +493,7 @@ class Attention(nn.Module, AttentionLayerBase):
         Attention metadata (`attn_metadata`) is set using a context manager in
         the model runner's `execute_model` method. It is accessed via forward
         context using
-        `vllm.forward_context.get_forward_context().attn_metadata`.
+        `vllm.runtime.execution.forward_context.get_forward_context().attn_metadata`.
         """
         if output_dtype is None:
             output_dtype = query.dtype

@@ -25,7 +25,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import get_pp_missing_layer_names, maybe_prefix
-from vllm.sequence import IntermediateTensors
+from vllm.runtime.modeling.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from ..common.mtp import fused_mtp_input

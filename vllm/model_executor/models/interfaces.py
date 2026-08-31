@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     )
     from vllm.foundation.config.multimodal import VideoPruningMethod
     from vllm.frontend.processing.inputs import PromptType, TokensPrompt
-    from vllm.lora.model_manager import LoRAModelManager
+    from vllm.runtime.modeling.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.frontend.processing.multimodal.registry import _ProcessorFactories
-    from vllm.sequence import IntermediateTensors
+    from vllm.runtime.modeling.sequence import IntermediateTensors
     from vllm.frontend.processing.tasks import ScoreType
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.worker.encoder_cudagraph_defs import (
@@ -796,10 +796,10 @@ class SupportsPP(Protocol):
         intermediate_tensors: "IntermediateTensors | None",
     ) -> "Tensor | IntermediateTensors | tuple[Tensor, list[Tensor]]":
         """
-        Accept [`IntermediateTensors`][vllm.sequence.IntermediateTensors] when
+        Accept [`IntermediateTensors`][vllm.runtime.modeling.sequence.IntermediateTensors] when
         PP rank > 0.
 
-        Return [`IntermediateTensors`][vllm.sequence.IntermediateTensors] only
+        Return [`IntermediateTensors`][vllm.runtime.modeling.sequence.IntermediateTensors] only
         for the last PP rank.
         """
         ...

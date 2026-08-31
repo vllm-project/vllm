@@ -60,7 +60,7 @@ from vllm.backends.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.backends.distributed.parallel_state import get_tensor_model_parallel_rank
-from vllm.forward_context import ForwardContext
+from vllm.runtime.execution.forward_context import ForwardContext
 from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
