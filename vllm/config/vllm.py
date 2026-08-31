@@ -2904,10 +2904,10 @@ class VllmConfig:
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
         elif use_mamba_replayssm_spec:
-            if self.cache_config.mamba_cache_mode != "none":
+            if self.cache_config.mamba_cache_mode not in ("none", "align"):
                 raise ValueError(
                     "FlashInfer ReplaySSM speculative decoding requires "
-                    "--mamba-cache-mode none"
+                    "--mamba-cache-mode none or align"
                 )
             query_len = 1 + self.num_speculative_tokens
             if self.cache_config.replayssm_buffer_len < query_len:

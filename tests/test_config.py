@@ -216,12 +216,26 @@ def test_flashinfer_replayssm_allows_align_prefix_caching():
     assert VllmConfig.validate_mamba_cached_kernel(config) is config
 
 
-def test_flashinfer_replayssm_spec_decode_still_requires_none():
-    config = _replayssm_config(backend=MambaBackendEnum.FLASHINFER)
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_flashinfer_replayssm_spec_decode_allows_align_prefix_caching(
+    use_v2_model_runner,
+):
+    config = _replayssm_config(
+        backend=MambaBackendEnum.FLASHINFER,
+        use_v2_model_runner=use_v2_model_runner,
+    )
     config.num_speculative_tokens = 3
     config.cache_config.mamba_cache_mode = "align"
 
-    with pytest.raises(ValueError, match="speculative decoding requires"):
+    assert VllmConfig.validate_mamba_cached_kernel(config) is config
+
+
+def test_flashinfer_replayssm_spec_decode_rejects_all_cache_mode():
+    config = _replayssm_config(backend=MambaBackendEnum.FLASHINFER)
+    config.num_speculative_tokens = 3
+    config.cache_config.mamba_cache_mode = "all"
+
+    with pytest.raises(ValueError, match="none or align"):
         VllmConfig.validate_mamba_cached_kernel(config)
 
 

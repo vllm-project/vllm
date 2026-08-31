@@ -20,6 +20,13 @@ try:
 except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
 
+try:
+    from flashinfer.mamba.replayssm_materialize import replayssm_materialize
+
+    HAS_FLASHINFER_REPLAYSSM_MATERIALIZE = callable(replayssm_materialize)
+except ImportError:
+    HAS_FLASHINFER_REPLAYSSM_MATERIALIZE = False
+
 # Mamba2 (Nemotron-3) hybrid.
 MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
 MODELS = [
@@ -277,4 +284,86 @@ def test_replayssm_prefix_caching_matches_baseline(vllm_runner, model_name):
 def test_replayssm_prefix_caching_matches_baseline_tp2(vllm_runner, model_name):
     _check_replayssm_prefix_caching_parity(
         vllm_runner, model_name, tensor_parallel_size=2
+    )
+
+
+def _check_replayssm_mtp_prefix_caching_parity(
+    vllm_runner,
+    model_name,
+    *,
+    require_v2=False,
+    monkeypatch=None,
+):
+    if require_v2:
+        assert monkeypatch is not None
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+        envs.disable_envs_cache()
+
+    common = dict(
+        max_model_len=8192,
+        trust_remote_code=True,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        mamba_cache_mode="align",
+        mamba_backend="flashinfer",
+        disable_log_stats=False,
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": 3,
+            "prompt_lookup_max": 3,
+        },
+    )
+    with vllm_runner(model_name, **common) as llm:
+        baseline = llm.generate_greedy_logprobs(
+            PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+        )
+    with vllm_runner(
+        model_name,
+        use_replayssm=True,
+        replayssm_buffer_len=16,
+        **common,
+    ) as llm:
+        if require_v2:
+            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
+        llm.generate_greedy_logprobs(
+            PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+        )
+        replay = llm.generate_greedy_logprobs(
+            PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+        )
+        replay_hits = _prefix_cache_hits(llm)
+
+    assert replay_hits > 0
+    check_logprobs_close(
+        outputs_0_lst=baseline,
+        outputs_1_lst=replay,
+        name_0="baseline_mtp_align_pc",
+        name_1="replayssm_flashinfer_mtp_align_pc",
+    )
+
+
+@pytest.mark.skipif(
+    not (HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE),
+    reason="FlashInfer ReplaySSM materialization APIs not available",
+)
+@pytest.mark.parametrize("model_name", MODELS)
+def test_replayssm_flashinfer_mtp_prefix_caching_matches_baseline(
+    vllm_runner, model_name
+):
+    _check_replayssm_mtp_prefix_caching_parity(vllm_runner, model_name)
+
+
+@pytest.mark.skipif(
+    not (HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE),
+    reason="FlashInfer ReplaySSM materialization APIs not available",
+)
+@pytest.mark.parametrize("model_name", MODELS)
+def test_replayssm_flashinfer_mtp_prefix_caching_matches_baseline_v2(
+    vllm_runner, model_name, monkeypatch
+):
+    _check_replayssm_mtp_prefix_caching_parity(
+        vllm_runner,
+        model_name,
+        require_v2=True,
+        monkeypatch=monkeypatch,
     )

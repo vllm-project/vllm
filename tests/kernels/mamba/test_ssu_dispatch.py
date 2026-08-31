@@ -16,6 +16,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
     materialize_replayssm_prefix_gpu,
+    materialize_replayssm_prefix_mtp_gpu,
     reset_replayssm_ring_trackers,
     selective_state_update,
     selective_state_update_replayssm_flashinfer,
@@ -301,8 +302,6 @@ def test_triton_basic_call():
     assert not torch.isnan(out).any()
 
 
-
-
 def test_replayssm_flashinfer_call_forwards_explicit_controls(monkeypatch):
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
 
@@ -491,6 +490,10 @@ def _flashinfer_replayssm_mixer() -> Mock:
     mixer.use_replayssm = True
     mixer.mamba_config.backend = MambaBackendEnum.FLASHINFER
     mixer.kv_cache = [object()] * 5
+    mixer._replayssm_ring_start = torch.zeros(32, dtype=torch.int32)
+    mixer._replayssm_prev_num_accepted = torch.zeros(32, dtype=torch.int32)
+    mixer._replayssm_prev_query_len = torch.zeros(32, dtype=torch.int32)
+    mixer.replayssm_buffer_len = 16
     return mixer
 
 
@@ -501,12 +504,14 @@ def test_materialize_replayssm_prefix_gpu_gathers_copied_slots(monkeypatch):
     kv_cache_config.kv_cache_groups = [Mock(layer_names=["mixer"])]
     launches: list[dict[str, list]] = []
 
-    def fake_launch(mixers, src_row, dst_row, copied, _kernel):
+    mixer._replayssm_prev_num_accepted[10] = 2
+
+    def fake_launch(mixers, src_row, dst_row, flush_count, _kernel):
         launches.append(
             {
                 "src_row": src_row.tolist(),
                 "dst_row": dst_row.tolist(),
-                "copied": copied.tolist(),
+                "flush_count": flush_count.tolist(),
             }
         )
 
@@ -518,6 +523,16 @@ def test_materialize_replayssm_prefix_gpu_gathers_copied_slots(monkeypatch):
     monkeypatch.setattr(
         "vllm.model_executor.layers.mamba.ops.ssu_dispatch._load_replayssm_materialize",
         lambda: object(),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.ops.ssu_dispatch."
+        "_replayssm_materialize_ready",
+        lambda _mixers: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.ops.ssu_dispatch."
+        "reset_replayssm_ring_trackers",
+        lambda *args, **kwargs: None,
     )
 
     # Request-state order: req0 copies 0->1, req1 stays on col 1, req2 is fresh.
@@ -550,7 +565,73 @@ def test_materialize_replayssm_prefix_gpu_gathers_copied_slots(monkeypatch):
     assert launches == [
         {
             "src_row": [10, 0, 21],
-            "dst_row": [11, 0, 21],
-            "copied": [True, False, False],
+            "dst_row": [10, 0, 21],
+            "flush_count": [2, -1, -1],
         }
     ]
+
+
+def test_materialize_replayssm_prefix_mtp_gpu_uses_committed_boundary(
+    monkeypatch,
+):
+    mixer = _flashinfer_replayssm_mixer()
+    mixer._replayssm_prev_num_accepted[10] = 4
+    mixer._replayssm_prev_num_accepted[21] = 5
+    kv_cache_config = Mock()
+    kv_cache_config.kv_cache_groups = [Mock(layer_names=["mixer"])]
+    launches: list[dict[str, list]] = []
+    resets: list[list[int]] = []
+
+    def fake_launch(mixers, src_row, dst_row, flush_count, _kernel):
+        launches.append(
+            {
+                "src_row": src_row.tolist(),
+                "dst_row": dst_row.tolist(),
+                "flush_count": flush_count.tolist(),
+            }
+        )
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.ops.ssu_dispatch."
+        "_launch_replayssm_materialize",
+        fake_launch,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.ops.ssu_dispatch._load_replayssm_materialize",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.ops.ssu_dispatch."
+        "_replayssm_materialize_ready",
+        lambda _mixers: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.ops.ssu_dispatch."
+        "reset_replayssm_ring_trackers",
+        lambda _start, _accepted, _query, slots: resets.append(slots.tolist()),
+    )
+
+    materialize_replayssm_prefix_mtp_gpu(
+        kv_cache_config,
+        [0],
+        {"mixer": mixer},
+        [
+            torch.tensor(
+                [[10, 11, 12], [0, 0, 0], [20, 21, 22]],
+                dtype=torch.int32,
+            )
+        ],
+        torch.tensor([0, -1, 1], dtype=torch.int32),
+        torch.tensor([1, 0, 2], dtype=torch.int32),
+        torch.tensor([2, 0, 3], dtype=torch.int32),
+        num_reqs=3,
+    )
+
+    assert launches == [
+        {
+            "src_row": [10, 0, 21],
+            "dst_row": [11, 0, 22],
+            "flush_count": [6, -1, 8],
+        }
+    ]
+    assert resets == [[11, 22]]

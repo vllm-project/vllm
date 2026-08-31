@@ -32,6 +32,7 @@ from vllm.v1.worker.mamba_utils import (
     collect_mamba_copy_meta,
     do_mamba_copy_block,
     get_mamba_groups,
+    postprocess_mamba_align_gpu,
     preprocess_mamba,
     stage_postprocess_inputs_to_gpu,
 )
@@ -277,6 +278,49 @@ def test_preprocess_mamba_skips_materialize_without_flashinfer(monkeypatch):
     assert called == []
 
 
+def test_postprocess_mamba_align_materializes_after_fused_copy(monkeypatch):
+    order: list[str] = []
+    ctx = MagicMock()
+    ctx.is_initialized = True
+    ctx.mamba_group_ids = [0]
+    ctx.mamba_state_idx_buf = MagicMock()
+    ctx.num_scheduled_tokens_buf = MagicMock()
+    ctx.num_computed_tokens_buf = MagicMock()
+    ctx.num_draft_tokens_buf = MagicMock()
+    ctx.num_accepted_tokens_out = torch.tensor([3], dtype=torch.int32)
+    ctx.materialize_src_cols = torch.tensor([2], dtype=torch.int32)
+    ctx.materialize_dst_cols = torch.tensor([1], dtype=torch.int32)
+    ctx.materialize_token_counts = torch.tensor([2], dtype=torch.int32)
+    ctx.run_fused_postprocess.side_effect = lambda **kwargs: order.append("copy")
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.mamba_utils.materialize_replayssm_prefix_mtp_gpu",
+        lambda *args, **kwargs: order.append("materialize"),
+    )
+
+    block_table = MagicMock()
+    block_table.get_device_tensor.return_value = torch.zeros((1, 4), dtype=torch.int32)
+    input_batch = MagicMock()
+    input_batch.block_table = [block_table]
+    kv_cache_config = MagicMock()
+    kv_cache_config.kv_cache_groups = [MagicMock()]
+    accepted_cpu = torch.zeros(1, dtype=torch.int32)
+
+    postprocess_mamba_align_gpu(
+        bufs=MagicMock(postprocess_align=ctx),
+        num_reqs=1,
+        num_accepted_tokens_gpu=torch.tensor([3], dtype=torch.int32),
+        num_accepted_tokens_cpu_tensor=accepted_cpu,
+        input_batch=input_batch,
+        kv_cache_config=kv_cache_config,
+        forward_context={},
+        mamba_state_copy_funcs={},
+    )
+
+    assert order == ["copy", "materialize"]
+    assert accepted_cpu.tolist() == [3]
+
+
 # -----------------------------------------------------------------------------
 # Golden tests for postprocess_mamba_fused_kernel
 # -----------------------------------------------------------------------------
@@ -399,6 +443,28 @@ def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
     assert gpu_ctx.block_table_ptrs.tolist() == [
         _reinterpret_u64_as_i64(block_table_ptr)
     ]
+
+
+def test_gpu_context_marks_flashinfer_replayssm_temporal_state():
+    cfg = _TestConfig(num_layers=1)
+    device = torch.device("cpu")
+    kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
+    gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+    attention = _make_mock_attention(
+        torch.empty(cfg.num_blocks, cfg.conv_width, cfg.conv_inner_dim),
+        torch.empty(cfg.num_blocks, cfg.temporal_state_dim),
+    )
+    attention.use_replayssm = True
+    attention.mamba_config.backend = MambaBackendEnum.FLASHINFER
+
+    gpu_ctx.initialize_from_forward_context(
+        kv_cache_config,
+        {"layer_0": attention},
+        _COPY_FUNCS,
+        [torch.empty(1, 4, dtype=torch.int32)],
+    )
+
+    assert gpu_ctx.state_skip_postprocess.tolist() == [0, 1]
 
 
 def _make_postprocess_scheduler_output(
@@ -1165,6 +1231,7 @@ class TestPostprocessMambaFusedKernel:
         # State should be unchanged
         torch.testing.assert_close(conv_state, conv_state_orig)
         torch.testing.assert_close(temporal_state, temporal_state_orig)
+        assert gpu_ctx.materialize_src_cols[0].item() == -1
 
     @pytest.mark.parametrize("num_reqs", [1, 2, 8, 16])
     def test_various_batch_sizes(self, device, test_config, num_reqs):
@@ -1486,6 +1553,10 @@ class TestPostprocessMambaFusedKernel:
             num_draft_tokens=num_draft_tokens,
             device=device,
         )
+
+        assert gpu_ctx.materialize_src_cols[0].item() == 1
+        assert gpu_ctx.materialize_dst_cols[0].item() == 1
+        assert gpu_ctx.materialize_token_counts[0].item() == 1
 
         # --- Verify Python behavior (ground truth) ---
         # State should be unchanged (no copy when src_addr == dst_addr)

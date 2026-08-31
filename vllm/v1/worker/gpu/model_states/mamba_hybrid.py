@@ -13,6 +13,7 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     materialize_replayssm_prefix_gpu,
+    materialize_replayssm_prefix_mtp_gpu,
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
@@ -103,6 +104,9 @@ class MambaHybridModelState(DefaultModelState):
             and self.cache_config.use_replayssm is True
             and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
         )
+        self._use_flashinfer_replayssm_mtp = (
+            self._use_flashinfer_replayssm and vllm_config.num_speculative_tokens > 0
+        )
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
@@ -120,6 +124,8 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
             self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
+            self._mamba_kv_cache_config: KVCacheConfig | None = None
+            self._mamba_block_tables: tuple[torch.Tensor, ...] | None = None
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -153,6 +159,8 @@ class MambaHybridModelState(DefaultModelState):
         mamba_group_ids: list[int],
         block_tables: tuple[torch.Tensor, ...],
     ) -> MambaSpecDecodeGPUContext:
+        self._mamba_kv_cache_config = kv_cache_config
+        self._mamba_block_tables = block_tables
         if self._mamba_state_copy_funcs is None:
             mamba_groups = get_mamba_groups(kv_cache_config)
             mamba_types = {spec.mamba_type for spec in mamba_groups}
@@ -409,6 +417,19 @@ class MambaHybridModelState(DefaultModelState):
                 num_computed_tokens,
                 idx_mapping,
             )
+            if self._use_flashinfer_replayssm_mtp:
+                assert self._mamba_kv_cache_config is not None
+                assert self._mamba_block_tables is not None
+                materialize_replayssm_prefix_mtp_gpu(
+                    self._mamba_kv_cache_config,
+                    self._mamba_group_ids,
+                    self.vllm_config.compilation_config.static_forward_context,
+                    self._mamba_block_tables,
+                    self._mamba_ctx.materialize_src_cols,
+                    self._mamba_ctx.materialize_dst_cols,
+                    self._mamba_ctx.materialize_token_counts,
+                    num_reqs,
+                )
 
 
 @triton.jit

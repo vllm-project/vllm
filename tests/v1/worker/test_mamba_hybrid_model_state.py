@@ -191,3 +191,46 @@ def test_preprocess_state_skips_materialize_without_flashinfer(monkeypatch):
     )
 
     assert order == ["advance", "precopy"]
+
+
+def test_postprocess_state_materializes_mtp_after_fused_copy(monkeypatch):
+    order: list[str] = []
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.model_states.mamba_hybrid._scatter_num_accepted_kernel",
+        _FakeTritonKernel(order),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.model_states.mamba_hybrid."
+        "materialize_replayssm_prefix_mtp_gpu",
+        lambda *args, **kwargs: order.append("materialize"),
+    )
+
+    ctx = MagicMock()
+    ctx.run_fused_postprocess_align.side_effect = lambda *args, **kwargs: order.append(
+        "copy"
+    )
+    ctx.materialize_src_cols = torch.tensor([2], dtype=torch.int32)
+    ctx.materialize_dst_cols = torch.tensor([1], dtype=torch.int32)
+    ctx.materialize_token_counts = torch.tensor([2], dtype=torch.int32)
+
+    state = object.__new__(MambaHybridModelState)
+    state._align_mode = True
+    state._use_flashinfer_replayssm_mtp = True
+    state._mamba_ctx = ctx
+    state._mamba_group_ids = [0]
+    state._mamba_state_idx_gpu = torch.zeros(1, dtype=torch.int32)
+    state.num_accepted_tokens_gpu = torch.ones(1, dtype=torch.int32)
+    state._mamba_kv_cache_config = MagicMock()
+    state._mamba_block_tables = (torch.zeros((1, 4), dtype=torch.int32),)
+    state.recoverssm = None
+    state.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(static_forward_context={})
+    )
+
+    state.postprocess_state(
+        torch.tensor([0], dtype=torch.int32),
+        torch.tensor([3], dtype=torch.int32),
+        torch.tensor([17], dtype=torch.int32),
+    )
+
+    assert order == ["advance", "copy", "materialize"]
