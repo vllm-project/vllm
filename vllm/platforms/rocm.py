@@ -904,6 +904,7 @@ class RocmPlatform(Platform):
             compilation_config.cudagraph_mode.has_full_cudagraphs()
             and parallel_config.prefill_context_parallel_size > 1
         ):
+            # prefill context parallel do not support full cudagraphs
             logger.warning_once(
                 "Prefill context parallel (PCP) is enabled, which is "
                 "incompatible with full CUDA graphs. "

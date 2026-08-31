@@ -56,7 +56,6 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # Non-causal DSpark block is flattened to one decode row per query token in
     # forward_mqa, so no intra-block causal masking is required.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
-    supports_non_causal_multi_token_dcp: ClassVar[bool] = True
 
     @classmethod
     def get_cudagraph_support(
@@ -94,11 +93,7 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
         # the decode path; raise its reorder threshold to the spec block length
         # so full-cudagraph capture admits it. Causal usage stays single-token.
         if getattr(self, "non_causal_multi_token_decode", False):
-            self._init_reorder_batch_threshold(
-                1,
-                supports_spec_as_decode=True,
-                supports_dcp_with_varlen=True,
-            )
+            self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
         self._reserve_attn_logits_workspace()
 
     def update_draft_decode_metadata(self, _metadata: MLACommonMetadata) -> None:

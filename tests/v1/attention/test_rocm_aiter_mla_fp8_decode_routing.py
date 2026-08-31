@@ -2,9 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Decode-kernel routing for the ROCm AITER MLA backend.
 
-Gluon is retained for supported non-DCP decode shapes. DCP multi-token
-verification uses segmented MLA so it does not depend on Gluon's query-head or
-long-context pipeline limits.
+Gluon exposes a single fp8-KV regime, bh16bn128. It is a bf16-query kernel that
+upcasts the cache in registers with a hardcoded scale of 1.0, and it asserts
+batch_size == 1, so it cannot serve a decode batch. Every fp8 shape therefore
+has to land on the asm kernels, which ship real fp8 variants for gqa=16. These
+tests pin that down at the predicates, since the failure it prevents is either a
+batch assertion or -- worse -- a silently wrong result.
+
+Gluon is still the route for supported non-DCP decode shapes. DCP multi-token
+verification uses segmented MLA instead, so it depends on neither Gluon's
+query-head nor its long-context pipeline limits.
 """
 
 import pytest
@@ -55,7 +62,7 @@ def test_non_dcp_fp8_never_routes_to_gluon(kv_cache_dtype, num_heads, max_qo_len
 def test_fp8_never_routes_to_gluon_under_any_mode(
     monkeypatch, kv_cache_dtype, num_heads, mode
 ):
-    """The mode knob cannot force a non-DCP fp8 cache onto Gluon.
+    """VLLM_ROCM_AITER_MLA_ASM_PADDING cannot force a non-DCP fp8 cache onto Gluon.
 
     The dtype guard deliberately precedes the mode knob: honouring an explicit
     "gluon" request under fp8 would hand Gluon the batch it asserts against, so
@@ -92,7 +99,9 @@ def test_segmented_dcp_verify_does_not_depend_on_gluon(monkeypatch):
     monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: False)
     monkeypatch.setattr(rocm_aiter_mla, "_segmented_mla_decode_supported", lambda: True)
 
-    assert AiterMLAHelper.use_segmented_dcp_verify(3, dcp_world_size=8)
+    assert rocm_aiter_mla._segmented_dcp_verify_supported(8, 1)
+    # Round-robin interleaving other than 1 is not served by this route.
+    assert not rocm_aiter_mla._segmented_dcp_verify_supported(8, 4)
 
 
 @pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)

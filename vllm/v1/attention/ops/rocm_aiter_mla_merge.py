@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Reduce AITER segmented MLA partials and return natural-log LSE."""
+"""Merge AITER segmented MLA split-K partials into output plus natural-log LSE.
+
+This mirrors AITER's own segment reduction, including its
+``tiles_per_segment = cdiv(seq_len, NUM_SEGMENTS * TILE_SIZE)`` partitioning, so
+it has to move together with the ``skip_reduce=True`` call in the AITER MLA
+backend. It is a rank-local split-K merge and unrelated to any collective
+reduce; the natural-log LSE it returns is what the cross-rank DCP merge
+consumes.
+"""
 
 import torch
 
@@ -8,7 +16,7 @@ from vllm.triton_utils import LOGE2, tl, triton
 
 
 @triton.jit
-def _reduce_mla_segment_partials_kernel(
+def _merge_mla_segments_kernel(
     out_ptr,
     lse_ptr,
     segm_output_ptr,
@@ -89,7 +97,7 @@ def _reduce_mla_segment_partials_kernel(
     tl.store(lse_ptr + token_idx * lse_stride0 + head_idx, lse)
 
 
-def reduce_mla_segment_partials(
+def merge_mla_segments_triton(
     segm_output: torch.Tensor,
     segm_max: torch.Tensor,
     segm_expsum: torch.Tensor,
@@ -109,7 +117,7 @@ def reduce_mla_segment_partials(
         dtype=torch.float32,
         device=segm_output.device,
     )
-    _reduce_mla_segment_partials_kernel[(num_tokens, num_heads)](
+    _merge_mla_segments_kernel[(num_tokens, num_heads)](
         output,
         lse,
         segm_output,

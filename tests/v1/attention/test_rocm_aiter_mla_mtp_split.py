@@ -20,8 +20,8 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
     AiterMLAImpl,
     AiterMLAMetadataBuilder,
 )
-from vllm.v1.attention.ops.rocm_aiter_mla_reduce import (  # noqa: E402
-    reduce_mla_segment_partials,
+from vllm.v1.attention.ops.rocm_aiter_mla_merge import (  # noqa: E402
+    merge_mla_segments_triton,
 )
 
 
@@ -97,10 +97,14 @@ def _builder(
         dcp_world_size=dcp_world_size,
         dcp_rank=dcp_rank,
         cp_kv_cache_interleave_size=1,
-        _dcp_verify_graph_max_kv_seq_len=128,
-        _verify_row_lens=None,
-        _dcp_verify_block_table=None,
-        _dcp_verify_qo_indptr=None,
+        # Mirrors the production constructor: configuration decides whether the
+        # segmented route is available, query length decides per batch.
+        _supports_segmented_dcp_verify=rocm_aiter_mla._segmented_dcp_verify_supported(
+            dcp_world_size, 1
+        ),
+        # Derived once in the real constructor, so derive it once here too.
+        _segmented_page_size=rocm_aiter_mla._segmented_mla_page_size(kernel_block_size),
+        _dcp_verify_buffers=None,
         _graph_seq_lens=None,
         _kv_cache_dtype_str=kv_cache_dtype,
         paged_kv_last_page_len=torch.ones(max_decode_rows, dtype=torch.int32),
@@ -159,11 +163,10 @@ def test_dcp_verify_row_view_is_causal_per_row():
     else adds it back on the target path.
     """
     qlen = 4
-    builder = _builder(mtp_decode_qlen=qlen, dcp_world_size=2)
-    builder.kernel_block_size = 2
+    builder = _builder(mtp_decode_qlen=qlen, dcp_world_size=2, kernel_block_size=2)
     block_table = torch.tensor([[7, 8, 9], [10, 11, 12]], dtype=torch.int32)
 
-    pages, row_lens, qo_indptr, max_kv_len = builder._build_dcp_verify_row_view(
+    view = builder._build_dcp_verify_row_view(
         qlen,
         block_table,
         torch.tensor([10, 12], dtype=torch.int32),
@@ -171,12 +174,12 @@ def test_dcp_verify_row_view_is_causal_per_row():
 
     # seq_len 10 -> rows see 7, 8, 9, 10 global positions, of which rank 0 of 2
     # holds ceil(n / 2); seq_len 12 -> 9, 10, 11, 12.
-    assert row_lens.tolist() == [4, 4, 5, 5, 5, 5, 6, 6]
-    assert qo_indptr.tolist() == list(range(2 * qlen + 1))
+    assert view.row_lens.tolist() == [4, 4, 5, 5, 5, 5, 6, 6]
+    assert view.qo_indptr.tolist() == list(range(2 * qlen + 1))
     # One query per row, so the page table is the request's ascending shard and
     # only the row length selects the causal prefix.
-    assert pages.tolist() == [[7, 8, 9]] * qlen + [[10, 11, 12]] * qlen
-    assert max_kv_len == 6
+    assert view.block_table.tolist() == [[7, 8, 9]] * qlen + [[10, 11, 12]] * qlen
+    assert view.max_kv_seq_len == 6
 
 
 def test_dcp_verify_rows_sum_to_the_global_window_across_ranks():
@@ -190,14 +193,14 @@ def test_dcp_verify_rows_sum_to_the_global_window_across_ranks():
             mtp_decode_qlen=qlen,
             dcp_world_size=dcp_world_size,
             dcp_rank=dcp_rank,
+            kernel_block_size=2,
         )
-        builder.kernel_block_size = 2
-        _, row_lens, _, _ = builder._build_dcp_verify_row_view(
+        view = builder._build_dcp_verify_row_view(
             qlen,
             torch.tensor([[7, 8, 9], [10, 11, 12]], dtype=torch.int32),
             seq_lens,
         )
-        per_rank.append(row_lens.tolist())
+        per_rank.append(view.row_lens.tolist())
 
     expected = [
         int(seq_len) - qlen + t + 1
@@ -208,29 +211,34 @@ def test_dcp_verify_rows_sum_to_the_global_window_across_ranks():
 
 
 def test_dcp_verify_row_view_uses_static_graph_bound():
+    """Under full graphs the bound comes from the buffers, not the batch."""
     qlen = 3
     builder = _builder(
         mtp_decode_qlen=qlen,
         dcp_world_size=8,
         has_full_cudagraphs=True,
+        kernel_block_size=1536,
     )
-    builder.kernel_block_size = 1536
-    builder._dcp_verify_graph_max_kv_seq_len = 3072
-    builder._dcp_verify_block_table = torch.zeros((qlen, 24), dtype=torch.int32)
-    builder._dcp_verify_qo_indptr = torch.zeros(qlen + 1, dtype=torch.int32)
-    builder._verify_row_lens = torch.zeros(qlen, dtype=torch.int32)
+    builder._dcp_verify_buffers = rocm_aiter_mla.AiterMLADCPVerifyMetadata(
+        row_lens=torch.zeros(qlen, dtype=torch.int32),
+        block_table=torch.zeros((qlen, 24), dtype=torch.int32),
+        qo_indptr=torch.zeros(qlen + 1, dtype=torch.int32),
+        page_size=128,
+        max_kv_seq_len=3072,
+    )
 
-    pages, row_lens, qo_indptr, max_kv_len = builder._build_dcp_verify_row_view(
+    view = builder._build_dcp_verify_row_view(
         qlen,
         torch.arange(2, dtype=torch.int32).view(1, 2),
         torch.tensor([1000], dtype=torch.int32),
     )
 
-    assert row_lens.tolist() == [125] * qlen
-    assert pages.data_ptr() == builder._dcp_verify_block_table.data_ptr()
-    assert qo_indptr.data_ptr() == builder._dcp_verify_qo_indptr.data_ptr()
-    assert pages[0].tolist() == list(range(24))
-    assert max_kv_len == 3072
+    buffers = builder._dcp_verify_buffers
+    assert view.row_lens.tolist() == [125] * qlen
+    assert view.block_table.data_ptr() == buffers.block_table.data_ptr()
+    assert view.qo_indptr.data_ptr() == buffers.qo_indptr.data_ptr()
+    assert view.block_table[0].tolist() == list(range(24))
+    assert view.max_kv_seq_len == 3072
 
 
 def test_dcp_fp8_verify_build_uses_segmented(monkeypatch):
@@ -253,8 +261,64 @@ def test_dcp_fp8_verify_build_uses_segmented(monkeypatch):
         dcp_tot_seq_lens_device=torch.tensor([10, 12], dtype=torch.int32),
     )
 
-    assert metadata.verify_row_lens is not None
-    assert metadata.dcp_verify_block_table is not None
+    assert metadata.dcp_verify is not None
+
+
+def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
+    """Single-token DCP decode must come back with an LSE the merge can use.
+
+    This is the path every DCP step takes outside verification. The vLLM custom
+    op drops aiter's LSE, so the impl calls aiter directly; without an LSE the
+    MLA layer's cross-rank combine asserts. The head count is deliberately a
+    non-divisor of 16 so both the output and the LSE have to be unpadded back
+    to the gathered head count.
+    """
+    num_heads, dcp_world_size = 6, 2
+    decode_heads = num_heads * dcp_world_size  # 12, padded to 16 by aiter
+    num_tokens, head_dim = 3, 576
+    captured = {}
+
+    def fake_aiter_decode(q, kv_buffer, out, *args, **kwargs):
+        captured["q_heads"] = q.shape[1]
+        captured["return_lse"] = kwargs.get("return_lse")
+        return None, torch.zeros(num_tokens, q.shape[1])
+
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_get_aiter_mla_decode", lambda: fake_aiter_decode
+    )
+
+    impl = object.__new__(AiterMLAImpl)
+    impl.num_heads = num_heads
+    impl.dcp_world_size = dcp_world_size
+    impl.kv_cache_dtype = "auto"
+    impl.kv_lora_rank = 512
+    impl.qk_rope_head_dim = 64
+    impl.scale = head_dim**-0.5
+    decode = SimpleNamespace(
+        max_qo_len=1,
+        qo_indptr=torch.arange(num_tokens + 1, dtype=torch.int32),
+        paged_kv_indptr=torch.zeros(num_tokens + 1, dtype=torch.int32),
+        paged_kv_indices=torch.zeros(1, dtype=torch.int32),
+        paged_kv_last_page_len=torch.ones(num_tokens, dtype=torch.int32),
+        use_gluon_decode=False,
+        use_gluon_verify=False,
+        dcp_verify=None,
+        has_persistent_metadata=False,
+        attn_out_dtype=torch.bfloat16,
+    )
+    attn_metadata = SimpleNamespace(decode=decode, causal=True, work_meta_data=None)
+    layer = SimpleNamespace(_q_scale=torch.tensor(1.0), _k_scale=torch.tensor(1.0))
+
+    q = torch.zeros(num_tokens, decode_heads, head_dim, dtype=torch.bfloat16)
+    output, lse = impl.forward_mqa(q, torch.zeros(1, 1, head_dim), attn_metadata, layer)
+
+    assert captured["return_lse"] is True
+    # aiter is handed the padded head count, but both results come back at the
+    # gathered count the cross-rank merge expects.
+    assert captured["q_heads"] == 16
+    assert lse is not None
+    assert output.shape[1] == decode_heads
+    assert lse.shape == (num_tokens, decode_heads)
 
 
 def test_verify_partial_attention_merge():
@@ -285,7 +349,7 @@ def test_segmented_verify_reduce_returns_natural_lse_and_masks_empty_rows():
     )
     segment_expsum = torch.ones_like(segment_max)
 
-    output, lse = reduce_mla_segment_partials(
+    output, lse = merge_mla_segments_triton(
         segment_output,
         segment_max,
         segment_expsum,
@@ -351,12 +415,10 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
         block_table = torch.arange(
             num_blocks, dtype=torch.int32, device=device
         ).unsqueeze(0)
-        row_block_table, row_lens, qo_indptr, max_kv_seq_len = (
-            builder._build_dcp_verify_row_view(
-                qlen,
-                block_table,
-                torch.tensor([global_seq_len], dtype=torch.int32, device=device),
-            )
+        view = builder._build_dcp_verify_row_view(
+            qlen,
+            block_table,
+            torch.tensor([global_seq_len], dtype=torch.int32, device=device),
         )
         decode = SimpleNamespace(
             max_qo_len=qlen,
@@ -367,10 +429,8 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
                 local_kv.shape[0], dtype=torch.int32, device=device
             ),
             use_gluon_decode=False,
-            verify_row_lens=row_lens,
-            dcp_verify_block_table=row_block_table,
-            dcp_verify_qo_indptr=qo_indptr,
-            dcp_verify_max_kv_seq_len=max_kv_seq_len,
+            use_gluon_verify=False,
+            dcp_verify=view,
             attn_out_dtype=torch.bfloat16,
         )
         attn_metadata = SimpleNamespace(decode=decode, causal=True)
@@ -759,8 +819,8 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
         (1, 1, 8, "fp8", True),
         (1, 1, 12, "fp8", True),
         (1, 1, 16, "fp8", True),
-        # A long speculative verify shape. The fp8 fold path rejects
-        # non-persistent execution once qlen > 4, so these must not fall through.
+        # DSpark verify shape. The fp8 fold path rejects non-persistent outright
+        # once qlen > 4, so these must not fall through.
         (8, 8, 8, "fp8", True),
         (8, 8, 12, "fp8", True),
     ],
