@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,6 +13,8 @@ from vllm.config import (
     DeviceConfig,
     VllmConfig,
 )
+from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CrossAttentionManager,
@@ -29,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheSpec,
     KVCacheSpecKind,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SinkFullAttentionSpec,
@@ -42,6 +46,42 @@ from vllm.v1.kv_cache_spec_registry import (
     KVCacheSpecRegistry,
     register_kv_cache_spec,
 )
+from vllm.v1.worker.utils import select_common_block_size
+
+
+@pytest.mark.parametrize("head_size", [128, 256])
+def test_fp8_k_nvfp4_v_page_size_is_between_fp8_and_nvfp4(head_size: int) -> None:
+    common = dict(
+        block_size=64, num_kv_heads=8, head_size=head_size, dtype=torch.uint8
+    )
+    fp8 = FlashInferBackend.customize_spec(
+        FullAttentionSpec(**common, kv_quant_mode=KVQuantMode.FP8_PER_TENSOR)
+    )
+    mixed = FlashInferBackend.customize_spec(
+        FullAttentionSpec(**common, kv_quant_mode=KVQuantMode.FP8_K_NVFP4_V)
+    )
+    nvfp4 = FlashInferBackend.customize_spec(
+        FullAttentionSpec(**common, kv_quant_mode=KVQuantMode.NVFP4)
+    )
+
+    expected_mixed_page_size = 64 * 8 * (
+        head_size + head_size // 2 + head_size // 16
+    )
+    assert mixed.page_size_bytes == expected_mixed_page_size
+    assert nvfp4.page_size_bytes < mixed.page_size_bytes < fp8.page_size_bytes
+
+
+@pytest.mark.parametrize("cache_dtype", ["nvfp4", "fp8_k_nvfp4_v"])
+def test_native_nvfp4_cache_uses_64_token_kernel_blocks(
+    monkeypatch: pytest.MonkeyPatch, cache_dtype: str
+) -> None:
+    config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
+    monkeypatch.setattr(
+        flashinfer_backend, "get_current_vllm_config_or_none", lambda: config
+    )
+
+    assert FlashInferBackend.get_supported_kernel_block_sizes() == [64]
+    assert select_common_block_size(2688, [FlashInferBackend]) == 64
 
 
 def make_vllm_config() -> VllmConfig:

@@ -51,6 +51,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "turboquant_3bit_nc": torch.uint8,
     "nvfp4": torch.uint8,
     "nvfp4_4over6": torch.uint8,
+    "fp8_k_nvfp4_v": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -596,6 +597,56 @@ def nvfp4_split_data_scale(
     ).view(torch.float8_e4m3fn)
 
     return data, scale
+
+
+def fp8_k_nvfp4_v_cache_split_views(
+    kv_cache: torch.Tensor,
+    head_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split packed ``[K_fp8 | V_fp4 | V_scale]`` pages without copies."""
+    if kv_cache.dim() != 4 or kv_cache.dtype != torch.uint8:
+        raise ValueError("FP8-K/NVFP4-V cache must be a 4D uint8 tensor")
+
+    total_dim = head_size + nvfp4_kv_cache_full_dim(head_size)
+    if head_size % 64 != 0 or kv_cache.shape[-1] != total_dim:
+        raise ValueError(f"Invalid FP8-K/NVFP4-V cache shape {tuple(kv_cache.shape)}")
+
+    dim_1, dim_2 = kv_cache.shape[1:3]
+    stride_1, stride_2 = kv_cache.stride()[1:3]
+    is_dense_nhd = stride_1 == dim_2 * total_dim and stride_2 == total_dim
+    is_dense_hnd = stride_1 == total_dim and stride_2 == dim_1 * total_dim
+    if kv_cache.stride(-1) != 1 or not (is_dense_nhd or is_dense_hnd):
+        raise ValueError("FP8-K/NVFP4-V cache has incompatible inner strides")
+
+    num_pages = kv_cache.shape[0]
+    page_stride = kv_cache.stride(0)
+    page_items = dim_1 * dim_2
+    value_dim = head_size // 2
+    scale_dim = head_size // 16
+    base = kv_cache.storage_offset()
+
+    def segment(offset: int, dim: int, dtype: torch.dtype) -> torch.Tensor:
+        strides = (
+            page_stride,
+            kv_cache.stride(1) * dim // total_dim,
+            kv_cache.stride(2) * dim // total_dim,
+            1,
+        )
+        return torch.as_strided(
+            kv_cache,
+            (num_pages, dim_1, dim_2, dim),
+            strides,
+            storage_offset=base + offset,
+        ).view(dtype)
+
+    key = segment(0, head_size, torch.float8_e4m3fn)
+    value = segment(page_items * head_size, value_dim, torch.uint8)
+    value_scale = segment(
+        page_items * (head_size + value_dim),
+        scale_dim,
+        torch.float8_e4m3fn,
+    )
+    return key, value, value_scale
 
 
 def create_kv_caches_with_random_flash(

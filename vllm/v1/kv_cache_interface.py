@@ -54,6 +54,7 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_4BIT_NC = 7
     TURBOQUANT_K3V4_NC = 8
     TURBOQUANT_3BIT_NC = 9
+    FP8_K_NVFP4_V = 10  # fp8 K + packed nvfp4 V
 
     @property
     def is_per_token_head(self) -> bool:
@@ -79,6 +80,10 @@ class KVQuantMode(IntEnum):
             KVQuantMode.TURBOQUANT_3BIT_NC,
         )
 
+    @property
+    def is_fp8_k_nvfp4_v(self) -> bool:
+        return self == KVQuantMode.FP8_K_NVFP4_V
+
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
@@ -92,6 +97,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
         return KVQuantMode[kv_cache_dtype.upper()]
+    if kv_cache_dtype == "fp8_k_nvfp4_v":
+        return KVQuantMode.FP8_K_NVFP4_V
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR
     return KVQuantMode.NONE

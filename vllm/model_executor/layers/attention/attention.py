@@ -268,6 +268,12 @@ class Attention(nn.Module, AttentionLayerBase):
         else:
             kv_cache_dtype = "auto"
 
+        if kv_cache_dtype == "fp8_k_nvfp4_v" and head_size_v not in (
+            None,
+            head_size,
+        ):
+            raise ValueError("fp8_k_nvfp4_v requires matching K/V head sizes")
+
         # llm-compressor models declare an FP8 KV-cache scheme in their
         # checkpoint config. Honor it only when the user did not explicitly
         # pick a kv_cache_dtype; an explicit choice (e.g. bfloat16) must win.
@@ -503,8 +509,10 @@ class Attention(nn.Module, AttentionLayerBase):
             # which reduces overheads during decoding.
             # Otherwise queries are quantized using custom ops
             # which causes decoding overheads
-            assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"} or (
-                self.kv_cache_dtype.startswith("nvfp4")
+            assert (
+                self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
+                or (self.kv_cache_dtype.startswith("nvfp4"))
+                or self.kv_cache_dtype == "fp8_k_nvfp4_v"
             )
 
             # check if query quantization is supported

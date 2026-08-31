@@ -95,6 +95,12 @@
   THO_DISPATCH_SWITCH(TYPE, NAME,                        \
                       VLLM_STABLE_DISPATCH_CASE_HALF_TYPES(__VA_ARGS__))
 
+#define VLLM_STABLE_DISPATCH_BFLOAT16(TYPE, NAME, ...)                  \
+  THO_DISPATCH_SWITCH(                                                  \
+      TYPE, NAME,                                                       \
+      THO_DISPATCH_CASE(torch::headeronly::ScalarType::BFloat16,        \
+                        __VA_ARGS__))
+
 // Quant type dispatch (FP8 + INT8)
 #ifdef USE_ROCM
   #define VLLM_STABLE_DISPATCH_CASE_QUANT_TYPES(...)                  \

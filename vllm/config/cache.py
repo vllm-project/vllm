@@ -54,6 +54,7 @@ CacheDType = Literal[
     "fp8_per_token_head",
     "nvfp4",
     "nvfp4_4over6",
+    "fp8_k_nvfp4_v",
 ]
 
 
@@ -125,6 +126,7 @@ class CacheConfig:
     to fp8.
     "nvfp4_4over6" uses the NVFP4 layout and selects between max/6 and max/4
     scales per 16 values by minimizing squared reconstruction error.
+    "fp8_k_nvfp4_v" stores K in FP8 E4M3 and V in NVFP4.
     """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in

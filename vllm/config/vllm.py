@@ -2823,8 +2823,8 @@ class VllmConfig:
             return self
         if (
             self.cache_config.cache_dtype.startswith("nvfp4")
-            and self.model_config.use_mla
-        ):
+            or self.cache_config.cache_dtype == "fp8_k_nvfp4_v"
+        ) and self.model_config.use_mla:
             raise ValueError(
                 "nvfp4 KV cache is not supported with MLA (Multi-head Latent "
                 "Attention) backends. Please use a different --kv-cache-dtype "
