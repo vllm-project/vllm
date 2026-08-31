@@ -417,7 +417,7 @@ def test_auto_selection_excludes_rocm_attn_for_kv_connector(
 
 
 def test_unified_attn_prefers_block_contiguous_layout():
-    """Unified attn prefers a block-first KV layout, making PR #53695 safe."""
+    """Unified attn prefers a block-first KV layout, hence ok with kv connectors."""
     from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
         RocmAiterUnifiedAttentionBackend,
     )
