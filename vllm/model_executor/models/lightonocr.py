@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
+from typing import TypeVar
 
 import torch
 import torch.nn as nn
@@ -33,6 +34,8 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+
+_I = TypeVar("_I", bound=Mistral3ProcessingInfo)
 
 
 class LightOnOCRProcessingInfo(Mistral3ProcessingInfo):

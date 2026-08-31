@@ -70,13 +70,6 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-def _get_weight_loader(param: torch.Tensor) -> Callable[..., object]:
-    weight_loader = getattr(param, "weight_loader", default_weight_loader)
-    if not callable(weight_loader):
-        raise TypeError("weight_loader must be callable")
-    return weight_loader
-
-
 class Llama4MoE(nn.Module):
     @staticmethod
     def custom_routing_function(
@@ -583,6 +576,7 @@ class Llama4Model(LlamaModel):
         params_dict = dict(self.named_parameters())
         # The module parameters that have been loaded.
         loaded_params: set[str] = set()
+        weight_loader: Callable[..., object]
 
         # Iterate over all the weights and load them into module parameters.
         for name, loaded_weight in weights:
@@ -627,7 +621,7 @@ class Llama4Model(LlamaModel):
                 # Load the weight into the module parameter with corresponding
                 # shard id and exit the for loop and the else block.
                 param = params_dict[name]
-                weight_loader = _get_weight_loader(param)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
 
                 if weight_loader == default_weight_loader:
                     weight_loader(param, loaded_weight)
@@ -670,7 +664,9 @@ class Llama4Model(LlamaModel):
                 ):
                     name = maybe_remap_moe_expert_param_name(name, params_dict)
                     param = params_dict[name]
-                    weight_loader = _get_weight_loader(param)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
 
                     # If weight loader supports special moe loading, use it to
                     # avoid expensive runtime reflection
@@ -704,7 +700,7 @@ class Llama4Model(LlamaModel):
 
                 # Handle normal (non-stacked, non-MoE) weights.
                 param = params_dict[name]
-                weight_loader = _get_weight_loader(param)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
