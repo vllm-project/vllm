@@ -8,10 +8,10 @@ For each token and channel, the output kernel computes
   hist[m] = state[sid, slot_off + m, c]  if m < state_len
             x[qsl[r] + m - state_len, c] otherwise
 
-State uses the [slot, window, channel] layout. Decode, speculative decode,
-and prefill differ only in their state-window offset and write-back rule.
-The write-back runs as a separate kernel because it overwrites state read by
-the output kernel. Slot zero is reserved and is never updated.
+State may use either [slot, window, channel] or [slot, channel, window]
+layout. Decode, speculative decode, and prefill differ in their state-window
+offset and write-back rule. The write-back runs separately because it
+overwrites state read by the output kernel. Slot zero is never updated.
 """
 
 import torch
@@ -38,6 +38,7 @@ def _ple_conv_kernel(
     bs_iters,
     state_bs,
     state_ws,
+    state_cs,
     C: tl.constexpr,
     BLOCK_C: tl.constexpr,
     STATE_LEN: tl.constexpr,
@@ -102,7 +103,7 @@ def _ple_conv_kernel(
         h = j + DILATION * k
         from_state = h <= STATE_LEN - 1
         state_tap = tl.load(
-            base_state + (h + slot_off) * state_ws + c_offs,
+            base_state + (h + slot_off) * state_ws + c_offs * state_cs,
             mask=c_mask & read_state & from_state,
             other=0.0,
         )
@@ -140,6 +141,7 @@ def _ple_conv_writeback_kernel(
     num_reqs,
     state_bs,
     state_ws,
+    state_cs,
     C: tl.constexpr,
     BLOCK_C: tl.constexpr,
     STATE_LEN: tl.constexpr,
@@ -189,7 +191,7 @@ def _ple_conv_writeback_kernel(
         from_state = m <= STATE_LEN - 1
         do_write = i < STATE_LEN + qlen - 1 if MODE == "spec" else True
         state_value = tl.load(
-            base_state + (slot_off + m) * state_ws + c_offs,
+            base_state + (slot_off + m) * state_ws + c_offs * state_cs,
             mask=c_mask & from_state & src_ok,
             other=0.0,
         )
@@ -200,7 +202,7 @@ def _ple_conv_writeback_kernel(
         )
         value = tl.where(from_state, state_value, input_value)
         tl.store(
-            base_state + i * state_ws + c_offs,
+            base_state + i * state_ws + c_offs * state_cs,
             value,
             mask=c_mask & do_write,
         )
@@ -219,6 +221,30 @@ def _conv_dimensions(
     return num_tokens, channels, kernel_size, state_len, state_width
 
 
+def _get_conv_state_strides(
+    conv_state: torch.Tensor,
+    channels: int,
+    state_width: int,
+) -> tuple[int, int, int]:
+    is_sd_layout = (
+        conv_state.shape[1] >= state_width and conv_state.shape[2] == channels
+    )
+    is_ds_layout = (
+        conv_state.shape[1] == channels and conv_state.shape[2] >= state_width
+    )
+    if is_sd_layout == is_ds_layout:
+        raise ValueError(
+            "conv_state must have shape [slots, window, channels] or "
+            "[slots, channels, window]"
+        )
+    state_dim, channel_dim = (1, 2) if is_sd_layout else (2, 1)
+    return (
+        conv_state.stride(0),
+        conv_state.stride(state_dim),
+        conv_state.stride(channel_dim),
+    )
+
+
 def ple_conv_decode(
     x_d: torch.Tensor,
     conv_state: torch.Tensor,
@@ -227,8 +253,9 @@ def ple_conv_decode(
     has_initial_states_d: torch.Tensor | None,
     dilation: int,
 ) -> torch.Tensor:
-    """Decode path: x_d [T, C], conv_state [S, W, C] (SD layout)."""
+    """Run decode for either supported convolution-state layout."""
     T, C, K, state_len, state_width = _conv_dimensions(x_d, conv_weights, dilation, 1)
+    state_bs, state_ws, state_cs = _get_conv_state_strides(conv_state, C, state_width)
     out = torch.empty_like(x_d)
     has_init_ptr = (
         has_initial_states_d
@@ -246,8 +273,9 @@ def ple_conv_decode(
         has_init_ptr,
         T,
         1,
-        conv_state.stride(0),
-        conv_state.stride(1),
+        state_bs,
+        state_ws,
+        state_cs,
         C=C,
         BLOCK_C=BLOCK_C,
         STATE_LEN=state_len,
@@ -266,8 +294,9 @@ def ple_conv_decode(
         state_indices_tensor_d,
         has_init_ptr,
         T,
-        conv_state.stride(0),
-        conv_state.stride(1),
+        state_bs,
+        state_ws,
+        state_cs,
         C=C,
         BLOCK_C=BLOCK_C,
         STATE_LEN=state_len,
@@ -294,6 +323,7 @@ def ple_conv_spec_decode(
     T, C, K, state_len, state_width = _conv_dimensions(
         x_spec, conv_weights, dilation, spec_query_len
     )
+    state_bs, state_ws, state_cs = _get_conv_state_strides(conv_state, C, state_width)
     R = spec_state_indices_tensor.numel()
     out = torch.empty_like(x_spec)
     _ple_conv_kernel[(T, triton.cdiv(C, BLOCK_C))](
@@ -307,8 +337,9 @@ def ple_conv_spec_decode(
         spec_query_start_loc,  # unused dummy pointer
         R,
         max(R, 1).bit_length(),
-        conv_state.stride(0),
-        conv_state.stride(1),
+        state_bs,
+        state_ws,
+        state_cs,
         C=C,
         BLOCK_C=BLOCK_C,
         STATE_LEN=state_len,
@@ -327,8 +358,9 @@ def ple_conv_spec_decode(
         num_accepted_tokens,
         spec_query_start_loc,  # unused dummy pointer
         R,
-        conv_state.stride(0),
-        conv_state.stride(1),
+        state_bs,
+        state_ws,
+        state_cs,
         C=C,
         BLOCK_C=BLOCK_C,
         STATE_LEN=state_len,
@@ -352,6 +384,7 @@ def ple_conv_prefill(
 ) -> torch.Tensor:
     """Run prefill over flat variable-length input sequences."""
     T, C, K, state_len, state_width = _conv_dimensions(x_p, conv_weights, dilation, 1)
+    state_bs, state_ws, state_cs = _get_conv_state_strides(conv_state, C, state_width)
     R = state_indices_tensor_p.numel()
     out = torch.empty_like(x_p)
     has_init_ptr = has_initial_states_p
@@ -366,8 +399,9 @@ def ple_conv_prefill(
         has_init_ptr,
         R,
         max(R, 1).bit_length(),
-        conv_state.stride(0),
-        conv_state.stride(1),
+        state_bs,
+        state_ws,
+        state_cs,
         C=C,
         BLOCK_C=BLOCK_C,
         STATE_LEN=state_len,
@@ -386,8 +420,9 @@ def ple_conv_prefill(
         query_start_loc_p,
         has_init_ptr,
         R,
-        conv_state.stride(0),
-        conv_state.stride(1),
+        state_bs,
+        state_ws,
+        state_cs,
         C=C,
         BLOCK_C=BLOCK_C,
         STATE_LEN=state_len,

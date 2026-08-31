@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 from functools import partial
 from itertools import accumulate
 from types import SimpleNamespace
@@ -558,7 +557,6 @@ def test_fused_ngram_ids_correctness(
 
 
 _KERNEL_STATE_BLOCKS = 64
-_ConvCall = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 def _make_conv_case(
@@ -590,24 +588,22 @@ def _make_conv_case(
     return generator, state, weights
 
 
-def _assert_conv_correctness(
-    inputs: torch.Tensor,
-    state: torch.Tensor,
-    weights: torch.Tensor,
-    eager_call: _ConvCall,
-    kernel_call: _ConvCall,
-) -> None:
-    state_eager = state.clone().transpose(-1, -2)
-    state_kernel = state.clone()
-    out_eager = eager_call(inputs, state_eager, weights)
-    out_kernel = kernel_call(inputs, state_kernel, weights)
-    torch.testing.assert_close(
-        out_kernel.float(), out_eager.float(), atol=3e-2, rtol=3e-2
-    )
-    assert torch.equal(state_kernel, state_eager.transpose(-1, -2).contiguous())
+def _make_conv_states(
+    state_sd: torch.Tensor,
+    state_layout: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    state_reference_ds = state_sd.clone().transpose(-1, -2)
+    if state_layout == "SD":
+        state_kernel = state_sd.clone()
+        state_kernel_ds = state_kernel.transpose(-1, -2)
+    else:
+        state_kernel = state_sd.clone().transpose(-1, -2).contiguous()
+        state_kernel_ds = state_kernel
+    return state_reference_ds, state_kernel, state_kernel_ds
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
+@pytest.mark.parametrize("state_layout", ["SD", "DS"])
 @pytest.mark.parametrize(
     ("num_tokens", "channels", "kernel_size", "dilation"),
     [(1, 512, 4, 3), (4, 640, 3, 2), (33, 2048, 5, 1)],
@@ -617,6 +613,7 @@ def test_fused_conv_decode_correctness(
     channels: int,
     kernel_size: int,
     dilation: int,
+    state_layout: str,
 ) -> None:
     from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv_decode
 
@@ -635,42 +632,63 @@ def test_fused_conv_decode_correctness(
         dtype=torch.bfloat16,
         generator=generator,
     )
-    state_indices = torch.randperm(
-        _KERNEL_STATE_BLOCKS - 1, device=device, generator=generator
-    )[:num_tokens].add_(1)
-    state_indices[::3] = 0
-    has_initial_states = (
-        torch.rand(num_tokens, device=device, generator=generator) < 0.7
-    )
+    state_indices = torch.arange(1, num_tokens + 1, dtype=torch.int32, device=device)
+    if num_tokens > 1:
+        state_indices[-1] = 0
+    has_initial_states = torch.arange(num_tokens, device=device) % 2 == 0
 
-    _assert_conv_correctness(
-        inputs,
-        state,
-        weights,
-        lambda x, s, w: module._short_conv_dilated_decode_batched(
-            x, s, w, state_indices, has_initial_states
-        ),
-        lambda x, s, w: ple_conv_decode(
-            x, s, w, state_indices, has_initial_states, dilation
-        ),
+    state_reference, state_kernel, state_kernel_ds = _make_conv_states(
+        state, state_layout
     )
+    null_state = state_kernel_ds[0].clone()
+    output_reference = module._short_conv_dilated_decode_batched(
+        inputs,
+        state_reference,
+        weights,
+        state_indices,
+        has_initial_states,
+    )
+    output_kernel = ple_conv_decode(
+        inputs,
+        state_kernel,
+        weights,
+        state_indices,
+        has_initial_states,
+        dilation,
+    )
+    torch.testing.assert_close(
+        output_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
+    )
+    assert torch.equal(state_kernel_ds, state_reference)
+    assert torch.equal(state_kernel_ds[0], null_state)
+    assert torch.count_nonzero(output_kernel[state_indices == 0]) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
+@pytest.mark.parametrize("state_layout", ["SD", "DS"])
 @pytest.mark.parametrize(
-    ("num_reqs", "spec_query_len", "channels", "kernel_size", "dilation"),
+    (
+        "query_lens",
+        "num_accepted",
+        "spec_query_len",
+        "channels",
+        "kernel_size",
+        "dilation",
+    ),
     [
-        (1, 2, 640, 3, 2),
-        (3, 4, 2048, 4, 3),
-        (6, 5, 512, 5, 1),
+        ([1], [2], 2, 640, 3, 2),
+        ([1, 4, 4], [1, 2, 4], 4, 2048, 4, 3),
+        ([5, 5, 5, 2, 1, 3], [4, 3, 1, 2, 0, 1], 5, 512, 5, 1),
     ],
 )
 def test_fused_conv_spec_correctness(
-    num_reqs: int,
+    query_lens: list[int],
+    num_accepted: list[int],
     spec_query_len: int,
     channels: int,
     kernel_size: int,
     dilation: int,
+    state_layout: str,
 ) -> None:
     from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv_spec_decode
 
@@ -679,6 +697,7 @@ def test_fused_conv_spec_correctness(
     nn.Module.__init__(module)
     module.conv_state_len = (kernel_size - 1) * dilation
     module.short_conv_dilation = dilation
+    num_reqs = len(query_lens)
     generator, state, weights = _make_conv_case(
         device,
         num_reqs + 100,
@@ -687,17 +706,11 @@ def test_fused_conv_spec_correctness(
         dilation,
         spec_query_len,
     )
-    query_lens = torch.randint(
-        1,
-        spec_query_len + 1,
-        (num_reqs,),
-        device=device,
-        dtype=torch.int32,
-        generator=generator,
+    query_start_loc = torch.tensor(
+        [0, *accumulate(query_lens)], dtype=torch.int32, device=device
     )
-    query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
-    query_start_loc[1:] = query_lens.cumsum(0)
-    num_tokens = int(query_start_loc[-1]) + spec_query_len
+    num_real_tokens = sum(query_lens)
+    num_tokens = num_real_tokens + spec_query_len
     inputs = torch.randn(
         num_tokens,
         channels,
@@ -705,46 +718,44 @@ def test_fused_conv_spec_correctness(
         dtype=torch.bfloat16,
         generator=generator,
     )
-    state_indices = torch.randperm(
-        _KERNEL_STATE_BLOCKS - 1, device=device, generator=generator
-    )[:num_reqs].add_(1)
+    state_indices = torch.arange(1, num_reqs + 1, dtype=torch.int32, device=device)
     if num_reqs > 1:
         state_indices[1] = 0
-    num_accepted = torch.randint(
-        0,
-        spec_query_len + 1,
-        (num_reqs,),
-        device=device,
-        generator=generator,
-    )
+    num_accepted_tensor = torch.tensor(num_accepted, dtype=torch.int32, device=device)
 
-    _assert_conv_correctness(
-        inputs,
-        state,
-        weights,
-        lambda x, s, w: module._short_conv_dilated_spec_batched(
-            x,
-            s,
-            w,
-            state_indices,
-            query_start_loc,
-            num_accepted,
-            spec_query_len,
-        ),
-        lambda x, s, w: ple_conv_spec_decode(
-            x,
-            s,
-            w,
-            state_indices,
-            query_start_loc,
-            num_accepted,
-            dilation,
-            spec_query_len,
-        ),
+    state_reference, state_kernel, state_kernel_ds = _make_conv_states(
+        state, state_layout
     )
+    null_state = state_kernel_ds[0].clone()
+    output_reference = module._short_conv_dilated_spec_batched(
+        inputs,
+        state_reference,
+        weights,
+        state_indices,
+        query_start_loc,
+        num_accepted_tensor,
+        spec_query_len,
+    )
+    output_kernel = ple_conv_spec_decode(
+        inputs,
+        state_kernel,
+        weights,
+        state_indices,
+        query_start_loc,
+        num_accepted_tensor,
+        dilation,
+        spec_query_len,
+    )
+    torch.testing.assert_close(
+        output_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
+    )
+    assert torch.equal(state_kernel_ds, state_reference)
+    assert torch.equal(state_kernel_ds[0], null_state)
+    assert torch.count_nonzero(output_kernel[num_real_tokens:]) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
+@pytest.mark.parametrize("state_layout", ["SD", "DS"])
 @pytest.mark.parametrize(
     ("query_lens", "channels", "kernel_size", "dilation"),
     [([37, 0, 5, 128], 2048, 4, 3), ([1, 8, 3], 640, 3, 2)],
@@ -754,6 +765,7 @@ def test_fused_conv_prefill_correctness(
     channels: int,
     kernel_size: int,
     dilation: int,
+    state_layout: str,
 ) -> None:
     from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv_prefill
 
@@ -776,7 +788,7 @@ def test_fused_conv_prefill_correctness(
         generator=generator,
     )
     num_reqs = len(query_lens)
-    state_indices = torch.arange(1, num_reqs + 1, device=device)
+    state_indices = torch.arange(1, num_reqs + 1, dtype=torch.int32, device=device)
     state_indices[-2] = 0
     has_initial_states = torch.tensor(
         [i % 2 == 0 for i in range(num_reqs)], device=device
@@ -787,23 +799,44 @@ def test_fused_conv_prefill_correctness(
         max_prefill_query_len=max(query_lens),
     )
 
-    _assert_conv_correctness(
-        inputs,
-        state,
-        weights,
-        lambda x, s, w: module._short_conv_dilated_prefill_batched(
-            x, metadata, s, w, state_indices, num_reqs, 0, x.shape[0]
-        ),
-        lambda x, s, w: ple_conv_prefill(
-            x,
-            s,
-            w,
-            state_indices,
-            has_initial_states,
-            query_start_loc,
-            dilation,
-        ),
+    state_reference, state_kernel, state_kernel_ds = _make_conv_states(
+        state, state_layout
     )
+    null_state = state_kernel_ds[0].clone()
+    output_reference = module._short_conv_dilated_prefill_batched(
+        inputs,
+        metadata,
+        state_reference,
+        weights,
+        state_indices,
+        num_reqs,
+        0,
+        inputs.shape[0],
+    )
+    output_kernel = ple_conv_prefill(
+        inputs,
+        state_kernel,
+        weights,
+        state_indices,
+        has_initial_states,
+        query_start_loc,
+        dilation,
+    )
+    torch.testing.assert_close(
+        output_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
+    )
+    assert torch.equal(state_kernel_ds, state_reference)
+    assert torch.equal(state_kernel_ds[0], null_state)
+    query_start = 0
+    for state_index, query_len in zip(state_indices.tolist(), query_lens):
+        if state_index == 0:
+            assert (
+                torch.count_nonzero(
+                    output_kernel[query_start : query_start + query_len]
+                )
+                == 0
+            )
+        query_start += query_len
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused gate needs CUDA")
@@ -924,16 +957,20 @@ def test_fused_conv_mixed_batch_correctness() -> None:
         num_decode_tokens=1,
         num_prefill_tokens=5,
         spec_sequence_masks=torch.tensor([True, True], device=device),
-        spec_token_indx=torch.arange(7, device=device),
-        non_spec_token_indx=torch.arange(7, 13, device=device),
+        spec_token_indx=torch.arange(7, dtype=torch.int32, device=device),
+        non_spec_token_indx=torch.arange(7, 13, dtype=torch.int32, device=device),
         num_actual_tokens=13,
-        spec_state_indices_tensor=torch.tensor([11, 12], device=device),
-        spec_query_start_loc=torch.tensor([0, 3, 7], device=device),
-        num_accepted_tokens=torch.tensor([2, 4], device=device),
+        spec_state_indices_tensor=torch.tensor(
+            [11, 12], dtype=torch.int32, device=device
+        ),
+        spec_query_start_loc=torch.tensor([0, 3, 7], dtype=torch.int32, device=device),
+        num_accepted_tokens=torch.tensor([2, 4], dtype=torch.int32, device=device),
         spec_query_len=4,
-        state_indices_tensor=torch.tensor([13, 14], device=device),
+        state_indices_tensor=torch.tensor([13, 14], dtype=torch.int32, device=device),
         has_initial_states_d=torch.tensor([True], device=device),
-        non_spec_query_start_loc=torch.tensor([0, 1, 6], device=device),
+        non_spec_query_start_loc=torch.tensor(
+            [0, 1, 6], dtype=torch.int32, device=device
+        ),
         has_initial_states_p=torch.tensor([True], device=device),
         max_prefill_query_len=5,
         num_spec_decodes=2,
@@ -941,10 +978,18 @@ def test_fused_conv_mixed_batch_correctness() -> None:
     state_kernel = state.clone()
     state_eager = state.clone().transpose(-1, -2)
     output_kernel = module._short_conv_dilated_dispatch(
-        inputs, metadata, state_kernel, weights, True
+        inputs=inputs,
+        metadata=metadata,
+        conv_state=state_kernel,
+        conv_weights=weights,
+        use_fused_kernels=True,
     )
     output_eager = module._short_conv_dilated_dispatch(
-        inputs, metadata, state_eager, weights, False
+        inputs=inputs,
+        metadata=metadata,
+        conv_state=state_eager,
+        conv_weights=weights,
+        use_fused_kernels=False,
     )
     torch.testing.assert_close(
         output_kernel.float(), output_eager.float(), atol=3e-2, rtol=3e-2
