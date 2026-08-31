@@ -1740,6 +1740,13 @@ class MooncakeStoreWorker:
         ):
             assert layout_cls is not None
             if self.num_kv_head % requested_store_tp_size == 0:
+                if layout_cls is LBNHCStoreLayout:
+                    logger.warning_once(
+                        "Mooncake Store TP sharding is using the LBNHC (NHC) "
+                        "KV cache layout, which creates many transfer segments "
+                        "and may significantly reduce PUT/GET performance. Use "
+                        "LBHNC (HNC) when supported by the attention backend."
+                    )
                 return (
                     requested_store_tp_size,
                     layout_cls.shared_namespace(requested_store_tp_size, self.pp_size),

@@ -2245,14 +2245,16 @@ def test_worker_enables_lbnhc_store_tp_layout(tmp_path, monkeypatch):
         ),
     )
 
-    w = worker.MooncakeStoreWorker(
-        _make_vllm_config(
-            extra_config={"store_tp_size": 4},
-            kv_cache_layout=KVCacheLayout.LBNHC,
-        ),
-        _make_kv_cache_config(),
-    )
+    with patch.object(worker.logger, "warning_once") as warning_once:
+        w = worker.MooncakeStoreWorker(
+            _make_vllm_config(
+                extra_config={"store_tp_size": 4},
+                kv_cache_layout=KVCacheLayout.LBNHC,
+            ),
+            _make_kv_cache_config(),
+        )
 
+    warning_once.assert_called_once()
     assert w.store_tp_size == 4
     assert w.token_dbs[0].metadata.store_namespace == _TP_SHARED_LBNHC_NAMESPACE
     assert isinstance(w.token_dbs[0].store_layout, LBNHCStoreLayout)
