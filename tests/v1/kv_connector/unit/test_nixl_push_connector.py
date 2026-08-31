@@ -359,6 +359,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._physical_blocks_per_logical_kv_block = 1
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
+        w._is_csa_linear = False
         w._group_spec_types = (FullAttentionSpec,)
         w._engine_ttl = 0.0
         w._engine_last_active = {}
@@ -1197,6 +1198,75 @@ class TestPushWriterMlaReplication:
         # All of the request's WRITE handles must be tracked together, so the
         # engine thread never sees a partial set and double-frees the request.
         assert sorted(w._sending_transfers["p-req"]) == [1000, 1001]
+
+    def test_csa_linear_writes_every_group_to_each_target(self):
+        from types import SimpleNamespace
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+            RemoteMeta,
+            ReqMeta,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+            TPMapping,
+        )
+
+        engine_id = "decode-engine"
+        w = _StubWriterWorker.fresh()
+        w.world_size = 2
+        w.use_mla = False
+        w._has_mamba = True
+        w._is_csa_linear = True
+        w.nixl_wrapper = MagicMock()
+        w.transfer_topo = MagicMock()
+        w.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+            remote_tp_size=4,
+            remote_block_size=16,
+            remote_physical_blocks_per_logical=1,
+        )
+        w.transfer_topo.tp_ratio.return_value = -2
+        w.transfer_topo.handshake_target_ranks.return_value = (0, 1)
+        w.tp_mappings = {
+            engine_id: TPMapping(
+                source_ranks_per_group=((0,), (0,), (0, 1), (0, 1)),
+                all_source_ranks=(0, 1),
+                rank_to_attention_slot={0: 0, 1: 0},
+                rank_offset_factor=0,
+            )
+        }
+        w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
+        w.dst_xfer_side_handles = {engine_id: {0: 1000, 1: 1001}}
+        w.src_xfer_handles_by_tp_ratio = {(-2, 16): [2000, 2001]}
+
+        writes = []
+
+        def _fake_xfer(**kwargs):
+            writes.append(kwargs)
+            return 3000 + kwargs["read_spec"].remote_rank
+
+        w._xfer_blocks = _fake_xfer
+        block_ids = ([10], [20], [30], [40])
+        meta = ReqMeta(
+            local_block_ids=block_ids,
+            local_physical_block_ids=block_ids,
+            tp_size=2,
+            remote=RemoteMeta(
+                block_ids=([50], [60], [70], [80]),
+                host="",
+                port=0,
+                engine_id=engine_id,
+                request_id="d-req",
+            ),
+        )
+
+        w._xfer_blocks_for_req(req_id="p-req", meta=meta)
+
+        assert [write["read_spec"].remote_rank for write in writes] == [0, 1]
+        assert [write["read_spec"].local_block_ids for write in writes] == [
+            list(block_ids),
+            list(block_ids),
+        ]
+        assert [write["local_xfer_side_handle"] for write in writes] == [2000, 2001]
+        assert sorted(w._sending_transfers["p-req"]) == [3000, 3001]
 
 
 class TestPushPrefixCaching:
