@@ -204,9 +204,6 @@ class Plamo3ReasoningParser(ReasoningParser):
                 return i
         return -1
 
-    def _effective_input_ids(self, input_ids: Sequence[int]) -> list[int]:
-        return self._stream_token_ids or list(input_ids)
-
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         if self._identity_parser is not None:
             return self._identity_parser.is_reasoning_end(input_ids)
@@ -250,7 +247,7 @@ class Plamo3ReasoningParser(ReasoningParser):
         if self._identity_parser is not None:
             return self._identity_parser.extract_content_ids(input_ids)
 
-        ids = self._effective_input_ids(input_ids)
+        ids = self._stream_token_ids or input_ids
         end_start = self._find_seq(ids, self._end_think_token_ids)
         if end_start == -1:
             return []
