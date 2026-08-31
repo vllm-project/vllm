@@ -161,7 +161,7 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
             min_pixels_key = "shortest_edge"
             max_pixels_key = "longest_edge"
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs, modality="image")
         size = image_processor.size
         if override_size := mm_kwargs.get("size"):
             size = size | override_size
