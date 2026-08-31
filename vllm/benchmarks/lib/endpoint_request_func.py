@@ -436,6 +436,156 @@ async def async_request_openai_chat_completions(
     return output
 
 
+def _extract_sse_data(message: str) -> str | None:
+    """Extract the ``data`` payload of a single SSE message.
+
+    The Responses API stream labels every message with an ``event:`` line
+    before its ``data:`` line, so the payload cannot be recovered by
+    stripping a leading ``data: `` the way the Completions and Chat
+    Completions streams allow.
+
+    Args:
+        message: One complete SSE message, without its trailing blank line.
+
+    Returns:
+        The payload, with multi-line payloads joined by newlines as required
+        by the SSE spec, or None if the message carries no ``data:`` line.
+    """
+    data_lines = [
+        line.removeprefix("data:").removeprefix(" ")
+        for line in message.splitlines()
+        if line.startswith("data:")
+    ]
+    if not data_lines:
+        return None
+
+    return "\n".join(data_lines)
+
+
+# Responses events that carry generated tokens. Reasoning deltas are included
+# because the server is already decoding when it emits them, so excluding them
+# would report the whole reasoning phase as time to first token.
+_RESPONSES_TOKEN_DELTA_EVENTS = frozenset(
+    {
+        "response.output_text.delta",
+        "response.reasoning_text.delta",
+    }
+)
+
+# Responses events that end a request. `response.incomplete` is the Responses
+# equivalent of finishing with `finish_reason="length"`, so it is a normal
+# outcome for a benchmark that caps the output length.
+_RESPONSES_TERMINAL_EVENTS = frozenset(
+    {
+        "response.completed",
+        "response.incomplete",
+    }
+)
+
+_RESPONSES_ERROR_EVENTS = frozenset({"error", "response.failed"})
+
+
+async def async_request_openai_responses(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    _validate_api_url(api_url, "OpenAI Responses API", "responses")
+
+    payload = {
+        "model": request_func_input.model_name
+        if request_func_input.model_name
+        else request_func_input.model,
+        "input": request_func_input.prompt,
+        "max_output_tokens": request_func_input.output_len,
+        "stream": True,
+    }
+    _update_payload_common(payload, request_func_input)
+
+    headers = _get_headers("application/json")
+    _update_headers_common(headers, request_func_input)
+
+    output = RequestFuncOutput()
+    output.prompt_len = request_func_input.prompt_len
+
+    # Only output text is accumulated. Reasoning text is timed but not
+    # returned, matching how `openai-chat` handles `DeltaMessage.reasoning`.
+    generated_text = ""
+    stream_error: str | None = None
+    ttft = 0.0
+    st = time.perf_counter()
+    output.start_time = st
+    most_recent_timestamp = st
+    end_timestamp = st
+    try:
+        async with session.post(url=api_url, json=payload, headers=headers) as response:
+            if response.status == 200:
+                handler = StreamedResponseHandler()
+
+                async for chunk_bytes in response.content.iter_any():
+                    for message in handler.add_chunk(chunk_bytes):
+                        # NOTE: `_extract_sse_data` returns None for SSE
+                        # comments, which the server sends as keep-alives.
+                        chunk = _extract_sse_data(message)
+                        if chunk is None or chunk == "[DONE]":
+                            continue
+
+                        timestamp = time.perf_counter()
+                        data = json.loads(chunk)
+                        event_type = data.get("type")
+
+                        if event_type in _RESPONSES_TOKEN_DELTA_EVENTS:
+                            # First token
+                            if ttft == 0.0:
+                                ttft = timestamp - st
+                                output.ttft = ttft
+
+                            # Decoding phase
+                            else:
+                                output.itl.append(timestamp - most_recent_timestamp)
+
+                            if event_type == "response.output_text.delta":
+                                generated_text += data.get("delta") or ""
+
+                            most_recent_timestamp = timestamp
+                            end_timestamp = timestamp
+                        elif event_type in _RESPONSES_TERMINAL_EVENTS:
+                            end_timestamp = timestamp
+                            usage = (data.get("response") or {}).get("usage") or {}
+                            if (n_output := usage.get("output_tokens")) is not None:
+                                output.output_tokens = n_output
+                            if (n_input := usage.get("input_tokens")) is not None:
+                                output.prompt_len = n_input
+                        elif event_type in _RESPONSES_ERROR_EVENTS or data.get("error"):
+                            stream_error = json.dumps(data.get("error") or data)
+
+                output.generated_text = generated_text
+                output.latency = end_timestamp - st
+                if stream_error is not None:
+                    output.success = False
+                    output.error = stream_error
+                elif ttft == 0.0:
+                    output.success = False
+                    output.error = (
+                        "Never received a token delta to calculate TTFT."
+                        "This response will be marked as failed!"
+                    )
+                else:
+                    output.success = True
+            else:
+                output.error = response.reason or ""
+                output.success = False
+    except Exception:
+        output.success = False
+        exc_info = sys.exc_info()
+        output.error = "".join(traceback.format_exception(*exc_info))
+
+    if pbar:
+        pbar.update(1)
+    return output
+
+
 async def async_request_openai_audio(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
@@ -886,6 +1036,7 @@ ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "vllm": async_request_openai_completions,
     "openai": async_request_openai_completions,
     "openai-chat": async_request_openai_chat_completions,
+    "openai-responses": async_request_openai_responses,
     "openai-audio": async_request_openai_audio,
     "openai-embeddings": async_request_openai_embeddings,
     "openai-embeddings-chat": async_request_openai_embeddings_chat,
@@ -913,5 +1064,10 @@ POOLING_BACKENDS = {
 OPENAI_COMPATIBLE_BACKENDS = [
     k
     for k, v in ASYNC_REQUEST_FUNCS.items()
-    if v in (async_request_openai_completions, async_request_openai_chat_completions)
+    if v
+    in (
+        async_request_openai_completions,
+        async_request_openai_chat_completions,
+        async_request_openai_responses,
+    )
 ]
