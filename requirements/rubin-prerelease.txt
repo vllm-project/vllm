@@ -1,0 +1,19 @@
+# Public CUDA 13.4 prerelease PyTorch nightly pins for Rubin bring-up.
+# Installed when INSTALL_RUBIN_PRERELEASE=true (see docker/Dockerfile).
+# TODO(rubin-bringup): delete once Rubin APIs ship in regular PyTorch wheels
+# (vllm-project/vllm#49735).
+--pre
+--extra-index-url https://download.pytorch.org/whl/nightly/cu134
+
+torch==2.15.0.dev20260812+cu134
+torchvision==0.29.0.dev20260813+cu134
+torchaudio==2.11.0.dev20260813+cu134
+
+# docker/Dockerfile strips these two from requirements/cuda.txt whenever
+# INSTALL_RUBIN_PRERELEASE=true, so they must be pinned here instead to
+# still get installed. Same versions as requirements/cuda.txt's own
+# defaults - nvidia-cutlass-dsl[cu13]==4.6.2's missing sm_107a arch-enum
+# entry is worked around via CUTE_DSL_ARCH=sm_100f (docker/Dockerfile ENV),
+# no version bump needed.
+nvidia-cutlass-dsl[cu13]==4.6.2
+flashinfer-python==0.6.18

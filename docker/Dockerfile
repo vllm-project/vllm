@@ -738,6 +738,15 @@ ARG NCCL_VERSION
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
+# No public nvidia/cuda:13.4 image exists yet, so FINAL_BASE_IMAGE for a
+# Rubin/CUDA-13.4 build is plain ubuntu (no CUDA apt repo preconfigured).
+# Set these to register NVIDIA's public developer-preview apt repo before the
+# "Install CUDA development tools" step below, so its normal
+# cuda-nvcc-${CUDA_VERSION_DASH} etc. package names resolve. Same mechanism
+# sglang's docker/Dockerfile.cu134 uses. Empty by default (no-op) for a
+# normal FINAL_BASE_IMAGE that already has a CUDA apt repo.
+ARG CUDA_PREVIEW_APT_REPO=""
+ARG CUDA_PREVIEW_APT_SUITE=""
 
 # Keep the output image's CUDA metadata aligned with the selected toolkit.
 # This also normalizes prerelease base images with four-component metadata for
@@ -789,6 +798,27 @@ RUN apt-get update -y \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
+# Register NVIDIA's public developer-preview apt repo, when set, so the CUDA
+# dev tools install below can find prerelease packages (e.g. cuda-nvcc-13-4)
+# that aren't in the standard CUDA apt repo yet.
+RUN if [ -n "${CUDA_PREVIEW_APT_REPO}" ]; then \
+        apt-get update -y \
+        && apt-get install -y --no-install-recommends ca-certificates wget gnupg \
+        && wget -q -O /tmp/nvidia-preview-keyring.deb \
+            "${CUDA_PREVIEW_APT_REPO}/nvidia-preview-keyring.deb" \
+        && dpkg -i /tmp/nvidia-preview-keyring.deb \
+        && rm -f /tmp/nvidia-preview-keyring.deb \
+        && printf '%s\n' \
+            'X-Repolib-Name: NVIDIA Packages (frozen)' \
+            'Types: deb' \
+            "URIs: ${CUDA_PREVIEW_APT_REPO}" \
+            "Suites: ${CUDA_PREVIEW_APT_SUITE}" \
+            'Components: main' \
+            'Signed-By: /usr/share/keyrings/nvidia-packages-preview.gpg' \
+            'Enabled: yes' \
+            > /etc/apt/sources.list.d/nvidia-packages-preview.sources; \
+    fi
+
 # Install CUDA development tools for runtime JIT compilation
 # (FlashInfer, DeepGEMM, EP kernels all require compilation at runtime)
 RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
@@ -797,6 +827,9 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         cuda-nvcc-${CUDA_VERSION_DASH} \
         cuda-cudart-${CUDA_VERSION_DASH} \
         cuda-nvrtc-${CUDA_VERSION_DASH} \
+        # FlashInfer's runtime JIT-compiled kernels (e.g. trtllm_fmha_kernel_launcher.cu)
+        # #include <nvrtc.h>, which only the -dev package ships.
+        cuda-nvrtc-dev-${CUDA_VERSION_DASH} \
         cuda-cuobjdump-${CUDA_VERSION_DASH} \
         libcurand-dev-${CUDA_VERSION_DASH} \
         libcublas-dev-${CUDA_VERSION_DASH} \
@@ -806,10 +839,23 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         numactl && \
     rm -rf /var/lib/apt/lists/*
 
+# A real nvidia/cuda:*-base-* image bakes PATH/LD_LIBRARY_PATH in already; our
+# plain-ubuntu FINAL_BASE_IMAGE (CUDA_PREVIEW_APT_REPO case) doesn't, so nvcc/
+# ptxas (installed above, needed at runtime for FlashInfer/DeepGEMM/EP kernel
+# JIT compilation) are otherwise unreachable on PATH. Harmless no-op if
+# already set by a real CUDA base image.
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH="${CUDA_HOME}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+
 # Apply the CUDA 13.4-only libcurand compatibility link described in the build
 # stage. CUDA 13.5 uses its native libcurand.so.11. DeepEP expects NCCL directly
 # under its configured /usr prefix, while Ubuntu installs it in a multiarch
-# subdirectory.
+# subdirectory - but that symlink only applies to the internal Rubin CUDA
+# image, which bundles NCCL directly; our own public-preview-apt-repo build
+# (CUDA_PREVIEW_APT_REPO set) has no NCCL yet at this point in the build (it
+# arrives later via the standard nvidia-nccl-cu* pip package, UV_OVERRIDE
+# below), so there's nothing to symlink from and that step is skipped.
 RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
         && if [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
@@ -827,12 +873,27 @@ RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
             echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
             exit 1; \
         fi \
-        && NCCL_LIBRARY=$(find /usr/lib -name libnccl.so.2 -print -quit) \
-        && test -n "${NCCL_LIBRARY}" \
-        && ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2 \
-        && ln -sf libnccl.so.2 /usr/lib/libnccl.so \
+        && if [ -z "${CUDA_PREVIEW_APT_REPO}" ]; then \
+            NCCL_LIBRARY=$(find /usr/lib -name libnccl.so.2 -print -quit) \
+            && test -n "${NCCL_LIBRARY}" \
+            && ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2 \
+            && ln -sf libnccl.so.2 /usr/lib/libnccl.so; \
+        fi \
         && ldconfig; \
     fi
+
+# nvidia-cutlass-dsl has no sm_107 entry in its Arch enum, so on Rubin every
+# CuTe DSL kernel (FA4, etc.) dies with `KeyError: 'sm_107a'` at JIT compile -
+# and that JIT compile happens at vllm serve runtime, not at image build time,
+# so this must be set in the final runtime stage, not an earlier build stage.
+# sm_100f is the family target covering all sm_10x (sm_100a would be
+# arch-specific and still miss sm_107). Both DSL singletons need setting --
+# CUTE_DSL_ARCH for CuTeDSL and CUTE_EXPERIMENTAL_DSL_ARCH for
+# CuteExperimentalDSL (the default bf16 GEMM) -- since either alone leaves the
+# other half failing. TODO(rubin-bringup): drop once nvidia-cutlass-dsl adds a
+# real sm_107 arch entry.
+ENV CUTE_DSL_ARCH=sm_100f
+ENV CUTE_EXPERIMENTAL_DSL_ARCH=sm_100f
 
 # Install uv for faster pip installs
 RUN python3 -m pip install uv
@@ -962,8 +1023,10 @@ ARG GDRCOPY_OS_VERSION=Ubuntu24_04
 ARG TARGETPLATFORM
 COPY tools/install_gdrcopy.sh /tmp/install_gdrcopy.sh
 RUN set -eux; \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        # The Rubin CUDA image already provides GDRCopy. \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && [ -z "${CUDA_PREVIEW_APT_REPO}" ]; then \
+        # The internal Rubin CUDA image already provides GDRCopy. Our own
+        # public-preview-apt-repo build (CUDA_PREVIEW_APT_REPO set) has no
+        # such guarantee, so it falls through to the normal install below.
         ldconfig -p | grep -q 'libgdrapi\.so'; \
     else \
         case "${TARGETPLATFORM}" in \
