@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm.config.compilation import CompilationMode
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
@@ -221,3 +221,62 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
+
+
+@pytest.mark.parametrize(
+    ("mode", "expect_warmup_pass"),
+    [
+        (CompilationMode.VLLM_COMPILE, True),
+        (CompilationMode.NONE, False),
+    ],
+)
+def test_compilation_warmup_before_memory_profiling(mode, expect_warmup_pass):
+    worker = _plan_worker()
+    worker.vllm_config.compilation_config = SimpleNamespace(
+        mode=mode,
+        cudagraph_mode=SimpleNamespace(name="NONE"),
+    )
+    worker.cache_config.kv_cache_memory_bytes = None
+    worker.cache_config.gpu_memory_utilization = 0.9
+    worker.model_config = SimpleNamespace(multimodal_config=None)
+    worker.model_runner = SimpleNamespace(
+        model_memory_usage=10 * GiB_bytes,
+        profile_run=MagicMock(),
+        profile_cudagraph_memory=MagicMock(return_value=0),
+    )
+    worker.device = "cuda:0"
+    worker.requested_memory = 70 * GiB_bytes
+    worker.determine_available_memory = (
+        gpu_worker.Worker.determine_available_memory.__get__(worker)
+    )
+
+    mock_profile_result = _profile_result(consumed=2 * GiB_bytes)
+    mock_profile_result.non_kv_cache_memory = 2 * GiB_bytes
+    mock_snapshot = SimpleNamespace(free_memory=78 * GiB_bytes, device_="cuda:0")
+
+    @contextmanager
+    def mock_mem_profiling(*args, **kwargs):
+        yield mock_profile_result
+
+    with (
+        patch.object(gpu_worker, "maybe_apply_startup_plan"),
+        patch.object(gpu_worker, "MemorySnapshot", return_value=mock_snapshot),
+        patch.object(gpu_worker, "memory_profiling", side_effect=mock_mem_profiling),
+        patch.object(gpu_worker.torch.accelerator, "empty_cache") as mock_empty_cache,
+        patch.object(gpu_worker.torch.accelerator, "synchronize") as mock_sync,
+        patch.object(gpu_worker, "maybe_save_startup_plan"),
+    ):
+        available_mem = worker.determine_available_memory()
+        assert available_mem == 68 * GiB_bytes
+
+        if expect_warmup_pass:
+            # profile_run called twice: 1. warmup 2. inside profiler
+            assert worker.model_runner.profile_run.call_count == 2
+            mock_empty_cache.assert_called_once()
+            mock_sync.assert_called_once()
+            assert worker.init_snapshot == mock_snapshot
+        else:
+            # profile_run called only once inside profiler
+            assert worker.model_runner.profile_run.call_count == 1
+            mock_empty_cache.assert_not_called()
+            mock_sync.assert_not_called()
