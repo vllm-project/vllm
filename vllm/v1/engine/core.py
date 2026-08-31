@@ -832,12 +832,14 @@ class EngineCore:
         # reset_connector=True so external connectors clear alongside
         # local caches, matching the pause_generation(clear_cache=True)
         # contract. No-op when no connector is configured.
-        self.reset_prefix_cache(
+        prefix_reset_successful = self.reset_prefix_cache(
             reset_running_requests=reset_running_requests,
             reset_connector=reset_connector,
         )
         self.reset_mm_cache()
         self.reset_encoder_cache()
+        if not prefix_reset_successful:
+            raise RuntimeError("Failed to reset the KV connector cache.")
 
     def _finish_pause(self, clear_cache: bool) -> None:
         # A completed pause promises an idle device: nothing else waits on
@@ -1943,8 +1945,12 @@ class EngineCoreProc(EngineCore):
             raise ValueError(f"Invalid pause mode: {mode}")
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
-            engine._finish_pause(clear_cache)
-            future.set_result(None)
+            try:
+                engine._finish_pause(clear_cache)
+            except Exception as e:
+                future.set_exception(e)
+            else:
+                future.set_result(None)
 
         if mode == "abort":
             aborted_reqs = self.scheduler.finish_requests(
