@@ -66,6 +66,8 @@ decord==0.6.0; platform_machine == "x86_64"
 imagehash # Required for Prithvi tests
 segmentation-models-pytorch > 0.4.0 # Required for Prithvi tests
 
+# gpt-oss depends on openai-harmony; exclude it in favor of oss-harmony:
+#   --excludes requirements/harmony-excludes.txt
 gpt-oss >= 0.0.7; python_version > '3.11'
 
 perceptron # required for isaac test

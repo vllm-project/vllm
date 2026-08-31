@@ -1,0 +1,7 @@
+# gpt-oss on PyPI depends on openai-harmony. vLLM uses oss-harmony instead
+# (same import name: openai_harmony). Installing both overwrites the module.
+#
+# Pass this file when compiling or installing test requirements:
+#   uv pip compile ... --excludes requirements/harmony-excludes.txt
+#   uv pip install -r requirements/test/cuda.in --excludes requirements/harmony-excludes.txt
+openai-harmony
