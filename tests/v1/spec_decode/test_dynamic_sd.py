@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Regression tests for the Dynamic SD batch-size schedule helpers."""
+"""Regression tests for the Dynamic SD schedule helpers."""
 
 import logging
 
@@ -13,20 +13,28 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 
 def _make_lookup(
-    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]],
+    num_speculative_tokens_per_batch_size,
     *,
     max_batch_size: int = 256,
     runtime_num_speculative_tokens: int = 3,
 ) -> list[int]:
-    return build_dynamic_sd_schedule_lookup(
+    """Build a lookup and flatten it to a 1D ``[bs] -> K`` list.
+
+    Only valid for schedules that produce a single context bucket (i.e. legacy
+    3-item entries). New 5-item tests call ``build_dynamic_sd_schedule_lookup``
+    directly to see the full 2D structure.
+    """
+    lookup = build_dynamic_sd_schedule_lookup(
         num_speculative_tokens_per_batch_size=num_speculative_tokens_per_batch_size,
         vllm_max_batch_size=max_batch_size,
         vllm_num_speculative_tokens=runtime_num_speculative_tokens,
     )
+    assert len(lookup.ctx_boundaries) == 1
+    return [row[0] for row in lookup.dense]
 
 
 def _make_scheduler_with_dynamic_sd(
-    schedule: list[tuple[int, int, int]],
+    schedule,
     *,
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 8192,
@@ -97,7 +105,7 @@ def test_dynamic_sd_clamps_k_to_runtime_max():
 
 def test_dynamic_sd_rejects_invalid_schedule_entry():
     with pytest.raises(ValueError, match="3-item sequence"):
-        _make_lookup([(1, 16, 3), (32, 64)])  # type: ignore[list-item]
+        _make_lookup([(1, 16, 3), (32, 64)])
 
 
 def test_dynamic_sd_rejects_overlapping_ranges():
@@ -132,6 +140,124 @@ def test_dynamic_sd_lookup_rejects_invalid_batch_size_queries():
     assert dynamic_sd_lookup[0] == 0
     with pytest.raises(IndexError):
         _ = dynamic_sd_lookup[257]
+
+
+def test_dynamic_sd_5tuple_forms_2d_dense_lookup():
+    lookup = build_dynamic_sd_schedule_lookup(
+        num_speculative_tokens_per_batch_size=[
+            (1, 32, 1, 512, 3),
+            (1, 32, 513, 4096, 2),
+            (33, 128, 1, 512, 2),
+            (33, 128, 513, 4096, 1),
+        ],
+        vllm_max_batch_size=128,
+        vllm_num_speculative_tokens=3,
+    )
+
+    assert len(lookup.ctx_boundaries) == 2
+    assert lookup.ctx_boundaries[0] == (1, 512)
+    assert lookup.ctx_boundaries[1][0] == 513
+    assert lookup.dense[1] == [3, 2]
+    assert lookup.dense[32] == [3, 2]
+    assert lookup.dense[33] == [2, 1]
+    assert lookup.dense[128] == [2, 1]
+
+
+def test_dynamic_sd_5tuple_carry_forward_across_bs_gap():
+    lookup = build_dynamic_sd_schedule_lookup(
+        num_speculative_tokens_per_batch_size=[
+            (1, 8, 1, 100, 3),
+            (1, 8, 101, 4096, 2),
+            (32, 64, 1, 100, 1),
+            (32, 64, 101, 4096, 0),
+        ],
+        vllm_max_batch_size=64,
+        vllm_num_speculative_tokens=3,
+    )
+
+    assert lookup.dense[8] == [3, 2]
+    assert lookup.dense[15] == [3, 2]
+    assert lookup.dense[31] == [3, 2]
+    assert lookup.dense[32] == [1, 0]
+    assert lookup.dense[64] == [1, 0]
+
+
+def test_dynamic_sd_bucket_of_maps_context_to_bucket_index():
+    lookup = build_dynamic_sd_schedule_lookup(
+        num_speculative_tokens_per_batch_size=[
+            (1, 16, 1, 100, 3),
+            (1, 16, 101, 4096, 2),
+        ],
+        vllm_max_batch_size=16,
+        vllm_num_speculative_tokens=3,
+    )
+
+    assert lookup.bucket_of(0) == 0
+    assert lookup.bucket_of(1) == 0
+    assert lookup.bucket_of(100) == 0
+    assert lookup.bucket_of(101) == 1
+    assert lookup.bucket_of(10_000_000) == 1
+
+
+def test_dynamic_sd_5tuple_extends_last_ctx_to_cover_any_value():
+    lookup = build_dynamic_sd_schedule_lookup(
+        num_speculative_tokens_per_batch_size=[(1, 16, 1, 4096, 3)],
+        vllm_max_batch_size=16,
+        vllm_num_speculative_tokens=3,
+    )
+
+    assert len(lookup.ctx_boundaries) == 1
+    assert lookup.ctx_boundaries[0][0] == 1
+    assert lookup.bucket_of(1) == 0
+    assert lookup.bucket_of(10_000_000) == 0
+
+
+def test_dynamic_sd_rejects_mixed_arity():
+    with pytest.raises(ValueError, match="all be 3-item or all 5-item"):
+        _make_lookup([(1, 16, 3), (17, 32, 1, 100, 2)])
+
+
+def test_dynamic_sd_rejects_non_rectangular_grid():
+    with pytest.raises(ValueError, match="rectangular"):
+        build_dynamic_sd_schedule_lookup(
+            num_speculative_tokens_per_batch_size=[
+                (1, 64, 1, 4096, 3),
+                (65, 256, 1, 512, 2),
+                (65, 256, 513, 4096, 1),
+            ],
+            vllm_max_batch_size=256,
+            vllm_num_speculative_tokens=3,
+        )
+
+
+def test_dynamic_sd_rejects_ctx_gap():
+    with pytest.raises(ValueError, match="contiguous"):
+        build_dynamic_sd_schedule_lookup(
+            num_speculative_tokens_per_batch_size=[
+                (1, 16, 1, 100, 3),
+                (1, 16, 200, 4096, 2),
+            ],
+            vllm_max_batch_size=16,
+            vllm_num_speculative_tokens=3,
+        )
+
+
+def test_dynamic_sd_rejects_ctx_not_starting_at_1():
+    with pytest.raises(ValueError, match="first context range must start at 1"):
+        build_dynamic_sd_schedule_lookup(
+            num_speculative_tokens_per_batch_size=[(1, 16, 2, 100, 3)],
+            vllm_max_batch_size=16,
+            vllm_num_speculative_tokens=3,
+        )
+
+
+def test_dynamic_sd_rejects_negative_ctx():
+    with pytest.raises(ValueError, match="Context range .* must be positive"):
+        build_dynamic_sd_schedule_lookup(
+            num_speculative_tokens_per_batch_size=[(1, 16, 0, 100, 3)],
+            vllm_max_batch_size=16,
+            vllm_num_speculative_tokens=3,
+        )
 
 
 def test_scheduler_initializes_dynamic_sd_lookup_from_speculative_config():
@@ -242,6 +368,32 @@ def test_scheduler_passes_max_num_seqs_as_dsd_runtime_batch_limit():
     output = _add_requests_and_schedule(scheduler, 16)
 
     assert scheduler.dynamic_sd_lookup is not None
-    assert len(scheduler.dynamic_sd_lookup) == 17
+    assert len(scheduler.dynamic_sd_lookup.dense) == 17
     assert len(output.num_scheduled_tokens) == 16
+    assert output.num_spec_tokens_to_schedule == 3
+
+
+def test_scheduler_stores_dynamic_sd_lookup_from_5tuple_config():
+    scheduler = _make_scheduler_with_dynamic_sd(
+        [(1, 16, 1, 100, 3), (1, 16, 101, 4096, 2)],
+        runtime_num_speculative_tokens=3,
+    )
+
+    assert scheduler.dynamic_sd_lookup is not None
+    assert len(scheduler.dynamic_sd_lookup.ctx_boundaries) == 2
+    assert scheduler.dynamic_sd_lookup.dense[1] == [3, 2]
+
+
+def test_scheduler_dispatches_k_via_ctx_bucket_for_fresh_requests():
+    scheduler = _make_scheduler_with_dynamic_sd(
+        [(1, 8, 1, 100, 3), (1, 8, 101, 8192, 1)],
+        max_num_seqs=8,
+        max_num_batched_tokens=200,
+        runtime_num_speculative_tokens=3,
+    )
+    output = _add_requests_and_schedule(
+        scheduler, num_requests=4, num_tokens=20
+    )
+
+    assert len(output.num_scheduled_tokens) == 4
     assert output.num_spec_tokens_to_schedule == 3

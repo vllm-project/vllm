@@ -2064,7 +2064,7 @@ class VllmConfig:
                         # cannot drift from it. Validation lives elsewhere; an
                         # invalid schedule keeps the single-tier default.
                         try:
-                            dense_schedule = build_dynamic_sd_schedule_lookup(
+                            schedule_lookup = build_dynamic_sd_schedule_lookup(
                                 schedule,
                                 vllm_max_batch_size=max_num_seqs,
                                 vllm_num_speculative_tokens=self.num_speculative_tokens,
@@ -2075,10 +2075,11 @@ class VllmConfig:
                             # Ascending batch size, so the last write per
                             # query length is the widest batch running at it.
                             widest_batch: dict[int, int] = {}
-                            for batch_size, num_spec in enumerate(
-                                dense_schedule[1:], start=1
+                            for batch_size, row in enumerate(
+                                schedule_lookup.dense[1:], start=1
                             ):
-                                widest_batch[num_spec + 1] = batch_size
+                                for num_spec in row:
+                                    widest_batch[num_spec + 1] = batch_size
                             decode_tiers = list(widest_batch.items())
 
                     uniform_decode_sizes = sorted(

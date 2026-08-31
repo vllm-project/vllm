@@ -216,7 +216,7 @@ class CudaGraphManager:
             num_new_sampled_tokens_per_step = (
                 self.decode_query_len - self.vllm_config.num_speculative_tokens
             )
-            dense_schedule = build_dynamic_sd_schedule_lookup(
+            schedule_lookup = build_dynamic_sd_schedule_lookup(
                 speculative_config.num_speculative_tokens_per_batch_size,
                 vllm_max_batch_size=self.max_num_reqs,
                 vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
@@ -224,7 +224,8 @@ class CudaGraphManager:
             decode_query_lens = sorted(
                 {
                     num_spec + num_new_sampled_tokens_per_step
-                    for num_spec in dense_schedule[1:]
+                    for row in schedule_lookup.dense[1:]
+                    for num_spec in row
                 }
             )
         else:
