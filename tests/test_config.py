@@ -209,6 +209,22 @@ def test_v2_flashinfer_replayssm_is_supported():
     assert VllmConfig.validate_mamba_cached_kernel(config) is config
 
 
+def test_flashinfer_replayssm_allows_align_prefix_caching():
+    config = _replayssm_config(backend=MambaBackendEnum.FLASHINFER)
+    config.cache_config.mamba_cache_mode = "align"
+
+    assert VllmConfig.validate_mamba_cached_kernel(config) is config
+
+
+def test_flashinfer_replayssm_spec_decode_still_requires_none():
+    config = _replayssm_config(backend=MambaBackendEnum.FLASHINFER)
+    config.num_speculative_tokens = 3
+    config.cache_config.mamba_cache_mode = "align"
+
+    with pytest.raises(ValueError, match="speculative decoding requires"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+
 def test_flashinfer_replayssm_rejects_unsupported_buffer_length():
     config = _replayssm_config(backend=MambaBackendEnum.FLASHINFER)
     config.cache_config.replayssm_buffer_len = 17

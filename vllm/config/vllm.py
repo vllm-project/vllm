@@ -2927,17 +2927,17 @@ class VllmConfig:
                 "--use-replayssm supports prefix caching only in align mode; "
                 "pass --mamba-cache-mode align"
             )
-        elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
-            if self.cache_config.mamba_cache_mode == "align":
-                raise ValueError(
-                    "FlashInfer ReplaySSM does not support "
-                    "--mamba-cache-mode align yet; use none"
-                )
-        elif self.mamba_config.backend != MambaBackendEnum.TRITON:
+        elif self.mamba_config.backend not in (
+            MambaBackendEnum.TRITON,
+            MambaBackendEnum.FLASHINFER,
+        ):
             raise ValueError(
                 "--use-replayssm requires --mamba-backend triton or flashinfer"
             )
-        elif self.use_v2_model_runner:
+        elif (
+            self.mamba_config.backend == MambaBackendEnum.TRITON
+            and self.use_v2_model_runner
+        ):
             raise ValueError(
                 "Triton ReplaySSM requires Model Runner V1; use "
                 "--mamba-backend flashinfer or Model Runner V1"

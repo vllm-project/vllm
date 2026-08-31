@@ -1563,10 +1563,11 @@ def preprocess_mamba(
             idx_mapping=None,
         )
     else:
-        do_mamba_copy_block(copy_bufs)
         if _should_materialize_replayssm_prefix(
             cache_config, forward_context, src_cols, num_reqs
         ):
+            # Exact-ify the hashed source slot before conv/SSM memcpy seeds
+            # the new running column from it.
             materialize_replayssm_prefix(
                 kv_cache_config,
                 mamba_group_ids,
@@ -1577,6 +1578,7 @@ def preprocess_mamba(
                 dst_cols,
                 num_reqs,
             )
+        do_mamba_copy_block(copy_bufs)
 
 
 def postprocess_mamba_all(

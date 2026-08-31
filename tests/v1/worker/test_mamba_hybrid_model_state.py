@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
@@ -94,3 +94,100 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias() -
     assert state._mamba_state_idx_gpu.tolist() == expected_state_indices
     expected_accepted = [9, 1, 9, 2, 9]
     assert state.num_accepted_tokens_gpu.tolist() == expected_accepted
+
+
+class _FakeTritonKernel:
+    def __init__(self, order: list[str]) -> None:
+        self._order = order
+
+    def __getitem__(self, _grid):
+        def _launch(*_args, **_kwargs):
+            self._order.append("advance")
+
+        return _launch
+
+
+def test_preprocess_state_materializes_before_fused_precopy(monkeypatch):
+    """V2 FlashInfer align must exact-ify the hashed slot before memcpy."""
+    order: list[str] = []
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.model_states.mamba_hybrid."
+        "preprocess_mamba_align_fused_kernel",
+        _FakeTritonKernel(order),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.model_states.mamba_hybrid.materialize_replayssm_prefix_gpu",
+        lambda *args, **kwargs: order.append("materialize"),
+    )
+
+    ctx = MagicMock()
+    ctx.run_fused_precopy.side_effect = lambda *args, **kwargs: order.append("precopy")
+
+    state = object.__new__(MambaHybridModelState)
+    state._align_mode = True
+    state._use_flashinfer_replayssm = True
+    state._mamba_src_col_gpu = torch.zeros(2, dtype=torch.int32)
+    state._mamba_state_idx_gpu = torch.zeros(2, dtype=torch.int32)
+    state._mamba_src_off_gpu = torch.zeros(2, dtype=torch.int32)
+    state.num_accepted_tokens_gpu = torch.ones(2, dtype=torch.int32)
+    state.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(static_forward_context={})
+    )
+    state._get_mamba_group_info = lambda _cfg: ([0], SimpleNamespace(block_size=4))
+    state._ensure_align_ctx = lambda *_args: ctx
+
+    input_batch = SimpleNamespace(
+        num_reqs=1,
+        idx_mapping=torch.tensor([0], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+    )
+
+    state.preprocess_state(
+        input_batch,
+        (torch.zeros((1, 2), dtype=torch.int32),),
+        MagicMock(),
+        torch.tensor([4], dtype=torch.int32),
+    )
+
+    assert order == ["advance", "materialize", "precopy"]
+
+
+def test_preprocess_state_skips_materialize_without_flashinfer(monkeypatch):
+    order: list[str] = []
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.model_states.mamba_hybrid."
+        "preprocess_mamba_align_fused_kernel",
+        _FakeTritonKernel(order),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.model_states.mamba_hybrid.materialize_replayssm_prefix_gpu",
+        lambda *args, **kwargs: order.append("materialize"),
+    )
+
+    ctx = MagicMock()
+    ctx.run_fused_precopy.side_effect = lambda *args, **kwargs: order.append("precopy")
+
+    state = object.__new__(MambaHybridModelState)
+    state._align_mode = True
+    state._use_flashinfer_replayssm = False
+    state._mamba_src_col_gpu = torch.zeros(2, dtype=torch.int32)
+    state._mamba_state_idx_gpu = torch.zeros(2, dtype=torch.int32)
+    state._mamba_src_off_gpu = torch.zeros(2, dtype=torch.int32)
+    state.num_accepted_tokens_gpu = torch.ones(2, dtype=torch.int32)
+    state._get_mamba_group_info = lambda _cfg: ([0], SimpleNamespace(block_size=4))
+    state._ensure_align_ctx = lambda *_args: ctx
+
+    input_batch = SimpleNamespace(
+        num_reqs=1,
+        idx_mapping=torch.tensor([0], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+    )
+
+    state.preprocess_state(
+        input_batch,
+        (torch.zeros((1, 2), dtype=torch.int32),),
+        MagicMock(),
+        torch.tensor([4], dtype=torch.int32),
+    )
+
+    assert order == ["advance", "precopy"]

@@ -9,7 +9,11 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    materialize_replayssm_prefix_gpu,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -94,6 +98,11 @@ class MambaHybridModelState(DefaultModelState):
         # kernel reusing the postprocess copy machinery, so the per-step src
         # columns and the running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
+        self._use_flashinfer_replayssm = (
+            self._align_mode
+            and self.cache_config.use_replayssm is True
+            and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        )
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
@@ -221,6 +230,19 @@ class MambaHybridModelState(DefaultModelState):
             BLOCK_SIZE=block,
             MAMBA_BLOCK_SIZE=mamba_spec.block_size,
         )
+        if self._use_flashinfer_replayssm:
+            # Exact-ify the hashed source slot before the conv/SSM memcpy
+            # seeds the new running column from it.
+            materialize_replayssm_prefix_gpu(
+                kv_cache_config,
+                mamba_group_ids,
+                self.vllm_config.compilation_config.static_forward_context,
+                block_tables,
+                self._mamba_src_col_gpu,
+                self._mamba_state_idx_gpu,
+                input_batch.idx_mapping,
+                num_reqs,
+            )
         ctx.run_fused_precopy(
             num_reqs,
             self._mamba_state_idx_gpu,

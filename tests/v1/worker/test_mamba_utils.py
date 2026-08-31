@@ -185,6 +185,7 @@ def test_preprocess_mamba_calls_flashinfer_replayssm_materialize(monkeypatch):
     forward_context = {"mixer": mixer}
 
     seen: dict[str, Any] = {}
+    order: list[str] = []
 
     def fake_materialize(
         _kv_cache_config,
@@ -196,6 +197,7 @@ def test_preprocess_mamba_calls_flashinfer_replayssm_materialize(monkeypatch):
         dst_cols,
         num_reqs,
     ):
+        order.append("materialize")
         seen["src_cols"] = src_cols
         seen["dst_cols"] = dst_cols
         seen["num_reqs"] = num_reqs
@@ -210,7 +212,7 @@ def test_preprocess_mamba_calls_flashinfer_replayssm_materialize(monkeypatch):
     )
     monkeypatch.setattr(
         "vllm.v1.worker.mamba_utils.do_mamba_copy_block",
-        lambda _copy_bufs: None,
+        lambda _copy_bufs: order.append("copy"),
     )
 
     preprocess_mamba(
@@ -228,6 +230,7 @@ def test_preprocess_mamba_calls_flashinfer_replayssm_materialize(monkeypatch):
     assert seen["src_cols"] == [0]
     assert seen["dst_cols"] == [1]
     assert seen["num_reqs"] == 1
+    assert order == ["materialize", "copy"]
 
 
 def test_preprocess_mamba_skips_materialize_without_flashinfer(monkeypatch):

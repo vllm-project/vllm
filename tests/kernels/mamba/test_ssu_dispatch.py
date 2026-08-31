@@ -15,6 +15,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     commit_replayssm_ring_trackers,
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
+    materialize_replayssm_prefix_gpu,
     reset_replayssm_ring_trackers,
     selective_state_update,
     selective_state_update_replayssm_flashinfer,
@@ -483,3 +484,73 @@ def test_replayssm_physical_ring_shape(
         (8, expected_ring_len),
         (2, expected_ring_len, 16),
     )
+
+
+def _flashinfer_replayssm_mixer() -> Mock:
+    mixer = Mock()
+    mixer.use_replayssm = True
+    mixer.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    mixer.kv_cache = [object()] * 5
+    return mixer
+
+
+def test_materialize_replayssm_prefix_gpu_gathers_copied_slots(monkeypatch):
+    """V2 gather: only src_col != dst_col rows are copied; hashed slot is src."""
+    mixer = _flashinfer_replayssm_mixer()
+    kv_cache_config = Mock()
+    kv_cache_config.kv_cache_groups = [Mock(layer_names=["mixer"])]
+    launches: list[dict[str, list]] = []
+
+    def fake_launch(mixers, src_row, dst_row, copied, _kernel):
+        launches.append(
+            {
+                "src_row": src_row.tolist(),
+                "dst_row": dst_row.tolist(),
+                "copied": copied.tolist(),
+            }
+        )
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.ops.ssu_dispatch."
+        "_launch_replayssm_materialize",
+        fake_launch,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.ops.ssu_dispatch._load_replayssm_materialize",
+        lambda: object(),
+    )
+
+    # Request-state order: req0 copies 0->1, req1 stays on col 1, req2 is fresh.
+    src_col_gpu = torch.tensor([0, 1, -1], dtype=torch.int32)
+    dst_col_gpu = torch.tensor([1, 1, 0], dtype=torch.int32)
+    # Batch order: req0, skipped, req1.
+    idx_mapping = torch.tensor([0, -1, 1], dtype=torch.int32)
+    block_tables = [
+        torch.tensor(
+            [
+                [10, 11],
+                [0, 0],
+                [20, 21],
+            ],
+            dtype=torch.int32,
+        )
+    ]
+
+    materialize_replayssm_prefix_gpu(
+        kv_cache_config,
+        [0],
+        {"mixer": mixer},
+        block_tables,
+        src_col_gpu,
+        dst_col_gpu,
+        idx_mapping,
+        num_reqs=3,
+    )
+
+    assert launches == [
+        {
+            "src_row": [10, 0, 21],
+            "dst_row": [11, 0, 21],
+            "copied": [True, False, False],
+        }
+    ]
