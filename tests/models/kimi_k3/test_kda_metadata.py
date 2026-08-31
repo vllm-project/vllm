@@ -655,27 +655,6 @@ def test_aligned_block_table_matches_shared_gdn():
     torch.testing.assert_close(actual, expected)
 
 
-def test_gdn_builder_stores_base_fields():
-    """The GDN builder must expose what AttentionMetadataBuilder.__init__ stores.
-
-    _get_recoverssm_context reads self.layer_names, and it is the only reader,
-    so a builder that drops the field raises AttributeError at the first
-    cudagraph capture and nowhere else. self.device has no reader today and
-    would have gone the same way.
-    """
-    builder = _make_builder(
-        KimiK3KDAMetadataBuilder,
-        num_speculative_tokens=1,
-        full_cuda_graph=False,
-        mamba_cache_mode="align",
-        use_recoverssm=True,
-    )
-    assert builder.layer_names == ["layer.0"]
-    assert builder.device == DEVICE
-    assert builder.kv_cache_spec is not None
-    assert builder.vllm_config is not None
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_checkpoint_metadata_on_prefill_only_step_under_recoverssm():
     """A prefill-only step under RecoverSSM must build checkpoint metadata.
