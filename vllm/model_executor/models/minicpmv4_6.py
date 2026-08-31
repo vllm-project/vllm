@@ -1083,14 +1083,10 @@ class MiniCPMV4_6ForConditionalGeneration(
                 image_embeds=image_embeds,
             )
 
-        assert isinstance(pixel_values, list)
-        pixel_values_list: list[torch.Tensor] = []
-        for pixel_value in pixel_values:
-            assert isinstance(pixel_value, torch.Tensor)
-            pixel_values_list.append(pixel_value)
+        assert isinstance(pixel_values, torch.Tensor | list)
         tgt_sizes = kwargs.pop("tgt_sizes")
-        num_slices_flat = torch.tensor([len(ps) for ps in pixel_values_list])
-        pixel_values_flat = flatten_bn(pixel_values_list)
+        num_slices_flat = torch.tensor([len(ps) for ps in pixel_values])
+        pixel_values_flat = flatten_bn(pixel_values)
         tgt_sizes_flat = flatten_bn(tgt_sizes, concat=True)
 
         return MiniCPMVImagePixelInputs(
