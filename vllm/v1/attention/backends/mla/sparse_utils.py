@@ -307,6 +307,7 @@ def triton_filter_and_convert_dcp_index(
     dcp_rank: int,
     cp_kv_cache_interleave_size: int = 1,
     BLOCK_SIZE: int = 64,
+    BLOCK_STRIDE_ROWS: int | None = None,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,
     return_valid_counts: bool = False,
@@ -343,6 +344,7 @@ def triton_filter_and_convert_dcp_index(
             block_table,
             token_indices,
             BLOCK_SIZE=BLOCK_SIZE,
+            BLOCK_STRIDE_ROWS=BLOCK_STRIDE_ROWS,
             NUM_TOPK_TOKENS=NUM_TOPK_TOKENS,
             BLOCK_N=BLOCK_N,
             return_valid_counts=return_valid_counts,
@@ -390,7 +392,7 @@ def triton_filter_and_convert_dcp_index(
         None,
         max_num_blocks_per_req,
         BLOCK_SIZE,
-        BLOCK_SIZE,  # dense caches on the DCP path
+        BLOCK_STRIDE_ROWS if BLOCK_STRIDE_ROWS is not None else BLOCK_SIZE,
         block_n,
         False,  # HAS_PREFILL
         count_valid,
