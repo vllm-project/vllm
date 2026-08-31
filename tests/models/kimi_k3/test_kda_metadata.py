@@ -708,7 +708,15 @@ def test_checkpoint_metadata_on_prefill_only_step_under_recoverssm():
         builder.kv_cache_spec,
         "align",
     )
-    actual = builder.build(0, common_attn_metadata)
+    # The -1 fill is what the runner passes on a prefill-only step, and it is
+    # what makes the mask all-False rather than absent. Omitting the kwarg
+    # takes the `num_decode_draft_tokens_cpu is None` branch, which sets the
+    # mask to None and never reaches the guard under test.
+    actual = builder.build(
+        0,
+        common_attn_metadata,
+        num_decode_draft_tokens_cpu=torch.full((2,), -1, dtype=torch.int32),
+    )
 
     # Same expectation as the non-RecoverSSM case: every row is its own
     # checkpoint row, because non_spec_query_start_loc is the full
