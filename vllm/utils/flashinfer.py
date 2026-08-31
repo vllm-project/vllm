@@ -24,6 +24,26 @@ from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
+
+def flashinfer_bf16_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None,
+    pdl: bool,
+    backend: str,
+) -> torch.Tensor:
+    from flashinfer import mm_bf16
+
+    return mm_bf16(
+        a,
+        b,
+        bias=bias,
+        pdl=pdl,
+        out_dtype=torch.bfloat16,
+        backend=backend,
+    )
+
+
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
 # Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35  # noqa: E501
@@ -61,6 +81,58 @@ def has_flashinfer() -> bool:
         )
         return False
     return True
+
+
+@functools.cache
+def has_flashinfer_bf16_gemm() -> bool:
+    """Return whether FlashInfer exposes the BF16 dense GEMM API."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer")
+    return mod is not None and callable(getattr(mod, "mm_bf16", None))
+
+
+@functools.cache
+def is_flashinfer_bf16_gemm_supported(
+    backend: str,
+    compute_capability: int | None = None,
+) -> bool:
+    """Return whether an exact FlashInfer BF16 backend is available."""
+    if not current_platform.is_cuda() or not has_flashinfer_bf16_gemm():
+        return False
+
+    mod = _get_submodule("flashinfer")
+    mm_bf16 = getattr(mod, "mm_bf16", None) if mod is not None else None
+    backend_supported = getattr(mm_bf16, "is_backend_supported", None)
+    if not callable(backend_supported):
+        return False
+
+    if compute_capability is None:
+        device_capability = current_platform.get_device_capability()
+        if device_capability is None:
+            return False
+        compute_capability = device_capability.to_int()
+
+    try:
+        return bool(backend_supported(backend, compute_capability))
+    except (AttributeError, ImportError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+@functools.cache
+def is_flashinfer_cutedsl_bf16_gemm_supported() -> bool:
+    """Return whether the CuTeDSL BF16 dense GEMM backend is available."""
+    if not is_flashinfer_bf16_gemm_supported("cute-dsl"):
+        return False
+    try:
+        from flashinfer.cute_dsl.utils import is_cute_dsl_available
+        from flashinfer.utils import is_sm100a_supported
+    except (ImportError, ModuleNotFoundError):
+        return False
+    try:
+        return is_cute_dsl_available() and is_sm100a_supported(torch.device("cuda"))
+    except (RuntimeError, TypeError, ValueError):
+        return False
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
@@ -1079,6 +1151,10 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 
 __all__ = [
     "has_flashinfer",
+    "flashinfer_bf16_mm",
+    "has_flashinfer_bf16_gemm",
+    "is_flashinfer_bf16_gemm_supported",
+    "is_flashinfer_cutedsl_bf16_gemm_supported",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",
