@@ -189,6 +189,9 @@ class SpecDecodeBaseProposer:
             self.mrope_positions = torch.zeros(
                 (3, self.max_positions + 1), dtype=torch.int64, device=device
             )
+            self._slot_positions = torch.zeros(
+                self.max_positions, dtype=torch.int64, device=device
+            )
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions = torch.zeros(
                 (self.uses_xdrope_dim, self.max_positions + 1),
@@ -784,12 +787,17 @@ class SpecDecodeBaseProposer:
     ) -> torch.Tensor:
         """Update positions, slot mappings, and sequence metadata for the
         next draft step. Returns the updated positions tensor."""
-        positions_1d = positions[0] if self.uses_mrope else positions
         if self.uses_mrope:
-            out_pos = self.mrope_positions[0, :batch_size]
+            slot_positions = self._slot_positions[:batch_size]
+            slot_positions.copy_(common_attn_metadata.seq_lens[:batch_size])
+            slot_positions.sub_(1)
+            positions_1d = slot_positions
+            out_pos = slot_positions
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+            positions_1d = positions
             out_pos = self.xdrope_positions[0, :batch_size]
         else:
+            positions_1d = positions
             out_pos = self.positions[:batch_size]
         eagle_step_update_slot_mapping_and_metadata(
             positions_1d=positions_1d,
@@ -803,7 +811,9 @@ class SpecDecodeBaseProposer:
         )
         common_attn_metadata.slot_mapping = self._slot_mapping_buffer[:batch_size]
         if self.uses_mrope:
-            self.mrope_positions[1:, :batch_size] = self.mrope_positions[0, :batch_size]
+            next_positions = positions + 1
+            next_positions[next_positions >= self.max_model_len] = 0
+            self.mrope_positions[:, :batch_size] = next_positions
             positions = self.mrope_positions[:, :batch_size]
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions[1:, :batch_size] = self.xdrope_positions[

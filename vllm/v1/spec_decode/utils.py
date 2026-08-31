@@ -103,7 +103,8 @@ def eagle_step_update_slot_mapping_and_metadata(
     PADDING_SLOT_ID to out_slot_mapping for cudagraph padding.
 
     Args:
-        positions_1d: [batch_size] current positions (use positions[0] for M-RoPE)
+        positions_1d: [batch_size] current 1D sequence positions for slot
+            mapping computation (0-indexed)
         block_table_tensor: [batch_size, n_blocks_per_req]
         seq_lens: [batch_size] updated in place
         block_size: KV cache block size

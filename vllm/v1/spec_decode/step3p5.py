@@ -97,8 +97,12 @@ class Step3p5MTPProposer(EagleProposer):
             common_attn_metadata.slot_mapping
         )
         # Recompute slot_mapping for the remaining gids using their own block tables.
-        new_positions_1d = positions[0] if self.uses_mrope else positions
-        exceeds = old_positions_1d + 1 >= self.max_model_len
+        if self.uses_mrope:
+            new_positions_1d = common_attn_metadata.seq_lens[:batch_size] - 1
+            exceeds = common_attn_metadata.seq_lens[:batch_size] > self.max_model_len
+        else:
+            new_positions_1d = positions
+            exceeds = old_positions_1d + 1 >= self.max_model_len
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
             if gid == self.kv_cache_gid:
