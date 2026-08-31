@@ -162,6 +162,8 @@ def causal_conv1d_update_cpu(
     conv_state_indices: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
     pad_slot_id: int | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
     **kwargs,
 ) -> torch.Tensor:
     """CPU implementation for causal_conv1d_update."""
@@ -172,6 +174,46 @@ def causal_conv1d_update_cpu(
         pad_slot_id = kwargs.get("null_block_id", NULL_BLOCK_ID)
         if pad_slot_id is None:
             pad_slot_id = NULL_BLOCK_ID
+
+    if (
+        conv_state_indices is not None
+        and conv_state_indices.dim() == 2
+        and block_idx_last_scheduled_token is None
+    ):
+        # Without prefix caching each sequence owns exactly one mamba state
+        # block, so the block table is (batch, 1): flatten to the legacy
+        # one-slot-per-sequence layout the C++ vec kernel expects.
+        conv_state_indices = conv_state_indices[:, 0].contiguous()
+
+    if conv_state_indices is not None and conv_state_indices.dim() == 2:
+        # Mamba prefix caching: a per-sequence BLOCK TABLE plus pointers.
+        # The C++ vec kernel only understands one slot per sequence, so
+        # resolve the table here: the running conv state is read from the
+        # ``initial_state_idx`` block and lives at the
+        # ``block_idx_last_scheduled_token`` block afterwards. On a block
+        # transition (read != write slot), migrate the state first, then
+        # let the kernel read+write in place at the write slot.
+        write_idx = (
+            conv_state_indices.gather(
+                1, block_idx_last_scheduled_token.to(torch.int64).unsqueeze(1)
+            )
+            .squeeze(1)
+            .to(torch.int32)
+        )
+        if initial_state_idx is not None:
+            read_idx = (
+                conv_state_indices.gather(
+                    1, initial_state_idx.to(torch.int64).unsqueeze(1)
+                )
+                .squeeze(1)
+                .to(torch.int32)
+            )
+            moved = (read_idx != write_idx) & (write_idx != pad_slot_id)
+            for s in torch.nonzero(moved).flatten().tolist():
+                r, w = int(read_idx[s].item()), int(write_idx[s].item())
+                if r != pad_slot_id and r != NULL_BLOCK_ID and r >= 0:
+                    conv_state[w].copy_(conv_state[r])
+        conv_state_indices = write_idx
 
     return causal_conv1d_update_cpu_vec(
         x,
