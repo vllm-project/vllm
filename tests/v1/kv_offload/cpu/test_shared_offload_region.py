@@ -826,6 +826,8 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     monkeypatch.setattr(region.os, "open", mock_open)
     monkeypatch.setattr(region.os, "unlink", mock_unlink)
     monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(region, "hold_region_file_lock", MagicMock())
+    monkeypatch.setattr(region, "reap_orphaned_region_files", MagicMock())
     monkeypatch.setattr(
         region,
         "check_shm_free_space",
@@ -858,6 +860,8 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
     monkeypatch.setattr(region.os, "open", MagicMock(return_value=9999))
     monkeypatch.setattr(region.os, "unlink", mock_unlink)
     monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(region, "hold_region_file_lock", MagicMock())
+    monkeypatch.setattr(region, "reap_orphaned_region_files", MagicMock())
     monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
     monkeypatch.setattr(
         region.os,
@@ -995,3 +999,44 @@ def test_barrier_release_failure_keeps_original_error(iid, monkeypatch):
         _make_region(iid, barrier=MagicMock(side_effect=TimeoutError("barrier")))
 
     assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+
+
+def _write_orphan(path: str, size: int) -> None:
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    os.ftruncate(fd, size)
+    os.close(fd)
+
+
+def test_orphaned_file_reclaimed_on_next_start(iid):
+    orphan = f"/dev/shm/vllm_offload_orphan-{iid}.mmap"
+    _write_orphan(orphan, PAGE_SIZE)
+    try:
+        with _region(iid):
+            assert not os.path.exists(orphan)
+    finally:
+        _cleanup_file(orphan)
+
+
+def test_live_region_survives_another_start(iid):
+    live_id = f"{iid}-live"
+    live_path = f"/dev/shm/vllm_offload_{live_id}.mmap"
+    with _region(live_id), _region(f"{iid}-new"):
+        assert os.path.exists(live_path)
+
+
+def test_zero_length_file_not_reclaimed(iid):
+    stub = f"/dev/shm/vllm_offload_stub-{iid}.mmap"
+    fd = os.open(stub, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    os.close(fd)
+    try:
+        with _region(iid):
+            assert os.path.exists(stub)
+    finally:
+        _cleanup_file(stub)
+
+
+def test_stale_file_with_same_engine_id_does_not_wedge_restart(iid):
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    _write_orphan(path, 4 * PAGE_SIZE)
+    with _region(iid) as region:
+        assert region._creator is True
