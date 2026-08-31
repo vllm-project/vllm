@@ -186,7 +186,7 @@ def _create_random_top_token_test_matrix(
         row = matrix[rdx, 1:]  # Skip the first column as it contains the token list
         token_index = (row == tokens_list[rdx]).nonzero(as_tuple=True)[0]
         if token_index.numel() > 0:
-            prompt_token_ranks[rdx] = token_index.item()
+            prompt_token_ranks[rdx] = token_index.item() + 1
         else:
             prompt_token_ranks[rdx] = random.randint(shape[1], 50700)
 
