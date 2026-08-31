@@ -108,9 +108,17 @@ class KVCacheCoordinator(ABC):
         self.eagle_group_ids: set[int] = {
             i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
         }
-        # Conservatively fall back to flag all groups when no group is flagged.
+        # Conservatively fall back to flag all groups when no group is
+        # flagged — except Mamba groups: an attention-only drafter can never
+        # own a Mamba group, and flagging one widens its lookup window beyond
+        # what block-granular SSM checkpoints can satisfy, silently disabling
+        # all Mamba prefix reuse under MTP/EAGLE.
         if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+            self.eagle_group_ids = {
+                i
+                for i, g in enumerate(kv_cache_config.kv_cache_groups)
+                if not isinstance(g.kv_cache_spec, MambaSpec)
+            }
 
         # During chunked prefill with EAGLE, the single next prefill lookahead
         # token past the chunk boundary is combined with the final hidden state
