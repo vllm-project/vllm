@@ -741,9 +741,13 @@ def validate_mamba_state_copy_funcs(
             f"missing state copy funcs for {mamba_spec.mamba_type}"
         )
         state_copy_funcs = copy_funcs[mamba_spec.mamba_type]
-        assert len(state_copy_funcs) == len(mamba_spec.shapes), (
-            f"{mamba_spec.mamba_type} declares {len(mamba_spec.shapes)} states, "
-            f"but provides {len(state_copy_funcs)} state copy funcs"
+        num_copyable_states = (
+            len(mamba_spec.shapes) - mamba_spec.num_backend_owned_state_tensors
+        )
+        assert len(state_copy_funcs) == num_copyable_states, (
+            f"{mamba_spec.mamba_type} expects {num_copyable_states} state copy "
+            f"funcs for {len(mamba_spec.shapes)} state tensors, but provides "
+            f"{len(state_copy_funcs)}"
         )
 
 

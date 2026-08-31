@@ -35,6 +35,7 @@ from vllm.v1.worker.mamba_utils import (
     postprocess_mamba_align_gpu,
     preprocess_mamba,
     stage_postprocess_inputs_to_gpu,
+    validate_mamba_state_copy_funcs,
 )
 
 # Conv + temporal copy specs, in the order the tests' MambaSpec shapes expect.
@@ -729,6 +730,32 @@ def test_mamba_groups_support_different_state_specs():
     assert ctx.is_initialized
     assert ctx.state_group_indices.tolist() == [0, 0, 0, 0, 1]
     assert ctx.state_conv_widths.tolist() == [4, 0, 4, 0, 12]
+
+
+def test_mamba_copy_funcs_allow_backend_owned_state_tensors():
+    replayssm_spec = MambaSpec(
+        block_size=16,
+        shapes=((4, 4), (2, 4, 4), (2, 8, 4), (2, 8), (1, 8, 4)),
+        dtypes=(torch.float16,) * 5,
+        mamba_type=MambaAttentionBackendEnum.MAMBA2,
+        mamba_cache_mode="align",
+        num_backend_owned_state_tensors=3,
+    )
+
+    validate_mamba_state_copy_funcs({replayssm_spec: [0]}, _COPY_FUNCS)
+
+    for invalid_funcs in (
+        (get_conv_copy_spec,),
+        (*_DEFAULT_COPY_FUNCS, get_temporal_copy_spec),
+    ):
+        invalid_copy_funcs = {
+            **_COPY_FUNCS,
+            MambaAttentionBackendEnum.MAMBA2: invalid_funcs,
+        }
+        with pytest.raises(AssertionError, match="expects 2 state copy funcs"):
+            validate_mamba_state_copy_funcs(
+                {replayssm_spec: [0]}, invalid_copy_funcs
+            )
 
 
 def test_mamba_groups_support_mixed_specs_in_uniform_group():

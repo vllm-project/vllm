@@ -83,6 +83,9 @@ class MambaBase(AttentionLayerBase):
                 if vllm_config.cache_config.use_replayssm
                 else vllm_config.num_speculative_tokens
             ),
+            num_backend_owned_state_tensors=(
+                3 if vllm_config.cache_config.use_replayssm else 0
+            ),
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:

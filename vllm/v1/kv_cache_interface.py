@@ -858,6 +858,10 @@ class MambaSpec(KVCacheSpec):
     num_prefill_checkpoint_blocks: int = 0
     num_heads: int = 1
     tokens_per_state: int = -1
+    # Cache tensors owned by a backend-specific lifecycle rather than the
+    # generic prefix-copy path. ReplaySSM appends three ring tensors after the
+    # canonical conv and temporal states.
+    num_backend_owned_state_tensors: int = 0
     # False: the state is sharded across TP ranks (e.g. GDN). True: every TP
     # rank holds the full state (e.g. the replicated PLE conv state).
     tp_replicated: bool = False
