@@ -46,24 +46,47 @@ class NixlDataTransport(DataTransport):
                 "ECCPUConnector requires NIXL; "
                 "install the `nixl` package or set a different ec_connector."
             )
+        # agent_name → remote dlist handle (from add_remote_peer, used by post_read)
+        self._peer_handles: dict[str, int] = {}
+        # None until the local region is registered, so deregister() is safe on
+        # a transport whose registration failed part-way.
+        self._reg_descs: Any = None
+
         self._nixl = NixlWrapper(
             agent_name,
             nixl_agent_config(num_threads=num_threads, capture_telemetry=True),
         )
+        self._register_local_memory(
+            base_ptr, num_blocks, block_size_bytes, total_size_bytes
+        )
+
+    def _register_local_memory(
+        self,
+        base_ptr: int,
+        num_blocks: int,
+        block_size_bytes: int,
+        total_size_bytes: int,
+    ) -> None:
+        """Register the local region with NIXL and prep its transfer dlist.
+
+        Unwinds the registration if a later step fails: __init__ propagates the
+        error, so the caller never receives an object it could deregister with.
+        """
         block_descs = build_block_descs(base_ptr, num_blocks, block_size_bytes)
-        reg_descs = self._nixl.get_reg_descs(
+        self._reg_descs = self._nixl.get_reg_descs(
             [(base_ptr, total_size_bytes, 0, "")], _NIXL_DRAM
         )
-        self._nixl.register_memory(reg_descs, backends=["UCX"])
-        self._reg_descs = reg_descs
-        xfer_descs = self._nixl.get_xfer_descs(block_descs, _NIXL_DRAM)
-        self._local_xfer_handle = self._nixl.prep_xfer_dlist(
-            "NIXL_INIT_AGENT", xfer_descs
-        )
-        self._agent_metadata = self._nixl.get_agent_metadata()
-        self._mem_descriptor_bytes = serialize_mem_descriptor(block_descs)
-        # agent_name → remote dlist handle (from add_remote_peer, used by post_read)
-        self._peer_handles: dict[str, int] = {}
+        self._nixl.register_memory(self._reg_descs, backends=["UCX"])
+        try:
+            xfer_descs = self._nixl.get_xfer_descs(block_descs, _NIXL_DRAM)
+            self._local_xfer_handle = self._nixl.prep_xfer_dlist(
+                "NIXL_INIT_AGENT", xfer_descs
+            )
+            self._agent_metadata = self._nixl.get_agent_metadata()
+            self._mem_descriptor_bytes = serialize_mem_descriptor(block_descs)
+        except Exception:
+            self.deregister()
+            raise
 
     def get_agent_metadata(self) -> bytes:
         return self._agent_metadata
@@ -130,7 +153,10 @@ class NixlDataTransport(DataTransport):
             logger.warning("EC: release_xfer_handle failed", exc_info=True)
 
     def deregister(self) -> None:
+        if self._reg_descs is None:
+            return
         try:
             self._nixl.deregister_memory(self._reg_descs)
         except Exception:
             logger.warning("EC: deregister failed", exc_info=True)
+        self._reg_descs = None
