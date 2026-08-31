@@ -288,7 +288,6 @@ def _replayssm_autotune_kwargs(
         and config.mamba_config.backend == MambaBackendEnum.FLASHINFER
     ):
         return None
-    use_v2_model_runner = config.use_v2_model_runner
     if not flashinfer_replayssm_autotune_supported():
         logger.info_once(
             "Skipping FlashInfer ReplaySSM autotuning because "
@@ -299,7 +298,7 @@ def _replayssm_autotune_kwargs(
     v2_runner: Any = runner
     query_len = (
         v2_runner.decode_query_len
-        if use_v2_model_runner
+        if config.use_v2_model_runner
         else runner.uniform_decode_query_len
     )
     max_num_reqs = min(
@@ -319,7 +318,7 @@ def _replayssm_autotune_kwargs(
         "num_tokens": max_num_reqs * query_len,
         "uniform_decode": True,
     }
-    if use_v2_model_runner:
+    if config.use_v2_model_runner:
         decode_kwargs["valid_dummy_state_slots"] = True
     else:
         decode_kwargs.update(
