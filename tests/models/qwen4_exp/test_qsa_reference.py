@@ -7,9 +7,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
-    _qsa_decode_warmup_profiles,
-)
 from vllm.models.qwen4_exp.common import qsa_cache
 from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
 from vllm.models.qwen4_exp.nvidia import indexer_qsa
@@ -18,6 +15,9 @@ from vllm.models.qwen4_exp.nvidia import (
 )
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
+from vllm.models.qwen4_exp.nvidia.ops.qsa_indexer import (
+    _qsa_decode_warmup_profiles,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
@@ -724,6 +724,39 @@ def test_qsa_decode_warmup_covers_reachable_dql_and_launch_regimes() -> None:
         (3, 1),
         (4, 1),
     )
+
+
+def test_qsa_decode_warmup_compiles_profiles_without_launching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    kernel = SimpleNamespace(
+        warmup=lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+    monkeypatch.setattr(
+        qsa_indexer_ops,
+        "_qsa_mqa_paged_uniform_kernel",
+        kernel,
+    )
+    monkeypatch.setattr(qsa_indexer_ops.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(qsa_indexer_ops, "HAS_TRITON", True)
+
+    profiles = qsa_indexer_ops.warmup_qsa_mqa_paged_decode(
+        torch.empty(40, 4, 1, 128, dtype=torch.bfloat16),
+        torch.empty(33, 20, dtype=torch.int32),
+        num_heads=4,
+        head_dim=128,
+        compress_ratio=4,
+        max_decode_query_len=4,
+        max_num_reqs=33,
+        max_num_batched_tokens=132,
+    )
+
+    assert len(calls) == len(profiles) == 8
+    assert [
+        (kwargs["DECODE_QUERY_LEN"], kwargs["TILES_PER_PROG"]) for _, kwargs in calls
+    ] == [(dql, 1 if num_requests <= 32 else 8) for dql, num_requests in profiles]
+    assert all(not isinstance(args[0], torch.Tensor) for args, _ in calls)
 
 
 @requires_qsa_kernels

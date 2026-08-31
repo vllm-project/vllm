@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Warm up Qwen4Exp QSA Triton decode kernels."""
+"""Connect loaded Qwen4Exp QSA modules to their kernel-owned warmup."""
 
 from typing import TYPE_CHECKING
 
@@ -14,25 +14,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
-
-_LARGE_DECODE_REQUESTS = 33
-
-
-def _qsa_decode_warmup_profiles(
-    max_dql: int,
-    max_num_reqs: int,
-    max_num_batched_tokens: int,
-) -> tuple[tuple[int, int], ...]:
-    profiles = []
-    for dql in range(1, max_dql + 1):
-        if dql <= max_num_batched_tokens:
-            profiles.append((dql, 1))
-        if (
-            max_num_reqs >= _LARGE_DECODE_REQUESTS
-            and dql * _LARGE_DECODE_REQUESTS <= max_num_batched_tokens
-        ):
-            profiles.append((dql, _LARGE_DECODE_REQUESTS))
-    return tuple(profiles)
 
 
 def _get_qsa_indexer(worker: "Worker") -> "QSAIndexer | None":
@@ -68,7 +49,6 @@ def _get_compressed_block_table(
     return None
 
 
-@torch.inference_mode()
 def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
     """Warm every reachable QSA decode-query-length specialization."""
 
@@ -88,16 +68,8 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
         max_dql = getattr(runner, "decode_query_len", None)
     if max_dql is None:
         max_dql = 1 + worker.vllm_config.num_speculative_tokens
-    profiles = _qsa_decode_warmup_profiles(
-        max_dql=int(max_dql),
-        max_num_reqs=int(runner.max_num_reqs),
-        max_num_batched_tokens=int(runner.max_num_tokens),
-    )
-    if not profiles:
-        return
-
     from vllm.models.qwen4_exp.nvidia.ops.qsa_indexer import (
-        qsa_mqa_paged_decode,
+        warmup_qsa_mqa_paged_decode,
     )
 
     k_cache = indexer.compressed_key_cache.kv_cache
@@ -105,25 +77,18 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
         logger.warning("Skipping Qwen4Exp QSA warmup: cache is not bound.")
         return
 
-    logger.info("Warming up Qwen4Exp QSA decode kernels: %s.", profiles)
-    for dql, num_requests in profiles:
-        num_tokens = dql * num_requests
-        qsa_mqa_paged_decode(
-            torch.empty(
-                num_tokens,
-                indexer.index_n_heads,
-                indexer.index_head_dim,
-                dtype=torch.bfloat16,
-                device=k_cache.device,
-            ),
-            k_cache,
-            block_table[:num_requests],
-            torch.zeros(num_tokens, dtype=torch.int64, device=k_cache.device),
-            torch.zeros(num_requests, dtype=torch.int32, device=k_cache.device),
-            indexer.compress_ratio,
-            dql,
-        )
-    torch.accelerator.synchronize(k_cache.device)
+    profiles = warmup_qsa_mqa_paged_decode(
+        k_cache,
+        block_table,
+        num_heads=indexer.index_n_heads,
+        head_dim=indexer.index_head_dim,
+        compress_ratio=indexer.compress_ratio,
+        max_decode_query_len=int(max_dql),
+        max_num_reqs=int(runner.max_num_reqs),
+        max_num_batched_tokens=int(runner.max_num_tokens),
+    )
+    if profiles:
+        logger.info("Warmed up Qwen4Exp QSA decode kernels: %s.", profiles)
 
 
 __all__ = ["qwen4_exp_qsa_triton_warmup"]

@@ -6,11 +6,15 @@ import math
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
+_LARGE_DECODE_REQUESTS = 33
 
 
 @triton.jit
@@ -24,12 +28,9 @@ def _qsa_mqa_paged_uniform_kernel(
     logits_ptr,
     stride_q_row,
     stride_q_head,
-    stride_q_dim,
     stride_cache_block,
     stride_cache_token,
-    stride_cache_dim,
     stride_table_req,
-    stride_table_page,
     stride_logits_row,
     num_columns,
     num_pages,
@@ -88,7 +89,7 @@ def _qsa_mqa_paged_uniform_kernel(
         q_ptr
         + (request * DECODE_QUERY_LEN + query_offset)[None, :] * stride_q_row
         + head[None, :] * stride_q_head
-        + dims[:, None] * stride_q_dim,
+        + dims[:, None],
         mask=valid_query[None, :] & (dims[:, None] < HEAD_DIM),
         other=0.0,
     )
@@ -99,9 +100,7 @@ def _qsa_mqa_paged_uniform_kernel(
         logical_page = tl.minimum(columns // PAGE_SIZE, PAGE_TABLE_WIDTH - 1)
         page_offset = columns % PAGE_SIZE
         physical_page = tl.load(
-            page_table_ptr
-            + request * stride_table_req
-            + logical_page * stride_table_page,
+            page_table_ptr + request * stride_table_req + logical_page,
             mask=live,
             other=-1,
         )
@@ -111,7 +110,7 @@ def _qsa_mqa_paged_uniform_kernel(
             k_cache_ptr
             + safe_physical_page[:, None] * stride_cache_block
             + page_offset[:, None] * stride_cache_token
-            + dims[None, :] * stride_cache_dim,
+            + dims[None, :],
             mask=page_valid[:, None] & (dims[None, :] < HEAD_DIM),
             other=0.0,
             eviction_policy="evict_first",
@@ -145,12 +144,9 @@ def _qsa_mqa_paged_prefill_kernel(
     logits_ptr,
     stride_q_row,
     stride_q_head,
-    stride_q_dim,
     stride_cache_block,
     stride_cache_token,
-    stride_cache_dim,
     stride_table_req,
-    stride_table_page,
     stride_logits_row,
     num_rows,
     num_columns,
@@ -207,7 +203,7 @@ def _qsa_mqa_paged_prefill_kernel(
         q_ptr
         + q_rows[None, :] * stride_q_row
         + heads[None, :] * stride_q_head
-        + dims[:, None] * stride_q_dim,
+        + dims[:, None],
         mask=(heads[None, :] < NUM_HEADS)
         & (q_rows[None, :] < num_rows)
         & (dims[:, None] < HEAD_DIM),
@@ -225,9 +221,7 @@ def _qsa_mqa_paged_prefill_kernel(
             logical_page = tl.minimum(columns // PAGE_SIZE, PAGE_TABLE_WIDTH - 1)
             page_offset = columns % PAGE_SIZE
             physical_page = tl.load(
-                page_table_ptr
-                + first_req * stride_table_req
-                + logical_page * stride_table_page,
+                page_table_ptr + first_req * stride_table_req + logical_page,
                 mask=live,
                 other=-1,
             )
@@ -237,7 +231,7 @@ def _qsa_mqa_paged_prefill_kernel(
                 k_cache_ptr
                 + safe_physical_page[:, None] * stride_cache_block
                 + page_offset[:, None] * stride_cache_token
-                + dims[None, :] * stride_cache_dim,
+                + dims[None, :],
                 mask=page_valid[:, None] & (dims[None, :] < HEAD_DIM),
                 other=0.0,
                 eviction_policy="evict_first",
@@ -276,9 +270,7 @@ def _qsa_mqa_paged_prefill_kernel(
                 logical_page = tl.minimum(columns // PAGE_SIZE, PAGE_TABLE_WIDTH - 1)
                 page_offset = columns % PAGE_SIZE
                 physical_page = tl.load(
-                    page_table_ptr
-                    + request * stride_table_req
-                    + logical_page * stride_table_page,
+                    page_table_ptr + request * stride_table_req + logical_page,
                     mask=live,
                     other=-1,
                 )
@@ -288,7 +280,7 @@ def _qsa_mqa_paged_prefill_kernel(
                     k_cache_ptr
                     + safe_physical_page[:, None] * stride_cache_block
                     + page_offset[:, None] * stride_cache_token
-                    + dims[None, :] * stride_cache_dim,
+                    + dims[None, :],
                     mask=page_valid[:, None] & (dims[None, :] < HEAD_DIM),
                     other=0.0,
                     eviction_policy="evict_first",
@@ -390,6 +382,137 @@ def _validate_mqa(q: torch.Tensor) -> None:
         raise ValueError("QSA query must be [rows, heads, head_dim]")
 
 
+def _qsa_decode_warmup_profiles(
+    max_dql: int,
+    max_num_reqs: int,
+    max_num_batched_tokens: int,
+) -> tuple[tuple[int, int], ...]:
+    profiles = []
+    for dql in range(1, max_dql + 1):
+        if dql <= max_num_batched_tokens:
+            profiles.append((dql, 1))
+        if (
+            max_num_reqs >= _LARGE_DECODE_REQUESTS
+            and dql * _LARGE_DECODE_REQUESTS <= max_num_batched_tokens
+        ):
+            profiles.append((dql, _LARGE_DECODE_REQUESTS))
+    return tuple(profiles)
+
+
+def _qsa_decode_kernel_config(
+    *,
+    page_size: int,
+    page_table_width: int,
+    num_heads: int,
+    head_dim: int,
+    decode_query_len: int,
+    num_requests: int,
+    compress_ratio: int,
+) -> dict[str, int]:
+    decode_query_len_padded = triton.next_power_of_2(decode_query_len)
+    num_heads_padded = triton.next_power_of_2(num_heads)
+    return {
+        "PAGE_SIZE": page_size,
+        "PAGE_TABLE_WIDTH": page_table_width,
+        "NUM_HEADS": num_heads,
+        "HEAD_DIM": head_dim,
+        "DECODE_QUERY_LEN": decode_query_len,
+        "DECODE_QUERY_LEN_PADDED": decode_query_len_padded,
+        "NUM_HEADS_PADDED": num_heads_padded,
+        "MMA_N": decode_query_len_padded * num_heads_padded,
+        "BLOCK_N": 64,
+        "BLOCK_D": max(16, triton.next_power_of_2(head_dim)),
+        "TILES_PER_PROG": 1 if num_requests <= 32 else 8,
+        "STAGES": 2,
+        "COMPRESS_RATIO": compress_ratio,
+    }
+
+
+def warmup_qsa_mqa_paged_decode(
+    k_cache: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    num_heads: int,
+    head_dim: int,
+    compress_ratio: int,
+    max_decode_query_len: int,
+    max_num_reqs: int,
+    max_num_batched_tokens: int,
+) -> tuple[tuple[int, int], ...]:
+    """Compile every reachable decode specialization without launching it."""
+
+    if not current_platform.is_cuda() or not HAS_TRITON:
+        return ()
+    profiles = _qsa_decode_warmup_profiles(
+        max_decode_query_len,
+        max_num_reqs,
+        max_num_batched_tokens,
+    )
+    if not profiles:
+        return ()
+
+    warmup = getattr(_qsa_mqa_paged_uniform_kernel, "warmup", None)
+    assert warmup is not None
+    page_size = k_cache.shape[1]
+    page_table_width = page_table.shape[1]
+    columns = page_table_width * page_size
+    k_cache_ptr = TritonWarmupTensor(k_cache.dtype, shape=tuple(k_cache.shape))
+    page_table_ptr = TritonWarmupTensor(
+        page_table.dtype,
+        shape=(max_num_reqs, page_table_width),
+    )
+    int32_ptr = TritonWarmupTensor(torch.int32)
+    int64_ptr = TritonWarmupTensor(torch.int64)
+
+    for decode_query_len, num_requests in profiles:
+        num_rows = decode_query_len * num_requests
+        q_ptr = TritonWarmupTensor(
+            torch.bfloat16,
+            shape=(num_rows, num_heads, head_dim),
+        )
+        logits_ptr = TritonWarmupTensor(
+            torch.float32,
+            shape=(num_rows, columns),
+        )
+        kernel_config = _qsa_decode_kernel_config(
+            page_size=page_size,
+            page_table_width=page_table_width,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            decode_query_len=decode_query_len,
+            num_requests=num_requests,
+            compress_ratio=compress_ratio,
+        )
+        warmup(
+            q_ptr,
+            k_cache_ptr,
+            page_table_ptr,
+            int64_ptr,
+            int32_ptr,
+            int32_ptr,
+            logits_ptr,
+            q_ptr.stride()[0],
+            q_ptr.stride()[1],
+            k_cache_ptr.stride()[0],
+            k_cache_ptr.stride()[1],
+            page_table_ptr.stride()[0],
+            logits_ptr.stride()[0],
+            columns,
+            k_cache.shape[0],
+            math.sqrt(head_dim),
+            **kernel_config,
+            num_warps=2,
+            grid=(
+                num_requests,
+                triton.cdiv(
+                    columns,
+                    kernel_config["BLOCK_N"] * kernel_config["TILES_PER_PROG"],
+                ),
+            ),
+        )
+    return profiles
+
+
 def qsa_mqa_paged_decode(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -417,6 +540,14 @@ def qsa_mqa_paged_decode(
         raise ValueError("QSA cache must be [pages, page_size, 1, head_dim]")
     if k_cache.shape[3] != q.shape[2] or compress_ratio <= 0:
         raise ValueError("QSA decode scoring received incompatible dimensions")
+    if q.stride(2) != 1:
+        raise ValueError("QSA decode query head dimension must be contiguous")
+    if k_cache.stride(3) != 1:
+        raise ValueError("QSA decode cache head dimension must be contiguous")
+    if page_table.stride(1) != 1:
+        raise ValueError("QSA decode page-table rows must be contiguous")
+    if query_positions.stride(0) != 1 or sequence_lengths.stride(0) != 1:
+        raise ValueError("QSA decode row metadata must be contiguous")
     if not q.is_cuda or not HAS_TRITON:
         raise RuntimeError("paged QSA decode scoring requires CUDA and Triton")
 
@@ -444,12 +575,9 @@ def qsa_mqa_paged_decode(
         logits,
         q.stride(0),
         q.stride(1),
-        q.stride(2),
         k_cache.stride(0),
         k_cache.stride(1),
-        k_cache.stride(3),
         page_table.stride(0),
-        page_table.stride(1),
         logits.stride(0),
         columns,
         k_cache.shape[0],
@@ -496,6 +624,18 @@ def qsa_mqa_paged_prefill(
         q.shape[0],
     ):
         raise ValueError("QSA prefill row metadata must match query rows")
+    if q.stride(2) != 1:
+        raise ValueError("QSA prefill query head dimension must be contiguous")
+    if k_cache.stride(3) != 1:
+        raise ValueError("QSA prefill cache head dimension must be contiguous")
+    if page_table.stride(1) != 1:
+        raise ValueError("QSA prefill page-table rows must be contiguous")
+    if (
+        token_to_req.stride(0) != 1
+        or query_positions.stride(0) != 1
+        or sequence_lengths.stride(0) != 1
+    ):
+        raise ValueError("QSA prefill row metadata must be contiguous")
 
     columns = page_table.shape[1] * k_cache.shape[1]
     logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
@@ -520,12 +660,9 @@ def qsa_mqa_paged_prefill(
         logits,
         q.stride(0),
         q.stride(1),
-        q.stride(2),
         k_cache.stride(0),
         k_cache.stride(1),
-        k_cache.stride(3),
         page_table.stride(0),
-        page_table.stride(1),
         logits.stride(0),
         q.shape[0],
         columns,
@@ -822,4 +959,5 @@ __all__ = [
     "qsa_mqa_paged_prefill",
     "qsa_select_paged_decode",
     "qsa_select_paged_prefill",
+    "warmup_qsa_mqa_paged_decode",
 ]
