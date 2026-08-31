@@ -6773,12 +6773,15 @@ class GPUModelRunner(
         original_pools: dict[int, Any] = {}
         # Only touch wrappers belonging to this engine; other engines may
         # coexist in the same process (e.g. in-process engines in tests).
+        # compilation_config identity is the engine tag: derived configs
+        # (VllmConfig.with_hf_config) are distinct VllmConfig instances that
+        # share the engine's compilation_config.
         wrapper_instances: list[Any] = list(CUDAGraphWrapper._all_instances)
         wrapper_instances.extend(BreakableCUDAGraphWrapper._all_instances)
         all_wrappers = [
             instance
             for instance in wrapper_instances
-            if instance.vllm_config is self.vllm_config
+            if instance.compilation_config is self.compilation_config
         ]
         for instance in all_wrappers:
             original_pools[id(instance)] = instance.graph_pool

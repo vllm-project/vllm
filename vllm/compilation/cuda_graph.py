@@ -176,10 +176,17 @@ class CUDAGraphWrapper:
         When ``vllm_config`` is given, only instances belonging to that engine
         are cleared -- multiple engines may coexist in one process (e.g.
         in-process engines in tests), and clearing across engines invalidates
-        another engine's already-captured graphs.
+        another engine's already-captured graphs. Engine identity is the
+        ``compilation_config`` object: derived configs (e.g. from
+        ``VllmConfig.with_hf_config`` for a multimodal model's language
+        backbone) are distinct VllmConfig instances that share the engine's
+        compilation_config.
         """
         for instance in list(cls._all_instances):
-            if vllm_config is None or instance.vllm_config is vllm_config:
+            if (
+                vllm_config is None
+                or instance.compilation_config is vllm_config.compilation_config
+            ):
                 instance.clear_graphs()
 
     def __init__(

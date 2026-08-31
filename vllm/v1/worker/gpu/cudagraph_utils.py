@@ -799,9 +799,16 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
                 manager.init_breakable_cg_runner(runner.model)
             # Only touch wrappers belonging to this engine; other engines may
             # coexist in the same process (e.g. in-process engines in tests).
-            wrappers: list[Any] = list(CUDAGraphWrapper._all_instances)
-            wrappers.extend(BreakableCUDAGraphWrapper._all_instances)
-            all_wrappers = [w for w in wrappers if w.vllm_config is runner.vllm_config]
+            # compilation_config identity is the engine tag: derived configs
+            # (VllmConfig.with_hf_config) are distinct VllmConfig instances
+            # that share the engine's compilation_config.
+            wrapper_instances: list[Any] = list(CUDAGraphWrapper._all_instances)
+            wrapper_instances.extend(BreakableCUDAGraphWrapper._all_instances)
+            all_wrappers = [
+                wrapper
+                for wrapper in wrapper_instances
+                if wrapper.compilation_config is runner.vllm_config.compilation_config
+            ]
             for wrapper in all_wrappers:
                 original_pools[id(wrapper)] = wrapper.graph_pool
                 wrapper.graph_pool = throwaway_pool
