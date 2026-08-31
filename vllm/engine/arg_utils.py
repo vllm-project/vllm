@@ -367,6 +367,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                 "max_num_scheduled_tokens",
                 "kv_cache_memory_bytes",
                 "safetensors_prefetch_block_size",
+                "max_num_queued_tokens",
             }
             if name == "max_model_len":
                 kwargs[name]["type"] = human_readable_int_or_auto
@@ -496,6 +497,9 @@ class EngineArgs:
     data_parallel_multi_port_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_batch_sharded_sampling: bool | None = (
+        ParallelConfig.enable_batch_sharded_sampling
+    )
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
@@ -541,6 +545,8 @@ class EngineArgs:
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = None
+    max_num_queued_reqs: int | None = None
+    max_num_queued_tokens: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     use_fp64_gumbel: bool = ModelConfig.use_fp64_gumbel
@@ -1157,6 +1163,10 @@ class EngineArgs:
             **parallel_kwargs["enable_expert_parallel"],
         )
         parallel_group.add_argument(
+            "--enable-batch-sharded-sampling",
+            **parallel_kwargs["enable_batch_sharded_sampling"],
+        )
+        parallel_group.add_argument(
             "--enable-ep-weight-filter",
             **parallel_kwargs["enable_ep_weight_filter"],
         )
@@ -1546,6 +1556,13 @@ class EngineArgs:
                 **scheduler_kwargs["max_num_seqs"],
                 "default": None,
             },
+        )
+        scheduler_group.add_argument(
+            "--max-num-queued-reqs", **scheduler_kwargs["max_num_queued_reqs"]
+        )
+        scheduler_group.add_argument(
+            "--max-num-queued-tokens",
+            **scheduler_kwargs["max_num_queued_tokens"],
         )
         scheduler_group.add_argument(
             "--long-prefill-token-threshold",
@@ -2279,6 +2296,7 @@ class EngineArgs:
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
@@ -2340,6 +2358,8 @@ class EngineArgs:
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
+            max_num_queued_reqs=self.max_num_queued_reqs,
+            max_num_queued_tokens=self.max_num_queued_tokens,
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
