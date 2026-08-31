@@ -75,8 +75,6 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
-_BLOCKED_WAITING_TIMEOUT_S = 60.0
-
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -850,7 +848,7 @@ class Scheduler(SchedulerInterface):
                                 request.blocked_since = time.time()
                             elif (
                                 time.time() - request.blocked_since
-                                > _BLOCKED_WAITING_TIMEOUT_S
+                                > self.scheduler_config.blocked_waiting_timeout_s
                             ):
                                 self.finish_requests(
                                     request_id, RequestStatus.FINISHED_ABORTED
