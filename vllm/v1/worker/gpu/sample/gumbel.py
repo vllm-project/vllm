@@ -145,8 +145,9 @@ def murmur3_uniform32(seed, pos, offset):
 @triton.jit
 def _uniform64_from_random53(random53):
     uniform = (random53.to(tl.float64) + 0.5) * 1.1102230246251565e-16
-    # The largest midpoint rounds to 1.0 in fp64; keep the uniform open.
-    return tl.minimum(uniform, 0.9999999999999999)
+    # The largest midpoint rounds to 1.0 in fp64; keep the uniform open without
+    # relying on a near-one literal that Triton may materialize in fp32.
+    return tl.where(uniform == 1.0, uniform - 1.1102230246251565e-16, uniform)
 
 
 @triton.jit
