@@ -87,6 +87,16 @@ class EndpointPlugin(Protocol):
         """
         ...
 
+    # Optional. Classifier / guardrail plugins may implement:
+    #
+    #   name: str
+    #   blocking: bool
+    #   timeout_ms: int
+    #   async def post_generation(self, ctx: ScoringContext) -> dict[str, Any]
+    #
+    # See `vllm/plugins/endpoint_plugins/post_generation.py`. The method is
+    # not part of this Protocol so existing route-only plugins keep working.
+
 
 def attach_endpoint_plugins(
     app: FastAPI, supported_tasks: tuple["SupportedTask", ...]
