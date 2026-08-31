@@ -8,7 +8,9 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
+    KVCacheSpec,
     MLAAttentionSpec,
+    iter_layer_specs,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -21,6 +23,17 @@ from vllm.v1.kv_offload.config import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig
+
+
+def _is_dcp_sharded(spec: "KVCacheSpec") -> bool:
+    """Attention groups are block-sharded across DCP ranks, so a logical
+    (scheduler/hash) block spans ``block_size * dcp`` tokens. A uniform-type
+    group made only of attention specs (e.g. MLA + sparse indexer layers) is
+    sharded the same way; anything else keeps its full per-rank block."""
+    layer_specs = iter_layer_specs(spec)
+    return len(layer_specs) > 0 and all(
+        isinstance(member, AttentionSpec) for member in layer_specs
+    )
 
 
 def build_offloading_config(
@@ -41,7 +54,7 @@ def build_offloading_config(
                 group.kv_cache_spec.block_size
                 * (
                     parallel_config.decode_context_parallel_size
-                    if isinstance(group.kv_cache_spec, AttentionSpec)
+                    if _is_dcp_sharded(group.kv_cache_spec)
                     else 1
                 )
             ),
