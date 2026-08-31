@@ -11,15 +11,15 @@ import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
-from vllm.config import VllmConfig
-from vllm.config.utils import Range
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.utils import Range
 from vllm.distributed import get_tp_group
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import (
@@ -48,7 +48,7 @@ def _flashinfer_scaled_mm_out(
 ) -> None:
     # Import lazily to avoid a circular import during module initialization
     # when docs or other tooling import the pass without FlashInfer.
-    from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm_out
+    from vllm.foundation.utilities.flashinfer import flashinfer_scaled_fp8_mm_out
 
     assert bias is None, "FlashInfer symm_mem adapter does not support bias"
     assert scale_result is None, (
@@ -86,7 +86,7 @@ def _flashinfer_fp4_mm_out(
     use_8x4_sf_layout: bool = False,
     backend: str = "cutlass",
 ) -> None:
-    from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm_out
+    from vllm.foundation.utilities.flashinfer import flashinfer_scaled_fp4_mm_out
 
     assert A.ndim == 2 and B.ndim == 2 and out.ndim == 2, (
         "FlashInfer FP4 symm_mem adapter expects 2D inputs and output"
@@ -925,7 +925,7 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
                     self.pm_pass
                 )
             with suppress(ImportError):
-                import vllm.utils.flashinfer  # noqa: F401
+                import vllm.foundation.utilities.flashinfer  # noqa: F401
             if hasattr(torch.ops.vllm, "bmm_fp8"):
                 self.register(
                     FlashInferAllGatherBMMFP8Pattern(self.model_dtype, self.device)

@@ -9,7 +9,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 _EC_CONNECTOR_AGENT: ECConnectorBase | None = None
 

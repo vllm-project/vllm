@@ -19,12 +19,12 @@ from vllm.entrypoints.serve.utils.api_utils import (
     log_non_default_args,
     log_version_and_model,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
 from vllm.foundation.observability.tracing import instrument
-from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_address
-from vllm.utils.system_utils import set_ulimit
+from vllm.foundation.utilities.network_utils import find_process_using_port, is_valid_ipv6_address
+from vllm.foundation.utilities.system_utils import set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
 
 from .utils.constants import (

@@ -1,15 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Exports for the package-owned Qwen4Exp configs."""
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.models.qwen4_exp.config import (
-    Qwen4ExpConfig,
-    Qwen4ExpTextConfig,
-    Qwen4ExpVisionConfig,
-)
+"""Compatibility shim: vllm.transformers_utils/configs/qwen4_exp -> vllm.foundation.integrations.transformers_utils.configs.qwen4_exp (sys.modules alias)."""
+import importlib
+import sys
 
-__all__ = [
-    "Qwen4ExpConfig",
-    "Qwen4ExpTextConfig",
-    "Qwen4ExpVisionConfig",
-]
+_real = importlib.import_module("vllm.foundation.integrations.transformers_utils.configs.qwen4_exp")
+sys.modules[__name__] = _real

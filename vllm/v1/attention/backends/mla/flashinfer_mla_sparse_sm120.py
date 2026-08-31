@@ -74,7 +74,7 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.qk_nope_head_dim: int = mla_args["qk_nope_head_dim"]
         self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
-        from vllm.config import get_current_vllm_config
+        from vllm.foundation.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
         model_type = None
@@ -91,7 +91,7 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
             if indexer is not None
             else mla_args.get("topk_indices_buffer")
         )
-        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
+        from vllm.foundation.utilities.flashinfer import has_flashinfer_sparse_mla_sm120
 
         if not has_flashinfer_sparse_mla_sm120():
             raise RuntimeError(
@@ -137,7 +137,7 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
         if self._workspace_buffer is None:
             self._workspace_buffer = _get_workspace_buffer(q.device)
 
-        from vllm.utils.flashinfer import (
+        from vllm.foundation.utilities.flashinfer import (
             flashinfer_trtllm_batch_decode_with_kv_cache_mla,
         )
 

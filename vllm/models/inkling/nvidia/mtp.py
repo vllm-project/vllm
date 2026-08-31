@@ -25,7 +25,7 @@ import regex as re
 import torch
 from torch import nn
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead

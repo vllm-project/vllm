@@ -13,7 +13,7 @@ from torch import nn
 from torch.nn import LayerNorm
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -31,7 +31,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
+from vllm.foundation.integrations.transformers_utils.configs.chatglm import ChatGLMConfig
 
 from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (

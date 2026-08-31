@@ -9,10 +9,10 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorRole,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import ECTransferConfig, VllmConfig
+    from vllm.foundation.config import ECTransferConfig, VllmConfig
 
 logger = init_logger(__name__)
 

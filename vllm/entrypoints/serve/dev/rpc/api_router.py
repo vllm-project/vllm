@@ -9,7 +9,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm.engine.protocol import EngineClient
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

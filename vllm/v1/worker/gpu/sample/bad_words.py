@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor

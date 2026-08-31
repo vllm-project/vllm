@@ -7,10 +7,10 @@ from torch import nn
 
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -52,7 +52,7 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda_packed_decode,
 )
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
-from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 

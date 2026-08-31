@@ -48,7 +48,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     buffer_alloc_bytes,
     check_ray_rdt_version,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

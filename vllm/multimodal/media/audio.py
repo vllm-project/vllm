@@ -9,14 +9,14 @@ import numpy.typing as npt
 import pybase64
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.multimodal.audio import resample_audio_pyav
-from vllm.utils.import_utils import PlaceholderModule
-from vllm.utils.mem_constants import MiB_bytes
-from vllm.utils.serial_utils import tensor2base64
-from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
+from vllm.foundation.utilities.import_utils import PlaceholderModule
+from vllm.foundation.utilities.mem_constants import MiB_bytes
+from vllm.foundation.utilities.serial_utils import tensor2base64
+from vllm.foundation.utilities.sparse_utils import check_sparse_tensor_invariants_threadsafe
 
 from .base import MediaIO
 

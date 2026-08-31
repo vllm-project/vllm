@@ -13,8 +13,8 @@ from vllm.entrypoints.launchers.cli_args import (
 )
 from vllm.entrypoints.launchers.render.entry import run_launch_fastapi
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
-from vllm.logger import init_logger
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 

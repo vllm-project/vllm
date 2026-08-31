@@ -1,20 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from abc import ABC, abstractmethod
-from pathlib import Path
+"""Compatibility shim: vllm.transformers_utils/config_parser_base -> vllm.foundation.integrations.transformers_utils.config_parser_base (sys.modules alias)."""
+import importlib
+import sys
 
-from transformers import PretrainedConfig
-
-
-class ConfigParserBase(ABC):
-    @abstractmethod
-    def parse(
-        self,
-        model: str | Path,
-        trust_remote_code: bool,
-        revision: str | None = None,
-        code_revision: str | None = None,
-        **kwargs,
-    ) -> tuple[dict, PretrainedConfig]:
-        raise NotImplementedError
+_real = importlib.import_module("vllm.foundation.integrations.transformers_utils.config_parser_base")
+sys.modules[__name__] = _real

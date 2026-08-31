@@ -31,7 +31,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
@@ -48,7 +48,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron import NemotronConfig
+from vllm.foundation.integrations.transformers_utils.configs.nemotron import NemotronConfig
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (

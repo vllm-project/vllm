@@ -7,16 +7,16 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _get_matmul_config,
     resolve_tuned_matmul_configs,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.mem_utils import get_max_shared_memory_bytes
-from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.foundation.utilities.mem_utils import get_max_shared_memory_bytes
+from vllm.foundation.utilities.platform_utils import num_compute_units
+from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
 
 
 def _matmul_launch_metadata(

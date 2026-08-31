@@ -30,7 +30,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import RCP_LN2
+from vllm.foundation.utilities.math_utils import RCP_LN2
 
 
 @triton.jit

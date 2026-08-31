@@ -214,24 +214,24 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import (
+from vllm.foundation.config import (
     CacheConfig,
     ModelConfig,
     VllmConfig,
     get_current_vllm_config,
 )
-from vllm.config.cache import CacheDType
+from vllm.foundation.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_tp_group,
     is_global_first_rank,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention.attention import (
     _init_kv_cache_quant,
@@ -259,9 +259,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.math_utils import cdiv, round_down, round_up
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.flashinfer import has_flashinfer
+from vllm.foundation.utilities.math_utils import cdiv, round_down, round_up
+from vllm.foundation.utilities.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
@@ -1761,7 +1761,7 @@ def backend_supports_prefill_query_quantization() -> bool:
     if not current_platform.is_device_capability_family(100):
         return False
 
-    from vllm.config import get_current_vllm_config
+    from vllm.foundation.config import get_current_vllm_config
     from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 
     vllm_config = get_current_vllm_config()

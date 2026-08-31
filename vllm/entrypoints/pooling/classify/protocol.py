@@ -8,8 +8,8 @@ from pydantic import BeforeValidator, Field
 
 from vllm import PoolingParams
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.logger import init_logger
-from vllm.utils import random_uuid
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities import random_uuid
 
 from ..base.protocol import (
     ChatRequestMixin,

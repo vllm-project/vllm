@@ -7,18 +7,18 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_pcp_group
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
-from vllm.utils.flashinfer import (
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
-from vllm.utils.func_utils import supports_kw
-from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, has_mori
+from vllm.foundation.utilities.func_utils import supports_kw
+from vllm.foundation.utilities.import_utils import has_deep_ep, has_deep_ep_v2, has_mori
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -1041,7 +1041,7 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         )
 
     def _check_gin_support(self, group) -> None:
-        from vllm.utils.nccl import query_nccl_gin_type
+        from vllm.foundation.utilities.nccl import query_nccl_gin_type
 
         # ProcessGroupNCCL creates communicators lazily. Initialize this exact
         # group before querying so a null comm pointer is not mistaken for

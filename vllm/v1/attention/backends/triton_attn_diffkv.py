@@ -11,11 +11,11 @@ from typing import ClassVar
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
-from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.math_utils import next_power_of_2
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionBackend,

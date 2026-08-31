@@ -15,8 +15,8 @@ from torch.nn import functional as F
 from transformers import BatchFeature, ProcessorMixin
 from transformers.models.whisper import WhisperFeatureExtractor
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
@@ -43,9 +43,9 @@ from vllm.multimodal.processing import (
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.ultravox import UltravoxConfig
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.integrations.transformers_utils.configs.ultravox import UltravoxConfig
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

@@ -12,24 +12,24 @@ from pydantic import (
     model_validator,
 )
 
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.sampling_params import (
     BeamSearchParams,
     RequestOutputKind,
     SamplingParams,
 )
-from vllm.utils import random_uuid
+from vllm.foundation.utilities import random_uuid
 
 from ..base.protocol import _LONG_INFO, TranscriptionResponseFormat
 
 if TYPE_CHECKING:
     import numpy as np
 
-    from vllm.config import ModelConfig, SpeechToTextConfig
+    from vllm.foundation.config import ModelConfig, SpeechToTextConfig
 
 logger = init_logger(__name__)
 

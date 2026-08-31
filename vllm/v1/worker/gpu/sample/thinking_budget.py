@@ -7,12 +7,12 @@ import torch
 
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.states import RequestState
 
 if TYPE_CHECKING:
-    from vllm.config.reasoning import ReasoningConfig
+    from vllm.foundation.config.reasoning import ReasoningConfig
 
 _INT32_MAX = np.iinfo(np.int32).max
 _COLD_SCAN_BLOCK = 1024

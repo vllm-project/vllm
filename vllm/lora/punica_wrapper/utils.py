@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 if TYPE_CHECKING:
     # avoid circuit import

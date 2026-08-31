@@ -10,8 +10,8 @@ import torch
 import torch.nn as nn
 from transformers import BatchFeature
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -48,8 +48,8 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.hf import HfTokenizer
-from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
-from vllm.transformers_utils.processors.deepseek_ocr import (
+from vllm.foundation.integrations.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
+from vllm.foundation.integrations.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
     DeepseekOCRProcessor,

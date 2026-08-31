@@ -13,7 +13,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterable
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.kv_offload.tiering.base import JobId
 
 logger = init_logger(__name__)

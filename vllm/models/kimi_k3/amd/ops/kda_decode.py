@@ -15,7 +15,7 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 

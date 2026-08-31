@@ -3,7 +3,7 @@
 
 from fastapi import FastAPI
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from .exception_handling.error_response import create_error_response
 

@@ -4,10 +4,10 @@
 
 from typing import TYPE_CHECKING
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 

@@ -13,12 +13,12 @@ from transformers.models.llava_next.modeling_llava_next import (
     unpad_image,
 )
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItem
 from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
 from .interfaces import (

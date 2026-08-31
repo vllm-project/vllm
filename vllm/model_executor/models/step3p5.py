@@ -11,7 +11,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -20,7 +20,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (

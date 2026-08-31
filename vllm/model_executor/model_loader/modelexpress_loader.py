@@ -7,8 +7,8 @@ import importlib
 
 from torch import nn
 
-from vllm.config import ModelConfig, VllmConfig
-from vllm.config.load import LoadConfig
+from vllm.foundation.config import ModelConfig, VllmConfig
+from vllm.foundation.config.load import LoadConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.foundation.observability.tracing import instrument
 

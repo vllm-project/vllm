@@ -30,8 +30,8 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.tokenizers import TokenizerLike, get_tokenizer
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.async_utils import merge_async_iterators
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.async_utils import merge_async_iterators
 
 
 def run_vllm(

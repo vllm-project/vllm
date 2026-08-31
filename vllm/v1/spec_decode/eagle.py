@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 
 

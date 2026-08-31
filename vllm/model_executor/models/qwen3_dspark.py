@@ -20,8 +20,8 @@ from collections.abc import Iterable
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig

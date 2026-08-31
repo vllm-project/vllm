@@ -26,13 +26,13 @@ from vllm.inputs import (
     MultiModalInput,
     MultiModalPlaceholders,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     extract_prompt_len,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.utils import random_uuid
+from vllm.foundation.utilities import random_uuid
 
 logger = init_logger(__name__)
 

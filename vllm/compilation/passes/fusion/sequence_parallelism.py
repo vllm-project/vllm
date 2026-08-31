@@ -12,14 +12,14 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
-from vllm.config import VllmConfig
-from vllm.config.utils import Range
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )

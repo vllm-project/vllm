@@ -21,10 +21,10 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config, PretrainedConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.config.cache import CacheDType
+from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.foundation.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.hpc import hpc_gated_mla_gemm, hpc_gated_mla_supported
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm

@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (
+from vllm.foundation.config import (
     CacheConfig,
     VllmConfig,
     get_current_vllm_config,
@@ -20,7 +20,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (

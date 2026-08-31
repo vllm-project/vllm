@@ -9,7 +9,7 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import PretrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
@@ -62,8 +62,8 @@ from vllm.model_executor.parameter import (
     RowvLLMParameter,
 )
 from vllm.scalar_type import scalar_types
-from vllm.transformers_utils.config import get_safetensors_params_metadata
-from vllm.utils.collection_utils import is_list_of
+from vllm.foundation.integrations.transformers_utils.config import get_safetensors_params_metadata
+from vllm.foundation.utilities.collection_utils import is_list_of
 
 logger = init_logger(__name__)
 

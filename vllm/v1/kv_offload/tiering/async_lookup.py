@@ -37,7 +37,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 
 logger = init_logger(__name__)

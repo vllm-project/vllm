@@ -39,7 +39,7 @@ import numpy as np
 from transformers import AutoTokenizer
 
 from vllm.benchmarks.datasets.utils import RangeRatio, get_sampling_params
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
 logger = logging.getLogger(__name__)
 

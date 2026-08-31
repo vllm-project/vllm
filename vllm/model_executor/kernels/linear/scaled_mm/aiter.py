@@ -8,7 +8,7 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import (
     rocm_aiter_ops,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _upcast_e8m0_to_fp32,
 )

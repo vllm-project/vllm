@@ -40,7 +40,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -49,7 +49,7 @@ from vllm.parser.engine.parser_engine_config import (
     Transition,
 )
 from vllm.sampling_params import StructuredOutputsParams
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (

@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.config.compilation import CUDAGraphMode
+from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (

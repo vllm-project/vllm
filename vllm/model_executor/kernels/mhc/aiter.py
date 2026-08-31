@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 
 def mhc_pre_aiter(

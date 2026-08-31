@@ -11,7 +11,7 @@ import torch
 from vllm import SamplingParams
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 
 class MoveDirectionality(Enum):

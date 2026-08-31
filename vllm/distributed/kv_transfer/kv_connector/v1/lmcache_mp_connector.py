@@ -8,10 +8,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import zmq
-from lmcache.integration.vllm.utils import mla_enabled
+from lmcache.integration.vllm.foundation.utilities import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,

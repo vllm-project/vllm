@@ -9,7 +9,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -34,11 +34,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
 )
-from vllm.utils.import_utils import has_humming
+from vllm.foundation.utilities.import_utils import has_humming
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
-    from vllm.utils.humming import (
+    from vllm.foundation.utilities.humming import (
         AWQWeightSchema,
         BaseInputSchema,
         BaseWeightSchema,
@@ -50,7 +50,7 @@ if TYPE_CHECKING:
         HummingWeightSchema,
         LayerConfig,
     )
-    from vllm.utils.humming import dtypes as humming_dtypes
+    from vllm.foundation.utilities.humming import dtypes as humming_dtypes
 
 logger = init_logger(__name__)
 
@@ -62,7 +62,7 @@ class HummingMoEQuantConfig(FusedMoEQuantConfig):
 
 
 if has_humming():
-    from vllm.utils.humming import dtypes as humming_dtypes
+    from vllm.foundation.utilities.humming import dtypes as humming_dtypes
 
     _HUMMING_TO_QUANT_DTYPE: dict[humming_dtypes.DataType, Any] = {
         humming_dtypes.float4e2m1: FP4_DTYPE,
@@ -110,7 +110,7 @@ def _group_shape(group_size: int, group_size_n: int = 0) -> GroupShape:
 def _humming_weight_schema_to_quant_key(
     schema: "HummingWeightSchema",
 ) -> QuantKey:
-    from vllm.utils.humming import WeightScaleType
+    from vllm.foundation.utilities.humming import WeightScaleType
 
     """Convert a HummingWeightSchema to a QuantKey."""
     dtype = _HUMMING_TO_QUANT_DTYPE[schema.b_dtype]
@@ -238,7 +238,7 @@ def _compressed_tensors_weight_schema_to_quant_key(
 def weight_schema_to_quant_key(
     schema: "BaseWeightSchema",
 ) -> QuantKey:
-    from vllm.utils.humming import (
+    from vllm.foundation.utilities.humming import (
         AWQWeightSchema,
         BitnetWeightSchema,
         CompressedTensorsWeightSchema,
@@ -332,7 +332,7 @@ def _resolve_input_quant_key(
     origin_a_dtype: "humming_dtypes.DataType",
     group_size: int,
 ) -> QuantKey | None:
-    from vllm.utils.humming import HummingInputSchema
+    from vllm.foundation.utilities.humming import HummingInputSchema
 
     """Resolve the actual activation QuantKey after platform fallback."""
     a_dtype = HummingInputSchema().get_fallback_input_dtype(origin_a_dtype)
@@ -369,7 +369,7 @@ def _compressed_tensors_input_schema_to_quant_key(
 def input_schema_to_quant_key(
     schema: "BaseInputSchema",
 ) -> QuantKey | None:
-    from vllm.utils.humming import (
+    from vllm.foundation.utilities.humming import (
         CompressedTensorsInputSchema,
         Fp8InputSchema,
         HummingInputSchema,
@@ -463,7 +463,7 @@ def prepare_humming_linear_layer_config(
     quant_config: dict,
     input_quant_config: dict | None = None,
 ) -> "LayerConfig":
-    from vllm.utils.humming import (
+    from vllm.foundation.utilities.humming import (
         BaseInputSchema,
         BaseWeightSchema,
         HummingInputSchema,
@@ -543,7 +543,7 @@ def apply_humming_linear(
     compute_config: str,
     locks: torch.Tensor,
 ) -> torch.Tensor:
-    from vllm.utils.humming import humming_forward
+    from vllm.foundation.utilities.humming import humming_forward
 
     flatten_inputs = x.reshape(-1, x.size(-1))
     output = humming_forward(
@@ -849,7 +849,7 @@ def _convert_sublayer_to_humming(
     Returns:
         Tuple of (converted_weight_schema, converted_input_schema)
     """
-    from vllm.utils.humming import HummingWeightSchema
+    from vllm.foundation.utilities.humming import HummingWeightSchema
 
     if isinstance(weight_schema, HummingWeightSchema):
         # Already in Humming format
@@ -895,7 +895,7 @@ def _prepare_and_transform_sublayer(
     param_dtype: torch.dtype,
 ) -> "LayerConfig":
     """Prepare Humming configuration and transform one sublayer's tensors."""
-    from vllm.utils.humming import (
+    from vllm.foundation.utilities.humming import (
         prepare_layer_config,
         transform_humming_tensors,
     )
@@ -952,7 +952,7 @@ def _process_single_sublayer(
     Returns:
         Tuple of the final weight schema, input schema, and Humming layer config.
     """
-    from vllm.utils.humming import HummingWeightSchema
+    from vllm.foundation.utilities.humming import HummingWeightSchema
 
     # Step 1: Convert from checkpoint format to humming format if needed
     current_weight_schema, current_input_schema = _convert_sublayer_to_humming(
@@ -1048,7 +1048,7 @@ def convert_to_humming_moe_kernel_format(
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             humming_is_layer_skipped,
         )
-        from vllm.utils.humming import BaseWeightSchema, HummingInputSchema
+        from vllm.foundation.utilities.humming import BaseWeightSchema, HummingInputSchema
 
         if weight_schema is None:
             weight_schema = BaseWeightSchema.from_config(quant_config)

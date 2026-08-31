@@ -12,10 +12,10 @@ from typing import Any
 # this line makes it possible to directly load `libcudart.so` using `ctypes`
 import torch  # noqa
 
-import vllm.envs as envs
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.system_utils import find_loaded_library
+from vllm.foundation.utilities.system_utils import find_loaded_library
 
 logger = init_logger(__name__)
 

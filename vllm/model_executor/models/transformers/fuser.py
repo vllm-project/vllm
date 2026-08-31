@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from cachetools import cached
 from torch import nn
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.transformers.fusers import (
     BaseFuser,
     GLUFuser,
@@ -27,7 +27,7 @@ from vllm.model_executor.models.transformers.fusers import (
 from vllm.model_executor.models.transformers.fx_utils import trace
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 logger = init_logger(__name__)
 

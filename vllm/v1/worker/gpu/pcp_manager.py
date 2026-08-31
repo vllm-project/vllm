@@ -6,9 +6,9 @@ from dataclasses import dataclass, replace
 import numpy as np
 import torch
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.foundation.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu

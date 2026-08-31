@@ -11,11 +11,11 @@ from typing import Any, ParamSpec, TypeVar
 
 import torch
 
-import vllm.envs as envs
-from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
-from vllm.config.compilation import DynamicShapesType
-from vllm.logger import init_logger
-from vllm.utils.nvtx_pytorch_hooks import layerwise_nvtx_marker_context
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
+from vllm.foundation.config.compilation import DynamicShapesType
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.nvtx_pytorch_hooks import layerwise_nvtx_marker_context
 
 logger = init_logger(__name__)
 

@@ -8,20 +8,20 @@ from typing import ClassVar
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import (
+from vllm.foundation.config import (
     VllmConfig,
     get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
 )
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv
-from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.platform_utils import num_compute_units
+from vllm.foundation.utilities.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

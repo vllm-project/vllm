@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-    from vllm.config.kv_events import KVEventsConfig
+    from vllm.foundation.config import VllmConfig
+    from vllm.foundation.config.kv_events import KVEventsConfig
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput

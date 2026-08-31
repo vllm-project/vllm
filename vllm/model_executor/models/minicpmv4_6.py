@@ -11,7 +11,7 @@ from PIL import Image as PILImage
 from torch import nn
 from transformers import MiniCPMV4_6Config
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention

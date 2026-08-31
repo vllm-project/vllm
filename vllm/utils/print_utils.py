@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
+"""Compatibility shim: vllm.utils/print_utils -> vllm.foundation.utilities.print_utils (sys.modules alias)."""
+import importlib
+import sys
 
-def print_embeddings(embeds: list[float], prefix: str = "Embeddings"):
-    embeds_trimmed = (str(embeds[:4])[:-1] + ", ...]") if len(embeds) > 4 else embeds
-    print(f"{prefix}: {embeds_trimmed} (size={len(embeds)})")
+_real = importlib.import_module("vllm.foundation.utilities.print_utils")
+sys.modules[__name__] = _real

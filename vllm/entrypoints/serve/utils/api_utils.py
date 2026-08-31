@@ -19,9 +19,9 @@ from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm.logger import current_formatter_type, init_logger
+from vllm.foundation.observability.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 

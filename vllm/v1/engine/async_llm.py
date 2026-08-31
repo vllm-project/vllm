@@ -11,9 +11,9 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm import TokensPrompt
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -23,7 +23,7 @@ from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
 from vllm.foundation.system.exceptions import VLLMClientError, VLLMValidationError
 from vllm.inputs import EngineInput, PromptType
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
@@ -34,10 +34,10 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.foundation.observability.tracing import init_tracer
-from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
+from vllm.foundation.integrations.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.foundation.observability.usage.usage_lib import UsageContext
-from vllm.utils.async_utils import cancel_task_threadsafe
-from vllm.utils.collection_utils import as_list
+from vllm.foundation.utilities.async_utils import cancel_task_threadsafe
+from vllm.foundation.utilities.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError

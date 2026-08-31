@@ -6,9 +6,9 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.config import get_current_vllm_config
+from vllm.foundation.config import get_current_vllm_config
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.linear import (

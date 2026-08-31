@@ -5,7 +5,7 @@ import math
 
 import torch
 
-from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.foundation.config import CompilationMode, get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform

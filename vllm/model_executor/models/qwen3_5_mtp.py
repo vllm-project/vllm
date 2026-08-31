@@ -8,9 +8,9 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
@@ -32,8 +32,8 @@ from vllm.model_executor.models.qwen3_next import (
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5TextConfig
-from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
+from vllm.foundation.integrations.transformers_utils.configs.qwen3_5 import Qwen3_5TextConfig
+from vllm.foundation.integrations.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
 
 from .interfaces import (
     MultiModalEmbeddings,

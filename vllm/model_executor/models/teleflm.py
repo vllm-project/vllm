@@ -26,7 +26,7 @@
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.llama import (
     LlamaDecoderLayer,

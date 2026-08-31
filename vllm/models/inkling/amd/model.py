@@ -11,7 +11,7 @@ import regex as re
 import torch
 from torch import nn
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,

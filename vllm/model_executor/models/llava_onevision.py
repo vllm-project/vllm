@@ -13,8 +13,8 @@ from transformers.models.llava_onevision.modeling_llava_onevision import (
     unpad_image,
 )
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -30,7 +30,7 @@ from vllm.multimodal.parse import (
 )
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP

@@ -5,20 +5,20 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
-    from vllm.config.cache import CacheDType
+    from vllm.foundation.config.cache import CacheDType
 
 import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.config import (
+from vllm.foundation.config import (
     VllmConfig,
     get_layers_from_vllm_config,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,

@@ -8,7 +8,7 @@ from typing import TypeAlias, TypeVar
 
 from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 
-from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
+from vllm.foundation.integrations.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
 from .protocol import TokenizerLike
 

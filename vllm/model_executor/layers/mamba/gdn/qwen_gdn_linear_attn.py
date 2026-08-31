@@ -12,7 +12,7 @@ from torch import nn
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import (
+from vllm.foundation.config import (
     VllmConfig,
     get_current_vllm_config,
 )
@@ -20,7 +20,7 @@ from vllm.distributed import (
     divide,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
@@ -57,9 +57,9 @@ from vllm.third_party.flash_linear_attention.ops import (
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
-from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
+from vllm.foundation.integrations.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,

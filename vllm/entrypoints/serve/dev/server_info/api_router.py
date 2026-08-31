@@ -10,10 +10,10 @@ import pydantic
 from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.collect_env import get_env_info
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -23,7 +23,7 @@ PydanticVllmConfig = pydantic.TypeAdapter(VllmConfig)
 
 
 def _get_vllm_env_vars():
-    from vllm.config.utils import normalize_value
+    from vllm.foundation.config.utils import normalize_value
 
     vllm_envs = {}
     for key in dir(envs):

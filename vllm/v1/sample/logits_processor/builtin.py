@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from vllm import SamplingParams
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
     LogitsProcessor,
@@ -15,7 +15,7 @@ from vllm.v1.sample.logits_processor.interface import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 T = TypeVar("T")
 

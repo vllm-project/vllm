@@ -20,7 +20,7 @@ from transformers import PretrainedConfig
 
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
@@ -84,7 +84,7 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.foundation.utilities.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,

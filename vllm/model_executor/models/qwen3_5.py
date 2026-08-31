@@ -30,11 +30,11 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
@@ -56,8 +56,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
-from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig
-from vllm.transformers_utils.configs.qwen3_5_moe import (
+from vllm.foundation.integrations.transformers_utils.configs.qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig
+from vllm.foundation.integrations.transformers_utils.configs.qwen3_5_moe import (
     Qwen3_5MoeConfig,
     Qwen3_5MoeTextConfig,
 )

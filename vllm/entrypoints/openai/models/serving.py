@@ -5,7 +5,7 @@ from asyncio import Lock
 from collections import defaultdict
 from http import HTTPStatus
 
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
 from vllm.entrypoints.serve import create_error_response
@@ -20,10 +20,10 @@ from vllm.entrypoints.serve.lora.protocol import (
     UnloadLoRAAdapterRequest,
 )
 from vllm.foundation.system.exceptions import LoRAAdapterNotFoundError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
-from vllm.utils.counter import AtomicCounter
+from vllm.foundation.utilities.counter import AtomicCounter
 
 logger = init_logger(__name__)
 

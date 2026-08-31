@@ -10,7 +10,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.utils.flashinfer import nvfp4_block_scale_interleave
+from vllm.foundation.utilities.flashinfer import nvfp4_block_scale_interleave
 
 
 def _quantize_and_setup_dispatch(

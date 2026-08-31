@@ -21,7 +21,7 @@ from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import _tcgen05, simple_tma_copy
 from vllm.triton_utils import tl, triton
-from vllm.utils import math_utils
+from vllm.foundation.utilities import math_utils
 
 __all__ = ["bf16x3_router_gemm"]
 

@@ -14,14 +14,14 @@ from vllm import (
     RequestOutput,
     SamplingParams,
 )
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, ChatParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
@@ -30,9 +30,9 @@ from vllm.renderers.inputs.preprocess import (
     prompt_to_seq,
 )
 from vllm.sampling_params import RequestOutputKind
-from vllm.utils.counter import Counter
-from vllm.utils.mistral import is_mistral_tokenizer
-from vllm.utils.tqdm_utils import maybe_tqdm
+from vllm.foundation.utilities.counter import Counter
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer
+from vllm.foundation.utilities.tqdm_utils import maybe_tqdm
 from vllm.v1.engine.llm_engine import LLMEngine
 
 logger = init_logger(__name__)

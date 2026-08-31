@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from torch.nn.parameter import Parameter
 
-from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.foundation.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -34,7 +34,7 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_scan_fn
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import selective_state_update
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,

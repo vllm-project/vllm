@@ -7,8 +7,8 @@ import json
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.version import __version__ as VLLM_VERSION

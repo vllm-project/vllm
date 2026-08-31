@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4,
     quant_dequant_mxfp4,
@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp6E3M2Dynamic,
 )
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_quark
+from vllm.foundation.utilities.import_utils import has_quark
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 

@@ -27,10 +27,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     ReqId,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv
-from vllm.utils.network_utils import make_zmq_path
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -39,7 +39,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.outputs import KVConnectorOutput

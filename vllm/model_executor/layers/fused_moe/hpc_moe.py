@@ -4,7 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
@@ -20,7 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.utils.hpc import has_hpc, hpc_fuse_moe, hpc_fuse_moe_blockwise
+from vllm.foundation.utilities.hpc import has_hpc, hpc_fuse_moe, hpc_fuse_moe_blockwise
 
 logger = init_logger(__name__)
 

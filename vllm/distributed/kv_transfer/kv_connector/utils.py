@@ -10,17 +10,17 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 
-from vllm.config import (
+from vllm.foundation.config import (
     VllmConfig,
     get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 

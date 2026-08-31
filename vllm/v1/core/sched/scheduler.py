@@ -8,7 +8,7 @@ from dataclasses import replace
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
-from vllm.config import KVEventsConfig, VllmConfig
+from vllm.foundation.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
@@ -24,7 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsManager,
 )

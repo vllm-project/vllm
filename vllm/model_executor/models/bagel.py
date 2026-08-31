@@ -13,10 +13,10 @@ from typing import Any, Literal, TypeAlias
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -36,8 +36,8 @@ from vllm.multimodal.processing import (
     PromptReplacement,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processors.bagel import BagelProcessor
-from vllm.utils.tensor_schema import TensorSchema
+from vllm.foundation.integrations.transformers_utils.processors.bagel import BagelProcessor
+from vllm.foundation.utilities.tensor_schema import TensorSchema
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -191,7 +191,7 @@ class BagelProcessingInfo(BaseProcessingInfo):
     """Processing information for BAGEL model."""
 
     def get_hf_processor(self, **kwargs: object) -> BagelProcessor:
-        from vllm.transformers_utils.processor import cached_get_image_processor
+        from vllm.foundation.integrations.transformers_utils.processor import cached_get_image_processor
 
         image_processor = cached_get_image_processor(
             self.ctx.model_config.model,

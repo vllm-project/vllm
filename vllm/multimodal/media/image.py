@@ -9,9 +9,9 @@ import pybase64
 import torch
 from PIL import Image
 
-import vllm.envs as envs
-from vllm.utils.serial_utils import tensor2base64
-from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
+import vllm.foundation.system.envs as envs
+from vllm.foundation.utilities.serial_utils import tensor2base64
+from vllm.foundation.utilities.sparse_utils import check_sparse_tensor_invariants_threadsafe
 
 from ..image import convert_image_mode, normalize_image, rgba_to_rgb
 from .base import MediaIO, MediaWithBytes

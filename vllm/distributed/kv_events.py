@@ -15,8 +15,8 @@ from typing import Any
 import msgspec
 import zmq
 
-from vllm.config.kv_events import KVEventsConfig
-from vllm.logger import init_logger
+from vllm.foundation.config.kv_events import KVEventsConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.core.kv_cache_utils import ExternalBlockHash
 
 logger = init_logger(__name__)

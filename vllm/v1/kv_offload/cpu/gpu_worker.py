@@ -11,11 +11,11 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
     CanonicalKVCacheRef,

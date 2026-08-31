@@ -13,11 +13,11 @@ from copy import copy
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
+from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.torch_utils import current_stream
+from vllm.foundation.utilities.torch_utils import current_stream
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,

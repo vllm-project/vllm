@@ -16,7 +16,7 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.ops.xpu_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.utils.math_utils import round_up
+from vllm.foundation.utilities.math_utils import round_up
 
 if HAS_TRITON:
     from vllm.lora.ops.triton_ops import (

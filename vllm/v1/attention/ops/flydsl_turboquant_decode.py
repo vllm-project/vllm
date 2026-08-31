@@ -32,7 +32,7 @@ from typing import Any
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
@@ -156,7 +156,7 @@ def _detect_max_capture_B() -> int:
     previously dominated dense-capture VRAM cost.
     """
     try:
-        from vllm.config import get_current_vllm_config
+        from vllm.foundation.config import get_current_vllm_config
 
         cfg = get_current_vllm_config()
         sizes = cfg.compilation_config.cudagraph_capture_sizes

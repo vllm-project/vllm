@@ -4,13 +4,13 @@ import functools
 
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention
-from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,

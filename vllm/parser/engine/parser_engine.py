@@ -22,7 +22,7 @@ from vllm.entrypoints.generate.base.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.parser.abstract_parser import Parser, StreamState
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserState

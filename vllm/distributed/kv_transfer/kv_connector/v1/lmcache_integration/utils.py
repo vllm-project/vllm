@@ -10,7 +10,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig as V1Config
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.foundation.config import ModelConfig
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.request import Request
@@ -121,7 +121,7 @@ def create_lmcache_metadata(
     # First Party
     from lmcache.config import LMCacheEngineMetadata
 
-    from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+    from vllm.foundation.utilities.torch_utils import get_kv_cache_torch_dtype
 
     config = lmcache_get_or_create_config()
     # Support both vllm_config object and individual config parameters

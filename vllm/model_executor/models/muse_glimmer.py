@@ -44,15 +44,15 @@ from torch import nn
 from transformers import BatchFeature
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import CacheConfig, VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import (
     divide,
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
 from vllm.inputs import MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.model_executor.layers.linear import (
@@ -83,8 +83,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processors.muse_glimmer import MuseGlimmerProcessor
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.integrations.transformers_utils.processors.muse_glimmer import MuseGlimmerProcessor
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     EagleModelMixin,

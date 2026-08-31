@@ -7,9 +7,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.compilation import CUDAGraphMode
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch

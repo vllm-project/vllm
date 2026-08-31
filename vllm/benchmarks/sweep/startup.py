@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import ClassVar
 
 from vllm.benchmarks.startup import add_cli_args as add_startup_cli_args
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.import_utils import PlaceholderModule
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
 from .utils import sanitize_filename

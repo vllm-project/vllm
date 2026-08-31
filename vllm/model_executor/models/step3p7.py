@@ -4,8 +4,8 @@
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 

@@ -7,7 +7,7 @@ import numpy as np
 from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.outputs import ClassificationOutput
 
 from ..base.serving import PoolingServing

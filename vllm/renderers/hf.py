@@ -29,7 +29,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.inputs import EmbedsPrompt
 from vllm.inputs.engine import MultiModalInput
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (
     MultiModalFieldElem,
@@ -44,10 +44,10 @@ from vllm.multimodal.processing.processor import (
     find_mm_placeholders,
 )
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
-from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
-from vllm.transformers_utils.processor import cached_get_processor
-from vllm.utils.async_utils import make_async
-from vllm.utils.func_utils import supports_kw
+from vllm.foundation.integrations.transformers_utils.chat_templates import get_chat_template_fallback_path
+from vllm.foundation.integrations.transformers_utils.processor import cached_get_processor
+from vllm.foundation.utilities.async_utils import make_async
+from vllm.foundation.utilities.func_utils import supports_kw
 
 from .base import BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
@@ -55,7 +55,7 @@ from .inputs.preprocess import parse_dec_only_prompt
 if TYPE_CHECKING:
     from collections.abc import Set
 
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.foundation.config import ModelConfig, VllmConfig
     from vllm.entrypoints.chat_utils import (
         ChatCompletionMessageParam,
         ChatTemplateContentFormat,

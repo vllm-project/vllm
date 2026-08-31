@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Physical KV cache layout descriptor.
 
-A leaf module so ``vllm.config`` can import the enum without pulling in the
+A leaf module so ``vllm.foundation.config`` can import the enum without pulling in the
 full KV cache interface.
 """
 

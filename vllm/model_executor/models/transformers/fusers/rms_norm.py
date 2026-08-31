@@ -15,7 +15,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.distributed.utils import split_tensor_along_last_dim
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.transformers.fusers.base import BaseFuser
 from vllm.model_executor.models.transformers.fx_utils import (
     find_node,
@@ -31,7 +31,7 @@ from vllm.model_executor.models.transformers.layers import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 logger = init_logger(__name__)
 

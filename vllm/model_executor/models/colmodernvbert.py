@@ -14,8 +14,8 @@ import torch
 from torch import nn
 from transformers import BatchFeature
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -34,7 +34,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.hf import HfTokenizer
-from vllm.transformers_utils.configs.colmodernvbert import ColModernVBertConfig
+from vllm.foundation.integrations.transformers_utils.configs.colmodernvbert import ColModernVBertConfig
 
 from .interfaces import (
     MultiModalEmbeddings,

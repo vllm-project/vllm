@@ -21,16 +21,16 @@ import torch
 from PIL import Image, UnidentifiedImageError
 from urllib3.util import Url, parse_url
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.foundation.system.connections import (
     HTTPConnection,
     MediaDownloadSizeExceededError,
     global_http_connection,
 )
 from vllm.foundation.system.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.multimodal.video import get_video_loader_backend_for_processor
-from vllm.utils.registry import ExtensionManager
+from vllm.foundation.utilities.registry import ExtensionManager
 
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
 from .base import MediaIO, MediaWithBytes

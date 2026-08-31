@@ -22,7 +22,7 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from vllm.config import PoolerConfig, VllmConfig
+from vllm.foundation.config import PoolerConfig, VllmConfig
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper

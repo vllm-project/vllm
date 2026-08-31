@@ -5,10 +5,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
@@ -76,7 +76,7 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import (
+from vllm.foundation.utilities.deep_gemm import (
     is_deep_gemm_supported,
 )
 

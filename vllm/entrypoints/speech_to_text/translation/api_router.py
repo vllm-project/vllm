@@ -14,7 +14,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     with_cancellation,
 )
 from vllm.entrypoints.speech_to_text.base.utils import read_upload_with_limit
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from .protocol import TranslationRequest, TranslationResponseVariant
 from .serving import OpenAIServingTranslation

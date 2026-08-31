@@ -5,12 +5,12 @@ import os
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.foundation.devtools.profiler.wrapper import TorchProfilerWrapper
-from vllm.utils.mem_utils import MemorySnapshot, format_gib
-from vllm.utils.torch_utils import set_random_seed
+from vllm.foundation.utilities.mem_utils import MemorySnapshot, format_gib
+from vllm.foundation.utilities.torch_utils import set_random_seed
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.workspace import init_workspace_manager

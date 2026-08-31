@@ -23,7 +23,7 @@ import torch
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 
 class LegacyMixin:

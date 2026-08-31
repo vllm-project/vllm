@@ -40,14 +40,14 @@ from torch import nn
 
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import (
+from vllm.foundation.config import (
     CacheConfig,
     VllmConfig,
     get_current_vllm_config,
 )
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.attention import (
     _init_kv_cache_quant,
     set_default_quant_scales,
@@ -86,9 +86,9 @@ from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_qkv_quant_kv_cache_fp8_insert,
 )
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import (
+from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
+from vllm.foundation.utilities.torch_utils import (
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
 )

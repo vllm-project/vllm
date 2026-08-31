@@ -7,7 +7,7 @@ import torch.fx
 from torch import SymInt
 from torch.fx.experimental.symbolic_shapes import statically_known_true
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from ..fx_utils import is_func
 from ..vllm_inductor_pass import VllmInductorPass

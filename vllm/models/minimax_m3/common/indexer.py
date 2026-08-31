@@ -20,12 +20,12 @@ from typing import ClassVar
 import torch
 from torch import nn
 
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.config.attention import IndexerKVDType
-from vllm.config.cache import CacheDType
+from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.foundation.config.attention import IndexerKVDType
+from vllm.foundation.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 

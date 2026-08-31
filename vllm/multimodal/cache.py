@@ -10,17 +10,17 @@ from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar, cast
 import torch
 from typing_extensions import override
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.distributed.device_communicators.shm_object_storage import (
     MsgpackSerde,
     SingleWriterShmObjectStorage,
     SingleWriterShmRingBuffer,
 )
-from vllm.logger import init_logger
-from vllm.utils.cache import CacheInfo, LRUCache
-from vllm.utils.jsontree import json_count_leaves, json_map_leaves, json_reduce_leaves
-from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
-from vllm.utils.mem_utils import format_gib
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.cache import CacheInfo, LRUCache
+from vllm.foundation.utilities.jsontree import json_count_leaves, json_map_leaves, json_reduce_leaves
+from vllm.foundation.utilities.mem_constants import GiB_bytes, MiB_bytes
+from vllm.foundation.utilities.mem_utils import format_gib
 
 from .inputs import (
     MultiModalBatchedField,
@@ -32,7 +32,7 @@ from .inputs import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.foundation.config import ModelConfig, VllmConfig
 
     from .processing.processor import ResolvedPromptUpdate
 

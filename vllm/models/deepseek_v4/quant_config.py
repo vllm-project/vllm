@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from vllm.config import get_current_vllm_config
+from vllm.foundation.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     UnquantizedFusedMoEMethod,
@@ -70,7 +70,7 @@ class DeepseekV4FP8Config(Fp8Config):
                     f"expected one of {_DEEPSEEK_V4_EXPERT_DTYPES}."
                 )
             self._resolved_expert_dtype = expert_dtype
-            from vllm.logger import init_logger
+            from vllm.foundation.observability.logger import init_logger
 
             init_logger(__name__).info_once(
                 "DeepSeek V4 expert_dtype resolved to %r", expert_dtype

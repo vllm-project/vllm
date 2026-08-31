@@ -16,14 +16,14 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.passes.fusion.rms_quant_fusion import (
     _rms_input_weight_dtype_match,
 )
-from vllm.config import VllmConfig
-from vllm.config.utils import Range
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -31,7 +31,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.torch_utils import (
     direct_register_custom_op,
 )
 

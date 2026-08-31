@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from torch import fx, nn
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.models.transformers.fusers.base import (
     RewriteFuser,
@@ -29,7 +29,7 @@ from vllm.model_executor.models.transformers.utils import (
 from vllm.model_executor.models.utils import maybe_prefix
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 logger = init_logger(__name__)
 

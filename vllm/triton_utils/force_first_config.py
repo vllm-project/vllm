@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Skip Triton autotuning under VLLM_TRITON_FORCE_FIRST_CONFIG."""
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.triton_utils.importing import HAS_TRITON
 
 logger = init_logger(__name__)

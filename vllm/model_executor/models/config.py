@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
-from vllm.logger import init_logger
-from vllm.utils.math_utils import round_up
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.math_utils import round_up
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
-    from vllm.config import CacheConfig, ModelConfig, VllmConfig
-    from vllm.config.cache import MambaDType
+    from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
+    from vllm.foundation.config.cache import MambaDType
 
 
 logger = init_logger(__name__)
@@ -289,7 +289,7 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
 
         # Auto-create DiffusionConfig from HF config if not provided.
         if vllm_config.diffusion_config is None:
-            from vllm.config.diffusion import DiffusionConfig
+            from vllm.foundation.config.diffusion import DiffusionConfig
 
             hf_config = vllm_config.model_config.hf_config
             canvas_length = getattr(hf_config, "canvas_length", 256)
@@ -303,7 +303,7 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         # We can't see the original None here (the engine already filled a generic
         # default), so use >= DEFAULT_MAX_NUM_SEQS as a proxy, (the default is much
         # larger than any deliberate value for this model)
-        from vllm.config.scheduler import SchedulerConfig
+        from vllm.foundation.config.scheduler import SchedulerConfig
 
         sc = vllm_config.scheduler_config
         if sc is not None and sc.max_num_seqs >= SchedulerConfig.DEFAULT_MAX_NUM_SEQS:
@@ -538,7 +538,7 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
 class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        from vllm.config.pooler import SequencePoolingType
+        from vllm.foundation.config.pooler import SequencePoolingType
 
         hf_config = model_config.hf_config
         hf_config.is_causal = False
@@ -572,7 +572,7 @@ class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        from vllm.config.pooler import SequencePoolingType
+        from vllm.foundation.config.pooler import SequencePoolingType
 
         hf_config = model_config.hf_config
 
@@ -989,7 +989,7 @@ class LongcatFlashNgramForCausalLMConfig(VerifyAndUpdateConfig):
         # FULL cudagraph capture (PIECEWISE prefill drops them). Default to
         # no-compile + FULL cudagraph (prefill runs eager) unless the user
         # configured compilation explicitly.
-        from vllm.config.compilation import CompilationMode, CUDAGraphMode
+        from vllm.foundation.config.compilation import CompilationMode, CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
         if compilation_config.mode is None:

@@ -7,9 +7,9 @@ from typing import Any
 import torch
 from typing_extensions import override
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.utils import (

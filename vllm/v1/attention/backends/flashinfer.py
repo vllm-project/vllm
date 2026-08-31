@@ -23,14 +23,14 @@ from typing_extensions import override
 
 from vllm import _custom_ops as custom_ops
 from vllm import envs
-from vllm.config import (
+from vllm.foundation.config import (
     CUDAGraphMode,
     VllmConfig,
     get_current_vllm_config_or_none,
 )
-from vllm.config.cache import CacheDType
+from vllm.foundation.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -39,16 +39,16 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
-from vllm.utils.flashinfer import (
+from vllm.foundation.utilities.flashinfer import (
     can_use_trtllm_attention,
     flashinfer_xqa_batch_decode_with_kv_cache,
     force_use_trtllm_attention,
     supports_trtllm_attention,
     use_trtllm_attention,
 )
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.torch_utils import (
     PIN_MEMORY,
     canonicalize_singleton_dim_strides,
     get_dtype_size,
@@ -516,7 +516,7 @@ class FlashInferBackend(AttentionBackend):
     @classmethod
     def supports_sink(cls) -> bool:
         """FlashInfer supports sinks on SM12x XQA and SM100 trtllm-gen."""
-        from vllm.utils.flashinfer import (
+        from vllm.foundation.utilities.flashinfer import (
             force_use_trtllm_attention,
         )
 
@@ -2031,7 +2031,7 @@ class FlashInferImpl(AttentionImpl):
         # with TP=8).  PyTorch permits non-canonical strides on size-1 dims;
         # CUDA TMA requires ≥16-byte alignment on all non-outermost strides.
         # canonicalize_singleton_dim_strides patches metadata via as_strided —
-        # zero-copy.  See vllm.utils.torch_utils.
+        # zero-copy.  See vllm.foundation.utilities.torch_utils.
         fixed = canonicalize_singleton_dim_strides(kv_cache_permute)
         if fixed is not kv_cache_permute:
             logger.debug(

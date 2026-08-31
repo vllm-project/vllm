@@ -7,19 +7,19 @@ from typing import ClassVar
 
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
+from vllm.foundation.config import CUDAGraphMode, VllmConfig
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
+from vllm.foundation.utilities.math_utils import next_power_of_2
+from vllm.foundation.utilities.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -395,7 +395,7 @@ class TritonAttentionImpl(AttentionImpl):
         """
         if self._k_scale_cache is not None:
             return
-        from vllm.utils.torch_utils import get_dtype_size
+        from vllm.foundation.utilities.torch_utils import get_dtype_size
 
         num_blocks, nkv, block_size, content = kv_cache.shape
         dtype_sz = kv_cache.element_size()

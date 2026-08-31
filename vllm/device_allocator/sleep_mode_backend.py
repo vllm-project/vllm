@@ -24,10 +24,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config.model import ModelConfig
+    from vllm.foundation.config.model import ModelConfig
 
 logger = init_logger(__name__)
 

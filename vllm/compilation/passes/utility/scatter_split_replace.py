@@ -24,7 +24,7 @@ import torch
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from ..fx_utils import is_func
 from ..vllm_inductor_pass import VllmInductorPass

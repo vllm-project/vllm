@@ -28,9 +28,9 @@ from vllm.benchmarks.datasets import (
 )
 from vllm.benchmarks.throughput import get_requests
 from vllm.engine.arg_utils import EngineArgs
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.gc_utils import freeze_gc_heap
-from vllm.utils.import_utils import PlaceholderModule
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.gc_utils import freeze_gc_heap
+from vllm.foundation.utilities.import_utils import PlaceholderModule
 
 try:
     import pandas as pd

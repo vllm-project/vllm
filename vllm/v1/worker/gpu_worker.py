@@ -16,9 +16,9 @@ import regex as re
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
-from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
-from vllm.config.compilation import CompilationMode
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.foundation.config.compilation import CompilationMode
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
@@ -50,7 +50,7 @@ from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
     WeightTransferEngineFactory,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
@@ -63,16 +63,16 @@ from vllm.foundation.devtools.profiler.wrapper import (
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.foundation.observability.tracing import instrument
-from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
-from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
-from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import (
+from vllm.foundation.utilities.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
+from vllm.foundation.utilities.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
+from vllm.foundation.utilities.mem_constants import GiB_bytes
+from vllm.foundation.utilities.mem_utils import (
     MemoryProfilingResult,
     MemorySnapshot,
     format_gib,
     memory_profiling,
 )
-from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
+from vllm.foundation.utilities.torch_utils import set_random_seed, set_torch_threads_for_runtime
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -899,7 +899,7 @@ class Worker(WorkerBase):
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
-        from vllm.utils.jit_monitor import activate as activate_jit_monitor
+        from vllm.foundation.utilities.jit_monitor import activate as activate_jit_monitor
 
         activate_jit_monitor(
             mode=self.observability_config.jit_monitor_mode,

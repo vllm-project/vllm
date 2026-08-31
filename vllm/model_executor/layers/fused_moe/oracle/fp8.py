@@ -9,8 +9,8 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config.kernel import MoEBackend
-from vllm.logger import init_logger
+from vllm.foundation.config.kernel import MoEBackend
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )

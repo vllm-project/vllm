@@ -20,7 +20,7 @@ import torch.distributed
 import torch.nn as nn
 from tqdm import tqdm
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.compilation.breakable_cudagraph import (
     BreakableCUDAGraphWrapper,
     is_breakable_cudagraph_enabled,
@@ -28,7 +28,7 @@ from vllm.compilation.breakable_cudagraph import (
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
-from vllm.config import (
+from vllm.foundation.config import (
     CompilationMode,
     CUDAGraphMode,
     VllmConfig,
@@ -36,9 +36,9 @@ from vllm.config import (
     set_current_vllm_config,
     update_config,
 )
-from vllm.config.cache import CacheConfig
-from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
-from vllm.config.model import PROCESSED_LOGPROBS_MODES
+from vllm.foundation.config.cache import CacheConfig
+from vllm.foundation.config.ec_manager_config import EncoderCacheManagerMetadata
+from vllm.foundation.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -57,7 +57,7 @@ from vllm.forward_context import (
     BatchDescriptor,
     set_forward_context,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -123,13 +123,13 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.foundation.observability.tracing import instrument
-from vllm.utils import length_from_prompt_token_ids_or_embeds
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv, round_up
-from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
-from vllm.utils.nvtx_pytorch_hooks import PytHooks
-from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.math_utils import cdiv, round_up
+from vllm.foundation.utilities.mem_utils import DeviceMemoryProfiler, format_gib
+from vllm.foundation.utilities.nvtx_pytorch_hooks import PytHooks
+from vllm.foundation.utilities.platform_utils import num_compute_units
+from vllm.foundation.utilities.torch_utils import (
     PIN_MEMORY,
     async_tensor_h2d,
     current_stream,

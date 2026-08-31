@@ -19,8 +19,8 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv, next_power_of_2
-from vllm.utils.platform_utils import num_compute_units
+from vllm.foundation.utilities.math_utils import cdiv, next_power_of_2
+from vllm.foundation.utilities.platform_utils import num_compute_units
 
 from .utils import input_guard
 

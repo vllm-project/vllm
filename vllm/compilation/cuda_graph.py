@@ -11,20 +11,20 @@ from unittest.mock import patch
 
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.foundation.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
     BatchDescriptor,
     get_forward_context,
     is_forward_context_available,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import current_stream, weak_ref_tensors
+from vllm.foundation.utilities.torch_utils import current_stream, weak_ref_tensors
 
 logger = init_logger(__name__)
 

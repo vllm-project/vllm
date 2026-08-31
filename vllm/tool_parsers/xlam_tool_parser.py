@@ -23,9 +23,9 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.utils import random_uuid
+from vllm.foundation.utilities import random_uuid
 
 logger = init_logger(__name__)
 

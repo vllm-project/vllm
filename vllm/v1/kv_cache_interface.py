@@ -16,15 +16,15 @@ from typing import TYPE_CHECKING, TypeVar
 import torch
 from typing_extensions import Self
 
-from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv, round_up
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.math_utils import cdiv, round_up
+from vllm.foundation.utilities.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_layout import _DIM_B, _DIM_L, KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 logger = init_logger(__name__)
 

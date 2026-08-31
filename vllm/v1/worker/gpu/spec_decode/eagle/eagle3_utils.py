@@ -4,8 +4,8 @@ from typing import cast
 
 import torch.nn as nn
 
-from vllm.config import SpeculativeConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import SpeculativeConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsEagle3, supports_eagle3
 
 logger = init_logger(__name__)

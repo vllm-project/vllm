@@ -5,7 +5,7 @@ from typing import TypeAlias
 
 import torch
 
-from vllm.config import PoolerConfig, get_current_vllm_config
+from vllm.foundation.config import PoolerConfig, get_current_vllm_config
 from vllm.model_executor.layers.pooler import ClassifierFn, PoolingParamsUpdate
 from vllm.model_executor.layers.pooler.abstract import Pooler
 from vllm.model_executor.layers.pooler.activations import (

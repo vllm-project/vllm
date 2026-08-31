@@ -6,8 +6,8 @@ from collections.abc import Callable
 from enum import Enum, EnumMeta
 from typing import TYPE_CHECKING, cast
 
-from vllm.logger import init_logger
-from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backend import AttentionBackend

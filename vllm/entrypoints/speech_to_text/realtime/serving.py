@@ -13,7 +13,7 @@ from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import PromptType
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsRealtime
 from vllm.renderers.inputs.preprocess import parse_model_prompt
 

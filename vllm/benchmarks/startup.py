@@ -26,7 +26,7 @@ from vllm.benchmarks.lib.utils import (
     write_to_json,
 )
 from vllm.engine.arg_utils import EngineArgs
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
 PERCENTAGES = [10, 25, 50, 75, 90, 99]
 

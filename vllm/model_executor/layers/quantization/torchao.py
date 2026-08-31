@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from packaging import version
 from torch.nn.parameter import Parameter
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,

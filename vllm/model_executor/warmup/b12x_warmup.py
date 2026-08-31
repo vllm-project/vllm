@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.b12x import B12xWarmupUnit, b12x_warmup_token_counts
+from vllm.foundation.utilities.b12x import B12xWarmupUnit, b12x_warmup_token_counts
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker

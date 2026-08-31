@@ -1,26 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm import envs
+"""Compatibility shim: vllm.transformers_utils/ -> vllm.foundation.integrations.transformers_utils (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-if envs.VLLM_USE_MODELSCOPE:
-    try:
-        # Patch here, before each import happens
-        import modelscope
-        from packaging import version
+_real = _importlib.import_module("vllm.foundation.integrations.transformers_utils")
 
-        # patch_hub begins from modelscope>=1.18.1
-        if version.parse(modelscope.__version__) <= version.parse("1.18.0"):
-            raise ImportError(
-                "Using vLLM with ModelScope needs modelscope>=1.18.1, please "
-                "install by `pip install modelscope -U`"
-            )
-        from modelscope.utils.hf_util import patch_hub
+def __getattr__(name):
+    return getattr(_real, name)
 
-        # Patch hub to download models from modelscope to speed up.
-        patch_hub()
-    except ImportError as err:
-        raise ImportError(
-            "Please install modelscope>=1.18.1 via "
-            "`pip install modelscope>=1.18.1` to use ModelScope."
-        ) from err
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

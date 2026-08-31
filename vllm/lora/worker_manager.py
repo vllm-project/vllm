@@ -6,10 +6,10 @@ from typing import Any, Literal
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.config.lora import LoRAConfig
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.lora import LoRAConfig
 from vllm.foundation.system.exceptions import LoRAAdapterNotFoundError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.model_manager import (
     LoRAModelManager,
@@ -19,7 +19,7 @@ from vllm.lora.model_manager import (
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
 

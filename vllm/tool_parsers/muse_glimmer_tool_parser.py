@@ -55,7 +55,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,

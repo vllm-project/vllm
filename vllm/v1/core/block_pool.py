@@ -10,7 +10,7 @@ from vllm.distributed.kv_events import (
     BlockStored,
     KVCacheEvent,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,

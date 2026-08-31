@@ -24,8 +24,8 @@ from transformers.image_utils import ImageInput
 from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.foundation.config import CacheConfig, VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -34,7 +34,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.inputs import MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import MulAndSilu, SiluAndMul, get_act_fn
 from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -73,8 +73,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils.math_utils import round_down
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.math_utils import round_down
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

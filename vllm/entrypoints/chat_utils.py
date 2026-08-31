@@ -51,10 +51,10 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter
 from typing_extensions import Required, TypedDict, override
 
 from vllm import envs
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -71,10 +71,10 @@ from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
     safe_load_prompt_embeds_async,
 )
-from vllm.transformers_utils.processor import get_video_processor_cls_name
-from vllm.utils import random_uuid
-from vllm.utils.collection_utils import is_list_of
-from vllm.utils.import_utils import LazyLoader
+from vllm.foundation.integrations.transformers_utils.processor import get_video_processor_cls_name
+from vllm.foundation.utilities import random_uuid
+from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.foundation.utilities.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     import torch
@@ -1429,7 +1429,7 @@ def validate_chat_template(chat_template: Path | str | None):
             and not Path(chat_template).exists()
         ):
             # Try to find the template in the built-in templates directory
-            from vllm.transformers_utils.chat_templates.registry import (
+            from vllm.foundation.integrations.transformers_utils.chat_templates.registry import (
                 CHAT_TEMPLATES_DIR,
             )
 
@@ -1471,7 +1471,7 @@ def _load_chat_template(
         JINJA_CHARS = "{}\n"
         if not any(c in chat_template for c in JINJA_CHARS):
             # Try to load from the built-in templates directory
-            from vllm.transformers_utils.chat_templates.registry import (
+            from vllm.foundation.integrations.transformers_utils.chat_templates.registry import (
                 CHAT_TEMPLATES_DIR,
             )
 

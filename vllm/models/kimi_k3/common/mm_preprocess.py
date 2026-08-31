@@ -9,9 +9,9 @@ from typing import Any, cast
 import torch
 from transformers import BatchFeature
 
-from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
+from vllm.foundation.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -27,9 +27,9 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
-from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
-from vllm.transformers_utils.processor import cached_get_image_processor
-from vllm.transformers_utils.processors.kimi_k3 import KimiK3Processor
+from vllm.foundation.integrations.transformers_utils.configs.kimi_k3 import KimiK3Config
+from vllm.foundation.integrations.transformers_utils.processor import cached_get_image_processor
+from vllm.foundation.integrations.transformers_utils.processors.kimi_k3 import KimiK3Processor
 
 logger = init_logger(__name__)
 

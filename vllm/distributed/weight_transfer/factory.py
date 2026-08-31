@@ -10,13 +10,13 @@ from vllm.distributed.weight_transfer.base import (
     TrainerWeightTransferEngine,
     WeightTransferEngine,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 if TYPE_CHECKING:
     import torch
 
-    from vllm.config import VllmConfig
-    from vllm.config.weight_transfer import WeightTransferConfig
+    from vllm.foundation.config import VllmConfig
+    from vllm.foundation.config.weight_transfer import WeightTransferConfig
     from vllm.distributed.weight_transfer.base import (
         TrainerInitInfo,
         VLLMWeightSyncClient,

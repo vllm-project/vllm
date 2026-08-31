@@ -29,7 +29,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.foundation.utilities.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
 class TrtLlmBf16ExpertsBase:

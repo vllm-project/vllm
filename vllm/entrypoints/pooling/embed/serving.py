@@ -5,9 +5,9 @@ from typing import TypeAlias, cast
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
-from vllm.utils.serial_utils import EmbedDType, Endianness
+from vllm.foundation.utilities.serial_utils import EmbedDType, Endianness
 
 from ..base.io_processor import PoolingIOProcessor
 from ..base.serving import PoolingServing

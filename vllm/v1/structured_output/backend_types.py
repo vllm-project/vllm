@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import torch
 
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.tokenizers import TokenizerLike
 else:
     VllmConfig = object

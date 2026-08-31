@@ -55,7 +55,7 @@ from pydantic import (
     model_validator,
 )
 
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -63,14 +63,14 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.generate.base.protocol import StopParam
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
 )
-from vllm.utils import random_uuid
+from vllm.foundation.utilities import random_uuid
 
 logger = init_logger(__name__)
 

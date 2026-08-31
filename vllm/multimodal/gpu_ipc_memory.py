@@ -19,12 +19,12 @@ amount out of its KV-cache budget so the headroom physically exists.
 import threading
 from typing import TYPE_CHECKING
 
-from vllm.logger import init_logger
-from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import format_gib
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.mem_constants import GiB_bytes
+from vllm.foundation.utilities.mem_utils import format_gib
 
 if TYPE_CHECKING:
-    from vllm.config.multimodal import MultiModalConfig
+    from vllm.foundation.config.multimodal import MultiModalConfig
 
 logger = init_logger(__name__)
 

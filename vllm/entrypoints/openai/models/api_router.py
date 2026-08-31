@@ -6,7 +6,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

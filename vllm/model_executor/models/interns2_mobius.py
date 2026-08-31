@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig, replace, set_current_vllm_config
+from vllm.foundation.config import VllmConfig, replace, set_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,

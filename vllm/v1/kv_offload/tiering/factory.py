@@ -4,7 +4,7 @@ import importlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
 
 if TYPE_CHECKING:

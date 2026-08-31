@@ -6,11 +6,11 @@ from typing import Any
 
 import torch
 
-from vllm.config import get_current_vllm_config
+from vllm.foundation.config import get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -31,7 +31,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two
     FlashInferNVLinkTwoSidedPrepareAndFinalize,
 )
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import (
+from vllm.foundation.utilities.import_utils import (
     has_deep_ep,
     has_deep_ep_v2,
     has_mori,

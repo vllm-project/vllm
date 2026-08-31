@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from vllm.config.model import PROCESSED_LOGPROBS_MODES
-from vllm.logger import init_logger
+from vllm.foundation.config.model import PROCESSED_LOGPROBS_MODES
+from vllm.foundation.observability.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
@@ -24,7 +24,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 
 if TYPE_CHECKING:
-    from vllm.config.speculative import SpeculativeConfig
+    from vllm.foundation.config.speculative import SpeculativeConfig
 
 logger = init_logger(__name__)
 

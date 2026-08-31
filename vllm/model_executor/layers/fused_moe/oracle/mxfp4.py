@@ -7,10 +7,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.config import get_current_vllm_config
-from vllm.config.kernel import MoEBackend
-from vllm.config.quantization import QuantizationConfigArgs
-from vllm.logger import init_logger
+from vllm.foundation.config import get_current_vllm_config
+from vllm.foundation.config.kernel import MoEBackend
+from vllm.foundation.config.quantization import QuantizationConfigArgs
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     RoutedExperts,
@@ -45,8 +45,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import all_close_1d
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_triton_kernels
-from vllm.utils.math_utils import round_up
+from vllm.foundation.utilities.import_utils import has_triton_kernels
+from vllm.foundation.utilities.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe import RoutedExperts

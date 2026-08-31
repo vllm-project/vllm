@@ -14,21 +14,21 @@ import torch
 import torch.nn as nn
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
-from vllm.config import (
+from vllm.foundation.config import (
     CompilationMode,
     VllmConfig,
     get_current_vllm_config,
     set_current_vllm_config,
 )
-from vllm.config.compilation import DynamicShapesType
+from vllm.foundation.config.compilation import DynamicShapesType
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.sequence import IntermediateTensors
-from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
+from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
 
 from .monitor import monitor_profiling_run, monitor_torch_compile
 
@@ -746,7 +746,7 @@ def maybe_use_cudagraph_partition_wrapper(
     graph wrapper class to maintain more control over static graph
     capture and replay.
     """
-    from vllm.config import CUDAGraphMode
+    from vllm.foundation.config import CUDAGraphMode
 
     compilation_config = vllm_config.compilation_config
     if (

@@ -10,9 +10,9 @@ from transformers import BatchFeature
 from transformers.models.glmasr import GlmAsrConfig, GlmAsrProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
 
-from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.activation import get_act_fn
@@ -46,8 +46,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .glmasr_utils import (
     DEFAULT_CONV_PARAMS,

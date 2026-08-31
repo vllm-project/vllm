@@ -28,7 +28,7 @@ from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.foundation.system.exceptions import GenerationError
 from vllm.inputs import EngineInput
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.tokenizers import TokenizerLike

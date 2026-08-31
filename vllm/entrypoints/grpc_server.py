@@ -44,9 +44,9 @@ import uvloop
 from vllm import envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.serve.utils.api_utils import log_version_and_model
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.usage.usage_lib import UsageContext
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.version import __version__ as VLLM_VERSION
 

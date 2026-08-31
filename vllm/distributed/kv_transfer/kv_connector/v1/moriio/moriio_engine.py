@@ -11,8 +11,8 @@ import msgpack
 import torch
 import zmq
 
-from vllm.logger import init_logger
-from vllm.utils.network_utils import (
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.network_utils import (
     make_zmq_path,
     make_zmq_socket,
 )

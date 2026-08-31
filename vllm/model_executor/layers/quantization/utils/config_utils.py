@@ -75,7 +75,7 @@ def is_shared_expert_quant_fse_compatible(
     from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
 
     if isinstance(quant_config, DeepseekV4FP8Config):
-        from vllm.config import get_current_vllm_config
+        from vllm.foundation.config import get_current_vllm_config
         from vllm.model_executor.models.utils import extract_layer_index
 
         if quant_config.expert_dtype != "fp4":

@@ -9,7 +9,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.kv_cache_interface import KVQuantMode
 
 FP8_MIN, FP8_MAX = get_fp8_min_max()

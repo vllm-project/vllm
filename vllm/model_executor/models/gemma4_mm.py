@@ -33,15 +33,15 @@ from transformers.models.gemma4.configuration_gemma4 import (
     Gemma4TextConfig,
 )
 
-from vllm.config import VllmConfig
-from vllm.config.model import get_served_model_name
-from vllm.config.multimodal import (
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.model import get_served_model_name
+from vllm.foundation.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
     VideoDummyOptions,
 )
 from vllm.inputs import MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.gemma3n_mm import batch_audio_features
@@ -73,9 +73,9 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,

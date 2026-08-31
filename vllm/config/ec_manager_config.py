@@ -1,39 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from abc import ABC
-from dataclasses import field
-from typing import Any
+"""Compatibility shim: vllm.config/ec_manager_config -> vllm.foundation.config.ec_manager_config (sys.modules alias)."""
+import importlib
+import sys
 
-from vllm.config.utils import config
-from vllm.utils.import_utils import resolve_obj_by_qualname
-
-
-@config
-class EncoderCacheManagerConfig:
-    encoder_cache_manager_cls: str | None = None
-    """Fully qualified class name of the custom encoder cache manager."""
-
-    manager_config: dict[str, Any] = field(default_factory=dict)
-    """Opaque configuration interpreted by the custom cache manager."""
-
-    def __post_init__(self) -> None:
-        if self.encoder_cache_manager_cls is None and self.manager_config:
-            raise ValueError(
-                "manager_config requires encoder_cache_manager_cls to be set."
-            )
-
-    def get_encoder_cache_manager_obj(self):
-        cls_path = self.encoder_cache_manager_cls
-        if cls_path is None:
-            return None
-        return resolve_obj_by_qualname(cls_path)
-
-
-class EncoderCacheManagerMetadata(ABC):  # noqa: B024
-    """
-    Abstract Metadata used to communicate between the
-    Scheduler EncoderCacheManager and Worker EncoderCacheManager.
-    """
-
-    pass
+_real = importlib.import_module("vllm.foundation.config.ec_manager_config")
+sys.modules[__name__] = _real

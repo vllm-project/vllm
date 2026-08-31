@@ -4,8 +4,8 @@ import functools
 
 import torch
 
-from vllm.config import CacheConfig
-from vllm.config.vllm import VllmConfig
+from vllm.foundation.config import CacheConfig
+from vllm.foundation.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.v1.attention.backend import (

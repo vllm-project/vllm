@@ -9,7 +9,7 @@ import threading
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,

@@ -16,7 +16,7 @@ import msgspec
 import zmq
 import zmq.utils.monitor
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.kv_offload.tiering.p2p.control.base import (
     ControlConnection,
     ControlTransport,

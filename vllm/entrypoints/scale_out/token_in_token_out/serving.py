@@ -32,7 +32,7 @@ from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_includ
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.foundation.system.exceptions import GenerationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
@@ -42,8 +42,8 @@ from vllm.multimodal.inputs import (
 from vllm.outputs import RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.utils.collection_utils import as_list
-from vllm.utils.serial_utils import numpy2base64
+from vllm.foundation.utilities.collection_utils import as_list
+from vllm.foundation.utilities.serial_utils import numpy2base64
 
 from .mm_serde import decode_mm_kwargs_item
 from .protocol import (

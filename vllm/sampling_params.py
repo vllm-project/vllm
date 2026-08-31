@@ -14,12 +14,12 @@ import msgspec
 from pydantic import BeforeValidator
 from pydantic.dataclasses import dataclass
 
-import vllm.envs as envs
-from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)

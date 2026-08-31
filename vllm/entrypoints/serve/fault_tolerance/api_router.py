@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import validate_json_request
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 
 logger = init_logger(__name__)

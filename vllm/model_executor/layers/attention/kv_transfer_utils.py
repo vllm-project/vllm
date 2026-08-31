@@ -9,7 +9,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
     is_v1_kv_transfer_group,
 )
-from vllm.utils.torch_utils import _resolve_layer_name
+from vllm.foundation.utilities.torch_utils import _resolve_layer_name
 
 
 def maybe_transfer_kv_layer(func: Callable) -> Callable:

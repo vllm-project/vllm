@@ -11,9 +11,9 @@ import torch
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm.config import ModelConfig
-from vllm.config.load import LoadConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import ModelConfig
+from vllm.foundation.config.load import LoadConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
@@ -35,7 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
 from vllm.foundation.observability.tracing import instrument
-from vllm.transformers_utils.repo_utils import list_filtered_repo_files
+from vllm.foundation.integrations.transformers_utils.repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
 
@@ -355,7 +355,7 @@ class DefaultModelLoader(BaseModelLoader):
         expert weights.  By computing the set upfront we can skip non-local
         expert tensors *before* reading them from disk.
         """
-        from vllm.config import get_current_vllm_config
+        from vllm.foundation.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config

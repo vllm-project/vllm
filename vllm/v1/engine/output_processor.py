@@ -27,7 +27,7 @@ from vllm.foundation.observability.tracing import (
     extract_trace_context,
     instrument_manual,
 )
-from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor

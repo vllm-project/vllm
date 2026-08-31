@@ -13,7 +13,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 __all__ = [
     "BasevLLMParameter",

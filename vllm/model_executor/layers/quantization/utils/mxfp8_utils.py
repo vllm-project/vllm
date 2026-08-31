@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 # MXFP8 constants
 MXFP8_VALUE_DTYPE = torch.float8_e4m3fn
@@ -184,7 +184,7 @@ def _mxfp8_e4m3_quantize_impl(
     alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.platforms import current_platform
-    from vllm.utils.flashinfer import has_flashinfer
+    from vllm.foundation.utilities.flashinfer import has_flashinfer
 
     if current_platform.has_device_capability(100) and has_flashinfer():
         from flashinfer import mxfp8_quantize as flashinfer_mxfp8_quantize

@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,

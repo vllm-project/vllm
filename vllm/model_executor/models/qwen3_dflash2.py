@@ -7,7 +7,7 @@ from torch import nn
 
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig

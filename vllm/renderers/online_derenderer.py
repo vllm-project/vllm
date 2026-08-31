@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.base.protocol import DeltaMessage, ToolCall
 from vllm.entrypoints.generate.base.serving import resolve_token_id_placeholder
@@ -29,13 +29,13 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
-from vllm.utils import random_uuid
-from vllm.utils.async_utils import make_async
+from vllm.foundation.utilities import random_uuid
+from vllm.foundation.utilities.async_utils import make_async
 
 logger = init_logger(__name__)
 

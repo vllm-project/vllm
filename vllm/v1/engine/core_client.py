@@ -22,14 +22,14 @@ import zmq
 import zmq.asyncio
 
 from vllm import envs
-from vllm.config import VllmConfig
-from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.system.envs import VLLM_ENGINE_READY_TIMEOUT_S
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.foundation.observability.tracing import instrument
-from vllm.utils.async_utils import in_loop
-from vllm.utils.network_utils import (
+from vllm.foundation.utilities.async_utils import in_loop
+from vllm.foundation.utilities.network_utils import (
     close_sockets,
     get_open_zmq_inproc_path,
     make_zmq_socket,
@@ -1694,7 +1694,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     def _setup_elastic_ep_reconfig_bootstrap(self) -> None:
         from vllm.distributed.utils import create_tcp_store
-        from vllm.utils.network_utils import get_open_ports_list
+        from vllm.foundation.utilities.network_utils import get_open_ports_list
 
         parallel_config = self.vllm_config.parallel_config
         parallel_config._data_parallel_master_port_list = get_open_ports_list(5)

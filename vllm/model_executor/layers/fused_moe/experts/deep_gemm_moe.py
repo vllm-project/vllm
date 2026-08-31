@@ -4,7 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -37,7 +37,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Static,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import (
+from vllm.foundation.utilities.deep_gemm import (
     DeepGemmQuantScaleFMT,
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_supported,
@@ -45,7 +45,7 @@ from vllm.utils.deep_gemm import (
     m_grouped_fp8_gemm_nt_contiguous,
     mk_alignment_scope,
 )
-from vllm.utils.import_utils import has_deep_gemm
+from vllm.foundation.utilities.import_utils import has_deep_gemm
 
 logger = init_logger(__name__)
 

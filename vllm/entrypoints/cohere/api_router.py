@@ -37,7 +37,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -45,7 +45,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 _COHERE_PATH_PREFIX = "/cohere/"
 

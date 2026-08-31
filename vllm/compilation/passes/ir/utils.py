@@ -4,7 +4,7 @@ from torch import fx
 from torch._ops import OpOverload, OpOverloadPacket
 
 from vllm.ir.op import IrOp
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

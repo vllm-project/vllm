@@ -4,7 +4,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import aux_stream
+from vllm.foundation.utilities.torch_utils import aux_stream
 
 LOW_BLOCK_M = 32
 LOW_BLOCK_N = 64

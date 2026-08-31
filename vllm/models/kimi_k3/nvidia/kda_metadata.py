@@ -17,10 +17,10 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,

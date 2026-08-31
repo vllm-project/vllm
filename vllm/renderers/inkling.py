@@ -13,16 +13,16 @@ in :meth:`InklingRenderer._render` for adopting a standalone Inkling
 input-processing library (mistral-common style) later.
 """
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.tokenizers.hf import HfTokenizer
-from vllm.utils.async_utils import make_async
+from vllm.foundation.utilities.async_utils import make_async
 
 from .base import BaseRenderer
 from .inkling_encoding import SPECIAL_TOKEN_SPELLINGS, render_inkling_messages

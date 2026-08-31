@@ -13,8 +13,8 @@ from pydantic import (
     model_validator,
 )
 
-from vllm.logger import init_logger
-from vllm.utils import random_uuid
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities import random_uuid
 
 logger = init_logger(__name__)
 

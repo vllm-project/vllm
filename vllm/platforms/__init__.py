@@ -7,8 +7,8 @@ from itertools import chain
 from typing import TYPE_CHECKING
 
 from vllm import envs
-from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
-from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.foundation.extensibility.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
+from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 
 from .interface import CpuArchEnum, Platform, PlatformEnum, in_wsl
 
@@ -60,7 +60,7 @@ def cuda_platform_plugin() -> str | None:
     is_cuda = False
     logger.debug("Checking if CUDA platform is available.")
     try:
-        from vllm.utils.import_utils import import_pynvml
+        from vllm.foundation.utilities.import_utils import import_pynvml
 
         pynvml = import_pynvml()
         pynvml.nvmlInit()

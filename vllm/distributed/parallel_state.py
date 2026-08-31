@@ -42,7 +42,7 @@ import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
 from torch.distributed import Backend, ProcessGroup, Store
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
@@ -50,11 +50,11 @@ from vllm.distributed.utils import (
     StatelessProcessGroup,
     get_cached_tcp_store_client,
 )
-from vllm.logger import init_logger
-from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.network_utils import get_distributed_init_method
-from vllm.utils.system_utils import suppress_stdout
-from vllm.utils.torch_utils import (
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
+from vllm.foundation.utilities.network_utils import get_distributed_init_method
+from vllm.foundation.utilities.system_utils import suppress_stdout
+from vllm.foundation.utilities.torch_utils import (
     direct_register_custom_op,
 )
 
@@ -1736,7 +1736,7 @@ def init_distributed_environment(
         distributed_init_method,
         backend,
     )
-    from vllm.config import get_current_vllm_config_or_none
+    from vllm.foundation.config import get_current_vllm_config_or_none
 
     config = get_current_vllm_config_or_none()
     enable_elastic_ep = config is not None and config.parallel_config.enable_elastic_ep
@@ -1918,7 +1918,7 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
 
-    from vllm.config import get_current_vllm_config
+    from vllm.foundation.config import get_current_vllm_config
 
     config = get_current_vllm_config()
     data_parallel_size = config.parallel_config.data_parallel_size

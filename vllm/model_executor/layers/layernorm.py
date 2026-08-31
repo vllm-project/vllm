@@ -9,7 +9,7 @@ import torch.nn.functional as F
 # Import kernels
 import vllm.kernels  # noqa: F401
 from vllm import envs, ir
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
 

@@ -7,8 +7,8 @@ from torch._inductor.pattern_matcher import (
     PatternMatcherPass,
 )
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 
 from ..inductor_pass import get_pass_context
 from ..vllm_inductor_pass import VllmInductorPass

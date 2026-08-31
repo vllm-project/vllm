@@ -5,8 +5,8 @@ from typing import Any
 
 import torch
 
-from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
-from vllm.logger import init_logger
+from vllm.foundation.config.quantization import QuantizationConfigArgs, QuantSpec
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
 )

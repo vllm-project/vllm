@@ -16,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-from vllm.utils.deep_gemm import (
+from vllm.foundation.utilities.deep_gemm import (
     is_deep_gemm_e8m0_used,
 )
 

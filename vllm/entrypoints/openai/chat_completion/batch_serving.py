@@ -20,12 +20,12 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import EngineInput
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.async_utils import merge_async_iterators
-from vllm.utils.collection_utils import as_list
+from vllm.foundation.utilities.async_utils import merge_async_iterators
+from vllm.foundation.utilities.collection_utils import as_list
 
 logger = init_logger(__name__)
 

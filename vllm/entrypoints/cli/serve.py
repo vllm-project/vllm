@@ -8,7 +8,7 @@ import time
 import uvloop
 
 import vllm
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
 from vllm.entrypoints.launchers.cli_args import (
@@ -17,10 +17,10 @@ from vllm.entrypoints.launchers.cli_args import (
 )
 from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.usage.usage_lib import UsageContext
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.network_utils import get_tcp_uri
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.network_utils import get_tcp_uri
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor

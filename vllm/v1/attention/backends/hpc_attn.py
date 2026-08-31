@@ -14,9 +14,9 @@ from typing import ClassVar
 import torch
 from typing_extensions import override
 
-from vllm.config import VllmConfig
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (

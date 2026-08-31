@@ -4,7 +4,7 @@ from collections.abc import Sequence
 
 import torch
 
-from vllm.utils.platform_utils import is_uva_available
+from vllm.foundation.utilities.platform_utils import is_uva_available
 
 
 class UvaBuffer:

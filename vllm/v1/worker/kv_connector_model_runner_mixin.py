@@ -8,7 +8,7 @@ from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import TYPE_CHECKING
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context

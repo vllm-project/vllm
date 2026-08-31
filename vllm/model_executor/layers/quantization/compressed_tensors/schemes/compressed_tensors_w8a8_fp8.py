@@ -8,8 +8,8 @@ from compressed_tensors.quantization import QuantizationArgs, QuantizationStrate
 from torch.nn import Parameter
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import get_current_vllm_config
-from vllm.logger import init_logger
+from vllm.foundation.config import get_current_vllm_config
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )

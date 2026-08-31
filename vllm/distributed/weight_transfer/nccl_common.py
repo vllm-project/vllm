@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Protocol
 import torch
 
 if TYPE_CHECKING:
-    from vllm.config.parallel import ParallelConfig
+    from vllm.foundation.config.parallel import ParallelConfig
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
 from vllm.distributed.weight_transfer.base import WeightTransferInitInfo

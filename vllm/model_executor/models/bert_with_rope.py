@@ -7,7 +7,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,

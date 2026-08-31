@@ -10,9 +10,9 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_activation_quant,
     get_fp8_min_max,
@@ -29,12 +29,12 @@ from vllm.model_executor.parameter import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import (
+from vllm.foundation.utilities.deep_gemm import (
     get_tma_aligned_size,
     is_deep_gemm_e8m0_used,
     transform_sf_into_required_layout,
 )
-from vllm.utils.platform_utils import get_device_name_as_file_name
+from vllm.foundation.utilities.platform_utils import get_device_name_as_file_name
 
 logger = init_logger(__name__)
 
@@ -1012,7 +1012,7 @@ def requant_weight_ue8m0_inplace(
             f"Expected *weight* to be torch.float8_e4m3fn, got {weight.dtype} instead."
         )
 
-    from vllm.utils.deep_gemm import per_block_cast_to_fp8
+    from vllm.foundation.utilities.deep_gemm import per_block_cast_to_fp8
 
     block_m, block_k = int(block_size[0]), int(block_size[1])
 

@@ -3,7 +3,7 @@
 import torch
 from transformers import PretrainedConfig
 
-from vllm.config import (
+from vllm.foundation.config import (
     VllmConfig,
 )
 from vllm.distributed import (

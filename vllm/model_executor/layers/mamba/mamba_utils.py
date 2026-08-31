@@ -8,12 +8,12 @@ from typing import Literal, TypeAlias
 
 import torch
 
-import vllm.envs as envs
-from vllm.config.cache import MambaDType
-from vllm.config.model import ModelDType
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config.cache import MambaDType
+from vllm.foundation.config.model import ModelDType
 from vllm.distributed import divide
-from vllm.logger import init_logger
-from vllm.utils.torch_utils import (
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     get_kv_cache_torch_dtype,
 )

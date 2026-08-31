@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
 from vllm.multimodal.utils import (
     copy_mm_embedding_modality,

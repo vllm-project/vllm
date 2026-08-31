@@ -31,9 +31,9 @@ from torch import nn
 from transformers import Qwen3Config
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.encoder_only_attention import (
     Attention,
     EncoderOnlyAttention,
@@ -45,7 +45,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.foundation.integrations.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (

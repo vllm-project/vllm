@@ -6,7 +6,7 @@ from typing import Literal
 import numpy as np
 import numpy.typing as npt
 
-from vllm.utils.import_utils import PlaceholderModule, check_torchcodec_available
+from vllm.foundation.utilities.import_utils import PlaceholderModule, check_torchcodec_available
 
 from .base import (
     VideoSourceMetadata,

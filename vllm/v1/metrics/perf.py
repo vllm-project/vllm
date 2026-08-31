@@ -18,10 +18,10 @@ import torch
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from typing_extensions import Self
 
-import vllm.envs as envs
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
-from vllm.utils.torch_utils import (
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     get_dtype_size,
     get_kv_cache_torch_dtype,

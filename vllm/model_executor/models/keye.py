@@ -16,11 +16,11 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.utils import torch_int
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import ModalityData, MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
@@ -58,8 +58,8 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,

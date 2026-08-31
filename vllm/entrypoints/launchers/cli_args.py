@@ -12,8 +12,8 @@ from collections.abc import Sequence
 from dataclasses import field
 from typing import Any, Literal
 
-import vllm.envs as envs
-from vllm.config import config
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -21,7 +21,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.tool_parsers import ToolParserManager
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
 from .utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,

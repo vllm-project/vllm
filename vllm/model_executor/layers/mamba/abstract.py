@@ -6,9 +6,9 @@ from math import prod
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.foundation.utilities.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.selector import get_mamba_attn_backend

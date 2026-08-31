@@ -12,13 +12,13 @@ from vllm.kernels.helion.utils import (
     get_int8_min_max,
     get_int8_min_scaling_factor,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_helion
+from vllm.foundation.utilities.import_utils import has_helion
 
 if not has_helion():
     raise ImportError(

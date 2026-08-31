@@ -11,8 +11,8 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_captured_lora_counts
 
 if TYPE_CHECKING:
-    from vllm.config.compilation import CompilationConfig
-    from vllm.config.lora import LoRAConfig
+    from vllm.foundation.config.compilation import CompilationConfig
+    from vllm.foundation.config.lora import LoRAConfig
 
 NO_LORA_ID = 0
 

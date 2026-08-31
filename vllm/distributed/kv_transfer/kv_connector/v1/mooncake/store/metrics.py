@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from statistics import fmean
 from typing import Any
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,

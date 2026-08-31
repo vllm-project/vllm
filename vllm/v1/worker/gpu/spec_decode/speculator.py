@@ -8,10 +8,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.config.compilation import CUDAGraphMode
+from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config
+from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.distributed.eplb.eplb_state import EplbState
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY

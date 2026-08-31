@@ -10,7 +10,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
@@ -23,7 +23,7 @@ from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
-from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from ...linear import (

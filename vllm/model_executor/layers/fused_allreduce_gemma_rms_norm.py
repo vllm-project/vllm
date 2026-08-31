@@ -55,7 +55,7 @@ _FI_SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | None:
     """Workspace token budget for flashinfer fused all-reduce, or None if the
     current world size / device is unsupported. Mirrors ``FlashInferAllReduce``."""
-    from vllm.config.compilation import PassConfig
+    from vllm.foundation.config.compilation import PassConfig
 
     max_size_mb = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(tp_size)
     if not max_size_mb:

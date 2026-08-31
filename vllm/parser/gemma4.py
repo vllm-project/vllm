@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (

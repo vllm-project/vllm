@@ -17,7 +17,7 @@ import torch
 from torch.library import wrap_triton
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
+from vllm.foundation.utilities.math_utils import cdiv
 
 
 @triton.jit

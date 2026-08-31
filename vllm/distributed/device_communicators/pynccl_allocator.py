@@ -12,9 +12,9 @@ from torch.utils.cpp_extension import load_inline
 
 from vllm import envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.nccl import find_nccl_include_paths, find_nccl_library_paths
+from vllm.foundation.utilities.nccl import find_nccl_include_paths, find_nccl_library_paths
 
 logger = init_logger(__name__)
 

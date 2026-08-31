@@ -17,7 +17,7 @@ from collections import namedtuple
 
 import regex as re
 
-from vllm.envs import environment_variables
+from vllm.foundation.system.envs import environment_variables
 
 try:
     import torch

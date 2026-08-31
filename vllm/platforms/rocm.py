@@ -12,15 +12,15 @@ import torch
 from torch.distributed import PrefixStore, ProcessGroup
 from torch.distributed.distributed_c10d import is_nccl_available
 
-import vllm.envs as envs
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-    from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.foundation.config import VllmConfig
+    from vllm.foundation.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
@@ -584,7 +584,7 @@ class RocmPlatform(Platform):
             attn_selector_config.use_sparse,
             attn_selector_config.use_kv_connector,
         )
-        from vllm.config import get_current_vllm_config_or_none
+        from vllm.foundation.config import get_current_vllm_config_or_none
 
         vllm_config = get_current_vllm_config_or_none()
         is_encoder_decoder = (
@@ -895,7 +895,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        from vllm.config.compilation import CUDAGraphMode
+        from vllm.foundation.config.compilation import CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
@@ -1101,8 +1101,8 @@ class RocmPlatform(Platform):
     def get_default_ir_op_priority(
         cls, vllm_config: "VllmConfig"
     ) -> "IrOpPriorityConfig":
-        from vllm.config.compilation import CompilationMode, CUDAGraphMode
-        from vllm.config.kernel import IrOpPriorityConfig
+        from vllm.foundation.config.compilation import CompilationMode, CUDAGraphMode
+        from vllm.foundation.config.kernel import IrOpPriorityConfig
 
         # Native used by default when compiling,
         # use vllm_c kernels where available when no codegen

@@ -8,16 +8,16 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 
 from vllm import envs
-from vllm.config import VllmConfig
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
     SparseMLACommonMetadataBuilder,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -106,7 +106,7 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        from vllm.config import get_current_vllm_config
+        from vllm.foundation.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
         if kv_cache_dtype == "fp8_ds_mla":
@@ -173,8 +173,8 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        from vllm.config import get_current_vllm_config
-        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
+        from vllm.foundation.config import get_current_vllm_config
+        from vllm.foundation.utilities.flashinfer import has_flashinfer_sparse_mla_sm120
 
         if not has_flashinfer_sparse_mla_sm120():
             return (

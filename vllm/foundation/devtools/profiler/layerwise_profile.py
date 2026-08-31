@@ -20,7 +20,7 @@ from vllm.foundation.devtools.profiler.utils import (
     event_torch_op_stack_trace,
     indent_string,
 )
-from vllm.utils.import_utils import PlaceholderModule
+from vllm.foundation.utilities.import_utils import PlaceholderModule
 
 try:
     import pandas as pd

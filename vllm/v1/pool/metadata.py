@@ -7,7 +7,7 @@ import torch
 
 from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 
 
 @dataclass

@@ -31,10 +31,10 @@ from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear

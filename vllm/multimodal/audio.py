@@ -9,7 +9,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from vllm.utils.import_utils import PlaceholderModule
+from vllm.foundation.utilities.import_utils import PlaceholderModule
 
 try:
     import av as av

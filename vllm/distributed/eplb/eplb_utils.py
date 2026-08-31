@@ -7,8 +7,8 @@ import threading
 
 import torch
 
-from vllm.config import ParallelConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import ParallelConfig
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

@@ -6,8 +6,8 @@ import torch
 from transformers import PretrainedConfig
 
 from vllm import envs
-from vllm.config import get_current_vllm_config
-from vllm.config.lora import LoRAConfig
+from vllm.foundation.config import get_current_vllm_config
+from vllm.foundation.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
 from vllm.forward_context import (
     ForwardContext,
@@ -22,8 +22,8 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.platforms import current_platform
-from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_aux_cuda_stream, _get_lora_device

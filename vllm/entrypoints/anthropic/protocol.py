@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 
 
 class AnthropicError(BaseModel):

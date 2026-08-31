@@ -20,14 +20,14 @@ from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
 from transformers import PretrainedConfig
 
-import vllm.envs as envs
-from vllm.config import ModelConfig, ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import ModelConfig, ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
-from vllm.transformers_utils.repo_utils import hf_api
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.import_utils import PlaceholderModule
+from vllm.foundation.integrations.transformers_utils.repo_utils import hf_api
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.import_utils import PlaceholderModule
 
 if TYPE_CHECKING:
     from vllm.engine.arg_utils import EngineArgs

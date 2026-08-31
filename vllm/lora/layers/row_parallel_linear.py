@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config.lora import LoRAConfig
+from vllm.foundation.config.lora import LoRAConfig
 from vllm.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_reduce,

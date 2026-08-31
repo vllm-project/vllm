@@ -10,7 +10,7 @@ import torch
 from transformers import BatchFeature
 from transformers.video_utils import VideoMetadata
 
-from vllm.config.multimodal import (
+from vllm.foundation.config.multimodal import (
     BaseDummyOptions,
     ImageDummyOptions,
     VideoDummyOptions,
@@ -39,8 +39,8 @@ from vllm.multimodal.video import (
     VideoSourceMetadata,
     VideoTargetMetadata,
 )
-from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
-from vllm.transformers_utils.processors.minimax_m3 import (
+from vllm.foundation.integrations.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
+from vllm.foundation.integrations.transformers_utils.processors.minimax_m3 import (
     MIN_SHORT_SIDE_PIXEL,
     MiniMaxM3VLImageProcessor,
     MiniMaxM3VLVideoProcessor,

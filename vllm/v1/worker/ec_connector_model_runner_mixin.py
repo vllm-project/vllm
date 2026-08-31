@@ -12,7 +12,7 @@ import torch
 
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.outputs import ECConnectorOutput
 
 if TYPE_CHECKING:

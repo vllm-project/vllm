@@ -9,8 +9,8 @@ import os
 from dataclasses import MISSING, dataclass, field, fields
 from typing import Literal
 
-from vllm.config.lora import LoRAConfig
-from vllm.logger import init_logger
+from vllm.foundation.config.lora import LoRAConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 logger = init_logger(__name__)

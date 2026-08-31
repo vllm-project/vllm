@@ -6,14 +6,14 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 
-import vllm.envs as envs
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
-from vllm.utils.flashinfer import (
+from vllm.foundation.utilities.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
-from vllm.utils.math_utils import cdiv
+from vllm.foundation.utilities.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -50,7 +50,7 @@ def create_fp4_scale_tensor(
     https://docs.nvidia.com/cuda/parallel-thread-execution/
     #tcgen05-mma-scale-factor-b-layout-4x
     """
-    from vllm.utils.math_utils import round_up
+    from vllm.foundation.utilities.math_utils import round_up
 
     block_size = 16
     if is_sf_swizzled_layout:

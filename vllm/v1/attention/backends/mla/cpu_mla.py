@@ -31,8 +31,8 @@ from typing import ClassVar
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,

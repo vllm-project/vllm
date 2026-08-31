@@ -10,14 +10,14 @@ import torch
 from safetensors.torch import load as safetensors_load
 from torch import nn
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
-from vllm.transformers_utils.repo_utils import get_hf_file_bytes
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_bytes
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..layers.pooler import DispatchPooler

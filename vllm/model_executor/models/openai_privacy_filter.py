@@ -12,7 +12,7 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.attention.encoder_only_attention import (
     EncoderOnlyAttention,
 )

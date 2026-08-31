@@ -9,9 +9,9 @@ import regex as re
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
-from vllm.config import VllmConfig
-from vllm.config.kernel import MEGA_MOE_BACKENDS
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.kernel import MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -20,7 +20,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_fused_post_pre_tilelang,
@@ -84,11 +84,11 @@ from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.flashinfer_moe_ep import (
+from vllm.foundation.utilities.flashinfer_moe_ep import (
     is_fi_moe_ep_backend,
     validate_fi_moe_ep_config,
 )
-from vllm.utils.math_utils import cdiv
+from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
@@ -498,7 +498,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         ).squeeze(0)
 
     def finalize_weights(self, shared_experts: DeepseekV4MLP | None = None) -> None:
-        from vllm.utils.deep_gemm import _import_deep_gemm
+        from vllm.foundation.utilities.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
 
@@ -555,7 +555,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         return self._transformed_shared_l1_weights is not None
 
     def get_symm_buffer(self):
-        from vllm.utils.deep_gemm import _import_deep_gemm
+        from vllm.foundation.utilities.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
 
@@ -653,7 +653,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
 
-        from vllm.utils.deep_gemm import _import_deep_gemm
+        from vllm.foundation.utilities.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
 

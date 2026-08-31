@@ -14,7 +14,7 @@ import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import RCP_LN2, cdiv, next_power_of_2
+from vllm.foundation.utilities.math_utils import RCP_LN2, cdiv, next_power_of_2
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .cumsum import chunk_local_cumsum

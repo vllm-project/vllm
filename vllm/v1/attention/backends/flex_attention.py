@@ -22,14 +22,14 @@ from torch.nn.attention.flex_attention import (
     or_masks,
 )
 
-import vllm.envs as envs
-from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.torch_utils import (
     async_tensor_h2d,
     is_quantized_kv_cache,
     is_torch_equal_or_newer,

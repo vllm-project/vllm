@@ -24,9 +24,9 @@ from vllm.inputs import (
     mm_enc_dec_input,
     mm_input,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
+from vllm.foundation.utilities.collection_utils import flatten_2d_lists, full_groupby
 
 from ..inputs import (
     MultiModalFieldConfig,
@@ -448,7 +448,7 @@ _M = TypeVar("_M", bound=_HasModalityAttr | _HasModalityProp)
 def full_groupby_modality(values: Iterable[_M]) -> ItemsView[str, list[_M]]:
     """
     Convenience function to apply
-    [`full_groupby`][vllm.utils.collection_utils.full_groupby]
+    [`full_groupby`][vllm.foundation.utilities.collection_utils.full_groupby]
     based on modality.
     """
     return full_groupby(values, key=lambda x: x.modality)

@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.config.cache import CacheDType
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
@@ -23,7 +23,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4SparseMLABackend,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
+from vllm.foundation.utilities.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
@@ -154,7 +154,7 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
         if device_capability.major == 12:
             if kv_cache_dtype not in ("fp8", "fp8_e4m3", "fp8_ds_mla"):
                 return "kv_cache_dtype not supported"
-            from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
+            from vllm.foundation.utilities.flashinfer import has_flashinfer_sparse_mla_sm120
 
             if not has_flashinfer_sparse_mla_sm120():
                 return (
@@ -566,7 +566,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
 
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)
-        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120_config
+        from vllm.foundation.utilities.flashinfer import has_flashinfer_sparse_mla_sm120_config
 
         required_topk = _required_sm120_sparse_topk(vllm_config, self.window_size)
         if not has_flashinfer_sparse_mla_sm120_config(self.padded_heads, required_topk):

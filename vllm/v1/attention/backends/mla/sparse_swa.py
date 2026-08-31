@@ -5,7 +5,7 @@ from typing import ClassVar, cast
 
 import torch
 
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.foundation.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
@@ -14,7 +14,7 @@ from vllm.model_executor.warmup.jit_warmup import (
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv, next_power_of_2
+from vllm.foundation.utilities.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

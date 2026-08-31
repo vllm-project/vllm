@@ -31,11 +31,11 @@ import torch.nn as nn
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.whisper import WhisperFeatureExtractor
 
-from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     StreamingTranscriptionPostProcessor,
@@ -85,16 +85,16 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.configs.qwen3_asr import (
+from vllm.foundation.integrations.transformers_utils.configs.qwen3_asr import (
     Qwen3ASRConfig,
     Qwen3ASRThinkerConfig,
 )
-from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.processors.qwen3_asr import (
+from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
+from vllm.foundation.integrations.transformers_utils.processors.qwen3_asr import (
     Qwen3ASRProcessor,
 )
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"

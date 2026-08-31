@@ -26,8 +26,8 @@ from starlette.responses import JSONResponse
 from tqdm import tqdm
 from urllib3.util import parse_url
 
-import vllm.envs as envs
-from vllm.config import config
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import config
 from vllm.foundation.system.connections import HTTPResponseSizeExceededError, global_http_connection
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
@@ -62,11 +62,11 @@ from vllm.entrypoints.speech_to_text.translation.protocol import (
     TranslationResponseVerbose,
 )
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.utils import random_uuid
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.mem_constants import MiB_bytes
+from vllm.foundation.utilities import random_uuid
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.mem_constants import MiB_bytes
 from vllm.version import __version__ as VLLM_VERSION
 
 from .api_server.entry import init_app_state

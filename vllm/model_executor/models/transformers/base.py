@@ -36,10 +36,10 @@ from transformers.conversion_mapping import (
 )
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config.utils import getattr_iter
+from vllm.foundation.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
@@ -82,7 +82,7 @@ from vllm.sequence import IntermediateTensors
 if TYPE_CHECKING:
     from transformers import PreTrainedModel
 
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 logger = init_logger(__name__)
 

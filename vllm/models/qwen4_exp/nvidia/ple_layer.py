@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -33,10 +33,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.model_executor.parameter import PerTensorScaleParameter
-from vllm.transformers_utils.configs.qwen4_exp import (
+from vllm.foundation.integrations.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,

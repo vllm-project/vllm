@@ -28,8 +28,8 @@ from transformers import (
     Idefics3Processor,
 )
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -52,8 +52,8 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import (
     Idefics2VisionTransformer as Idefics3VisionTransformer,

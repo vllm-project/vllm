@@ -12,16 +12,16 @@ from typing import Any
 import torch
 from torch import nn
 
-from vllm.config import ModelConfig
-from vllm.config.load import LoadConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import ModelConfig
+from vllm.foundation.config.load import LoadConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     runai_safetensors_weights_iterator,
 )
-from vllm.transformers_utils.s3_utils import glob as s3_glob
-from vllm.transformers_utils.utils import is_s3
+from vllm.foundation.integrations.transformers_utils.s3_utils import glob as s3_glob
+from vllm.foundation.integrations.transformers_utils.utils import is_s3
 
 logger = init_logger(__name__)
 

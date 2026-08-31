@@ -32,7 +32,7 @@ from vllm.model_executor.models.phi4mm_utils import (
     get_offset,
     unfold_tensor,
 )
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 
 class ConformerEncoderLayer(nn.Module):

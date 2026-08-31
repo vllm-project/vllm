@@ -50,7 +50,7 @@ import torch
 
 from vllm.distributed import get_tp_group
 from vllm.distributed.parallel_state import in_the_same_node_as
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)

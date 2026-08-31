@@ -9,8 +9,8 @@ from fastapi import FastAPI
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
-from vllm.logger import init_logger
-from vllm.utils.gc_utils import freeze_gc_heap
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.gc_utils import freeze_gc_heap
 
 logger = init_logger(__name__)
 

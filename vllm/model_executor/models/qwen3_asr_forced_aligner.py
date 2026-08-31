@@ -7,7 +7,7 @@ from collections.abc import Iterable
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
 from vllm.model_executor.models.interfaces_base import default_pooling_type
 from vllm.model_executor.models.qwen3_asr import (

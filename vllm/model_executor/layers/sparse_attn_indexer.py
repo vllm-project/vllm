@@ -4,27 +4,27 @@
 
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode, get_current_vllm_config
+from vllm.foundation.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import (
+from vllm.foundation.utilities.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
     has_deep_gemm,
 )
-from vllm.utils.import_utils import has_cutedsl
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.import_utils import has_cutedsl
+from vllm.foundation.utilities.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,

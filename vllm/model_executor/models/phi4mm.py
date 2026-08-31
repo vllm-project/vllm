@@ -15,8 +15,8 @@ from transformers import (
     SiglipVisionConfig,
 )
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -50,8 +50,8 @@ from vllm.multimodal.processing.processor import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal

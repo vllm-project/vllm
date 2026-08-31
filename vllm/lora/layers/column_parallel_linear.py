@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config.lora import LoRAConfig
+from vllm.foundation.config.lora import LoRAConfig
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.utils import divide
 from vllm.model_executor.custom_op import maybe_get_oot_by_class

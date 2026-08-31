@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,

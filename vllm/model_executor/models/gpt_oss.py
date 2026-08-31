@@ -9,7 +9,7 @@ from torch import nn
 from transformers import GptOssConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -49,7 +49,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.math_utils import cdiv
+from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (

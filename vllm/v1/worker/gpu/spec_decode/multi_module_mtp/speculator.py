@@ -5,10 +5,10 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer

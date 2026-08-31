@@ -5,7 +5,7 @@
 from pathlib import Path
 from typing import Any
 
-from vllm.utils.import_utils import PlaceholderModule
+from vllm.foundation.utilities.import_utils import PlaceholderModule
 
 try:
     import plotly.express as px

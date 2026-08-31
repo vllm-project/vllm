@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import prometheus_client
 
-from vllm.config import SpeculativeConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import SpeculativeConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.metrics.utils import create_metric_per_engine
 
 logger = init_logger(__name__)

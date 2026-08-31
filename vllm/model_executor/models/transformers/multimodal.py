@@ -26,9 +26,9 @@ import transformers
 from packaging.version import Version
 
 from vllm.compilation.decorators import should_torch_compile_mm_encoder
-from vllm.config.utils import getattr_iter
+from vllm.foundation.config.utils import getattr_iter
 from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMRoPE,
@@ -59,13 +59,13 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 
 if TYPE_CHECKING:
     from transformers import BatchFeature, PreTrainedModel
 
-    from vllm.config import VllmConfig
-    from vllm.config.multimodal import BaseDummyOptions
+    from vllm.foundation.config import VllmConfig
+    from vllm.foundation.config.multimodal import BaseDummyOptions
 
 logger = init_logger(__name__)
 

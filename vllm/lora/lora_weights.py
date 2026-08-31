@@ -7,7 +7,7 @@ import torch
 import torch.types
 
 from vllm.lora.peft_helper import PEFTHelper
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 
 
 class LoRALayerWeights:

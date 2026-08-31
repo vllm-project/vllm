@@ -8,8 +8,8 @@ import torch
 import torch.nn as nn
 from transformers import BatchFeature
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (
@@ -42,12 +42,12 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import OpenVLAConfig
-from vllm.transformers_utils.processors.openvla import (
+from vllm.foundation.integrations.transformers_utils.configs import OpenVLAConfig
+from vllm.foundation.integrations.transformers_utils.processors.openvla import (
     OpenVLAImageProcessor,
     OpenVLAProcessor,
 )
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .module_mapping import MultiModelKeys
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix

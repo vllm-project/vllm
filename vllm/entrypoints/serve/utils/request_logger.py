@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams

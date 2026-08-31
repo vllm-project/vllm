@@ -14,7 +14,7 @@ import numpy as np
 from fastapi import Request
 from transformers import PreTrainedTokenizerBase
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
@@ -28,7 +28,7 @@ from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.inputs import EncoderDecoderInput, EngineInput
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
 from vllm.multimodal.audio import get_audio_duration, split_audio
@@ -38,7 +38,7 @@ from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
-from vllm.utils.async_utils import make_async_with_semaphore, merge_async_iterators
+from vllm.foundation.utilities.async_utils import make_async_with_semaphore, merge_async_iterators
 
 from ..transcription.protocol import (
     TranscriptionResponse,

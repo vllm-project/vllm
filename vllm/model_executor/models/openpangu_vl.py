@@ -31,7 +31,7 @@ from einops import rearrange
 from torchvision.transforms import v2
 from transformers.utils import logging
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
@@ -78,7 +78,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .vision import get_vit_attn_backend

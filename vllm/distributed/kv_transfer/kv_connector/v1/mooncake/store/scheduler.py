@@ -5,7 +5,7 @@
 # (vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/).
 """Scheduler-side logic for MooncakeStoreConnector."""
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
@@ -22,7 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (  # noqa: E501
     LookupKeyClient,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks

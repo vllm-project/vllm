@@ -8,15 +8,15 @@ from typing import ClassVar
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
+from vllm.foundation.utilities.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

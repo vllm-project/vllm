@@ -11,7 +11,7 @@ the fused allreduce+RMSNorm path share a single AITER instance with its IPC buff
 import torch
 from torch.distributed import ProcessGroup
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

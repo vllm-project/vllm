@@ -8,7 +8,7 @@ from multiprocessing.synchronize import Lock as LockType
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, cast
 
 from vllm.inputs import MultiModalInput
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 
 from .cache import (
@@ -29,7 +29,7 @@ from .processing import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, ObservabilityConfig, VllmConfig
+    from vllm.foundation.config import ModelConfig, ObservabilityConfig, VllmConfig
     from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 logger = init_logger(__name__)

@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from vllm.distributed.kv_transfer.kv_connector.utils import EngineId
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 WorkerAddr = str
 

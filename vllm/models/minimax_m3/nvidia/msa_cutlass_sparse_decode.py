@@ -9,7 +9,7 @@ from typing import Any
 
 import torch
 
-from vllm.config.attention import MiniMaxM3MSADecodeBackend
+from vllm.foundation.config.attention import MiniMaxM3MSADecodeBackend
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 

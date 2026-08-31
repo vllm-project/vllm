@@ -39,8 +39,8 @@ from transformers.models.whisper.modeling_whisper import (
     WhisperEncoder,
 )
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
@@ -60,7 +60,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .minicpmv import (
     _MAX_FRAMES_PER_VIDEO,
@@ -82,7 +82,7 @@ from .utils import (
 CPU_DEVICE = torch.device("cpu")
 
 if TYPE_CHECKING:
-    from vllm.transformers_utils.processors.minicpmo import MiniCPMOProcessor
+    from vllm.foundation.integrations.transformers_utils.processors.minicpmo import MiniCPMOProcessor
 
 if os.getenv("USE_FLAGOS") == "1":
     import flag_gems
@@ -293,7 +293,7 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         hf_processor = self.ctx.get_hf_processor(**kwargs)
         image_processor = self._get_checkpoint_image_processor(**kwargs)
 
-        from vllm.transformers_utils.processors.minicpmo import MiniCPMOProcessor
+        from vllm.foundation.integrations.transformers_utils.processors.minicpmo import MiniCPMOProcessor
 
         # Create vendored processor with correct configuration
         vendored_processor = MiniCPMOProcessor(

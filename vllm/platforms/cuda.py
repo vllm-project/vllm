@@ -24,17 +24,17 @@ import vllm._C_stable_libtorch  # noqa
 
 with contextlib.suppress(ImportError):
     import vllm._qutlass_C  # noqa
-import vllm.envs as envs
-from vllm.logger import init_logger
-from vllm.utils.import_utils import import_pynvml
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import import_pynvml
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-    from vllm.config.cache import CacheDType
-    from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.foundation.config import VllmConfig
+    from vllm.foundation.config.cache import CacheDType
+    from vllm.foundation.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
@@ -88,7 +88,7 @@ def _get_backend_priorities(
     use_non_causal: bool = False,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
-    from vllm.utils.torch_utils import is_quantized_kv_cache
+    from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 
     if use_mla:
         if device_capability.major == 10:
@@ -303,7 +303,7 @@ class CudaPlatformBase(Platform):
                 return False
             # On compatible WSL2 kernels, pinned memory is supported but
             # disabled by default. Enable it via VLLM_WSL2_ENABLE_PIN_MEMORY=1.
-            import vllm.envs as envs
+            import vllm.foundation.system.envs as envs
 
             return envs.VLLM_WSL2_ENABLE_PIN_MEMORY
         return True
@@ -694,8 +694,8 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_default_ir_op_priority(cls, vllm_config: VllmConfig) -> IrOpPriorityConfig:
-        from vllm.config.compilation import CompilationMode
-        from vllm.config.kernel import IrOpPriorityConfig
+        from vllm.foundation.config.compilation import CompilationMode
+        from vllm.foundation.config.kernel import IrOpPriorityConfig
 
         # Native used by default when compiling,
         # use vllm_c kernels where available when no codegen

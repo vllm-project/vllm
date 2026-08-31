@@ -4,9 +4,9 @@
 import torch
 from torch.nn.parameter import Parameter
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
 )
@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 # Actual aiter imports are deferred to the functions/methods that need them,
 # where HIP initialization is expected.
 if is_aiter_found_and_supported():
-    from vllm.utils.torch_utils import direct_register_custom_op
+    from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
     def gemm_with_dynamic_quant(
         x: torch.Tensor,

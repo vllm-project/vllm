@@ -16,11 +16,11 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.system_utils import update_environment_variables
+from vllm.foundation.utilities.system_utils import update_environment_variables
 
 logger = init_logger(__name__)
 

@@ -5,9 +5,9 @@
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import Response
 
-from vllm.config import ProfilerConfig
+from vllm.foundation.config import ProfilerConfig
 from vllm.engine.protocol import EngineClient
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

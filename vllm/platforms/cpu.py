@@ -11,13 +11,13 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm import envs
-from vllm.logger import init_logger
-from vllm.utils.cpu_resource_utils import (
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.cpu_resource_utils import (
     DEVICE_CONTROL_ENV_VAR,
     get_memory_node_info,
     get_visible_memory_node,
 )
-from vllm.utils.mem_constants import GiB_bytes
+from vllm.foundation.utilities.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -25,7 +25,7 @@ from .interface import CpuArchEnum, Platform, PlatformEnum
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -286,7 +286,7 @@ class CpuPlatform(Platform):
             parallel_config.enable_dbo = False
 
         # Note: workaround for v1 gpu_model_runner
-        from vllm.config import CompilationMode
+        from vllm.foundation.config import CompilationMode
 
         vllm_config.compilation_config.cudagraph_capture_sizes = []
 

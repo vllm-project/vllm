@@ -22,10 +22,10 @@ from torch import nn
 from transformers.models.gemma3n.configuration_gemma3n import Gemma3nTextConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import (
     _ACTIVATION_REGISTRY,
     GeluAndMul,

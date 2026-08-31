@@ -4,9 +4,9 @@
 
 from fastapi import UploadFile
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.utils.mem_constants import KiB_bytes, MiB_bytes
+from vllm.foundation.utilities.mem_constants import KiB_bytes, MiB_bytes
 
 _READ_CHUNK_SIZE = 64 * KiB_bytes
 

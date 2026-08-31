@@ -12,14 +12,14 @@ import torch
 import torch._inductor.compile_fx
 import torch.fx as fx
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig
-from vllm.config.utils import Range
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.utils import Range
 from vllm.foundation.system.env_override import _apply_constrain_to_fx_strides_patch
-from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.hashing import safe_hash
+from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -56,7 +56,7 @@ class CompilerInterface:
         Gather all the relevant information from the vLLM config,
         to compute a hash so that we can cache the compiled model.
 
-        See [`VllmConfig.compute_hash`][vllm.config.VllmConfig.compute_hash]
+        See [`VllmConfig.compute_hash`][vllm.foundation.config.VllmConfig.compute_hash]
         to check what information
         is already considered by default. This function should only
         consider the information that is specific to the compiler.

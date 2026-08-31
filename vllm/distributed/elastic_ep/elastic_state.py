@@ -7,12 +7,12 @@ from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import torch.distributed
 
-from vllm.config import ParallelConfig
+from vllm.foundation.config import ParallelConfig
 from vllm.distributed import (
     stateless_destroy_torch_distributed_process_group,
 )
 from vllm.distributed.utils import get_cached_tcp_store_client
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.engine import (
     EEPNotificationType,
     ReconfigureDistributedRequest,
@@ -21,7 +21,7 @@ from vllm.v1.engine import (
 from vllm.v1.engine.core import DPEngineCoreProc
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)

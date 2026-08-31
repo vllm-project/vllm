@@ -11,10 +11,10 @@ from typing import TYPE_CHECKING, Protocol
 import torch
 import torch.distributed as dist
 
-import vllm.envs as envs
-from vllm.config import VllmConfig
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import get_dcp_group
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.cp_common import (
     DirectCPWorkspace,

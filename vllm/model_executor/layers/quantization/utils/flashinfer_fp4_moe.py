@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_fp4_moe_weights_for_fi,

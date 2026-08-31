@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class MistralToolParser(MistralParserToolAdapter):  # type: ignore[valid-type, misc]
-    # Marked so is_mistral_tool_parser() in vllm.utils.mistral recognises
+    # Marked so is_mistral_tool_parser() in vllm.foundation.utilities.mistral recognises
     # this adapter and lets adjust_request() fire for tool_choice="none"
     # on grammar-capable Mistral tokenizers.
     IS_MISTRAL_TOOL_PARSER = True

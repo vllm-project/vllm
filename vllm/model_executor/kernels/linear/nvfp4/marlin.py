@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear,
     is_fp4_marlin_supported,

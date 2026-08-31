@@ -4,7 +4,7 @@ import importlib
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadingSpec
 from vllm.v1.kv_offload.config import OffloadingConfig
 

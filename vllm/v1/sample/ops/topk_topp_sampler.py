@@ -7,8 +7,8 @@ import torch.nn as nn
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
-from vllm.logger import init_logger
+from vllm.foundation.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
 

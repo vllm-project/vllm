@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from numba import get_num_threads, jit, njit, prange, set_num_threads
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 
 
 class NgramProposer:

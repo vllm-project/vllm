@@ -5,7 +5,7 @@
 import torch
 from torch.distributed import ProcessGroup
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.device_communicators.all_reduce_utils import (
     NCCL_SYMM_MEM_ALL_REDUCE_CONFIG,
@@ -16,7 +16,7 @@ from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric
 from vllm.distributed.device_communicators.pynccl_allocator import (
     is_symmetric_memory_enabled,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
 
 from ..utils import StatelessProcessGroup

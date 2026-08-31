@@ -14,10 +14,10 @@ import torch
 from torch import nn
 from transformers import BatchFeature
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors,
@@ -63,14 +63,14 @@ from vllm.multimodal.processing import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.kimi_k25 import KimiK25Config
-from vllm.transformers_utils.processor import cached_get_image_processor
-from vllm.transformers_utils.processors.kimi_k25 import KimiK25Processor
-from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
+from vllm.foundation.integrations.transformers_utils.configs.kimi_k25 import KimiK25Config
+from vllm.foundation.integrations.transformers_utils.processor import cached_get_image_processor
+from vllm.foundation.integrations.transformers_utils.processors.kimi_k25 import KimiK25Processor
+from vllm.foundation.integrations.transformers_utils.processors.kimi_k25_vision_fused import (
     KimiK25FusedVisionProcessor,
 )
-from vllm.utils.import_utils import is_numba_available
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.import_utils import is_numba_available
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .utils import (
     AutoWeightsLoader,

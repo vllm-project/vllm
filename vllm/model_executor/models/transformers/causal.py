@@ -30,7 +30,7 @@ from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 if TYPE_CHECKING:
     import torch
 
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 
 class CausalMixin(VllmModelForTextGeneration):

@@ -22,8 +22,8 @@ from transformers.models.pixtral.modeling_pixtral import (
     position_ids_in_meshgrid,
 )
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_and_mul_fn
@@ -64,12 +64,12 @@ from vllm.multimodal.processing.processor import (
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.transformers_utils.processors.pixtral import (
+from vllm.foundation.integrations.transformers_utils.processors.pixtral import (
     MistralCommonImageProcessor,
     MistralCommonPixtralProcessor,
 )
-from vllm.utils.collection_utils import is_list_of
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (

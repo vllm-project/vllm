@@ -25,8 +25,8 @@ from typing import Any, cast
 import cloudpickle
 import torch
 
-import vllm.envs as envs
-from vllm.config import VllmConfig
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
@@ -41,12 +41,12 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     model_parallel_is_initialized,
 )
-from vllm.envs import enable_envs_cache
-from vllm.logger import init_logger
+from vllm.foundation.system.envs import enable_envs_cache
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.foundation.observability.tracing import instrument, maybe_init_worker_tracer
-from vllm.utils import numa_utils
-from vllm.utils.network_utils import (
+from vllm.foundation.utilities import numa_utils
+from vllm.foundation.utilities.network_utils import (
     aiter_requires_tcp_store,
     get_distributed_init_method,
     get_file_store_init_method,
@@ -54,14 +54,14 @@ from vllm.utils.network_utils import (
     get_loopback_ip,
     get_open_port,
 )
-from vllm.utils.ompmultiprocessing import OMPProcessManager
-from vllm.utils.system_utils import (
+from vllm.foundation.utilities.ompmultiprocessing import OMPProcessManager
+from vllm.foundation.utilities.system_utils import (
     _maybe_force_spawn,
     decorate_logs,
     get_mp_context,
     set_process_title,
 )
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.torch_utils import (
     OMP_NUM_THREADS_SET_BY_VLLM,
     set_torch_threads_for_runtime,
     startup_omp_num_threads,

@@ -11,14 +11,14 @@ import torch
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.flashinfer import (
+from vllm.foundation.utilities.flashinfer import (
     flashinfer_bf16_mm,
     is_flashinfer_cutedsl_bf16_gemm_supported,
 )
-from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.platform_utils import num_compute_units
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 

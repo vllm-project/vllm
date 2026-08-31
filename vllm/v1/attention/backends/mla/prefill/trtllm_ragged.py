@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.v1.attention.backends.mla.prefill.base import (
     MLADimensions,
     MLAPrefillBackend,
@@ -15,7 +15,7 @@ from vllm.v1.attention.backends.utils import log2_lse_to_ln
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.model_executor.layers.attention.mla_attention import (
         MLACommonPrefillMetadata,
     )

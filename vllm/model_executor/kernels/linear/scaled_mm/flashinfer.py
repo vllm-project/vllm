@@ -6,7 +6,7 @@ from typing import ClassVar
 
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -16,14 +16,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import (
+from vllm.foundation.utilities.flashinfer import (
     flashinfer_fp8_blockscale_gemm,
     flashinfer_scaled_fp8_mm,
     has_flashinfer,
     is_flashinfer_fp8_blockscale_gemm_supported,
     should_use_flashinfer_for_blockscale_fp8_gemm,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledDynamicMMLinearKernel,

@@ -31,7 +31,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )

@@ -4,9 +4,9 @@ from collections.abc import Set as AbstractSet
 from dataclasses import replace
 from itertools import product
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.foundation.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.utils import get_captured_lora_counts
 
 logger = init_logger(__name__)

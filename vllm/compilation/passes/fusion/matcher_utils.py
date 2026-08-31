@@ -8,7 +8,7 @@ from torch._higher_order_ops import auto_functionalized
 from torch._ops import OpOverload
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import get_current_vllm_config
+from vllm.foundation.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8

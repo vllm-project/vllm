@@ -5,7 +5,7 @@ from collections.abc import Callable
 import torch
 
 import vllm._custom_ops as ops
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import get_forward_context, is_forward_context_available

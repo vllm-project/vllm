@@ -29,8 +29,8 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.import_utils import has_cutedsl
-from vllm.utils.math_utils import next_power_of_2
+from vllm.foundation.utilities.import_utils import has_cutedsl
+from vllm.foundation.utilities.math_utils import next_power_of_2
 
 
 @triton.jit

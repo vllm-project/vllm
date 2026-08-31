@@ -25,8 +25,8 @@ from transformers.activations import get_activation
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
@@ -49,7 +49,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.import_utils import _has_module
+from vllm.foundation.utilities.import_utils import _has_module
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (

@@ -10,7 +10,7 @@ import pydantic
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.entrypoints.generate.factories import get_generate_invocation_types
 from vllm.entrypoints.pooling.factories import get_pooling_invocation_types
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse

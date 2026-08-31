@@ -5,7 +5,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.import_utils import has_cutedsl
+from vllm.foundation.utilities.import_utils import has_cutedsl
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
 MXFP4_BLOCK_SIZE = 32

@@ -13,9 +13,9 @@ from transformers import PretrainedConfig
 from transformers.activations import GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.inputs import ModalityData
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -37,7 +37,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import SupportsLoRA, SupportsMRoPE, SupportsMultiModal, SupportsPP
 from .keye import (

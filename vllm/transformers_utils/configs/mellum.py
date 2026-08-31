@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from transformers import Qwen3MoeConfig
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
+"""Compatibility shim: vllm.transformers_utils/configs/mellum -> vllm.foundation.integrations.transformers_utils.configs.mellum (sys.modules alias)."""
+import importlib
+import sys
 
-class MellumConfig(Qwen3MoeConfig):
-    model_type = "mellum"
+_real = importlib.import_module("vllm.foundation.integrations.transformers_utils.configs.mellum")
+sys.modules[__name__] = _real

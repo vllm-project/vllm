@@ -63,7 +63,7 @@ processing cache consistent (verified by ``test_processing_correctness``).
 import math
 from collections.abc import Mapping, Sequence
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItems
 from vllm.multimodal.parse import (
@@ -76,7 +76,7 @@ from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.multimodal.processing.context import TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import MultiModalProcessingInfo
-from vllm.transformers_utils.processors.deepseek_ocr import (
+from vllm.foundation.integrations.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
     IMAGE_SIZE,
@@ -107,12 +107,12 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
     """
 
     def get_hf_config(self):
-        from vllm.transformers_utils.configs.unlimited_ocr import UnlimitedOCRConfig
+        from vllm.foundation.integrations.transformers_utils.configs.unlimited_ocr import UnlimitedOCRConfig
 
         return self.ctx.get_hf_config(UnlimitedOCRConfig)
 
     def get_hf_processor(self, **kwargs: object):
-        from vllm.transformers_utils.processors.unlimited_ocr import (
+        from vllm.foundation.integrations.transformers_utils.processors.unlimited_ocr import (
             UnlimitedOCRProcessor,
         )
 

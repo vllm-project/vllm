@@ -17,7 +17,7 @@ from torch import fx
 from torch._subclasses.fake_tensor import FakeTensorMode, unset_fake_temporarily
 
 if TYPE_CHECKING:
-    from vllm.config.utils import Range
+    from vllm.foundation.config.utils import Range
 
 from torch._inductor.custom_graph_pass import CustomGraphPass
 

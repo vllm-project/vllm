@@ -17,8 +17,8 @@ from typing import TypeVar
 
 import torch
 
-import vllm.envs as envs
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear.base import (
     MMLinearKernel,
     MMLinearLayerConfig,
@@ -229,7 +229,7 @@ logger = init_logger(__name__)
 
 def _get_linear_backend() -> str:
     """Get the linear_backend setting from the current vllm config."""
-    from vllm.config import get_current_vllm_config_or_none
+    from vllm.foundation.config import get_current_vllm_config_or_none
 
     config = get_current_vllm_config_or_none()
     if config is not None:

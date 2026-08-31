@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from vllm.model_executor.custom_op import CustomOp
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
 
 
 class ConvLayerBase(CustomOp):

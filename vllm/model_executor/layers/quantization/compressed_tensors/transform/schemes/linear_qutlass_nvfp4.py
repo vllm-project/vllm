@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     slice_nvfp4_output,
 )
-from vllm.utils.flashinfer import (
+from vllm.foundation.utilities.flashinfer import (
     flashinfer_scaled_fp4_mm,
 )
 

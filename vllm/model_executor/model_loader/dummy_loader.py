@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch.nn as nn
 
-from vllm.config import ModelConfig
-from vllm.config.load import LoadConfig
+from vllm.foundation.config import ModelConfig
+from vllm.foundation.config.load import LoadConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.reload.layerwise import (

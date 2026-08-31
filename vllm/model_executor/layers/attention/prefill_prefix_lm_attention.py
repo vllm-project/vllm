@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.encoder_only_attention import (
     create_encoder_only_attention_backend,

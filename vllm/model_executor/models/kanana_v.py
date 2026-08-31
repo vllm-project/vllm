@@ -17,10 +17,10 @@ from transformers import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLVisionConfig
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -36,9 +36,9 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .qwen2_vl import Qwen2VisionTransformer

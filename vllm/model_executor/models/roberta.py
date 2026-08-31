@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from transformers import RobertaConfig
 
-from vllm.config import ModelConfig, PoolerConfig, VllmConfig
+from vllm.foundation.config import ModelConfig, PoolerConfig, VllmConfig
 from vllm.model_executor.layers.pooler import (
     BgeM3Pooler,
     BOSEOSFilter,

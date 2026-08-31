@@ -5,7 +5,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import (
+from vllm.foundation.utilities.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutedsl_grouped_gemm_nt_masked,
     scaled_fp4_grouped_quantize,

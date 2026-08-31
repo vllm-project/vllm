@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
+from vllm.foundation.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
 
 if TYPE_CHECKING:

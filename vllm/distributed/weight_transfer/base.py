@@ -19,10 +19,10 @@ import torch
 from typing_extensions import Self
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
-from vllm.config.parallel import ParallelConfig
-from vllm.config.weight_transfer import WeightTransferConfig
+from vllm.foundation.config.parallel import ParallelConfig
+from vllm.foundation.config.weight_transfer import WeightTransferConfig
 
 TInitInfo = TypeVar("TInitInfo", bound="WeightTransferInitInfo")
 TUpdateInfo = TypeVar("TUpdateInfo", bound="WeightTransferUpdateInfo")

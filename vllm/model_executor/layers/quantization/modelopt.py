@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 from torch.nn.parameter import Parameter
 
-import vllm.envs as envs
-from vllm.config import get_current_vllm_config
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import get_current_vllm_config
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
     init_mxfp8_linear_kernel,

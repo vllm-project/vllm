@@ -5,9 +5,9 @@ from typing import Literal
 
 from torch import nn
 
-from vllm.config import ModelConfig, VllmConfig
-from vllm.config.load import LoadConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import ModelConfig, VllmConfig
+from vllm.foundation.config.load import LoadConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
@@ -73,7 +73,7 @@ def register_model_loader(load_format: str):
         load_format (str): The model loader format name.
 
     Examples:
-        >>> from vllm.config.load import LoadConfig
+        >>> from vllm.foundation.config.load import LoadConfig
         >>> from vllm.model_executor.model_loader import (
         ...     get_model_loader,
         ...     register_model_loader,

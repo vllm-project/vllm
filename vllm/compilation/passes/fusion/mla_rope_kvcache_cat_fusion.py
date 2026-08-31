@@ -4,12 +4,12 @@ import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
 import vllm._custom_ops as ops
-from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.torch_utils import (
     _USE_LAYERNAME,
     LayerNameType,
     _encode_layer_name,

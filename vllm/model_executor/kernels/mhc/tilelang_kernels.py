@@ -10,7 +10,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.tilelang_utils import T, tilelang, tilelang_jit
-from vllm.utils.math_utils import cdiv
+from vllm.foundation.utilities.math_utils import cdiv
 
 ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda()
 

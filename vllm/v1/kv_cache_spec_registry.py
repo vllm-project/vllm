@@ -12,7 +12,7 @@ custom specs and managers by using the @register_kv_cache_spec decorator.
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -48,7 +48,7 @@ class KVCacheSpecRegistry:
             return
 
         if vllm_config is None:
-            from vllm.config import get_current_vllm_config_or_none
+            from vllm.foundation.config import get_current_vllm_config_or_none
 
             vllm_config = get_current_vllm_config_or_none()
 

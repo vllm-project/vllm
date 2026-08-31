@@ -20,8 +20,8 @@ import torch
 from typing_extensions import assert_never
 
 from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalUUIDDict
-from vllm.utils.collection_utils import is_list_of
-from vllm.utils.import_utils import LazyLoader
+from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.foundation.utilities.import_utils import LazyLoader
 
 from .audio import AudioResampler, AudioSpec, normalize_audio
 from .image import convert_image_mode, normalize_image

@@ -8,8 +8,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
-import vllm.envs as envs
-from vllm.config import ModelConfig
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
     PerRequestMetrics,
@@ -21,7 +21,7 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import (
@@ -32,8 +32,8 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
     ThinkingTokenBudget,
 )
-from vllm.utils import random_uuid
-from vllm.utils.collection_utils import is_list_of
+from vllm.foundation.utilities import random_uuid
+from vllm.foundation.utilities.collection_utils import is_list_of
 
 logger = init_logger(__name__)
 

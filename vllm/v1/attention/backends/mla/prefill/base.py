@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.model_executor.layers.attention.mla_attention import (
         MLACommonPrefillMetadata,
     )

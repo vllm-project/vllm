@@ -21,13 +21,13 @@ from typing import TYPE_CHECKING
 import torch
 from transformers import AutoModelForSequenceClassification
 
-from vllm.config.utils import getattr_iter
+from vllm.foundation.config.utils import getattr_iter
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 
 class EmbeddingMixin(VllmModelForPooling):

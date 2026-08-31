@@ -21,7 +21,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
-from vllm.transformers_utils.configs.ovis import AIMv2Config
+from vllm.foundation.integrations.transformers_utils.configs.ovis import AIMv2Config
 
 
 class AIMv2SwiGLUFFN(nn.Module):

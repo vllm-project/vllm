@@ -1,0 +1,206 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+Model configs may be defined in this directory for the following reasons:
+
+- There is no configuration file defined by HF Hub or Transformers library.
+- There is a need to override the existing config to support vLLM.
+- The HF model_type isn't recognized by the Transformers library but can
+  be mapped to an existing Transformers config, such as
+  deepseek-ai/DeepSeek-V3.2-Exp.
+"""
+
+from __future__ import annotations
+
+import importlib
+
+_CLASS_TO_MODULE: dict[str, str] = {
+    "AfmoeConfig": "vllm.foundation.integrations.transformers_utils.configs.afmoe",
+    "AXK1Config": "vllm.foundation.integrations.transformers_utils.configs.AXK1",
+    "BagelConfig": "vllm.foundation.integrations.transformers_utils.configs.bagel",
+    "ChatGLMConfig": "vllm.foundation.integrations.transformers_utils.configs.chatglm",
+    "ColModernVBertConfig": "vllm.foundation.integrations.transformers_utils.configs.colmodernvbert",
+    "ColPaliConfig": "vllm.foundation.integrations.transformers_utils.configs.colpali",
+    "ColQwen3Config": "vllm.foundation.integrations.transformers_utils.configs.colqwen3",
+    "OpsColQwen3Config": "vllm.foundation.integrations.transformers_utils.configs.colqwen3",
+    "Qwen3VLNemotronEmbedConfig": "vllm.foundation.integrations.transformers_utils.configs.colqwen3",
+    "Cosmos3Config": "vllm.foundation.integrations.transformers_utils.configs.cosmos3",
+    "Cosmos3EdgeConfig": "vllm.foundation.integrations.transformers_utils.configs.cosmos3_edge",
+    "Cosmos3EdgeProjectorConfig": "vllm.foundation.integrations.transformers_utils.configs.cosmos3_edge",
+    "Cosmos3EdgeTextConfig": "vllm.foundation.integrations.transformers_utils.configs.cosmos3_edge",
+    "Cosmos3EdgeVisionConfig": "vllm.foundation.integrations.transformers_utils.configs.cosmos3_edge",
+    "DiffusionGemmaConfig": "vllm.foundation.integrations.transformers_utils.configs.diffusion_gemma",
+    "DiffusionGemmaTextConfig": "vllm.foundation.integrations.transformers_utils.configs.diffusion_gemma",
+    "DeepseekVLV2Config": "vllm.foundation.integrations.transformers_utils.configs.deepseek_vl2",
+    "DeepseekV4Config": "vllm.foundation.integrations.transformers_utils.configs.deepseek_v4",
+    "Dots3NoteConfig": "vllm.foundation.integrations.transformers_utils.configs.dots3_note",
+    "K3DSparkConfig": "vllm.foundation.integrations.transformers_utils.configs.k3_dspark",
+    "DotsOCRConfig": "vllm.foundation.integrations.transformers_utils.configs.dotsocr",
+    "EAGLEConfig": "vllm.foundation.integrations.transformers_utils.configs.eagle",
+    "FunAudioChatConfig": "vllm.foundation.integrations.transformers_utils.configs.funaudiochat",
+    "FunAudioChatAudioEncoderConfig": "vllm.foundation.integrations.transformers_utils.configs.funaudiochat",
+    "Granite4VisionConfig": "vllm.foundation.integrations.transformers_utils.configs.granite4_vision",
+    "HYV3Config": "vllm.foundation.integrations.transformers_utils.configs.hy_v3",
+    "HYV4Config": "vllm.foundation.integrations.transformers_utils.configs.hy_v4",
+    "HyperCLOVAXConfig": "vllm.foundation.integrations.transformers_utils.configs.hyperclovax",
+    "IsaacConfig": "vllm.foundation.integrations.transformers_utils.configs.isaac",
+    # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
+    # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
+    # `FalconConfig` class from the official HuggingFace transformers library.
+    "RWConfig": "vllm.foundation.integrations.transformers_utils.configs.falcon",
+    "LagunaConfig": "vllm.foundation.integrations.transformers_utils.configs.laguna",
+    "Lfm2MoeConfig": "vllm.foundation.integrations.transformers_utils.configs.lfm2_moe",
+    "MedusaConfig": "vllm.foundation.integrations.transformers_utils.configs.medusa",
+    "MellumConfig": "vllm.foundation.integrations.transformers_utils.configs.mellum",
+    "MiDashengLMConfig": "vllm.foundation.integrations.transformers_utils.configs.midashenglm",
+    "MiniMaxM3Config": "vllm.foundation.integrations.transformers_utils.configs.minimax_m3",
+    "MiniMaxM3MTPConfig": "vllm.foundation.integrations.transformers_utils.configs.minimax_m3",
+    "MiniMaxM3TextConfig": "vllm.foundation.integrations.transformers_utils.configs.minimax_m3",
+    "MLPSpeculatorConfig": "vllm.foundation.integrations.transformers_utils.configs.mlp_speculator",
+    "Moondream3Config": "vllm.foundation.integrations.transformers_utils.configs.moondream3",
+    "Moondream3TextConfig": "vllm.foundation.integrations.transformers_utils.configs.moondream3",
+    "Moondream3VisionConfig": "vllm.foundation.integrations.transformers_utils.configs.moondream3",
+    "MossTranscribeDiarizeConfig": (
+        "vllm.foundation.integrations.transformers_utils.configs.moss_transcribe_diarize"
+    ),
+    "MoonViTConfig": "vllm.foundation.integrations.transformers_utils.configs.moonvit",
+    "KimiLinearConfig": "vllm.foundation.integrations.transformers_utils.configs.kimi_linear",
+    "KimiVLConfig": "vllm.foundation.integrations.transformers_utils.configs.kimi_vl",
+    "KimiK25Config": "vllm.foundation.integrations.transformers_utils.configs.kimi_k25",
+    "MuseGlimmerConfig": "vllm.foundation.integrations.transformers_utils.configs.muse_glimmer",
+    "MuseGlimmerTextConfig": "vllm.foundation.integrations.transformers_utils.configs.muse_glimmer",
+    "MuseGlimmerVisionConfig": "vllm.foundation.integrations.transformers_utils.configs.muse_glimmer",
+    "MuseGlimmerAssistantConfig": "vllm.foundation.integrations.transformers_utils.configs.muse_glimmer",
+    "KimiK3Config": "vllm.foundation.integrations.transformers_utils.configs.kimi_k3",
+    "KimiK3VisionConfig": "vllm.foundation.integrations.transformers_utils.configs.kimi_k3",
+    "NemotronConfig": "vllm.foundation.integrations.transformers_utils.configs.nemotron",
+    "NemotronHConfig": "vllm.foundation.integrations.transformers_utils.configs.nemotron_h",
+    "OlmoHybridConfig": "vllm.foundation.integrations.transformers_utils.configs.olmo_hybrid",
+    "OpenVLAConfig": "vllm.foundation.integrations.transformers_utils.configs.openvla",
+    "OvisConfig": "vllm.foundation.integrations.transformers_utils.configs.ovis",
+    "PixelShuffleSiglip2VisionConfig": "vllm.foundation.integrations.transformers_utils.configs.isaac",
+    "RadioConfig": "vllm.foundation.integrations.transformers_utils.configs.radio",
+    "SpeculatorsConfig": "vllm.foundation.integrations.transformers_utils.configs.speculators",
+    "UltravoxConfig": "vllm.foundation.integrations.transformers_utils.configs.ultravox",
+    "UnlimitedOCRConfig": "vllm.foundation.integrations.transformers_utils.configs.unlimited_ocr",
+    "Step3VLConfig": "vllm.foundation.integrations.transformers_utils.configs.step3_vl",
+    "Step3VisionEncoderConfig": "vllm.foundation.integrations.transformers_utils.configs.step3_vl",
+    "Step3TextConfig": "vllm.foundation.integrations.transformers_utils.configs.step3_vl",
+    "Step3p5Config": "vllm.foundation.integrations.transformers_utils.configs.step3p5",
+    "QianfanOCRConfig": "vllm.foundation.integrations.transformers_utils.configs.qianfan_ocr",
+    "QianfanOCRVisionConfig": "vllm.foundation.integrations.transformers_utils.configs.qianfan_ocr",
+    "Qwen3ASRConfig": "vllm.foundation.integrations.transformers_utils.configs.qwen3_asr",
+    "Qwen3NextConfig": "vllm.foundation.integrations.transformers_utils.configs.qwen3_next",
+    "Qwen4ExpConfig": "vllm.foundation.integrations.transformers_utils.configs.qwen4_exp",
+    "Qwen4ExpTextConfig": "vllm.foundation.integrations.transformers_utils.configs.qwen4_exp",
+    "Qwen4ExpVisionConfig": "vllm.foundation.integrations.transformers_utils.configs.qwen4_exp",
+    "Qwen3_5Config": "vllm.foundation.integrations.transformers_utils.configs.qwen3_5",
+    "Qwen3_5TextConfig": "vllm.foundation.integrations.transformers_utils.configs.qwen3_5",
+    "Qwen3_5MoeConfig": "vllm.foundation.integrations.transformers_utils.configs.qwen3_5_moe",
+    "Qwen3_5MoeTextConfig": "vllm.foundation.integrations.transformers_utils.configs.qwen3_5_moe",
+    "InklingModelConfig": "vllm.models.inkling.configs",
+    "InklingAudioConfig": "vllm.models.inkling.configs",
+    "InklingVisionConfig": "vllm.models.inkling.configs",
+    "InklingMMConfig": "vllm.models.inkling.configs",
+    # Special case: DeepseekV3Config is from HuggingFace Transformers
+    "DeepseekV3Config": "transformers",
+}
+
+__all__ = [
+    "AfmoeConfig",
+    "AXK1Config",
+    "BagelConfig",
+    "ChatGLMConfig",
+    "ColModernVBertConfig",
+    "ColPaliConfig",
+    "ColQwen3Config",
+    "OpsColQwen3Config",
+    "Qwen3VLNemotronEmbedConfig",
+    "Cosmos3Config",
+    "Cosmos3EdgeConfig",
+    "Cosmos3EdgeProjectorConfig",
+    "Cosmos3EdgeTextConfig",
+    "Cosmos3EdgeVisionConfig",
+    "DiffusionGemmaConfig",
+    "DiffusionGemmaTextConfig",
+    "DeepseekVLV2Config",
+    "DeepseekV3Config",
+    "DeepseekV4Config",
+    "Dots3NoteConfig",
+    "K3DSparkConfig",
+    "DotsOCRConfig",
+    "EAGLEConfig",
+    "FunAudioChatConfig",
+    "FunAudioChatAudioEncoderConfig",
+    "Granite4VisionConfig",
+    "HYV3Config",
+    "HYV4Config",
+    "HyperCLOVAXConfig",
+    "IsaacConfig",
+    "RWConfig",
+    "LagunaConfig",
+    "Lfm2MoeConfig",
+    "MedusaConfig",
+    "MellumConfig",
+    "MiDashengLMConfig",
+    "MiniMaxM3Config",
+    "MiniMaxM3MTPConfig",
+    "MiniMaxM3TextConfig",
+    "MLPSpeculatorConfig",
+    "Moondream3Config",
+    "Moondream3TextConfig",
+    "Moondream3VisionConfig",
+    "MossTranscribeDiarizeConfig",
+    "MoonViTConfig",
+    "KimiLinearConfig",
+    "KimiVLConfig",
+    "KimiK25Config",
+    "MuseGlimmerConfig",
+    "MuseGlimmerTextConfig",
+    "MuseGlimmerVisionConfig",
+    "MuseGlimmerAssistantConfig",
+    "KimiK3Config",
+    "KimiK3VisionConfig",
+    "NemotronConfig",
+    "NemotronHConfig",
+    "OlmoHybridConfig",
+    "OpenVLAConfig",
+    "OvisConfig",
+    "PixelShuffleSiglip2VisionConfig",
+    "RadioConfig",
+    "SpeculatorsConfig",
+    "UltravoxConfig",
+    "UnlimitedOCRConfig",
+    "Step3VLConfig",
+    "Step3VisionEncoderConfig",
+    "Step3TextConfig",
+    "Step3p5Config",
+    "QianfanOCRConfig",
+    "QianfanOCRVisionConfig",
+    "Qwen3ASRConfig",
+    "Qwen3NextConfig",
+    "Qwen4ExpConfig",
+    "Qwen4ExpTextConfig",
+    "Qwen4ExpVisionConfig",
+    "Qwen3_5Config",
+    "Qwen3_5TextConfig",
+    "Qwen3_5MoeConfig",
+    "Qwen3_5MoeTextConfig",
+    "InklingModelConfig",
+    "InklingAudioConfig",
+    "InklingVisionConfig",
+    "InklingMMConfig",
+]
+
+
+def __getattr__(name: str):
+    if name in _CLASS_TO_MODULE:
+        module_name = _CLASS_TO_MODULE[name]
+        module = importlib.import_module(module_name)
+        return getattr(module, name)
+
+    raise AttributeError(f"module 'configs' has no attribute '{name}'")
+
+
+def __dir__():
+    return sorted(list(__all__))

@@ -16,10 +16,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)

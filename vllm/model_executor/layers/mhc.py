@@ -8,7 +8,7 @@ import vllm.model_executor.kernels.mhc as mhc_kernels
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_tilelang
+from vllm.foundation.utilities.import_utils import has_tilelang
 
 
 def _has_tilelang_mhc() -> bool:

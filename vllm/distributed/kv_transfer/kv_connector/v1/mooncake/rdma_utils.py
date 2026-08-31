@@ -5,8 +5,8 @@
 from collections.abc import Mapping
 from typing import Any
 
-import vllm.envs as envs
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

@@ -27,7 +27,7 @@ from vllm.multimodal.processing.processor import (
     TimingContext,
     cached_encode,
 )
-from vllm.transformers_utils.processors.h2ovl import H2OVLImageProcessor, H2OVLProcessor
+from vllm.foundation.integrations.transformers_utils.processors.h2ovl import H2OVLImageProcessor, H2OVLProcessor
 
 from .intern_vit import InternVisionModel
 from .internvl import (

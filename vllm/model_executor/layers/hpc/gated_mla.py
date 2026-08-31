@@ -18,8 +18,8 @@ Kernel constraints:
 import torch
 
 from vllm import envs
-from vllm.logger import init_logger
-from vllm.utils.hpc import has_hpc
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.hpc import has_hpc
 
 logger = init_logger(__name__)
 

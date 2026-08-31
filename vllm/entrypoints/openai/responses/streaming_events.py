@@ -78,7 +78,7 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.outputs import CompletionOutput
 from vllm.parser.harmony import Segment
-from vllm.utils import random_uuid
+from vllm.foundation.utilities import random_uuid
 
 TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {
     "python": "code_interpreter",

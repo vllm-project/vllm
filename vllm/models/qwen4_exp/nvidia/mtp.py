@@ -20,7 +20,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig, replace, set_current_vllm_config
+from vllm.foundation.config import VllmConfig, replace, set_current_vllm_config
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
@@ -45,7 +45,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen4_exp import (
+from vllm.foundation.integrations.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
 

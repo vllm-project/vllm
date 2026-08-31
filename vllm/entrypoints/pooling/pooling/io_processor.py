@@ -4,8 +4,8 @@ from collections.abc import Sequence
 from typing import Any
 
 from vllm import PoolingParams, PoolingRequestOutput
-from vllm.logger import init_logger
-from vllm.plugins.io_processors import get_io_processor
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.extensibility.plugins.io_processors import get_io_processor
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 
 from ..base.io_processor import PoolingIOProcessor

@@ -7,18 +7,18 @@ from concurrent.futures import Future
 from functools import cached_property
 from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
-import vllm.envs as envs
-from vllm.config import VllmConfig
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.foundation.observability.tracing import instrument
-from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec

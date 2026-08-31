@@ -50,12 +50,12 @@ from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import ModalityData, MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -108,10 +108,10 @@ from vllm.multimodal.video import (
     VideoTargetMetadata,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import _merge_mm_kwargs
-from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
-from vllm.transformers_utils.utils import convert_model_repo_to_path
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.integrations.transformers_utils.processor import _merge_mm_kwargs
+from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
+from vllm.foundation.integrations.transformers_utils.utils import convert_model_repo_to_path
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 logger = init_logger(__name__)
 

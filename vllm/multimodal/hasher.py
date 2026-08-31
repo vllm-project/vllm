@@ -11,8 +11,8 @@ import numpy as np
 import torch
 from PIL import Image
 
-from vllm.config.multimodal import MMHasherAlgorithm
-from vllm.logger import init_logger
+from vllm.foundation.config.multimodal import MMHasherAlgorithm
+from vllm.foundation.observability.logger import init_logger
 
 from .media import MediaWithBytes
 

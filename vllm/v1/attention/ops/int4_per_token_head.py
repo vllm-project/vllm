@@ -699,7 +699,7 @@ def _launch_packed_attn(
     of that split, and the trailing ``reduce_segments`` pass.  Writes
     into ``out`` (directly for 2D; via the segm buffers for 3D).
     """
-    import vllm.envs as envs
+    import vllm.foundation.system.envs as envs
     from vllm.v1.attention.ops.triton_unified_attention import _get_tile_size
 
     is_batch_invariant = envs.VLLM_BATCH_INVARIANT

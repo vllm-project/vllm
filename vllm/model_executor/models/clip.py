@@ -14,8 +14,8 @@ from transformers import (
     CLIPVisionConfig,
 )
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.model_executor.layers.activation import get_act_fn
@@ -51,7 +51,7 @@ from vllm.multimodal.processing import (
     TimingContext,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from .interfaces_base import default_pooling_type

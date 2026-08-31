@@ -18,8 +18,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-    from vllm.config.cache import CacheDType
+    from vllm.foundation.config import VllmConfig
+    from vllm.foundation.config.cache import CacheDType
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability

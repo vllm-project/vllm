@@ -25,7 +25,7 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import TypeAdapter
 
 from vllm import envs
-from vllm.config.utils import replace
+from vllm.foundation.config.utils import replace
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -90,7 +90,7 @@ from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.foundation.system.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput, tokens_input
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
@@ -99,8 +99,8 @@ from vllm.parser import Parser, ParserManager
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
-from vllm.utils import random_uuid
-from vllm.utils.collection_utils import as_list
+from vllm.foundation.utilities import random_uuid
+from vllm.foundation.utilities.collection_utils import as_list
 
 logger = init_logger(__name__)
 

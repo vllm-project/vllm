@@ -7,8 +7,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder

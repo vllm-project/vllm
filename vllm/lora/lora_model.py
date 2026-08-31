@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import safetensors
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.lora_weights import LoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import (
@@ -17,7 +17,7 @@ from vllm.lora.utils import (
 )
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 

@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import (
+from vllm.foundation.utilities.flashinfer import (
     flashinfer_convert_sf_to_mma_layout,
     has_flashinfer_b12x_moe,
 )

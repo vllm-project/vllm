@@ -10,7 +10,7 @@ from starlette.responses import JSONResponse
 
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from ..utils import sanitize_message
 

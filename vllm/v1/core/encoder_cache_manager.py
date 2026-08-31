@@ -5,13 +5,13 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
-from vllm.config import VllmConfig
-from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.ec_manager_config import EncoderCacheManagerMetadata
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
-    from vllm.config import SchedulerConfig
+    from vllm.foundation.config import SchedulerConfig
 
 logger = init_logger(__name__)
 

@@ -9,9 +9,9 @@ from typing import ClassVar, Final
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -152,7 +152,7 @@ def _aiter_mla_small_head_mode() -> str:
     On gfx942 (no Gluon build) the ASM path is always used regardless of this
     setting; ``"gluon"`` there falls back to ASM with a one-time warning.
     """
-    import vllm.envs as envs
+    import vllm.foundation.system.envs as envs
 
     mode = (envs.VLLM_ROCM_AITER_MLA_ASM_PADDING or "auto").lower()
     if mode == "gluon" and not _gluon_mla_decode_supported():
@@ -1138,7 +1138,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # Auto-enabled on gfx950 when AITER ships the kernels. Only runs when the
         # KV cache is FP8. Head counts that are not a multiple of 16 are
         # replicate-padded up to one (see _mla_fp8_prefill_attn).
-        from vllm.utils.torch_utils import is_quantized_kv_cache
+        from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             is_quantized_kv_cache(kv_cache_dtype)

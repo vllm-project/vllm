@@ -6,8 +6,8 @@ from typing import Any, ClassVar, cast
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.model_executor.models.interfaces import (
     SupportsEncoderCudaGraph,
     supports_encoder_cudagraph,

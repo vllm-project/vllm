@@ -6,7 +6,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -25,14 +25,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import (
+from vllm.foundation.utilities.deep_gemm import (
     DeepGemmQuantScaleFMT,
     fp8_m_grouped_gemm_nt_masked,
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
 )
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.foundation.utilities.math_utils import cdiv, round_up
 
 logger = init_logger(__name__)
 

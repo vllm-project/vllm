@@ -13,7 +13,7 @@ from torch import fx, nn
 from vllm.model_executor.models.utils import ShardId, maybe_prefix
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 
 @dataclass

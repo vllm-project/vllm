@@ -35,8 +35,8 @@ from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
-from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig, set_current_vllm_config
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -73,7 +73,7 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MixtureOfExperts,

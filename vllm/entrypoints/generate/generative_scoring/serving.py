@@ -27,7 +27,7 @@ from vllm.entrypoints.serve.engine.protocol import (
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, tokens_input
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
@@ -36,8 +36,8 @@ from vllm.foundation.observability.tracing import (
     extract_trace_headers,
     log_tracing_disabled_warning,
 )
-from vllm.utils import random_uuid
-from vllm.utils.async_utils import merge_async_iterators
+from vllm.foundation.utilities import random_uuid
+from vllm.foundation.utilities.async_utils import merge_async_iterators
 
 logger = init_logger(__name__)
 

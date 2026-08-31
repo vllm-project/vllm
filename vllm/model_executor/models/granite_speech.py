@@ -33,9 +33,9 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -59,10 +59,10 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 
 from .blip2 import Blip2QFormerModel
 from .interfaces import (

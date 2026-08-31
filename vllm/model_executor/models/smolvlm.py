@@ -4,7 +4,7 @@
 
 from transformers import SmolVLMProcessor
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .idefics3 import Idefics3DummyInputsBuilder as SmolVLMDummyInputsBuilder

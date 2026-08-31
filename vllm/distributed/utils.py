@@ -28,10 +28,10 @@ from torch.distributed.distributed_c10d import (
 )
 from torch.distributed.rendezvous import rendezvous
 
-import vllm.envs as envs
-from vllm.logger import init_logger
-from vllm.utils.network_utils import get_tcp_uri
-from vllm.utils.system_utils import suppress_stdout
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.network_utils import get_tcp_uri
+from vllm.foundation.utilities.system_utils import suppress_stdout
 
 logger = init_logger(__name__)
 
@@ -524,7 +524,7 @@ def get_cached_tcp_store_client(host: str, port: int) -> TCPStore:
 
 
 def get_cpu_distributed_timeout_or_none() -> timedelta | None:
-    from vllm.config import get_current_vllm_config_or_none
+    from vllm.foundation.config import get_current_vllm_config_or_none
 
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
@@ -534,7 +534,7 @@ def get_cpu_distributed_timeout_or_none() -> timedelta | None:
 
 
 def get_distributed_timeout_or_none() -> timedelta | None:
-    from vllm.config import get_current_vllm_config_or_none
+    from vllm.foundation.config import get_current_vllm_config_or_none
 
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:

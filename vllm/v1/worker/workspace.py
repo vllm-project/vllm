@@ -11,9 +11,9 @@ from math import prod
 
 import torch
 
-import vllm.envs as envs
-from vllm.logger import init_logger
-from vllm.utils.math_utils import round_up
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.math_utils import round_up
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)

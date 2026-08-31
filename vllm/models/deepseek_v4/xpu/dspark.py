@@ -14,12 +14,12 @@ import regex as re
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )

@@ -36,8 +36,8 @@ from transformers.models.qwen2_audio import (
 )
 from transformers.models.whisper import WhisperFeatureExtractor
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -60,8 +60,8 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix

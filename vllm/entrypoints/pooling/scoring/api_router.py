@@ -10,7 +10,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from .protocol import RerankRequest, ScoreRequest
 from .serving import ServingScores

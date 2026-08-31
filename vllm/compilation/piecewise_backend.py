@@ -16,9 +16,9 @@ from torch._inductor.runtime.triton_heuristics import CachingAutotuner
 from torch._logging._internal import trace_structured
 
 from vllm.compilation.backends import VllmBackend
-from vllm.config import VllmConfig
-from vllm.config.utils import Range
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.utils import Range
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

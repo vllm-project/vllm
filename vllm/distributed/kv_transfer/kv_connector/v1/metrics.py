@@ -5,9 +5,9 @@ from typing import Any, TypeAlias, TypeVar
 
 from prometheus_client import Counter, Gauge, Histogram
 
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.foundation.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 PromMetric: TypeAlias = Gauge | Counter | Histogram
 PromMetricT = TypeVar("PromMetricT", bound=PromMetric)

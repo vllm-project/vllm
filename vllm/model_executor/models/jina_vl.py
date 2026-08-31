@@ -5,9 +5,9 @@ from collections.abc import Iterable
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.foundation.config import ModelConfig, VllmConfig
 from vllm.inputs import TokensPrompt
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.multimodal import MULTIMODAL_REGISTRY

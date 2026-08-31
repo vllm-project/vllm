@@ -18,12 +18,12 @@ from vllm.entrypoints.chat_utils import (
     CustomChatCompletionMessageParam,
 )
 from vllm.inputs import tokens_input
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.renderers import merge_kwargs
 from vllm.renderers.hf import resolve_chat_template
-from vllm.utils.collection_utils import chunk_list
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.foundation.utilities.collection_utils import chunk_list
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 
 from ..base.io_processor import PoolingIOProcessor
 from ..scoring.io_processor import JinaRankingIOProcessorMixin
@@ -354,7 +354,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
         revision: str | None,
     ) -> dict[str, str] | None:
         """Load ``task_instructions`` from ``config_sentence_transformers.json``."""
-        from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+        from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
 
         try:
             cfg = get_hf_file_to_dict(

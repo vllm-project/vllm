@@ -15,8 +15,8 @@ from transformers import (
     SiglipVisionConfig,
 )
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.model_executor.layers.activation import get_act_fn
@@ -54,9 +54,9 @@ from vllm.multimodal.processing import (
     TimingContext,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 from .clip import dual_encoder_has_text_tokens, merge_dual_encoder_text_and_vision
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant

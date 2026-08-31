@@ -13,8 +13,8 @@ import torch.nn.functional as F
 from transformers import BatchFeature, PretrainedConfig
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -41,8 +41,8 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.transformers_utils.configs.mimo_v2_omni import Mimo_VLVisionConfig
-from vllm.transformers_utils.processors.mimo_v2_omni import (
+from vllm.foundation.integrations.transformers_utils.configs.mimo_v2_omni import Mimo_VLVisionConfig
+from vllm.foundation.integrations.transformers_utils.processors.mimo_v2_omni import (
     MiMoOmniProcessor,
     VideoAudioInput,
     _format_timestamp,

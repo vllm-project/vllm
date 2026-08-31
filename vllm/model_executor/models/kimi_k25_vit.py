@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from transformers.activations import GELUActivation
 
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
@@ -36,8 +36,8 @@ from vllm.model_executor.models.vision import (
     run_dp_sharded_mrope_vision_model,
 )
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.integrations.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
 

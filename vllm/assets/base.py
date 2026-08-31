@@ -4,7 +4,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.foundation.system.connections import global_http_connection
 
 VLLM_S3_BUCKET_URL = "https://vllm-public-assets.s3.us-west-2.amazonaws.com"

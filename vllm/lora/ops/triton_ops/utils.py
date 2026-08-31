@@ -10,10 +10,10 @@ from typing import Any
 import torch
 
 from vllm import envs
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.math_utils import next_power_of_2
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT

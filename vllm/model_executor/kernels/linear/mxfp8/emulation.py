@@ -40,7 +40,7 @@ class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
         # scale is kept for the dtype/ndim asserts but is otherwise unused.
         # Opt out (VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0) to keep the MXFP8
         # weight and dequant per-step in apply_weights instead.
-        import vllm.envs as envs
+        import vllm.foundation.system.envs as envs
 
         if envs.VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD:
             weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)

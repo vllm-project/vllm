@@ -32,7 +32,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,

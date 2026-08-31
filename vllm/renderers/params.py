@@ -5,10 +5,10 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.import_utils import LazyLoader
+from vllm.foundation.utilities.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     import torch

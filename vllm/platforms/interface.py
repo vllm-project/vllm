@@ -11,18 +11,18 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.config import VllmConfig
-    from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.foundation.config import VllmConfig
+    from vllm.foundation.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
@@ -590,7 +590,7 @@ class Platform:
         cls, vllm_config: "VllmConfig"
     ) -> "type[AttentionBackend] | None":
         """Find the first non-SSM attention backend from model layers."""
-        from vllm.config.vllm import get_layers_from_vllm_config
+        from vllm.foundation.config.vllm import get_layers_from_vllm_config
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
         )
@@ -611,8 +611,8 @@ class Platform:
         Ensure block_size is compatible with the attention backend.
         For hybrid models, also aligns block_size with mamba page sizes.
         """
-        from vllm.config.cache import CacheConfig
-        from vllm.config.vllm import set_current_vllm_config
+        from vllm.foundation.config.cache import CacheConfig
+        from vllm.foundation.config.vllm import set_current_vllm_config
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -675,9 +675,9 @@ class Platform:
         To add a padded-spec type: append its per-token page to ``padded_pages``
         and set its ``*_page_size_padded`` hint below.
         """
-        from vllm.config.vllm import set_current_vllm_config
-        from vllm.utils.math_utils import cdiv
-        from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+        from vllm.foundation.config.vllm import set_current_vllm_config
+        from vllm.foundation.utilities.math_utils import cdiv
+        from vllm.foundation.utilities.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import MultipleOf
         from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
 
@@ -775,10 +775,10 @@ class Platform:
         """
         from math import lcm
 
-        from vllm.config.vllm import set_current_vllm_config
+        from vllm.foundation.config.vllm import set_current_vllm_config
         from vllm.model_executor.models import ModelRegistry
-        from vllm.utils.math_utils import cdiv
-        from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+        from vllm.foundation.utilities.math_utils import cdiv
+        from vllm.foundation.utilities.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import MultipleOf
         from vllm.v1.kv_cache_interface import (
             FullAttentionSpec,
@@ -1307,7 +1307,7 @@ class Platform:
         cls, vllm_config: "VllmConfig"
     ) -> "IrOpPriorityConfig":
         """Get the default IR op priority for the current platform."""
-        from vllm.config.kernel import IrOpPriorityConfig
+        from vllm.foundation.config.kernel import IrOpPriorityConfig
 
         # Native always used by default. Platforms can override this behavior.
         return IrOpPriorityConfig.with_default(["native"])

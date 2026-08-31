@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import (
+from vllm.foundation.utilities.flashinfer import (
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
     has_flashinfer_b12x_gemm,

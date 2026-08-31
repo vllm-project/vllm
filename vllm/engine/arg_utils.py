@@ -32,8 +32,8 @@ from pydantic import TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs
 
-import vllm.envs as envs
-from vllm.config import (
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import (
     AttentionConfig,
     CacheConfig,
     CompilationConfig,
@@ -67,19 +67,19 @@ from vllm.config import (
     WeightTransferConfig,
     get_attr_docs,
 )
-from vllm.config.cache import (
+from vllm.foundation.config.cache import (
     CacheDType,
     KVOffloadingBackend,
     MambaCacheMode,
     MambaDType,
     PrefixCachingHashAlgo,
 )
-from vllm.config.device import Device
-from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
-from vllm.config.load import SafetensorsLoadStrategy
-from vllm.config.lora import MaxLoRARanks
-from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
-from vllm.config.model import (
+from vllm.foundation.config.device import Device
+from vllm.foundation.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
+from vllm.foundation.config.load import SafetensorsLoadStrategy
+from vllm.foundation.config.lora import MaxLoRARanks
+from vllm.foundation.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
+from vllm.foundation.config.model import (
     ConvertOption,
     HfOverrides,
     LogprobsMode,
@@ -87,45 +87,45 @@ from vllm.config.model import (
     RunnerOption,
     TokenizerMode,
 )
-from vllm.config.multimodal import (
+from vllm.foundation.config.multimodal import (
     MMCacheType,
     MMEncoderTPMode,
     MMHasherAlgorithm,
     MMProcessorDevice,
     MMTensorIPC,
 )
-from vllm.config.observability import DetailedTraceModules
-from vllm.config.parallel import (
+from vllm.foundation.config.observability import DetailedTraceModules
+from vllm.foundation.config.parallel import (
     All2AllBackend,
     DataParallelBackend,
     DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
 )
-from vllm.config.scheduler import SchedulerPolicy
-from vllm.config.utils import get_field
-from vllm.config.vllm import OptimizationLevel, PerformanceMode
-from vllm.logger import init_logger, suppress_logging
+from vllm.foundation.config.scheduler import SchedulerPolicy
+from vllm.foundation.config.utils import get_field
+from vllm.foundation.config.vllm import OptimizationLevel, PerformanceMode
+from vllm.foundation.observability.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.plugins import load_general_plugins
+from vllm.foundation.extensibility.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.transformers_utils.config import maybe_override_with_speculators
-from vllm.transformers_utils.repo_utils import get_model_path
-from vllm.transformers_utils.utils import is_cloud_storage
-from vllm.utils.argparse_utils import (
+from vllm.foundation.integrations.transformers_utils.config import maybe_override_with_speculators
+from vllm.foundation.integrations.transformers_utils.repo_utils import get_model_path
+from vllm.foundation.integrations.transformers_utils.utils import is_cloud_storage
+from vllm.foundation.utilities.argparse_utils import (
     FlexibleArgumentParser,
     human_readable_int,
     human_readable_int_or_auto,
 )
-from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.network_utils import get_ip
-from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
+from vllm.foundation.utilities.mem_constants import GiB_bytes
+from vllm.foundation.utilities.network_utils import get_ip
+from vllm.foundation.utilities.torch_utils import resolve_kv_cache_dtype_string
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
-    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.foundation.config.quantization import QuantizationConfigArgs
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.foundation.observability.usage.usage_lib import UsageContext
@@ -260,13 +260,13 @@ NEEDS_HELP = (
 
 def _maybe_add_docs_url(cls: Any) -> str:
     """Generate API docs URL for a vllm config class."""
-    import vllm.config
+    import vllm.foundation.config
 
     name = cls.__name__
-    if getattr(vllm.config, name, None) is not cls:
+    if getattr(vllm.foundation.config, name, None) is not cls:
         return ""
     version = f"v{VLLM_VERSION}" if "dev" not in VLLM_VERSION else "latest"
-    return f"\n\nAPI docs: https://docs.vllm.ai/en/{version}/api/vllm/config/#vllm.config.{name}"
+    return f"\n\nAPI docs: https://docs.vllm.ai/en/{version}/api/vllm/config/#vllm.foundation.config.{name}"
 
 
 def _expand_json_human_readable_numbers(val: str) -> str:
@@ -802,14 +802,14 @@ class EngineArgs:
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
 
-        from vllm.config.quantization import resolve_quantization_config
+        from vllm.foundation.config.quantization import resolve_quantization_config
 
         self.quantization_config = resolve_quantization_config(
             self.quantization, self.quantization_config
         )
 
         # Setup plugins
-        from vllm.plugins import load_general_plugins
+        from vllm.foundation.extensibility.plugins import load_general_plugins
 
         load_general_plugins()
         # when use hf offline,replace model and tokenizer id to local model path

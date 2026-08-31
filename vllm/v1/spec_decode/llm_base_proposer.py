@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
-from vllm.config import (
+from vllm.foundation.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import (
@@ -37,7 +37,7 @@ from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata

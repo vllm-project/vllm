@@ -7,7 +7,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from .base import BaseRenderer
 from .inputs import DictPrompt

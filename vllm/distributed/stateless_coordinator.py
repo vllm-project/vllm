@@ -20,8 +20,8 @@ from vllm.distributed.utils import (
     stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
 )
-from vllm.logger import init_logger
-from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 

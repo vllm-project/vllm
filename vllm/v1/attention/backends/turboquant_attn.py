@@ -25,14 +25,14 @@ from typing import Any, ClassVar
 import torch
 import torch.nn.functional as F
 
-from vllm.config import get_current_vllm_config
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
+from vllm.foundation.config import get_current_vllm_config
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
 )
 from vllm.triton_utils import triton
-from vllm.utils.math_utils import round_up
+from vllm.foundation.utilities.math_utils import round_up
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

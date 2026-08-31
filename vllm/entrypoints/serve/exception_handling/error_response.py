@@ -3,7 +3,7 @@
 from http import HTTPStatus
 
 from vllm.foundation.system.exceptions import GenerationError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from ..engine.protocol import ErrorInfo, ErrorResponse
 from .utils import sanitize_message

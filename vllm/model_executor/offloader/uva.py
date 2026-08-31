@@ -8,12 +8,12 @@ import torch
 import torch.nn as nn
 from torch.func import functional_call
 
-import vllm.envs as envs
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
-from vllm.utils.mem_utils import format_gib
-from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+from vllm.foundation.utilities.mem_utils import format_gib
+from vllm.foundation.utilities.platform_utils import is_uva_available
+from vllm.foundation.utilities.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
 

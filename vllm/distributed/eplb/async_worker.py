@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.distributed.parallel_state import get_eplb_group
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from .eplb_utils import CpuGpuEvent
 from .rebalance_execute import AsyncEplbLayerResult, transfer_layer

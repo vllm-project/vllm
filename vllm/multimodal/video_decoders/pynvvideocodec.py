@@ -10,8 +10,8 @@ from typing import ClassVar, NamedTuple
 import numpy as np
 import numpy.typing as npt
 
-from vllm.logger import init_logger
-from vllm.utils.mem_constants import MiB_bytes
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.mem_constants import MiB_bytes
 
 from .base import (
     PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,

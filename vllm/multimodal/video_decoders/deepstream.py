@@ -6,7 +6,7 @@ from typing import Any, ClassVar
 
 import numpy.typing as npt
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from .base import VideoSourceMetadata, VideoTargetMetadata, check_frame_pixel_limit
 

@@ -10,11 +10,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.b12x import B12xWarmupUnit
-from vllm.utils.b12x import (
+from vllm.foundation.utilities.b12x import B12xWarmupUnit
+from vllm.foundation.utilities.b12x import (
     get_b12x_blockscaled as _import_b12x_blockscaled,
 )
-from vllm.utils.b12x import get_b12x_intrinsics as _import_b12x_intrinsics
+from vllm.foundation.utilities.b12x import get_b12x_intrinsics as _import_b12x_intrinsics
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
@@ -25,7 +25,7 @@ def _apply_b12x_mxfp4_linear(
     weight_scale_storage: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> torch.Tensor:
-    from vllm.utils.flashinfer import flashinfer_mxfp4_quantize
+    from vllm.foundation.utilities.flashinfer import flashinfer_mxfp4_quantize
 
     blockscaled = _import_b12x_blockscaled()
     assert blockscaled is not None

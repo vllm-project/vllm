@@ -5,7 +5,7 @@ from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 from vllm.tokenizers import TokenizerLike

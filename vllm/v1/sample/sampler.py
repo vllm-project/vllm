@@ -5,9 +5,9 @@
 import torch
 import torch.nn as nn
 
-from vllm.config.model import LogprobsMode
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.config.model import LogprobsMode
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words

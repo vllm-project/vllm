@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.outputs import (

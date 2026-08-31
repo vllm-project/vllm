@@ -26,7 +26,7 @@ from vllm.model_executor.parameter import (
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -538,7 +538,7 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from vllm.utils.platform_utils import num_compute_units
+        from vllm.foundation.utilities.platform_utils import num_compute_units
 
         c = self.config
         w_q, w_s, w_zp, _ = self._get_weight_params(layer)

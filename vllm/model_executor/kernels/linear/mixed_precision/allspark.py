@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization.utils.allspark_utils import (
     check_allspark_supported_dtype_shape,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
-from vllm.utils.platform_utils import num_compute_units
+from vllm.foundation.utilities.platform_utils import num_compute_units
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 

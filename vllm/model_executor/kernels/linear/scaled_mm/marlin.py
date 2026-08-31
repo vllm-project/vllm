@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
 )

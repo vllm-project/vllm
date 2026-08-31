@@ -8,7 +8,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.multimodal.video_decoders import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VideoDecoderBackend,
@@ -17,8 +17,8 @@ from vllm.multimodal.video_decoders import (
     decode_video,
     resolve_video_backend_kwargs,
 )
-from vllm.utils.import_utils import PlaceholderModule
-from vllm.utils.registry import ExtensionManager
+from vllm.foundation.utilities.import_utils import PlaceholderModule
+from vllm.foundation.utilities.registry import ExtensionManager
 
 try:
     import cv2

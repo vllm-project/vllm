@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING, Any
 
 from typing_extensions import override
 
-import vllm.envs as envs
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.core.kv_cache_utils import get_none_hash_seed
 from vllm.v1.kv_offload.base import (
     LookupResult,

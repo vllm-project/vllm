@@ -6,7 +6,7 @@ from typing import Annotated, Any, TypeAlias
 
 from pydantic import ConfigDict, Field, model_validator
 
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,

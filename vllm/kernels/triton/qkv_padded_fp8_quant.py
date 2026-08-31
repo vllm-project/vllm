@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.utils.math_utils import round_up
+from vllm.foundation.utilities.math_utils import round_up
 
 _FP8_MIN, _FP8_MAX = get_fp8_min_max()
 

@@ -8,15 +8,15 @@ import regex as re
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,

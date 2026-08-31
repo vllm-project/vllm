@@ -16,7 +16,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,

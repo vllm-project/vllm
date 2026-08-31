@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from vllm.config.multimodal import MMHasherAlgorithm
+from vllm.foundation.config.multimodal import MMHasherAlgorithm
 from vllm.inputs import MultiModalHashes
 
 from ..hasher import MultiModalHasher

@@ -9,7 +9,7 @@ import importlib.metadata
 import sys
 from importlib.util import find_spec
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -25,7 +25,7 @@ def main():
         VLLM_SUBCMD_PARSER_EPILOG,
         cli_env_setup,
     )
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
     CMD_MODULES = [
         vllm.entrypoints.cli.openai,

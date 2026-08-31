@@ -30,7 +30,7 @@ except ImportError:
 
 from typing_extensions import override
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,

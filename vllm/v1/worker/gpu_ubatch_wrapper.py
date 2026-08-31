@@ -8,9 +8,9 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.foundation.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_ep_group
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
@@ -19,13 +19,13 @@ from vllm.forward_context import (
     get_forward_context,
     override_forward_context,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.deep_gemm import set_num_sms as deep_gemm_set_num_sms
-from vllm.utils.import_utils import has_deep_gemm
-from vllm.utils.platform_utils import num_compute_units
+from vllm.foundation.utilities.deep_gemm import set_num_sms as deep_gemm_set_num_sms
+from vllm.foundation.utilities.import_utils import has_deep_gemm
+from vllm.foundation.utilities.platform_utils import num_compute_units
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)

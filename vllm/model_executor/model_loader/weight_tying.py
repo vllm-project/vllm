@@ -7,8 +7,8 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from vllm.config import ModelConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import ModelConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
@@ -72,7 +72,7 @@ def _get_untied_lm_head(model: nn.Module) -> _UntiedLMHead | None:
 
 def maybe_retie_word_embeddings(model: nn.Module, model_config: ModelConfig) -> None:
     """Re-tie word embeddings that
-    [ModelConfig.maybe_untie_word_embeddings][vllm.config.ModelConfig.maybe_untie_word_embeddings]
+    [ModelConfig.maybe_untie_word_embeddings][vllm.foundation.config.ModelConfig.maybe_untie_word_embeddings]
     untied, if the loaded `lm_head` turned out to be identical to the input embeddings
     after all.
 

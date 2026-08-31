@@ -11,7 +11,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import SiluAndMul

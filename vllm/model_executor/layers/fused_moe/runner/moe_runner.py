@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, cast
 import torch
 import torch.nn.functional as F
 
-from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.config.parallel import ExpertPlacementStrategy
+from vllm.foundation.config import VllmConfig, get_current_vllm_config
+from vllm.foundation.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_ep_group,
     get_pcp_group,
@@ -20,7 +20,7 @@ from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -46,7 +46,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExpertsOrder,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.torch_utils import (
     _USE_LAYERNAME,
     LayerName,
     direct_register_custom_op,

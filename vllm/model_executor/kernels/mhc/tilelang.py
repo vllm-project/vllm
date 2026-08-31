@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 
 def _torch_hc_prenorm_gemm(
@@ -131,8 +131,8 @@ def mhc_pre_tilelang(
         mhc_pre_big_fuse_tilelang,
         mhc_pre_big_fuse_with_norm_tilelang,
     )
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
-    from vllm.utils.math_utils import cdiv
+    from vllm.foundation.utilities.deep_gemm import tf32_hc_prenorm_gemm
+    from vllm.foundation.utilities.math_utils import cdiv
 
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
@@ -162,7 +162,7 @@ def mhc_pre_tilelang(
     residual_flat = residual.view(-1, hc_mult, hidden_size)
     num_tokens = residual_flat.shape[0]
 
-    from vllm.utils.deep_gemm import is_deep_gemm_supported
+    from vllm.foundation.utilities.deep_gemm import is_deep_gemm_supported
 
     use_deep_gemm = is_deep_gemm_supported()
     if use_deep_gemm:
@@ -320,7 +320,7 @@ def mhc_pre_broadcast_tilelang(
         compute_num_split,
         mhc_pre_big_fuse_broadcast_with_norm_tilelang,
     )
-    from vllm.utils.math_utils import cdiv
+    from vllm.foundation.utilities.math_utils import cdiv
 
     assert norm_weight is not None, "broadcast mHC pre currently requires fused RMSNorm"
     assert residual.dtype == torch.bfloat16
@@ -369,7 +369,7 @@ def mhc_pre_broadcast_tilelang(
         n_splits, num_tokens, dtype=torch.float32, device=residual.device
     )
 
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
+    from vllm.foundation.utilities.deep_gemm import tf32_hc_prenorm_gemm
 
     tf32_hc_prenorm_gemm(
         residual_flat,
@@ -469,7 +469,7 @@ def mhc_fused_post_pre_tilelang(
         mhc_pre_big_fuse_tilelang,
         mhc_pre_big_fuse_with_norm_tilelang,
     )
-    from vllm.utils.math_utils import cdiv
+    from vllm.foundation.utilities.math_utils import cdiv
 
     assert residual.dtype == torch.bfloat16
     assert x.dtype == torch.bfloat16
@@ -512,7 +512,7 @@ def mhc_fused_post_pre_tilelang(
     post_layer_mix_flat = post_layer_mix.view(num_tokens, hc_mult)
     comb_res_mix_flat = comb_res_mix.view(num_tokens, hc_mult, hc_mult)
 
-    from vllm.utils.deep_gemm import is_deep_gemm_supported
+    from vllm.foundation.utilities.deep_gemm import is_deep_gemm_supported
 
     use_deep_gemm = is_deep_gemm_supported()
     use_small_fma = num_tokens <= 16
@@ -593,7 +593,7 @@ def mhc_fused_post_pre_tilelang(
 
         residual_cur_2d = residual_cur.view(num_tokens, hc_mult * hidden_size)
         if use_deep_gemm:
-            from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
+            from vllm.foundation.utilities.deep_gemm import tf32_hc_prenorm_gemm
 
             tf32_hc_prenorm_gemm(
                 residual_cur_2d,

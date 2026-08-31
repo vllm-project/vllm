@@ -6,7 +6,7 @@ from typing import Any
 
 from openai_harmony import Message as OpenAIMessage
 
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
@@ -34,15 +34,15 @@ from vllm.inputs import (
     SingletonPrompt,
     tokens_input,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer, ChatParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
-from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
-from vllm.utils.mistral import mt as _mt
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer, is_mistral_tool_parser
+from vllm.foundation.utilities.mistral import mt as _mt
 
 logger = init_logger(__name__)
 

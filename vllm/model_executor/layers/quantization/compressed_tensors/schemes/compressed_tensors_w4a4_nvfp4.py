@@ -5,7 +5,7 @@ from collections.abc import Callable
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
 from vllm.model_executor.layers.fusion.quant_activation import (
     expose_input_quant_key,

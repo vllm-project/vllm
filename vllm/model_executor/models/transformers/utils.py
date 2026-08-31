@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Literal, TypeVar
 import torch
 from torch import nn
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -36,10 +36,10 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.transformers_utils.config import is_rope_parameters_nested
+from vllm.foundation.integrations.transformers_utils.config import is_rope_parameters_nested
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
 

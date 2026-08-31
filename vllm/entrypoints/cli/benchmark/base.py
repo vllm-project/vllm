@@ -3,7 +3,7 @@
 import argparse
 
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
 
 class BenchmarkSubcommandBase(CLISubcommand):

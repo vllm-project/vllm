@@ -7,14 +7,14 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
     MoveDirectionality,
 )
 
 if TYPE_CHECKING:
-    from vllm.config.reasoning import ReasoningConfig
+    from vllm.foundation.config.reasoning import ReasoningConfig
 
 
 def maybe_create_thinking_budget_state_holder(

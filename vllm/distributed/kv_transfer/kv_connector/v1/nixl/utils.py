@@ -10,7 +10,7 @@ import regex as re
 import zmq
 
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import make_zmq_socket
+from vllm.foundation.utilities.network_utils import make_zmq_socket
 from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
 
 # Supported platforms and types of kv transfer buffer.
@@ -31,7 +31,7 @@ _NIXL_SUPPORTED_DEVICE = {
 _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
 
 
-# TODO: merge with vllm.utils.network_utils.zmq_socket_ctx
+# TODO: merge with vllm.foundation.utilities.network_utils.zmq_socket_ctx
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.config.vllm import VllmConfig
+from vllm.foundation.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.kv_cache_interface import KVCacheSpec, RSWASpec, get_kv_quant_mode
 

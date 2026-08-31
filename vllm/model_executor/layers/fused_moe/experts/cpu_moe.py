@@ -42,7 +42,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.math_utils import round_up
+from vllm.foundation.utilities.math_utils import round_up
 
 # ===========================================================================
 # Routing

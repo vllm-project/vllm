@@ -30,12 +30,12 @@ from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_tensor_model_parallel_rank,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.foundation.utilities.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 logger = init_logger(__name__)
 

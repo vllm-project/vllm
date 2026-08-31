@@ -26,7 +26,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser

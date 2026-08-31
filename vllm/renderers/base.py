@@ -28,7 +28,7 @@ from vllm.inputs import (
     embeds_input,
     tokens_input,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.gpu_ipc_memory import maybe_init_mm_gpu_ipc_pool
@@ -41,9 +41,9 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.async_utils import make_async
-from vllm.utils.counter import AtomicCounter
-from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.foundation.utilities.async_utils import make_async
+from vllm.foundation.utilities.counter import AtomicCounter
+from vllm.foundation.utilities.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .embed_utils import safe_load_prompt_embeds
@@ -59,7 +59,7 @@ from .inputs.preprocess import extract_target_prompt
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.entrypoints.chat_utils import (
         ChatCompletionMessageParam,
         ConversationMessage,

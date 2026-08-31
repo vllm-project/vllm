@@ -10,8 +10,8 @@ from openai.types.responses.response_function_tool_call_output_item import (
 )
 from openai_harmony import Author, Message, Role, TextContent
 
-from vllm.logger import init_logger
-from vllm.utils import random_uuid
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities import random_uuid
 
 if TYPE_CHECKING:
     # Avoid circular import.

@@ -27,14 +27,14 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import (
+from vllm.foundation.config import (
     CacheConfig,
     VllmConfig,
     get_current_vllm_config,
 )
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -109,7 +109,7 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.foundation.utilities.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,

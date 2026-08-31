@@ -4,7 +4,7 @@ import argparse
 
 from vllm.benchmarks.throughput import add_cli_args, main
 from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
 
 class BenchmarkThroughputSubcommand(BenchmarkSubcommandBase):

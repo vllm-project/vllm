@@ -12,9 +12,9 @@ from collections import defaultdict
 import torch.nn as nn
 
 from vllm.compilation.backends import set_model_tag
-from vllm.config import VllmConfig, replace
+from vllm.foundation.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,

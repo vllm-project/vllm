@@ -40,10 +40,10 @@ if TYPE_CHECKING:
         GlmOcrVisionConfig,
     )
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )

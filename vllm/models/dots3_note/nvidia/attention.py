@@ -19,7 +19,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,

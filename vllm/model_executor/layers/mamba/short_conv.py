@@ -4,7 +4,7 @@
 
 import torch
 
-from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.foundation.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
@@ -25,7 +25,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata

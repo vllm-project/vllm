@@ -19,10 +19,10 @@ import torch.nn as nn
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm import envs
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict, MultiModalInput
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -79,9 +79,9 @@ from vllm.multimodal.video_prune.evs import (
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.configs.radio import RadioConfig
-from vllm.transformers_utils.processors.internvl import get_internvl_target_ratios
-from vllm.transformers_utils.processors.nano_nemotron_vl import (
+from vllm.foundation.integrations.transformers_utils.configs.radio import RadioConfig
+from vllm.foundation.integrations.transformers_utils.processors.internvl import get_internvl_target_ratios
+from vllm.foundation.integrations.transformers_utils.processors.nano_nemotron_vl import (
     AUDIO_CONTEXT,
     IMG_CONTEXT,
     IMG_END,
@@ -91,7 +91,7 @@ from vllm.transformers_utils.processors.nano_nemotron_vl import (
     NanoNemotronVLProcessor,
     get_video_target_size_and_feature_size,
 )
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .utils import _merge_multimodal_embeddings
 

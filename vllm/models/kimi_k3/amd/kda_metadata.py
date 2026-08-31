@@ -9,10 +9,10 @@ differently on device rather than on the host.
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import next_power_of_2
+from vllm.foundation.utilities.math_utils import next_power_of_2
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
     GDNAttentionMetadataBuilder,

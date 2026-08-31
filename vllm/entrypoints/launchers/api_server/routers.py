@@ -5,7 +5,7 @@ from argparse import Namespace
 from fastapi import FastAPI
 
 from vllm import envs
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.tasks import POOLING_TASKS, SupportedTask
 
 

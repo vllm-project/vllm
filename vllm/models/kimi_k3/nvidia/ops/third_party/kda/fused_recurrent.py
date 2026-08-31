@@ -12,7 +12,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.op import exp, log
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv, next_power_of_2
+from vllm.foundation.utilities.math_utils import cdiv, next_power_of_2
 
 
 @triton.heuristics(

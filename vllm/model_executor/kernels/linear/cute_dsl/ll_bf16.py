@@ -112,7 +112,7 @@ def _cute():
 
 def _stream():
     _, CUstream = _cute()
-    from vllm.utils.torch_utils import current_stream
+    from vllm.foundation.utilities.torch_utils import current_stream
 
     return CUstream(current_stream().cuda_stream)
 

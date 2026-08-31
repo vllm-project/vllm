@@ -11,16 +11,16 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, MultiModalConfig, get_current_vllm_config_or_none
+from vllm.foundation.config import ModelConfig, MultiModalConfig, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.transformers_utils.processor import get_processor, get_processor_config
-from vllm.utils.math_utils import round_up
+from vllm.foundation.integrations.transformers_utils.processor import get_processor, get_processor_config
+from vllm.foundation.utilities.math_utils import round_up
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)

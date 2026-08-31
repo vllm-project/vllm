@@ -8,8 +8,8 @@ from collections.abc import Iterable
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -26,7 +26,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.utils import get_pp_missing_layer_names, maybe_prefix
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from ..common.mtp import fused_mtp_input
 from .linear import KimiDecoderLayer, get_spec_layer_idx_from_weight_name

@@ -14,14 +14,14 @@ from pydantic import (
     model_serializer,
 )
 
-import vllm.envs as envs
-from vllm.config.utils import replace
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config.utils import replace
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.sampling_params import StructuredOutputsParams
-from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 

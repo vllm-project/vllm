@@ -8,7 +8,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.outputs import RequestOutput
 
 from ...serve.engine.protocol import ErrorResponse

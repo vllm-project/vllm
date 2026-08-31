@@ -13,12 +13,12 @@ from compressed_tensors.quantization import (
 )
 from compressed_tensors.transform import TransformConfig
 
-from vllm.config import get_current_vllm_config_or_none
+from vllm.foundation.config import get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (

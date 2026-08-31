@@ -7,11 +7,11 @@ import pybase64
 import torch
 
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.utils.async_utils import make_async
-from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
+from vllm.foundation.utilities.async_utils import make_async
+from vllm.foundation.utilities.sparse_utils import check_sparse_tensor_invariants_threadsafe
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.foundation.config import ModelConfig
 
 
 def safe_load_prompt_embeds(

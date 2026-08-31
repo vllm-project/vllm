@@ -7,7 +7,7 @@ from collections.abc import Iterable
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.models.qwen3 import Qwen3Model
 from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
 from vllm.sequence import IntermediateTensors

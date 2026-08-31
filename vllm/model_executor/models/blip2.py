@@ -13,8 +13,8 @@ from transformers import (
     apply_chunking_to_forward,
 )
 
-from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
+from vllm.foundation.config import CacheConfig, VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -33,7 +33,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .blip import BlipVisionModel, get_blip_num_patches
 from .interfaces import (

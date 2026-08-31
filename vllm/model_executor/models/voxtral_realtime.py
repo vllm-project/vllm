@@ -14,11 +14,11 @@ from mistral_common.protocol.transcription.request import (
 from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.engine.protocol import StreamingInput
 from vllm.inputs import PromptType, TokensPrompt
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
 from vllm.model_executor.models.voxtral import (
     VoxtralDummyInputsBuilder,
@@ -37,7 +37,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
 
 from .utils import (
     _flatten_embeddings,

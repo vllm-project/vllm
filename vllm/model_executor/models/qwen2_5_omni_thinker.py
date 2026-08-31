@@ -43,11 +43,11 @@ from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import (
 )
 from transformers.models.whisper import WhisperFeatureExtractor
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import ModalityData, MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer,
@@ -89,8 +89,8 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

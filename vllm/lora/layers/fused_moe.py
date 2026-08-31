@@ -6,7 +6,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm import envs
-from vllm.config.lora import LoRAConfig
+from vllm.foundation.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.custom_op import maybe_get_oot_by_class

@@ -4,7 +4,7 @@
 
 from fastapi import APIRouter, WebSocket
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from .connection import RealtimeConnection
 

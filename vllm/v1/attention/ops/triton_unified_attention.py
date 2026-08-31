@@ -11,8 +11,8 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (

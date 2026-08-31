@@ -7,7 +7,7 @@ import regex as re
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )

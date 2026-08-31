@@ -6,8 +6,8 @@ from io import BytesIO
 import numpy as np
 import numpy.typing as npt
 
-from vllm.logger import init_logger
-from vllm.utils.import_utils import PlaceholderModule
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import PlaceholderModule
 
 from .base import (
     VideoSourceMetadata,

@@ -32,9 +32,9 @@ from torch import nn
 from transformers import PretrainedConfig
 
 # from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -60,7 +60,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.foundation.integrations.transformers_utils.config import set_default_rope_theta
 
 from .ernie45_moe import Ernie4_5_MoeMLP
 from .interfaces import SupportsPP

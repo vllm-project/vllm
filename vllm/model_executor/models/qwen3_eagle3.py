@@ -8,8 +8,8 @@ import torch.nn as nn
 from transformers import Qwen3Config
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig, get_current_vllm_config
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor

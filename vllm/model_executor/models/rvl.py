@@ -7,8 +7,8 @@ import torch
 import torch.nn as nn
 from transformers.activations import GELUActivation
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 

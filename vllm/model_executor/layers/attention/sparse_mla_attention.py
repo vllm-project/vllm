@@ -14,7 +14,7 @@ from vllm.distributed import (
     get_dcp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
     MLACommonMetadata,
@@ -27,8 +27,8 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
+from vllm.foundation.utilities.flashinfer import has_flashinfer
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
 from vllm.v1.attention.backend import AttentionMetadata, AttentionMetadataBuilder
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
@@ -36,7 +36,7 @@ from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.kv_cache_interface import AttentionSpec

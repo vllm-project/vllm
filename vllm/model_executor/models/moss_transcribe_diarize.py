@@ -19,9 +19,9 @@ import torch
 from torch import nn
 from transformers import BatchFeature
 
-from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TextPrompt
 from vllm.model_executor.models.interfaces import (
     DiarizedTranscriptionSegment,
@@ -68,8 +68,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.processing.processor import ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 WHISPER_ENCODER_STRIDE = 2
 MAX_AUDIO_DURATION_S = 90 * 60

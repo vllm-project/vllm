@@ -12,7 +12,7 @@ from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from typing_extensions import Self
 
 from vllm import envs
-from vllm.config.weight_transfer import WeightTransferConfig
+from vllm.foundation.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     TrainerInitInfo,
     TrainerWeightTransferEngine,
@@ -24,7 +24,7 @@ from vllm.distributed.weight_transfer.base import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     PackedBufferImporter,

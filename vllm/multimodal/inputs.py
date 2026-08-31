@@ -21,9 +21,9 @@ import numpy as np
 from PIL.Image import Image
 from typing_extensions import TypeVar
 
-from vllm.utils.collection_utils import is_list_of
-from vllm.utils.import_utils import LazyLoader
-from vllm.utils.jsontree import json_iter_leaves, json_map_leaves
+from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.foundation.utilities.import_utils import LazyLoader
+from vllm.foundation.utilities.jsontree import json_iter_leaves, json_map_leaves
 
 from .media import MediaWithBytes
 

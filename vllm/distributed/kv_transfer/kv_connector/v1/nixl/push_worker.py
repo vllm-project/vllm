@@ -57,12 +57,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     _is_attention_spec,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_request_id
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 if TYPE_CHECKING:
     import torch
 
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)

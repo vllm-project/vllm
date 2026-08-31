@@ -15,7 +15,7 @@ from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.sampling_params import BeamSearchParams
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
 
 def save_to_pytorch_benchmark_format(

@@ -30,8 +30,8 @@ from pathlib import Path
 from typing import Any
 
 from vllm.kernels.helion.case_key import CaseKey
-from vllm.logger import init_logger
-from vllm.utils.import_utils import has_helion
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import has_helion
 
 if not has_helion():
     raise ImportError(

@@ -12,9 +12,9 @@ import torch
 from PIL import Image
 
 from vllm import envs
-from vllm.logger import init_logger
-from vllm.utils.serial_utils import tensor2base64
-from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.serial_utils import tensor2base64
+from vllm.foundation.utilities.sparse_utils import check_sparse_tensor_invariants_threadsafe
 
 from ..video import VIDEO_LOADER_REGISTRY
 from .base import MediaIO, MediaWithBytes

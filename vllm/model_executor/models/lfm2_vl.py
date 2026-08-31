@@ -18,8 +18,8 @@ from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
     round_by_factor,
 )
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -46,7 +46,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     IsHybrid,

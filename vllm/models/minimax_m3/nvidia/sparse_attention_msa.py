@@ -11,10 +11,10 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.config.attention import MiniMaxM3MSADecodeBackend
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.attention import MiniMaxM3MSADecodeBackend
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_sparse_attn_decode,

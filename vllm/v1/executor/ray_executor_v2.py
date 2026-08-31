@@ -10,15 +10,15 @@ from typing import Any
 
 from torch.distributed import TCPStore
 
-import vllm.envs as envs
-from vllm.config import VllmConfig
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import (
     Handle,
     MessageQueue,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import (
+from vllm.foundation.utilities.network_utils import (
     get_distributed_init_method,
 )
 from vllm.v1.executor.multiproc_executor import (

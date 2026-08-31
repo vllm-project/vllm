@@ -15,9 +15,9 @@ from aiter.ops.flydsl.kernels.moe_gemm_2stage import (
     compile_moe_gemm2,
 )
 
-from vllm.logger import init_logger
-from vllm.utils.platform_utils import get_device_name_as_file_name
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.platform_utils import get_device_name_as_file_name
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 

@@ -9,8 +9,8 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm import envs
-from vllm.config.lora import LoRAConfig
-from vllm.logger import init_logger
+from vllm.foundation.config.lora import LoRAConfig
+from vllm.foundation.observability.logger import init_logger
 
 # being imported for _all_lora_classes below
 from vllm.lora.layers import (
@@ -37,7 +37,7 @@ from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.utils import get_moe_expert_mapping, get_packed_modules_mapping
-from vllm.transformers_utils.repo_utils import hf_api
+from vllm.foundation.integrations.transformers_utils.repo_utils import hf_api
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.logits_processor import LogitsProcessor

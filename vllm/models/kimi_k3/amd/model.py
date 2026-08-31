@@ -8,7 +8,7 @@ from typing import cast
 import torch
 from torch import nn
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors,
@@ -38,7 +38,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
+from vllm.foundation.integrations.transformers_utils.configs.kimi_k3 import KimiK3Config
 
 from ..common.mm_preprocess import (
     KimiK3DummyInputsBuilder,

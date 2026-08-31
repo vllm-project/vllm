@@ -7,12 +7,12 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-import vllm.envs
+import vllm.foundation.system.envs
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.utils.import_utils import LazyLoader
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.foundation.utilities.import_utils import LazyLoader
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -67,7 +67,7 @@ class XgrammarBackend(StructuredOutputBackend):
             tokenizer_info,
             max_threads=8,
             cache_enabled=True,
-            cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
+            cache_limit_bytes=vllm.foundation.system.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )
 
         self.num_speculative_tokens = 0

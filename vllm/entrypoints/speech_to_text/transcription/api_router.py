@@ -13,7 +13,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     with_cancellation,
 )
 from vllm.entrypoints.speech_to_text.base.utils import read_upload_with_limit
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from ...serve.engine.protocol import ErrorResponse
 from .protocol import TranscriptionRequest, TranscriptionResponseVariant

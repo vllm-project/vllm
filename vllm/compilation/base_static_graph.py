@@ -4,7 +4,7 @@
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.foundation.config import CUDAGraphMode, VllmConfig
 
 
 class AbstractStaticGraphWrapper(Protocol):

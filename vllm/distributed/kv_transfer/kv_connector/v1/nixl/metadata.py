@@ -5,13 +5,13 @@
 from dataclasses import dataclass
 from typing import Any
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -162,7 +162,7 @@ def compute_nixl_compatibility_hash(
         SHA-256 hex digest
     """
     from vllm import __version__ as vllm_version
-    from vllm.config.utils import hash_factors
+    from vllm.foundation.config.utils import hash_factors
 
     model_config = vllm_config.model_config
     cache_config = vllm_config.cache_config

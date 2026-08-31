@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
+"""Compatibility shim: vllm.transformers_utils/configs/cosmos3 -> vllm.foundation.integrations.transformers_utils.configs.cosmos3 (sys.modules alias)."""
+import importlib
+import sys
 
-class Cosmos3Config(Qwen3VLConfig):
-    model_type = "cosmos3_omni"
+_real = importlib.import_module("vllm.foundation.integrations.transformers_utils.configs.cosmos3")
+sys.modules[__name__] = _real

@@ -12,9 +12,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
-from vllm.config.lora import LoRAConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.lora import LoRAConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager

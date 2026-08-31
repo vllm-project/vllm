@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 
 
 def init_speculator(vllm_config: VllmConfig, device: torch.device):

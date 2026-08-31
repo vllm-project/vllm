@@ -20,7 +20,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
 )
-from vllm.utils.math_utils import round_up
+from vllm.foundation.utilities.math_utils import round_up
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWABackend,

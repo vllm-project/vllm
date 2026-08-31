@@ -10,9 +10,9 @@ from flashinfer.utils import (
     get_trtllm_gen_multi_ctas_kv_counter_bytes,
 )
 
-from vllm.config import get_current_vllm_config
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
+from vllm.foundation.config import get_current_vllm_config
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
@@ -21,7 +21,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -30,7 +30,7 @@ from vllm.v1.attention.backend import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)

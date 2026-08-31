@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.logger import init_logger
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
     from vllm.v1.worker.gpu.input_batch import InputBatch
     from vllm.v1.worker.gpu.states import RequestState

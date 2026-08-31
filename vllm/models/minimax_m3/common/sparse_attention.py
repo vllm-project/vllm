@@ -21,10 +21,10 @@ from typing import ClassVar
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
-from vllm.config.cache import CacheDType
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 from vllm.platforms import current_platform
 

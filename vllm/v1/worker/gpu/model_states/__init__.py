@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention, CrossAttention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache

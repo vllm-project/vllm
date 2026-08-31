@@ -6,7 +6,7 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 
-from vllm.config import get_current_vllm_config
+from vllm.foundation.config import get_current_vllm_config
 from vllm.model_executor.kernels.linear import (
     init_wfp8_a16_linear_kernel,
 )

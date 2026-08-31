@@ -9,13 +9,13 @@ from packaging import version
 from tokenizers import Tokenizer
 from transformers import TokenizersBackend
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
 )
-from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)

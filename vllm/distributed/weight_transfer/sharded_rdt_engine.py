@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
-from vllm.config.weight_transfer import WeightTransferConfig
+from vllm.foundation.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
@@ -73,10 +73,10 @@ from vllm.distributed.weight_transfer.sharded_rdt_fake import (
     FetchKey,
     _Scatter,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 logger = init_logger(__name__)
 

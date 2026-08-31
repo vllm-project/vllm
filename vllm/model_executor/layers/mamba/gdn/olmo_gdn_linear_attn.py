@@ -4,7 +4,7 @@ import torch
 from einops import rearrange
 from torch import nn
 
-from vllm.config import (
+from vllm.foundation.config import (
     VllmConfig,
     get_current_vllm_config,
 )
@@ -39,7 +39,7 @@ from vllm.third_party.flash_linear_attention.ops import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 

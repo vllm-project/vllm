@@ -4,7 +4,7 @@ import pydantic
 from fastapi import Request
 from starlette.concurrency import iterate_in_threadpool
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

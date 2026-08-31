@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import Field
 
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.utils import random_uuid
+from vllm.foundation.utilities import random_uuid
 
 # Client -> Server Events
 

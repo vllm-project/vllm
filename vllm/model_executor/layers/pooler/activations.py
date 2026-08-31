@@ -9,9 +9,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig
-from vllm.logger import init_logger
-from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.foundation.config import ModelConfig
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 

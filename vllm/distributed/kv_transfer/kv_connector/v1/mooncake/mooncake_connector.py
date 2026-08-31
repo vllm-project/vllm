@@ -18,7 +18,7 @@ import zmq
 import zmq.asyncio
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
@@ -44,12 +44,12 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import ForwardContext
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv
-from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
-from vllm.utils.torch_utils import is_non_overlapping_and_dense
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.network_utils import get_ip, make_zmq_path, make_zmq_socket
+from vllm.foundation.utilities.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput

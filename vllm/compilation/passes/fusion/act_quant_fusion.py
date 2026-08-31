@@ -8,8 +8,8 @@ import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._ops import OpOverload
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic64Sym,

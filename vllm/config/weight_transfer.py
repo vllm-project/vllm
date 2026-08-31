@@ -1,15 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Literal
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.config.utils import config
+"""Compatibility shim: vllm.config/weight_transfer -> vllm.foundation.config.weight_transfer (sys.modules alias)."""
+import importlib
+import sys
 
-
-@config
-class WeightTransferConfig:
-    """Configuration for weight transfer during RL training."""
-
-    backend: Literal["nccl", "ipc", "sparse_nccl", "sharded_rdt"] | str = "nccl"
-    """The backend to use for weight transfer. Validated against the
-    `WeightTransferEngineFactory` registry at engine creation time.
-    """
+_real = importlib.import_module("vllm.foundation.config.weight_transfer")
+sys.modules[__name__] = _real

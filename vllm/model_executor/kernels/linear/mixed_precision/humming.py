@@ -5,7 +5,7 @@
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_humming
+from vllm.foundation.utilities.import_utils import has_humming
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 

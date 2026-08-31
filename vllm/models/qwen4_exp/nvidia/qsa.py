@@ -9,8 +9,8 @@ from typing import ClassVar, cast
 import torch
 from torch import nn
 
-from vllm.config import VllmConfig
-from vllm.config.cache import CacheDType
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import (
@@ -23,10 +23,10 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.qwen4_exp import (
+from vllm.foundation.integrations.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,

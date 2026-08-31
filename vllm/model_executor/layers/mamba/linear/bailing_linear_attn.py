@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from transformers.configuration_utils import PretrainedConfig
 
-from vllm.config import (
+from vllm.foundation.config import (
     VllmConfig,
     get_current_vllm_config,
 )

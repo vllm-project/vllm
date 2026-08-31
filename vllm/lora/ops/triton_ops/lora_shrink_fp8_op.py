@@ -12,7 +12,7 @@ import torch
 from vllm.lora.ops.triton_ops.fp8_kernel_utils import do_shrink_kernel_fp8
 from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 _SHRINK_LORA_SCALE_PTR_DICT: dict[tuple[int, ...], tuple] = {}
 

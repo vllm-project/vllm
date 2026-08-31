@@ -10,7 +10,7 @@ import torch.nn as nn
 from vllm import envs
 from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import next_power_of_2
+from vllm.foundation.utilities.math_utils import next_power_of_2
 
 _lora_aux_cuda_stream: torch.cuda.Stream | None = None
 

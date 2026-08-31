@@ -16,9 +16,9 @@ from packaging.version import InvalidVersion, Version
 from typing_extensions import override
 
 import vllm.version
-from vllm.config import ProfilerConfig
-from vllm.config.profiler import _is_uri_path
-from vllm.logger import init_logger
+from vllm.foundation.config import ProfilerConfig
+from vllm.foundation.config.profiler import _is_uri_path
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

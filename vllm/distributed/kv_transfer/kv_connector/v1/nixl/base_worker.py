@@ -66,11 +66,11 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.network_utils import make_zmq_path
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.network_utils import make_zmq_path
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -86,7 +86,7 @@ from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)

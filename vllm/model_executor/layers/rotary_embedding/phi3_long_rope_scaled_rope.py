@@ -5,8 +5,8 @@ import math
 import torch
 import torch.nn as nn
 
-from vllm.config import get_current_vllm_config
-from vllm.logger import init_logger
+from vllm.foundation.config import get_current_vllm_config
+from vllm.foundation.observability.logger import init_logger
 
 from .common import rotate_neox
 

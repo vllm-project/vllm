@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -15,8 +15,8 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.tasks import check_removed_pooling_task
-from vllm.utils import random_uuid
-from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
+from vllm.foundation.utilities import random_uuid
+from vllm.foundation.utilities.serial_utils import EmbedDType, EncodingFormat, Endianness
 
 
 def reject_removed_pooling_parameters(data):

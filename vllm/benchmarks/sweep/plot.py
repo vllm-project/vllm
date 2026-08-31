@@ -12,9 +12,9 @@ from typing import TYPE_CHECKING, ClassVar
 
 from typing_extensions import Self, override
 
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.collection_utils import full_groupby
-from vllm.utils.import_utils import PlaceholderModule
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.collection_utils import full_groupby
+from vllm.foundation.utilities.import_utils import PlaceholderModule
 
 from .utils import sanitize_filename
 

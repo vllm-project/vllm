@@ -9,8 +9,8 @@ from typing import final
 
 import torch
 
-import vllm.envs as envs
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
     MoEActivation,

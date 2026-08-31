@@ -19,7 +19,7 @@ from transformers.models.qwen2_vl import (
     Qwen2VLVideoProcessor,
 )
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,

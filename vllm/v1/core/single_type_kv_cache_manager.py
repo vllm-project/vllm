@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import ClassVar
 
-from vllm.utils.math_utils import cdiv
+from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHashList,

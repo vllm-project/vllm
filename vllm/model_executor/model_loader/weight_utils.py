@@ -28,14 +28,14 @@ from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm import envs
-from vllm.config import ModelConfig
-from vllm.config.load import (
+from vllm.foundation.config import ModelConfig
+from vllm.foundation.config.load import (
     DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
     DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     LoadConfig,
 )
 from vllm.distributed import get_tensor_model_parallel_rank, get_world_group
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     get_quantization_config,
@@ -45,8 +45,8 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
 )
 from vllm.platforms import current_platform
 from vllm.foundation.observability.tracing import instrument
-from vllm.transformers_utils.repo_utils import hf_api, hf_fs
-from vllm.utils.import_utils import PlaceholderModule
+from vllm.foundation.integrations.transformers_utils.repo_utils import hf_api, hf_fs
+from vllm.foundation.utilities.import_utils import PlaceholderModule
 
 try:
     from runai_model_streamer import SafetensorsStreamer
@@ -323,7 +323,7 @@ def get_quant_config(
     # Online quantization doesn't read from checkpoint configs - it quantizes
     # fp16/bf16 weights on the fly during loading.
     if model_config.quantization_config is not None:
-        from vllm.config.quantization import QuantizationConfigArgs
+        from vllm.foundation.config.quantization import QuantizationConfigArgs
         from vllm.model_executor.layers.quantization.online.base import (
             OnlineQuantizationConfig,
         )
@@ -695,7 +695,7 @@ def _get_available_ram_bytes() -> int:
 
     host_available = psutil.virtual_memory().available
 
-    from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
+    from vllm.foundation.utilities.cpu_resource_utils import get_cgroup_memory_limit
 
     cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
     if cgroup_limit is None:

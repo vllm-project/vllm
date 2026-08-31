@@ -3,7 +3,7 @@
 
 from typing import TYPE_CHECKING
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from ..inc_linear import INCLinearMethod
 from .inc_scheme import INCScheme

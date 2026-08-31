@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import get_args
 
-from vllm.config.parallel import EPLBPolicyOption
+from vllm.foundation.config.parallel import EPLBPolicyOption
 
 from .abstract import AbstractEplbPolicy
 from .default import DefaultEplbPolicy

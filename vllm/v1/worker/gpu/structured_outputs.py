@@ -4,8 +4,8 @@ import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
 

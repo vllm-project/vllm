@@ -7,8 +7,8 @@ from typing import ClassVar
 import torch
 
 import vllm._custom_ops as ops
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
@@ -16,8 +16,8 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.foundation.utilities.platform_utils import num_compute_units
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,

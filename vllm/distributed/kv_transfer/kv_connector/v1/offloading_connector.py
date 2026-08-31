@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,

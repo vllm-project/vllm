@@ -26,7 +26,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 # Version of the canonical byte format; bump on any layout change
 CANONICAL_FORMAT_VERSION = 1

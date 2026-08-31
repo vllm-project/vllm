@@ -17,11 +17,11 @@ from transformers.models.gemma3n import (
 )
 from transformers.models.siglip import SiglipImageProcessorFast
 
-from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TextPrompt
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -55,8 +55,8 @@ from vllm.multimodal.processing.processor import (
     replace_token_matches,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
 from .utils import (

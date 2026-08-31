@@ -17,10 +17,10 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.embedding_cache import (
     EmbeddingCache,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.outputs import ECConnectorOutput
     from vllm.v1.request import Request

@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Set
 from dataclasses import dataclass, field
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 
 logger = init_logger(__name__)

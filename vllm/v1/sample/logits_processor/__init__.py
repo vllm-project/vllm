@@ -11,10 +11,10 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.logits_process import LogitsProcessor as RequestLogitsProcessor
 from vllm.sampling_params import SamplingParams
-from vllm.utils.torch_utils import guard_cuda_initialization
+from vllm.foundation.utilities.torch_utils import guard_cuda_initialization
 from vllm.v1.sample.logits_processor.builtin import (
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
@@ -29,7 +29,7 @@ from vllm.v1.sample.logits_processor.interface import (
 from vllm.v1.sample.logits_processor.state import BatchUpdateBuilder, LogitsProcessors
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 logger = init_logger(__name__)
 

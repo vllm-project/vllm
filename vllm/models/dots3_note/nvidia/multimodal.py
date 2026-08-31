@@ -8,7 +8,7 @@ from contextlib import contextmanager
 import torch
 from torch import nn
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
@@ -22,7 +22,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from ..common.processor import (
     AUDIO_END,

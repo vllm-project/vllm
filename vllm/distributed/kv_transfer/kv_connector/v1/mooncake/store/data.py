@@ -16,8 +16,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
-from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashListWithBlockSize,

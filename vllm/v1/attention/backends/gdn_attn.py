@@ -7,8 +7,8 @@ from typing import Literal
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

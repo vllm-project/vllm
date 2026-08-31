@@ -13,10 +13,10 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 

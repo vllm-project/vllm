@@ -5,7 +5,7 @@
 import torch
 
 import vllm._custom_ops as ops
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
     get_marlin_input_dtype,

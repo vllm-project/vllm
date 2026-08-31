@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_cutedsl
+from vllm.foundation.utilities.flashinfer import has_flashinfer_cutedsl
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
@@ -52,7 +52,7 @@ class FlashInferMxFp4LinearKernel(MxFp4LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from vllm.utils.flashinfer import (
+        from vllm.foundation.utilities.flashinfer import (
             flashinfer_mxfp4_quantize,
             flashinfer_scaled_fp4_mm,
         )

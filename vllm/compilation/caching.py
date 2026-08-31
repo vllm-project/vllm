@@ -15,15 +15,15 @@ from torch._subclasses import FakeTensorMode
 from torch.fx._graph_pickler import GraphPickler, Options
 from torch.utils import _pytree as pytree
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.compilation.codegen import compile_execution_fn
 from vllm.compilation.compiler_interface import get_inductor_factors
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.config.utils import hash_factors
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig, get_current_vllm_config
+from vllm.foundation.config.utils import hash_factors
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.hashing import safe_hash
+from vllm.foundation.utilities.hashing import safe_hash
 
 try:
     from torch._dynamo.aot_compile import SerializableCallable

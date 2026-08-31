@@ -4,13 +4,13 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from vllm.config import set_current_vllm_config
+from vllm.foundation.config import set_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.serial_utils import run_method

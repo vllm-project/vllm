@@ -52,8 +52,8 @@ from torch import nn
 from transformers import BatchFeature
 from transformers.activations import GELUActivation
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.interfaces import (
@@ -81,8 +81,8 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig, MoonViTConfig
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.integrations.transformers_utils.configs.kimi_vl import KimiVLConfig, MoonViTConfig
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix

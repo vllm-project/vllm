@@ -18,9 +18,9 @@ import psutil
 import requests
 import torch
 
-import vllm.envs as envs
-from vllm.logger import init_logger
-from vllm.utils.platform_utils import cuda_get_device_properties
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.platform_utils import cuda_get_device_properties
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)

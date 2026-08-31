@@ -15,22 +15,22 @@ import numpy as np
 import torch
 from typing_extensions import runtime_checkable
 
-from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
-from vllm.config.cache import _layout_from_name
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
+from vllm.foundation.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
+from vllm.foundation.config.cache import _layout_from_name
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
     AttentionBackend,

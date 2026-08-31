@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 import vllm._custom_ops as ops
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -25,7 +25,7 @@ from vllm.model_executor.models.utils import (
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.model import KimiMLP
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.worker.workspace import current_workspace_manager
 
 

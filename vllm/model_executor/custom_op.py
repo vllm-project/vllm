@@ -6,8 +6,8 @@ import inspect
 import torch
 import torch.nn as nn
 
-from vllm.config import get_cached_compilation_config
-from vllm.logger import init_logger
+from vllm.foundation.config import get_cached_compilation_config
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 
@@ -215,7 +215,7 @@ class CustomOp(nn.Module):
         NOTE: this does not enable fusion across ops, so opaque custom ops
         should still be unwrapped wherever possible.
         """
-        from vllm.config.compilation import CompilationMode
+        from vllm.foundation.config.compilation import CompilationMode
 
         # Do not compile if compilation disabled
         if not enable:

@@ -34,7 +34,7 @@ from transformers.tokenization_mistral_common import MistralCommonBackend
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.tokenizers.protocol import TokenizerLike
 
 if TYPE_CHECKING:
@@ -207,7 +207,7 @@ def tekken_convert_tokens_to_string(
 
 
 class MistralTokenizer(TokenizerLike):
-    IS_MISTRAL_TOKENIZER = True  # used by vllm.utils.mistral
+    IS_MISTRAL_TOKENIZER = True  # used by vllm.foundation.utilities.mistral
 
     @classmethod
     def from_pretrained(

@@ -15,7 +15,7 @@ from vllm.entrypoints.serve.lora.protocol import (
     UnloadLoRAAdapterRequest,
 )
 from vllm.entrypoints.serve.utils.api_utils import validate_json_request
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 router = APIRouter()

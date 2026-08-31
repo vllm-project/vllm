@@ -52,8 +52,8 @@ from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
-from vllm.config import VllmConfig
-from vllm.config.multimodal import (
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import (
     BaseDummyOptions,
     MultiModalConfig,
     VideoDummyOptions,
@@ -61,7 +61,7 @@ from vllm.config.multimodal import (
 )
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.inputs import MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
@@ -110,10 +110,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.utils.cache import LRUCache
-from vllm.utils.collection_utils import is_list_of
-from vllm.utils.math_utils import cdiv, round_up
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.utilities.cache import LRUCache
+from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.foundation.utilities.math_utils import cdiv, round_up
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from ...utils.gpu_sync_debug import gpu_sync_allowed

@@ -6,10 +6,10 @@ from copy import copy
 import numpy as np
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import CacheConfig, VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.utils.math_utils import cdiv
+from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,

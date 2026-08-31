@@ -43,7 +43,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.foundation.utilities.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
 @triton.jit

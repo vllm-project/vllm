@@ -9,7 +9,7 @@
 # ruff: noqa: E501
 import torch
 
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.triton_utils import triton
 
 from .utils import tensor_cache

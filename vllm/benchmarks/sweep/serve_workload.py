@@ -10,8 +10,8 @@ import numpy as np
 from typing_extensions import assert_never
 
 from vllm.benchmarks.datasets import DEFAULT_NUM_PROMPTS
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.import_utils import PlaceholderModule
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
 from .serve import (

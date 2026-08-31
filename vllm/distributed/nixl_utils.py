@@ -6,7 +6,7 @@ import os
 import sys
 from typing import Any
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)

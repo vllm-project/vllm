@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import process_lora_modules
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
+from vllm.foundation.extensibility.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tasks import FALLBACK_SUPPORTED_TASKS, POOLING_TASKS, SupportedTask

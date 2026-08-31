@@ -11,13 +11,13 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
 logger = init_logger(__name__)

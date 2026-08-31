@@ -13,7 +13,7 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform

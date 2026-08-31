@@ -7,12 +7,12 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-import vllm.utils.cpu_triton_utils as cpu_tl
-from vllm.config import (
+import vllm.foundation.utilities.cpu_triton_utils as cpu_tl
+from vllm.foundation.config import (
     CompilationMode,
     VllmConfig,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.foundation.observability.tracing import instrument
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig

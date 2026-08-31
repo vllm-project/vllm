@@ -12,10 +12,10 @@ import aiohttp
 import requests
 from urllib3.util import parse_url
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.logger import init_logger
-from vllm.utils.mem_constants import KiB_bytes, MiB_bytes
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.mem_constants import KiB_bytes, MiB_bytes
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)

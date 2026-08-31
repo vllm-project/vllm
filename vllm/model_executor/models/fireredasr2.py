@@ -11,11 +11,11 @@ from transformers import (
     Qwen2Config,
 )
 
-from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
@@ -38,11 +38,11 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.processors.fireredasr2 import (
+from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
+from vllm.foundation.integrations.transformers_utils.processors.fireredasr2 import (
     FireRedASR2FeatureExtractor,
 )
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .conformer_encoder import ConformerEncoder
 from .interfaces import (

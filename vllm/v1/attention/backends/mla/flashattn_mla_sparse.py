@@ -6,8 +6,8 @@ from typing import Any, ClassVar
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.config.cache import CacheDType
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.cache import CacheDType
 from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
@@ -92,7 +92,7 @@ class FlashAttnMLASparseBackend(AttentionBackend):
         if not flash_attn_supports_mla():
             return "FlashAttention MLA not supported on this device"
 
-        from vllm.config import get_current_vllm_config_or_none
+        from vllm.foundation.config import get_current_vllm_config_or_none
 
         vllm_config = get_current_vllm_config_or_none()
         if vllm_config is not None and vllm_config.model_config is not None:

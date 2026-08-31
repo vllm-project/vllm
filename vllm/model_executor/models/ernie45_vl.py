@@ -35,12 +35,12 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers import BaseImageProcessor, BatchFeature
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
@@ -72,9 +72,9 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM

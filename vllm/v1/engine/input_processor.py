@@ -5,8 +5,8 @@ import time
 from collections.abc import Mapping
 from typing import Any, Literal
 
-import vllm.envs as envs
-from vllm.config import VllmConfig
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import VllmConfig
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
@@ -14,7 +14,7 @@ from vllm.inputs import (
     SingletonInput,
     split_enc_dec_input,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -27,9 +27,9 @@ from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
-from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
-from vllm.utils.async_utils import make_async
-from vllm.utils.jsontree import json_iter_leaves
+from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds, random_uuid
+from vllm.foundation.utilities.async_utils import make_async
+from vllm.foundation.utilities.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)

@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING, NamedTuple, cast, get_args
 
 import torch
 
-import vllm.envs as envs
-from vllm.config.cache import CacheDType
-from vllm.utils.import_utils import resolve_obj_by_qualname
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
     MambaAttentionBackendEnum,
@@ -121,7 +121,7 @@ def get_attn_backend(
             f"Valid values are: {valid_cache_dtypes}"
         )
 
-    from vllm.config import get_current_vllm_config
+    from vllm.foundation.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
 

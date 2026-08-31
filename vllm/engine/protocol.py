@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.foundation.config import ModelConfig, VllmConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,

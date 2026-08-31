@@ -3,10 +3,10 @@
 
 from typing import Any
 
-import vllm.envs as envs
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 
 logger = init_logger(__name__)
 
@@ -107,7 +107,7 @@ def get_flash_attn_version(
             fa_version = 2
 
         # 2. override if passed by environment or config
-        from vllm.config import get_current_vllm_config_or_none
+        from vllm.foundation.config import get_current_vllm_config_or_none
 
         vllm_config = get_current_vllm_config_or_none()
         if (

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.config import CompilationConfig, VllmConfig
+from vllm.foundation.config import CompilationConfig, VllmConfig
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

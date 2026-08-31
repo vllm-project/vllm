@@ -15,8 +15,8 @@ from torch.distributed import ProcessGroup, all_gather
 
 from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
-from vllm.logger import init_logger
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
 

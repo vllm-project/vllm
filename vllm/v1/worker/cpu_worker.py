@@ -12,17 +12,17 @@ from typing import Any
 import psutil
 import torch
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.foundation.devtools.profiler.wrapper import TorchProfilerWrapper
-from vllm.utils.cpu_resource_utils import (
+from vllm.foundation.utilities.cpu_resource_utils import (
     get_allowed_cpu_list,
     get_memory_node_info,
     get_visible_memory_node,
 )
-from vllm.utils.mem_utils import format_gib
-from vllm.utils.torch_utils import set_random_seed
+from vllm.foundation.utilities.mem_utils import format_gib
+from vllm.foundation.utilities.torch_utils import set_random_seed
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.worker_base import CompilationTimes

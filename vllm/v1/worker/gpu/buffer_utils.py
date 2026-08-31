@@ -7,8 +7,8 @@ import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.platform_utils import is_uva_available
+from vllm.foundation.utilities.torch_utils import (
     async_tensor_h2d,
     get_accelerator_view_from_cpu_tensor,
 )

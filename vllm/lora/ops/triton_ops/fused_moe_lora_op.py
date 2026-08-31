@@ -10,8 +10,8 @@ from vllm.distributed import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
-from vllm.utils.mem_utils import get_max_shared_memory_bytes
-from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
+from vllm.foundation.utilities.mem_utils import get_max_shared_memory_bytes
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d, direct_register_custom_op
 
 from .utils import supports_pdl, supports_tma
 

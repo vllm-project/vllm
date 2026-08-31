@@ -8,7 +8,7 @@ from typing import cast
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     chunk_hashes_for_block_size,
 )
-from vllm.utils.math_utils import cdiv
+from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import SpecGroup
 from vllm.v1.core.kv_cache_utils import (

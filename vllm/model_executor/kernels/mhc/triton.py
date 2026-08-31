@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 
 @triton.jit

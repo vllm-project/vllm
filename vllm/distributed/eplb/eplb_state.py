@@ -34,8 +34,8 @@ from dataclasses import dataclass
 import torch
 from torch.distributed import ProcessGroup, all_reduce
 
-from vllm.config import ModelConfig, ParallelConfig
-from vllm.config.utils import compute_hash_cached
+from vllm.foundation.config import ModelConfig, ParallelConfig
+from vllm.foundation.config.utils import compute_hash_cached
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     get_ep_group,
@@ -45,10 +45,10 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.distributed.utils import StatelessProcessGroup
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.platforms import current_platform
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator

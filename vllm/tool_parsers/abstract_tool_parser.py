@@ -14,7 +14,7 @@ from openai.types.responses import (
 )
 from openai.types.responses.function_tool import FunctionTool
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
@@ -26,14 +26,14 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.utils import Tool, get_json_schema_from_tools
-from vllm.utils.collection_utils import is_list_of
-from vllm.utils.import_utils import import_from_path
+from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.foundation.utilities.import_utils import import_from_path
 
 __all__ = ["Tool"]
 

@@ -23,7 +23,7 @@ from typing import Literal
 import torch
 from torch import nn
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,

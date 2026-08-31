@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
@@ -26,7 +26,7 @@ from vllm.v1.attention.backends.mla.prefill.base import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.model_executor.layers.attention.mla_attention import (
         MLACommonPrefillMetadata,
         MLADims,

@@ -9,15 +9,15 @@ from typing import Any, cast
 import torch
 from torch import nn
 
-import vllm.envs as envs
-from vllm.config import VllmConfig
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -111,11 +111,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
-from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.utils.math_utils import cdiv
-from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import aux_stream
+from vllm.foundation.integrations.transformers_utils.configs.kimi_k3 import KimiK3Config
+from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
+from vllm.foundation.utilities.torch_utils import aux_stream
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.mm_preprocess import (
@@ -143,7 +143,7 @@ def shard_sequence_parallel_mlp(
     """Whether to TP-shard a sequence-parallel MLP instead of replicating it.
 
     Opt-in via ``VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT``; see :class:`KimiMLP` for
-    the trade-off and :mod:`vllm.envs` for when it is worth enabling.
+    the trade-off and :mod:`vllm.foundation.system.envs` for when it is worth enabling.
     """
     enabled = envs.VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT
     if not (use_sequence_parallel and eligible and enabled):
@@ -384,7 +384,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             return
 
         self._check_runtime_supported()
-        from vllm.utils.deep_gemm import _import_deep_gemm
+        from vllm.foundation.utilities.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
         w13_scale = deep_gemm.transform_sf_into_required_layout(
@@ -414,7 +414,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         self.w2_weight_scale = None
 
     def get_symm_buffer(self):
-        from vllm.utils.deep_gemm import _import_deep_gemm
+        from vllm.foundation.utilities.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
         group = get_ep_group().device_group
@@ -459,7 +459,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 f"but its symmetric buffer supports {self.max_num_tokens}."
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        from vllm.utils.deep_gemm import _import_deep_gemm
+        from vllm.foundation.utilities.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
         symm_buffer = self.get_symm_buffer()

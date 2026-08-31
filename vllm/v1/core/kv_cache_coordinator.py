@@ -4,8 +4,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
 
-from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv, round_down
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (

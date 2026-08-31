@@ -18,10 +18,10 @@ from typing import Any
 import torch
 
 from vllm.device_allocator import AllocationData, HandleType
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.system_utils import find_loaded_library
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.utilities.system_utils import find_loaded_library
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 

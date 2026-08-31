@@ -29,7 +29,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
 

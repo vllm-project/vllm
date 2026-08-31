@@ -8,7 +8,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     slice_nvfp4_output,
     swizzle_blockscale,
 )
-from vllm.utils.import_utils import has_fbgemm_gpu
+from vllm.foundation.utilities.import_utils import has_fbgemm_gpu
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 

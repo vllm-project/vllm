@@ -8,10 +8,10 @@ import torch
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 

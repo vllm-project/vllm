@@ -9,7 +9,7 @@ import regex as re
 from partial_json_parser.core.options import Allow
 from transformers import PreTrainedTokenizerBase
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -22,7 +22,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,

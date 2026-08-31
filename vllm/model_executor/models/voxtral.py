@@ -18,11 +18,11 @@ from mistral_common.protocol.transcription.request import TranscriptionRequest
 from mistral_common.tokens.tokenizers.audio import Audio
 from transformers import BatchFeature, WhisperConfig
 
-from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsPP
@@ -57,11 +57,11 @@ from vllm.multimodal.processing.processor import (
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.transformers_utils.processors.voxtral import (
+from vllm.foundation.integrations.transformers_utils.processors.voxtral import (
     MistralCommonFeatureExtractor,
     MistralCommonVoxtralProcessor,
 )
-from vllm.utils.collection_utils import is_list_of
+from vllm.foundation.utilities.collection_utils import is_list_of
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsTranscription
 from .utils import init_vllm_registered_model, maybe_prefix

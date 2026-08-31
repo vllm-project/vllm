@@ -21,7 +21,7 @@ from einops import rearrange
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -79,7 +79,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import (
     fused_recurrent_kda,
     fused_recurrent_kda_fwd,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 

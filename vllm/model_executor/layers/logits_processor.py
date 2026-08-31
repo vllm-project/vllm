@@ -8,12 +8,12 @@ from functools import cache
 import torch
 import torch.nn.functional as F
 
-from vllm.config import get_current_vllm_config
+from vllm.foundation.config import get_current_vllm_config
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -21,7 +21,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
+from vllm.foundation.utilities.flashinfer import has_flashinfer
 
 logger = init_logger(__name__)
 

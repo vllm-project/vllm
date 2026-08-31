@@ -12,15 +12,15 @@ import vllm_xpu_kernels._C  # noqa
 import vllm_xpu_kernels._moe_C  # noqa
 import vllm_xpu_kernels._xpu_C  # noqa
 
-import vllm.envs as envs
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-    from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.foundation.config import VllmConfig
+    from vllm.foundation.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -282,14 +282,14 @@ class XPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # lazy import to avoid circular import
-        from vllm.config import CUDAGraphMode
+        from vllm.foundation.config import CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
         if compilation_config.compile_sizes is None:
             compilation_config.compile_sizes = []
 
         # lazy import to avoid circular import
-        from vllm.utils.torch_utils import supports_xpu_graph
+        from vllm.foundation.utilities.torch_utils import supports_xpu_graph
 
         if not supports_xpu_graph():
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -310,7 +310,7 @@ class XPUPlatform(Platform):
             )
 
         # Disable fusion passes not yet supported on XPU.
-        from vllm.config.compilation import CompilationMode
+        from vllm.foundation.config.compilation import CompilationMode
 
         pass_config = compilation_config.pass_config
         fusion_passes_to_disable = {
@@ -386,11 +386,11 @@ class XPUPlatform(Platform):
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         super().update_block_size_for_backend(vllm_config)
-        from vllm.config.vllm import get_layers_from_vllm_config
+        from vllm.foundation.config.vllm import get_layers_from_vllm_config
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
         )
-        from vllm.utils.math_utils import cdiv
+        from vllm.foundation.utilities.math_utils import cdiv
 
         cache_config = vllm_config.cache_config
         # special fix for GDN since kernel only supports block size dividable by 64
@@ -481,8 +481,8 @@ class XPUPlatform(Platform):
     def get_default_ir_op_priority(
         cls, vllm_config: "VllmConfig"
     ) -> "IrOpPriorityConfig":
-        from vllm.config.compilation import CompilationMode
-        from vllm.config.kernel import IrOpPriorityConfig
+        from vllm.foundation.config.compilation import CompilationMode
+        from vllm.foundation.config.kernel import IrOpPriorityConfig
 
         # Native used by default when compiling,
         # use fused kernels where available when no codegen

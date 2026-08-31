@@ -28,16 +28,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
@@ -61,8 +61,8 @@ from vllm.multimodal.encoder_budget import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.foundation.utilities.mem_utils import DeviceMemoryProfiler, format_gib
+from vllm.foundation.utilities.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,

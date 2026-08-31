@@ -6,7 +6,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 
 # Cache of tiny 1-element dummy tensors (per device, dtype) reused by the
 # has_indexer=False path so the indexer args don't allocate every call.

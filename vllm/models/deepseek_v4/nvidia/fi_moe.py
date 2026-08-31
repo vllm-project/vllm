@@ -11,7 +11,7 @@ import torch.nn as nn
 
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
-from vllm.utils.flashinfer_moe_ep import (
+from vllm.foundation.utilities.flashinfer_moe_ep import (
     build_fi_mega_layer,
     ensure_fi_moe_ep_runtime,
     fi_moe_ep_backend_spec,
@@ -22,7 +22,7 @@ from vllm.utils.flashinfer_moe_ep import (
 if TYPE_CHECKING:
     from flashinfer.moe_ep import MoEEpMegaLayer
 
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MLP
 
 _MOE_SKIP_PADDING: bool | None = None
@@ -45,7 +45,7 @@ def resolve_mega_moe_is_padding(num_tokens: int) -> torch.Tensor | None:
 
     global _MOE_SKIP_PADDING
     if _MOE_SKIP_PADDING is None:
-        import vllm.envs as envs
+        import vllm.foundation.system.envs as envs
 
         _MOE_SKIP_PADDING = bool(envs.VLLM_MOE_SKIP_PADDING)
     if not _MOE_SKIP_PADDING or not is_forward_context_available():

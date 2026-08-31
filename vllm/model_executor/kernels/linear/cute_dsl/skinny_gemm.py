@@ -90,7 +90,7 @@ class ShapeDynamicSkinnyGemm:
     def _stream():
         from cuda.bindings.driver import CUstream
 
-        from vllm.utils.torch_utils import current_stream
+        from vllm.foundation.utilities.torch_utils import current_stream
 
         return CUstream(current_stream().cuda_stream)
 

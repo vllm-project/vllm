@@ -24,7 +24,7 @@
 """Inference-only Erine model compatible with HuggingFace weights."""
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 
 from .utils import PPMissingLayer

@@ -16,7 +16,7 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 
 @dataclass

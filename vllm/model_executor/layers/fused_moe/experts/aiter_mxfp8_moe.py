@@ -11,7 +11,7 @@ import math
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
     Mxfp8TritonExpertsBase,

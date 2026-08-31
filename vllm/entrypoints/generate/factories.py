@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.tasks import SupportedTask
 
 if TYPE_CHECKING:

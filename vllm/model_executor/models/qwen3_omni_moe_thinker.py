@@ -43,11 +43,11 @@ from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import PromptType
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
@@ -80,9 +80,9 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (

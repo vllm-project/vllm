@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, get_current_vllm_config
-from vllm.config.vllm import VllmConfig
+from vllm.foundation.config import CacheConfig, get_current_vllm_config
+from vllm.foundation.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
@@ -25,7 +25,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,

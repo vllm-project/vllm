@@ -11,8 +11,8 @@ from compressed_tensors.quantization import (
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.config.kernel import MoEBackend
-from vllm.logger import init_logger
+from vllm.foundation.config.kernel import MoEBackend
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -1165,7 +1165,7 @@ class _MoeWNA16HummingWeightSchema:
         num_experts: int | None = None,
     ) -> tuple[Any, dict[str, torch.Tensor]]:
         del shape_n_stacks, shape_k_stacks, num_experts
-        from vllm.utils.humming import HummingWeightSchema, dtypes
+        from vllm.foundation.utilities.humming import HummingWeightSchema, dtypes
 
         output = _convert_moe_wna16_humming_tensors(
             tensors, has_zero_point=self.has_zero_point
@@ -1469,7 +1469,7 @@ def convert_to_wna16_moe_kernel_format(
         )
 
         if isinstance(quant_config, MoeWNA16Config):
-            from vllm.utils.humming import HummingInputSchema
+            from vllm.foundation.utilities.humming import HummingInputSchema
 
             convert_to_humming_moe_kernel_format(
                 layer,

@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -205,7 +205,7 @@ class DeviceCommunicatorBase:
             self.rank_in_group = dist.get_group_rank(self.cpu_group, self.global_rank)
 
         all2all_backend = None
-        from vllm.config import get_current_vllm_config_or_none
+        from vllm.foundation.config import get_current_vllm_config_or_none
 
         config = get_current_vllm_config_or_none()
         if config is not None:

@@ -9,20 +9,20 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
-from vllm.transformers_utils.config import (
+from vllm.foundation.integrations.transformers_utils.config import (
     try_get_dense_modules,
 )
-from vllm.transformers_utils.repo_utils import get_hf_file_bytes
+from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_bytes
 
 from .interfaces import supports_multimodal
 from .interfaces_base import VllmModelForPooling, is_pooling_model
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.foundation.config import ModelConfig, VllmConfig
     from vllm.model_executor.layers.pooler import Pooler
 
 _T = TypeVar("_T", bound=nn.Module)

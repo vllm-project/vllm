@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
-from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
+from vllm.foundation.config.cache import CacheDType
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
@@ -16,7 +16,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -25,7 +25,7 @@ from vllm.v1.attention.backend import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -135,7 +135,7 @@ class TokenspeedMLABackend(MLACommonBackend):
 
         # tokenspeed_mla CuTe DSL kernel is shape-specialized for DeepSeek R1
         # MLA dimensions (qk_nope=128, qk_rope=64, v=128). Reject anything else.
-        from vllm.config import get_current_vllm_config
+        from vllm.foundation.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
         if vllm_config.model_config is not None:

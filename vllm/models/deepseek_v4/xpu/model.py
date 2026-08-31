@@ -8,7 +8,7 @@ import regex as re
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -62,7 +62,7 @@ from vllm.models.deepseek_v4.xpu.xpu_sparse import DeepseekV4XPUAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 
 class DeepseekV4MLP(nn.Module):

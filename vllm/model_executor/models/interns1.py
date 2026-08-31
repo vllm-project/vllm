@@ -21,8 +21,8 @@ from transformers.models.internvl.video_processing_internvl import (
     InternVLVideoProcessor,
 )
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interns1_vit import InternS1VisionModel
@@ -48,8 +48,8 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import cached_video_processor_from_config
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.integrations.transformers_utils.processor import cached_video_processor_from_config
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

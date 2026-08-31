@@ -15,7 +15,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaToolCall,
 )
 from vllm.tool_parsers.utils import partial_json_loads
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike

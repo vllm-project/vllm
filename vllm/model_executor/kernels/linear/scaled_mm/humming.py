@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
     apply_humming_linear,
     convert_linear_layer_to_humming_standard,
@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization.utils.humming_utils import (
     prepare_humming_linear_layer_config,
 )
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_humming
+from vllm.foundation.utilities.import_utils import has_humming
 
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
@@ -48,7 +48,7 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        from vllm.utils.humming import dtypes
+        from vllm.foundation.utilities.humming import dtypes
 
         name_map = {"weight": "weight", "weight_scale": "weight_scale"}
         scale_torch_dtype = self.config.weight_quant_key.scale.dtype

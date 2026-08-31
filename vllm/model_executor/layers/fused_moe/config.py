@@ -6,10 +6,10 @@ from typing import Union
 
 import torch
 
-from vllm.config import ParallelConfig, SchedulerConfig
-from vllm.config.kernel import MoEBackend
+from vllm.foundation.config import ParallelConfig, SchedulerConfig
+from vllm.foundation.config.kernel import MoEBackend
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_DTYPES,
@@ -17,8 +17,8 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_triton_kernels
-from vllm.utils.math_utils import cdiv
+from vllm.foundation.utilities.import_utils import has_triton_kernels
+from vllm.foundation.utilities.math_utils import cdiv
 
 logger = init_logger(__name__)
 

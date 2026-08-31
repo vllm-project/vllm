@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING
 
 import torch.nn as nn
 
-import vllm.envs as envs
-from vllm.logger import init_logger
-from vllm.utils.platform_utils import is_pin_memory_available
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
-    from vllm.config import OffloadConfig
+    from vllm.foundation.config import OffloadConfig
 
 logger = init_logger(__name__)
 

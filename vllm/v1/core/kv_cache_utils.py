@@ -13,12 +13,12 @@ from functools import partial
 from typing import Any, NamedTuple, NewType, TypeAlias, overload
 
 from vllm import envs
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
-from vllm.utils.hashing import xxhash, xxhash_cbor
-from vllm.utils.math_utils import cdiv
-from vllm.utils.mem_utils import format_gib
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.hashing import xxhash, xxhash_cbor
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.mem_utils import format_gib
+from vllm.foundation.utilities.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,

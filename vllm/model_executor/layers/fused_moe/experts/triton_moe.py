@@ -59,7 +59,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
-from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
 
 
 class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):

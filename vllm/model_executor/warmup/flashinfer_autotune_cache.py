@@ -9,7 +9,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.compilation.caching import aot_compile_hash_factors
 
 if TYPE_CHECKING:

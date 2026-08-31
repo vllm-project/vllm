@@ -7,9 +7,9 @@ from typing import Any, ClassVar, TypeVar
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,

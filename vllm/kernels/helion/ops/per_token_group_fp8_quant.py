@@ -7,12 +7,12 @@ from typing import Any
 import torch
 
 from vllm.kernels.helion.case_key import CaseKey
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_helion
+from vllm.foundation.utilities.import_utils import has_helion
 
 if not has_helion():
     raise ImportError(

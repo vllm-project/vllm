@@ -11,10 +11,10 @@ import torch
 from typing_extensions import Self
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
-from vllm.config.weight_transfer import WeightTransferConfig
+from vllm.foundation.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     ParamMeta,
     TrainerInitInfo,

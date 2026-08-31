@@ -20,8 +20,8 @@ import torch.nn.functional as F
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 
 def flash_attn_maxseqlen_wrapper(

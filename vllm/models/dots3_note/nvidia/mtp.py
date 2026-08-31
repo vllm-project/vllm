@@ -7,7 +7,7 @@ from collections.abc import Iterable, Iterator
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,

@@ -9,13 +9,13 @@ from importlib.util import find_spec
 import torch
 import torch.nn.functional as F
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode
+from vllm.foundation.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import LayerNameType
+from vllm.foundation.utilities.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -484,7 +484,7 @@ def fp8_paged_mqa_logits_torch(
     block_tables: torch.Tensor,
     max_model_len: int,
 ):
-    from vllm.utils.math_utils import cdiv
+    from vllm.foundation.utilities.math_utils import cdiv
 
     fp8_dtype = current_platform.fp8_dtype()
     batch_size, next_n, _, dim = q.size()
@@ -842,7 +842,7 @@ def rocm_aiter_sparse_attn_indexer(
     forward_context = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
-    from vllm.utils.torch_utils import _resolve_layer_name
+    from vllm.foundation.utilities.torch_utils import _resolve_layer_name
 
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
     # assert isinstance(attn_metadata, dict)

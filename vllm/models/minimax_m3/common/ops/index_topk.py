@@ -18,7 +18,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import round_up
+from vllm.foundation.utilities.math_utils import round_up
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128

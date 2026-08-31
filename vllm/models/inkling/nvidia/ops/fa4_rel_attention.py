@@ -16,10 +16,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     zip_inputs,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.foundation.utilities.torch_utils import kv_cache_dtype_str_to_dtype
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
 
 
 def bucket_max_seqlen_q(max_seqlen_q: int) -> int:

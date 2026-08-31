@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
@@ -9,7 +9,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages_async,
 )
 from vllm.tokenizers.deepseek_v4 import DeepseekV4Tokenizer
-from vllm.utils.async_utils import make_async
+from vllm.foundation.utilities.async_utils import make_async
 
 from .base import BaseRenderer
 from .inputs import DictPrompt

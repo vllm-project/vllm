@@ -7,8 +7,8 @@ import socket
 from argparse import Namespace
 
 from vllm import AsyncEngineArgs, envs
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 
 from ..app import build_app
 from ..launcher import serve_http, setup_server
@@ -102,7 +102,7 @@ if __name__ == "__main__":
     import uvloop
 
     from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
     from ..cli_args import (
         make_arg_parser,

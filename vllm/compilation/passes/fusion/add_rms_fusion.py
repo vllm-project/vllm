@@ -6,7 +6,7 @@ from itertools import product
 import torch
 
 import vllm.ir.ops
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 
 from ..vllm_inductor_pass import (
     VllmFusionPatternMatcherPass,

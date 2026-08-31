@@ -6,8 +6,8 @@ from itertools import islice
 
 import torch
 
-import vllm.envs as envs
-from vllm.config import VllmConfig
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_embed_norm import (

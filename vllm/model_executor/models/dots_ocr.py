@@ -8,8 +8,8 @@ import torch.nn as nn
 from torch.nn import LayerNorm
 from transformers.models.qwen2_vl import Qwen2VLProcessor
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import utils as dist_utils
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -55,8 +55,8 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig, DotsVisionConfig
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.integrations.transformers_utils.configs.dotsocr import DotsOCRConfig, DotsVisionConfig
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .vision import is_vit_use_data_parallel, run_dp_sharded_mrope_vision_model

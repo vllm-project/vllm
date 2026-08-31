@@ -7,7 +7,7 @@ from collections.abc import Iterable
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
 
 from ..fx_utils import is_func

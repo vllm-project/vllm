@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 
 from .layerwise import (
     finalize_layerwise_reload,

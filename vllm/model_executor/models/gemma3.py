@@ -23,9 +23,9 @@ from torch import nn
 from transformers import Gemma3TextConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import (
     Attention,

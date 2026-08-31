@@ -40,7 +40,7 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
-from vllm.utils import random_uuid
+from vllm.foundation.utilities import random_uuid
 
 if TYPE_CHECKING:
     from mcp.client import ClientSession

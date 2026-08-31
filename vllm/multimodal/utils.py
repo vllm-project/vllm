@@ -14,7 +14,7 @@ import numpy.typing as npt
 from PIL import Image
 
 from vllm.inputs import MultiModalPlaceholders
-from vllm.utils.import_utils import LazyLoader
+from vllm.foundation.utilities.import_utils import LazyLoader
 
 from .inputs import (
     BatchedTensorInputs,

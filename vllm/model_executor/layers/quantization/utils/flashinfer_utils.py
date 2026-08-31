@@ -4,9 +4,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.utils.math_utils import round_up
+from vllm.foundation.utilities.math_utils import round_up
 
 if TYPE_CHECKING:
     from flashinfer.fused_moe.core import ActivationType

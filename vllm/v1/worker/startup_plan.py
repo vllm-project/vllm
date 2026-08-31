@@ -25,9 +25,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:

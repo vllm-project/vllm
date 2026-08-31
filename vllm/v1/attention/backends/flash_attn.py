@@ -12,7 +12,7 @@ import torch
 
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import (
+from vllm.foundation.utilities.torch_utils import (
     PIN_MEMORY,
     canonicalize_singleton_dim_strides,
     is_quantized_kv_cache,
@@ -51,17 +51,17 @@ if is_flash_attn_varlen_func_available():
         get_scheduler_metadata,
         reshape_and_cache_flash,
     )
-import vllm.envs as envs
-from vllm.config import (
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import (
     VllmConfig,
     get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
 )
-from vllm.config.cache import CacheDType
+from vllm.foundation.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.foundation.utilities.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -1014,7 +1014,7 @@ class FlashAttentionImpl(AttentionImpl):
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
         # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
-        # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
+        # See vllm.foundation.utilities.torch_utils.canonicalize_singleton_dim_strides.
         fixed_k = canonicalize_singleton_dim_strides(key_cache)
         fixed_v = canonicalize_singleton_dim_strides(value_cache)
         if fixed_k is not key_cache or fixed_v is not value_cache:

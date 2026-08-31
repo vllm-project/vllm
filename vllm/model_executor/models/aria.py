@@ -9,8 +9,8 @@ from transformers import AriaConfig, AriaTextConfig, BatchFeature
 from transformers.models.aria.modeling_aria import AriaCrossAttention
 from transformers.models.aria.processing_aria import AriaProcessor
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
@@ -29,7 +29,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import Idefics2VisionConfig
 from .idefics2_vision_model import (

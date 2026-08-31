@@ -43,8 +43,8 @@ from transformers.dynamic_module_utils import (
 )
 from typing_extensions import TypeVar
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import (
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import (
     BaseDummyOptions,
     ImageDummyOptions,
     VideoDummyOptions,
@@ -92,15 +92,15 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import (
+from vllm.foundation.integrations.transformers_utils.processor import (
     _merge_mm_kwargs,
     cached_get_image_processor,
 )
-from vllm.transformers_utils.utils import convert_model_repo_to_path
-from vllm.utils.collection_utils import flatten_2d_lists
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.foundation.integrations.transformers_utils.utils import convert_model_repo_to_path
+from vllm.foundation.utilities.collection_utils import flatten_2d_lists
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import set_default_torch_dtype
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import (
@@ -630,7 +630,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         hf_processor = self.ctx.get_hf_processor(**kwargs)
         image_processor = self._get_checkpoint_image_processor(**kwargs)
 
-        from vllm.transformers_utils.processors.minicpmv import MiniCPMVProcessor
+        from vllm.foundation.integrations.transformers_utils.processors.minicpmv import MiniCPMVProcessor
 
         vendored_processor = MiniCPMVProcessor(
             image_processor=image_processor,

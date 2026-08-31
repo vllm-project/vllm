@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 from transformers import PretrainedConfig
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,

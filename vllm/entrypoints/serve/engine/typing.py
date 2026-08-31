@@ -3,7 +3,7 @@
 
 from typing import Protocol, TypeAlias
 
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,

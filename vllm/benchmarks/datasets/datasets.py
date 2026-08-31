@@ -46,10 +46,10 @@ from vllm.multimodal.audio import get_audio_duration
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.tokenizers import TokenizerLike
-from vllm.transformers_utils.repo_utils import hf_api
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.import_utils import PlaceholderModule
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.foundation.integrations.transformers_utils.repo_utils import hf_api
+from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+from vllm.foundation.utilities.import_utils import PlaceholderModule
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 
 try:
     from datasets import load_dataset

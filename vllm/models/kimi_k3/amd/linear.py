@@ -7,12 +7,12 @@ from typing import Any
 import torch
 from torch import nn
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -65,8 +65,8 @@ from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.utils.math_utils import cdiv
+from vllm.foundation.integrations.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.foundation.utilities.math_utils import cdiv
 
 logger = init_logger(__name__)
 

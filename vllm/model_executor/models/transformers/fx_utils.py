@@ -21,7 +21,7 @@ import torch
 from torch import fx, nn
 from torch.nn import functional as F
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

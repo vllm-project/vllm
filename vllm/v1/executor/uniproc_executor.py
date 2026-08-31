@@ -9,10 +9,10 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-import vllm.envs as envs
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import (
+from vllm.foundation.utilities.network_utils import (
     aiter_requires_tcp_store,
     get_distributed_init_method,
     get_file_store_init_method,

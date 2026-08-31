@@ -12,7 +12,7 @@ import regex as re
 import torch
 from transformers.feature_extraction_utils import BatchFeature
 
-from vllm.config.multimodal import (
+from vllm.foundation.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
     ImageDummyOptions,
@@ -31,7 +31,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.transformers_utils.processors.inkling import (
+from vllm.foundation.integrations.transformers_utils.processors.inkling import (
     AUDIO_MARKER_ID,
     AUDIO_TOKEN_ID,
     IMAGE_MARKER_ID,

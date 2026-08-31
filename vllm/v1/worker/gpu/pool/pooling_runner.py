@@ -6,11 +6,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.models import VllmModelForPooling, is_pooling_model
 from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates

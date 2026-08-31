@@ -9,7 +9,7 @@ from functools import cache
 from typing import TYPE_CHECKING, Any
 
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_tilelang
+from vllm.foundation.utilities.import_utils import has_tilelang
 
 if TYPE_CHECKING or current_platform.is_cuda():
     if not has_tilelang():

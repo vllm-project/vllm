@@ -16,8 +16,8 @@ import torch
 import torch.nn as nn
 from transformers import BatchFeature, PretrainedConfig
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
@@ -46,12 +46,12 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processors.internvl import (
+from vllm.foundation.integrations.transformers_utils.processors.internvl import (
     InternVLImageProcessor,
     InternVLProcessor,
     InternVLVideoProcessor,
 )
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

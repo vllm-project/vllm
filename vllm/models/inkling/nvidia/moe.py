@@ -25,8 +25,8 @@ import torch
 from torch import nn
 from torch.nn.parameter import Parameter
 
-import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import get_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     get_pcp_group,
@@ -38,8 +38,8 @@ from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
-from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import aux_stream
+from vllm.foundation.utilities.multi_stream_utils import maybe_execute_in_parallel
+from vllm.foundation.utilities.torch_utils import aux_stream
 
 from ..configs import InklingModelConfig
 

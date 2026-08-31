@@ -3,7 +3,7 @@
 
 from typing import Literal, get_args
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.platforms import current_platform
 
@@ -34,7 +34,7 @@ QuantizationMethods = Literal[
     "gpt_oss_mxfp4",
     "deepseek_v4_fp8",
     "online",
-    # Below are online quant shorthand names (see vllm.config.quantization).
+    # Below are online quant shorthand names (see vllm.foundation.config.quantization).
     # Listed here as strings to avoid a circular import; kept in sync with
     # _ONLINE_SHORTHANDS by the assertion in get_quantization_config().
     "fp8_per_tensor",
@@ -110,7 +110,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         raise ValueError(f"Invalid quantization method: {quantization}")
 
     # lazy import to avoid triggering `torch.compile` too early
-    from vllm.config.quantization import _ONLINE_SHORTHANDS
+    from vllm.foundation.config.quantization import _ONLINE_SHORTHANDS
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
     from vllm.models.deepseek_v4 import DeepseekV4FP8Config
 

@@ -3,8 +3,8 @@
 
 import importlib
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

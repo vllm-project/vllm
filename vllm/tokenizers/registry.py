@@ -9,20 +9,20 @@ from typing import TYPE_CHECKING
 import huggingface_hub
 from typing_extensions import TypeVar, assert_never
 
-import vllm.envs as envs
-from vllm.logger import init_logger
-from vllm.transformers_utils.config import _maybe_register_hf_config, get_config
-from vllm.transformers_utils.repo_utils import (
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.integrations.transformers_utils.config import _maybe_register_hf_config, get_config
+from vllm.foundation.integrations.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
     is_mistral_model_repo,
 )
-from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
 
 from .hf import CachedHfTokenizer
 from .protocol import TokenizerLike
 
 if TYPE_CHECKING:
-    from vllm.config.model import ModelConfig, RunnerType
+    from vllm.foundation.config.model import ModelConfig, RunnerType
 
 logger = init_logger(__name__)
 
@@ -214,7 +214,7 @@ def get_tokenizer(
     else:
         tokenizer_cls_ = tokenizer_cls
 
-    # Ensure that, if the config were to come from vllm.transformers_utils.config, it is
+    # Ensure that, if the config were to come from vllm.foundation.integrations.transformers_utils.config, it is
     # registered with AutoConfig before the tokenizer is loaded. This is necessary since
     # tokenizer_cls_.from_pretrained will call AutoConfig.from_pretrained internally.
     # This may fail for paths that don't have a model config (e.g. LoRA adapters),

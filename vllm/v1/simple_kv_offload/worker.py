@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend

@@ -9,8 +9,8 @@ import torch
 from torch.nn.parameter import Parameter
 from typing_extensions import TypeIs
 
-import vllm.envs as envs
-from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -19,7 +19,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.determinism.batch_invariant import (
     linear_batch_invariant,

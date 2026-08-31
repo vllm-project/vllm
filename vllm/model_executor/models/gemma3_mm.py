@@ -10,10 +10,10 @@ from transformers import BatchFeature, Gemma3Config, Gemma3Processor
 from transformers.models.gemma3.image_processing_gemma3 import Gemma3ImageProcessor
 from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -36,7 +36,7 @@ from vllm.multimodal.processing.processor import (
     replace_token_matches,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

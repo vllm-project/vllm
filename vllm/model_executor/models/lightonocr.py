@@ -10,7 +10,7 @@ from transformers import (
     PixtralVisionConfig,
 )
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.model_executor.models.mistral3 import (
     Mistral3DummyInputsBuilder,
     Mistral3ForConditionalGeneration,

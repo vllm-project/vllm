@@ -12,7 +12,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.elastic_ep.middleware import get_scaling_elastic_ep
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import validate_json_request
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 logger = init_logger(__name__)
 

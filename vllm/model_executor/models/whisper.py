@@ -18,9 +18,9 @@ from transformers import (
 from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import (
     ExplicitEncoderDecoderPrompt,
@@ -28,7 +28,7 @@ from vllm.inputs import (
     PromptType,
     TextPrompt,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -62,10 +62,10 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.renderers import TokenizeParams
-from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.utils.jsontree import json_map_leaves
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
+from vllm.foundation.utilities.jsontree import json_map_leaves
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backend import (
     AttentionType,
 )

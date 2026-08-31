@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig

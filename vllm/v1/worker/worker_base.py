@@ -8,14 +8,14 @@ import torch
 import torch.nn as nn
 
 import vllm.ir
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.foundation.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.foundation.observability.tracing import instrument
-from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.system_utils import update_environment_variables
+from vllm.foundation.utilities.import_utils import resolve_obj_by_qualname
+from vllm.foundation.utilities.system_utils import update_environment_variables
 from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
     record_kv_cache_layout,
@@ -266,7 +266,7 @@ class WorkerWrapperBase:
 
         vllm_config.enable_trace_function_call_for_thread()
 
-        from vllm.plugins import load_general_plugins
+        from vllm.foundation.extensibility.plugins import load_general_plugins
 
         load_general_plugins()
 

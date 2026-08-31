@@ -20,30 +20,30 @@ from typing import Any, TypeVar, cast, get_args
 import msgspec
 import zmq
 
-import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
-from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import ParallelConfig, VllmConfig
+from vllm.foundation.config.pooler import POOLER_CONFIG_LOG_FIELDS
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
-from vllm.envs import enable_envs_cache
-from vllm.logger import init_logger
+from vllm.foundation.system.envs import enable_envs_cache
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalCacheMissError
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.foundation.observability.tracing import instrument, maybe_init_worker_tracer
-from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.utils import numa_utils
-from vllm.utils.gc_utils import (
+from vllm.foundation.integrations.transformers_utils.config import maybe_register_config_serialize_by_value
+from vllm.foundation.utilities import numa_utils
+from vllm.foundation.utilities.gc_utils import (
     freeze_gc_heap,
     maybe_attach_gc_debug_callback,
 )
-from vllm.utils.hashing import get_hash_fn_by_name
-from vllm.utils.network_utils import make_zmq_socket
-from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.foundation.utilities.hashing import get_hash_fn_by_name
+from vllm.foundation.utilities.network_utils import make_zmq_socket
+from vllm.foundation.utilities.system_utils import decorate_logs, set_process_title
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -114,7 +114,7 @@ class EngineCore:
         include_finished_set: bool = False,
     ):
         # plugins need to be loaded at the engine/scheduler level too
-        from vllm.plugins import load_general_plugins
+        from vllm.foundation.extensibility.plugins import load_general_plugins
 
         load_general_plugins()
 

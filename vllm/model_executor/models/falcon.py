@@ -31,7 +31,7 @@ from torch.nn import LayerNorm
 from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -54,7 +54,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.falcon import RWConfig
+from vllm.foundation.integrations.transformers_utils.configs.falcon import RWConfig
 
 from .interfaces import SupportsPP
 from .utils import (

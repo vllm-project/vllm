@@ -5,7 +5,7 @@ import warnings
 
 from prometheus_client import start_http_server
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.version import __version__ as VLLM_VERSION
 
 warnings.warn(

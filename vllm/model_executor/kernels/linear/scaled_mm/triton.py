@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,

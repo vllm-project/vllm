@@ -5,7 +5,7 @@
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types

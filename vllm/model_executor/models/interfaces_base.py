@@ -14,14 +14,14 @@ import torch
 import torch.nn as nn
 from typing_extensions import TypeIs, TypeVar
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.tasks import ScoreType
-from vllm.utils.func_utils import supports_kw
+from vllm.foundation.utilities.func_utils import supports_kw
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-    from vllm.config.model import AttnTypeStr
-    from vllm.config.pooler import SequencePoolingType, TokenPoolingType
+    from vllm.foundation.config import VllmConfig
+    from vllm.foundation.config.model import AttnTypeStr
+    from vllm.foundation.config.pooler import SequencePoolingType, TokenPoolingType
     from vllm.model_executor.layers.pooler import Pooler
 else:
     VllmConfig = Any
@@ -159,7 +159,7 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
 
     default_seq_pooling_type: ClassVar[SequencePoolingType] = "LAST"
     """
-    Indicates the [vllm.config.pooler.PoolerConfig.seq_pooling_type][]
+    Indicates the [vllm.foundation.config.pooler.PoolerConfig.seq_pooling_type][]
     to use by default.
 
     You can use the
@@ -169,7 +169,7 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
 
     default_tok_pooling_type: ClassVar[TokenPoolingType] = "ALL"
     """
-    Indicates the [vllm.config.pooler.PoolerConfig.tok_pooling_type][]
+    Indicates the [vllm.foundation.config.pooler.PoolerConfig.tok_pooling_type][]
     to use by default.
 
     You can use the
@@ -180,7 +180,7 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
     attn_type: ClassVar[AttnTypeStr] = "decoder"
     """
     Indicates the
-    [vllm.config.model.ModelConfig.attn_type][]
+    [vllm.foundation.config.model.ModelConfig.attn_type][]
     to use by default.
 
     You can use the
@@ -191,7 +191,7 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
     score_type: ClassVar[ScoreType] = "bi-encoder"
     """
     Indicates the
-    [vllm.config.model.ModelConfig.score_type][]
+    [vllm.foundation.config.model.ModelConfig.score_type][]
     to use by default.
     
     Scoring API handles score/rerank for:\n

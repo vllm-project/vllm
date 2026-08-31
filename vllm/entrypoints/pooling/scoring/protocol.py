@@ -6,11 +6,11 @@ from typing import Any, TypeAlias
 from pydantic import BaseModel, Field, model_validator
 
 from vllm import PoolingParams
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
-from vllm.utils import random_uuid
+from vllm.foundation.utilities import random_uuid
 
 from ..base.protocol import ClassifyRequestMixin, PoolingBasicRequestMixin
 from .typing import ScoreContentPartParam, ScoreInput

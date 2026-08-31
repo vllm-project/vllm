@@ -24,20 +24,20 @@ import torch.nn as nn
 import transformers
 
 from vllm import envs
-from vllm.config import (
+from vllm.foundation.config import (
     ModelConfig,
     iter_architecture_defaults,
     try_match_architecture_defaults,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.observability.logging_utils import logtime
 from vllm.tasks import ScoreType
-from vllm.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
-from vllm.utils.hashing import safe_hash
+from vllm.foundation.integrations.transformers_utils.dynamic_module import try_get_class_from_dynamic_module
+from vllm.foundation.utilities.hashing import safe_hash
 
 if TYPE_CHECKING:
-    from vllm.config.model import AttnTypeStr
-    from vllm.config.pooler import SequencePoolingType, TokenPoolingType
+    from vllm.foundation.config.model import AttnTypeStr
+    from vllm.foundation.config.pooler import SequencePoolingType, TokenPoolingType
 else:
     AttnTypeStr = Any
     SequencePoolingType = Any
@@ -1531,7 +1531,7 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
 
 def _run() -> None:
     # Setup plugins
-    from vllm.plugins import load_general_plugins
+    from vllm.foundation.extensibility.plugins import load_general_plugins
 
     load_general_plugins()
 

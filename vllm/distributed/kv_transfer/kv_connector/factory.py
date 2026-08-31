@@ -5,7 +5,7 @@ import importlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
-from vllm.config.kv_transfer import KVTransferConfig
+from vllm.foundation.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase,
     KVConnectorBaseType,
@@ -14,11 +14,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     supports_hma,
 )
-from vllm.logger import init_logger
-from vllm.utils.func_utils import supports_kw
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.func_utils import supports_kw
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)

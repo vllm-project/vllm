@@ -16,8 +16,8 @@ from torch import fx
 from torch._dynamo.utils import lazy_format_graph_code
 from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.platforms import current_platform
 
 from .fx_utils import is_func
@@ -139,7 +139,7 @@ class VllmPatternMatcherPass(VllmInductorPass):
 
         debug_dump_path.mkdir(parents=True, exist_ok=True)
 
-        from vllm.utils.system_utils import unique_filepath
+        from vllm.foundation.utilities.system_utils import unique_filepath
 
         file_path = unique_filepath(
             lambda i: debug_dump_path / f"patterns.{self.pass_name}.{i}.py"

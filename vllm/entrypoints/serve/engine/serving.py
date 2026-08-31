@@ -5,7 +5,7 @@ from http import HTTPStatus
 from fastapi import Request
 
 from vllm import PromptType, SamplingParams, envs
-from vllm.config import ModelConfig
+from vllm.foundation.config import ModelConfig
 from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
@@ -23,7 +23,7 @@ from vllm.renderers.inputs.preprocess import (
     extract_prompt_len,
 )
 from vllm.sampling_params import BeamSearchParams
-from vllm.utils import random_uuid
+from vllm.foundation.utilities import random_uuid
 
 
 class BaseServing:

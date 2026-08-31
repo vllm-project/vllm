@@ -11,12 +11,12 @@ from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.foundation.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
+from vllm.foundation.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -53,13 +53,13 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.processing.processor import MultiModalProcessingInfo
 from vllm.renderers import TokenizeParams
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.processors.cohere_asr import (
+from vllm.foundation.integrations.transformers_utils.processors.cohere_asr import (
     INF_VAL,
     CohereASRFeatureExtractor,
     CohereASRProcessor,
 )
-from vllm.utils.collection_utils import is_list_of
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.collection_utils import is_list_of
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import (
     AttentionType,
 )

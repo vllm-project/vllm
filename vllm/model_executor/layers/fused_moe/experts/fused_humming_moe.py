@@ -11,7 +11,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation_supported,
@@ -62,17 +62,17 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
-from vllm.utils.import_utils import has_humming
+from vllm.foundation.utilities.import_utils import has_humming
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.humming_utils import (
         HummingMoEQuantConfig,
     )
-    from vllm.utils.humming import (
+    from vllm.foundation.utilities.humming import (
         GemmType as HummingGemmType,
     )
-    from vllm.utils.humming import (
+    from vllm.foundation.utilities.humming import (
         LayerConfig as HummingLayerConfig,
     )
 
@@ -181,7 +181,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self._permute_scratch: MoEPermuteScratch | None = None
 
     def init_humming_moe(self):
-        from vllm.utils.humming import get_heuristics_config
+        from vllm.foundation.utilities.humming import get_heuristics_config
 
         self.compute_config = {
             "use_batch_invariant": envs.VLLM_BATCH_INVARIANT,
@@ -215,7 +215,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         quanted_input: torch.Tensor | None,
         input_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        from vllm.utils.humming import may_quant_input
+        from vllm.foundation.utilities.humming import may_quant_input
 
         # input_scale is set for block-FP8 (group-128) activations that were
         # quantized before the EP dispatch: may_quant_input then skips the
@@ -236,7 +236,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         outputs: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
-        from vllm.utils.humming import humming_forward
+        from vllm.foundation.utilities.humming import humming_forward
 
         is_w13 = sublayer_name == "w13"
         return humming_forward(
@@ -438,8 +438,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         return meta1.num_experts, num_tokens, intermediate_dim, hidden_dim, top_k
 
     def get_buffer_metas(self, M: int, topk: int, activation: MoEActivation):
-        from vllm.utils.humming import GemmType as HummingGemmType
-        from vllm.utils.humming import dtypes
+        from vllm.foundation.utilities.humming import GemmType as HummingGemmType
+        from vllm.foundation.utilities.humming import dtypes
 
         num_experts = self.num_experts
         w13_config = self.humming_configs["w13"]
@@ -766,7 +766,7 @@ class HummingIndexedExperts(HummingExpertsBase):
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
-        from vllm.utils.humming import GemmType as HummingGemmType
+        from vllm.foundation.utilities.humming import GemmType as HummingGemmType
 
         return HummingGemmType.INDEXED
 
@@ -949,7 +949,7 @@ class HummingGroupedExperts(HummingExpertsBase):
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
-        from vllm.utils.humming import GemmType as HummingGemmType
+        from vllm.foundation.utilities.humming import GemmType as HummingGemmType
 
         return HummingGemmType.GROUPED_CONTIGUOUS
 
@@ -1067,7 +1067,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
-        from vllm.utils.humming import GemmType as HummingGemmType
+        from vllm.foundation.utilities.humming import GemmType as HummingGemmType
 
         return HummingGemmType.GROUPED_MASKED
 

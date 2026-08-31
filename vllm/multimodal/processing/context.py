@@ -12,7 +12,7 @@ from typing_extensions import TypeVar
 
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
     EmbeddingItems,
@@ -20,17 +20,17 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.tokenizers import TokenizerLike
-from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
-from vllm.utils.jsontree import JSONTree, json_map_leaves
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
+from vllm.foundation.utilities.func_utils import get_allowed_kwarg_only_overrides
+from vllm.foundation.utilities.jsontree import JSONTree, json_map_leaves
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
     from transformers.configuration_utils import PretrainedConfig
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
-    from vllm.config import ModelConfig
+    from vllm.foundation.config import ModelConfig
     from vllm.renderers import TokenizeParams
 else:
     PretrainedConfig = object

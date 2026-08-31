@@ -19,14 +19,14 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
 from vllm.tool_parsers.utils import is_complete_json, partial_tag_overlap
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
 

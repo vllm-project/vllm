@@ -8,14 +8,14 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-from vllm.config.multimodal import (
+from vllm.foundation.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
     ImageDummyOptions,
     VideoDummyOptions,
 )
 from vllm.inputs import MultiModalDataDict
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 
 from .context import BaseProcessingInfo
 from .inputs import ProcessorInputs

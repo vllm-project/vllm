@@ -6,10 +6,10 @@ from contextlib import nullcontext
 import torch
 import torch.distributed as dist
 
-from vllm.config import ParallelConfig
+from vllm.foundation.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
-from vllm.logger import init_logger
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.worker.ubatch_utils import (
     check_ubatch_thresholds,
     is_last_ubatch_empty,

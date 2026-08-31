@@ -11,14 +11,14 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (
+from vllm.foundation.config import (
     CompilationConfig,
     CompilationMode,
     CUDAGraphMode,
     VllmConfig,
 )
 from vllm.forward_context import set_forward_context
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch

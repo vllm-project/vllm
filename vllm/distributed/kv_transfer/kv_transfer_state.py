@@ -10,7 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.foundation.config import VllmConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 _KV_CONNECTOR_AGENT: KVConnectorBaseType | None = None

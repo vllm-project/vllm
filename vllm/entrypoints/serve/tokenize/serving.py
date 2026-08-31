@@ -22,7 +22,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 )
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import TokensPrompt, tokens_input
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers import TokenizerLike
 

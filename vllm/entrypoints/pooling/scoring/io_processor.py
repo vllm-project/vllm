@@ -15,7 +15,7 @@ from vllm.renderers.inputs.preprocess import (
     prompt_to_seq,
 )
 from vllm.tasks import PoolingTask
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 
 from ...chat_utils import ChatTemplateResolutionError
 from ..base.io_processor import PoolingIOProcessor

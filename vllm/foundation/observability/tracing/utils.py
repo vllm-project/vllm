@@ -3,8 +3,8 @@
 
 from collections.abc import Mapping
 
-from vllm.logger import init_logger
-from vllm.utils.func_utils import run_once
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.func_utils import run_once
 
 logger = init_logger(__name__)
 

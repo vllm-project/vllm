@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.config.kernel import MoEBackend
+from vllm.foundation.config.kernel import MoEBackend
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,

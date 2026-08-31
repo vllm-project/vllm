@@ -19,7 +19,7 @@ from typing import Any
 
 import torch
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.serial_utils import OOBTensorConsumer
 
 logger = init_logger(__name__)

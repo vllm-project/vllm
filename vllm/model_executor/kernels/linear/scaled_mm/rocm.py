@@ -4,11 +4,11 @@
 
 import torch
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.foundation.utilities.platform_utils import num_compute_units
+from vllm.foundation.utilities.torch_utils import direct_register_custom_op
 
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,

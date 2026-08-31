@@ -17,7 +17,7 @@ import numpy as np
 import torch
 import zmq
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.foundation.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -66,8 +66,8 @@ from vllm.distributed.parallel_state import (
     get_world_group,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.logger import init_logger
-from vllm.utils.network_utils import (
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.network_utils import (
     make_zmq_path,
     make_zmq_socket,
 )

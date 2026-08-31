@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, TypedDict
 import regex as re
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.reasoning import ReasoningParser
 from vllm.tokenizers import TokenizerLike
 

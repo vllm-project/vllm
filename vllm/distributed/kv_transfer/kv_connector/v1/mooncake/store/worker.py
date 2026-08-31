@@ -26,8 +26,8 @@ import regex as re
 import torch
 import zmq
 
-import vllm.envs as envs
-from vllm.config import VllmConfig
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import VllmConfig
 from vllm.distributed import (
     get_dcp_group,
     get_pcp_group,
@@ -59,10 +59,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
     decode_lookup_response,
     encode_lookup_response,
 )
-from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
-from vllm.utils.network_utils import get_ip, make_zmq_socket
-from vllm.utils.torch_utils import is_non_overlapping_and_dense
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.math_utils import cdiv
+from vllm.foundation.utilities.network_utils import get_ip, make_zmq_socket
+from vllm.foundation.utilities.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,

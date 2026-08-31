@@ -22,9 +22,9 @@ from collections.abc import AsyncGenerator, Mapping
 import numpy as np
 import torch
 
-from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs import PromptType, TokensPrompt
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     SupportsRealtime,
 )
@@ -46,7 +46,7 @@ from vllm.multimodal.processing.processor import (
     cached_encode,
 )
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
 
 logger = init_logger(__name__)
 

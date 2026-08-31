@@ -22,7 +22,7 @@ from typing import ClassVar
 import torch
 from torch import nn
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (

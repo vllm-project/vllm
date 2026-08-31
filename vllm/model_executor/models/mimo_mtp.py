@@ -26,7 +26,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig

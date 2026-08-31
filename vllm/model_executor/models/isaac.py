@@ -12,8 +12,8 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers.image_processing_utils import BatchFeature
 
-from vllm.config import ModelConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import ModelConfig, VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -58,17 +58,17 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.config import patch_rope_parameters
-from vllm.transformers_utils.configs.isaac import (
+from vllm.foundation.integrations.transformers_utils.config import patch_rope_parameters
+from vllm.foundation.integrations.transformers_utils.configs.isaac import (
     IsaacConfig,
     PixelShuffleSiglip2VisionConfig,
 )
-from vllm.transformers_utils.processors.isaac import (
+from vllm.foundation.integrations.transformers_utils.processors.isaac import (
     IsaacImageProcessor,
     IsaacProcessor,
     get_image_size_for_max_num_patches,
 )
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .vision import is_vit_use_data_parallel
 

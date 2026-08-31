@@ -31,7 +31,7 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig
+from vllm.foundation.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -61,7 +61,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.forward_context import ForwardContext
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput

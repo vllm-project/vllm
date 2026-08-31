@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import overload
 
-from vllm.config import (
+from vllm.foundation.config import (
     AttentionConfig,
     CompilationConfig,
     PoolerConfig,
@@ -19,15 +19,15 @@ from vllm.config import (
     StructuredOutputsConfig,
     is_init_field,
 )
-from vllm.config.compilation import CompilationMode
-from vllm.config.model import (
+from vllm.foundation.config.compilation import CompilationMode
+from vllm.foundation.config.model import (
     ConvertOption,
     HfOverrides,
     ModelDType,
     RunnerOption,
     TokenizerMode,
 )
-from vllm.config.quantization import QuantizationConfigArgs
+from vllm.foundation.config.quantization import QuantizationConfigArgs
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -42,7 +42,7 @@ from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.inputs import PromptType
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import PoolingRequestOutput, RequestOutput
@@ -50,7 +50,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.foundation.observability.usage.usage_lib import UsageContext
-from vllm.utils.counter import Counter
+from vllm.foundation.utilities.counter import Counter
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -142,7 +142,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             If False, we will use CUDA graph and eager execution in hybrid.
         enable_return_routed_experts: Whether to return routed experts.
         disable_custom_all_reduce: See
-            [ParallelConfig][vllm.config.ParallelConfig].
+            [ParallelConfig][vllm.foundation.config.ParallelConfig].
         hf_token: The token to use as HTTP bearer authorization for remote files
             . If `True`, will use the token generated when running
             `hf auth login` (stored in `~/.cache/huggingface/token`).
@@ -238,7 +238,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         if "kv_transfer_config" in kwargs and isinstance(
             kwargs["kv_transfer_config"], dict
         ):
-            from vllm.config.kv_transfer import KVTransferConfig
+            from vllm.foundation.config.kv_transfer import KVTransferConfig
 
             raw_config_dict = kwargs["kv_transfer_config"]
             try:

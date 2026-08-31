@@ -5,10 +5,10 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig
-from vllm.config.load import LoadConfig
-from vllm.logger import init_logger
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import ModelConfig, VllmConfig
+from vllm.foundation.config.load import LoadConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
@@ -16,8 +16,8 @@ from vllm.model_executor.model_loader.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.foundation.observability.tracing import instrument
-from vllm.utils.mem_utils import format_gib
-from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.foundation.utilities.mem_utils import format_gib
+from vllm.foundation.utilities.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 

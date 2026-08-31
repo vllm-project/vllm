@@ -13,8 +13,8 @@ from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.utils import random_uuid
-from vllm.utils.async_utils import collect_from_async_generator
+from vllm.foundation.utilities import random_uuid
+from vllm.foundation.utilities.async_utils import collect_from_async_generator
 
 from .utils import BeamSearchSequence, create_sort_beams_key_function
 

@@ -14,9 +14,9 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config
+from vllm.foundation.config import get_current_vllm_config
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
@@ -55,8 +55,8 @@ from vllm.model_executor.model_loader.reload.layerwise import (
 from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import per_block_cast_to_fp8
-from vllm.utils.math_utils import round_up
+from vllm.foundation.utilities.deep_gemm import per_block_cast_to_fp8
+from vllm.foundation.utilities.math_utils import round_up
 
 # ---------------------------------------------------------------------------
 # Online FP8 Linear Methods

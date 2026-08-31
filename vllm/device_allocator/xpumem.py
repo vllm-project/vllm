@@ -10,8 +10,8 @@ from typing import Any
 import torch
 
 from vllm.device_allocator import AllocationData, HandleType
-from vllm.logger import init_logger
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 

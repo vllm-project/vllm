@@ -8,9 +8,9 @@ from typing import TypeVar
 import torch
 from torch import nn
 
-from vllm.config import VllmConfig
-from vllm.config.lora import LoRAConfig
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.lora import LoRAConfig
+from vllm.foundation.observability.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
     FusedMoE3DWithLoRA,
@@ -42,8 +42,8 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.utils.cache import LRUCache
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.utilities.cache import LRUCache
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 

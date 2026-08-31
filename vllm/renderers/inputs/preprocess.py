@@ -16,13 +16,13 @@ from vllm.inputs import (
     TextPrompt,
     TokensPrompt,
 )
-from vllm.utils import length_from_prompt_token_ids_or_embeds
-from vllm.utils.collection_utils import is_list_of
+from vllm.foundation.utilities import length_from_prompt_token_ids_or_embeds
+from vllm.foundation.utilities.collection_utils import is_list_of
 
 if TYPE_CHECKING:
     import torch
 
-    from vllm.config import ModelConfig
+    from vllm.foundation.config import ModelConfig
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 

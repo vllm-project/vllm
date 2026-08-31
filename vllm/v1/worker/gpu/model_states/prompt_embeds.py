@@ -3,7 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.foundation.utilities.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch

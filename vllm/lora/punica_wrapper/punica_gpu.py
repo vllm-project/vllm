@@ -14,8 +14,8 @@ import torch
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import round_up
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.math_utils import round_up
 
 if HAS_TRITON:
     from vllm.lora.ops.triton_ops import (

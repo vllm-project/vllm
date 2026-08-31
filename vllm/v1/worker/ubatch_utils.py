@@ -6,7 +6,7 @@ from typing import TypeAlias
 import numpy as np
 import torch
 
-from vllm.config import ParallelConfig
+from vllm.foundation.config import ParallelConfig
 from vllm.v1.attention.backend import CommonAttentionMetadata
 
 

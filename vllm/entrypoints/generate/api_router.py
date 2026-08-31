@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 
 if TYPE_CHECKING:
     from argparse import Namespace

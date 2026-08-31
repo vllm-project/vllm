@@ -38,8 +38,8 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 
 from .utils import AutoWeightsLoader, WeightsMapper
 from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model

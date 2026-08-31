@@ -10,8 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
@@ -38,13 +38,13 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.step3_vl import Step3VisionEncoderConfig
-from vllm.transformers_utils.processors.step3_vl import (
+from vllm.foundation.integrations.transformers_utils.configs.step3_vl import Step3VisionEncoderConfig
+from vllm.foundation.integrations.transformers_utils.processors.step3_vl import (
     MAX_IMAGE_SIZE,
     Step3VLImageProcessor,
     Step3VLProcessor,
 )
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

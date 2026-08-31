@@ -7,8 +7,8 @@ import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils import random_uuid
-from vllm.utils.math_utils import cdiv
+from vllm.foundation.utilities import random_uuid
+from vllm.foundation.utilities.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.block_table import BlockTables

@@ -16,10 +16,10 @@ import torch
 from cachetools import LRUCache
 from transformers import MistralCommonBackend
 
-import vllm.envs as envs
-from vllm.logger import init_logger
-from vllm.utils.import_utils import LazyLoader
-from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.import_utils import LazyLoader
+from vllm.foundation.utilities.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 if TYPE_CHECKING:

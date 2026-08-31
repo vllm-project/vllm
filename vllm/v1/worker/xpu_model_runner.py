@@ -5,8 +5,8 @@ from functools import partial
 
 import torch
 
-from vllm.config import VllmConfig
-from vllm.utils.torch_utils import supports_xpu_graph
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.utilities.torch_utils import supports_xpu_graph
 from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner as GPUModelRunnerV2,
 )

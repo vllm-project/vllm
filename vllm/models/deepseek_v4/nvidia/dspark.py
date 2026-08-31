@@ -15,14 +15,14 @@ import regex as re
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
-from vllm.config import VllmConfig, get_current_vllm_config
+import vllm.foundation.system.envs as envs
+from vllm.foundation.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_post_tilelang,

@@ -12,7 +12,7 @@ import torch
 from PIL import Image
 from transformers import BatchFeature
 
-from vllm.config.multimodal import (
+from vllm.foundation.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
     ImageDummyOptions,
@@ -34,7 +34,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from .video import preprocess_dots3_note_video
 

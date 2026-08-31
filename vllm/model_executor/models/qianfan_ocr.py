@@ -10,7 +10,7 @@ from transformers import PretrainedConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.transformers_utils.processors.internvl import (
+from vllm.foundation.integrations.transformers_utils.processors.internvl import (
     InternVLImageProcessor,
     InternVLProcessor,
 )

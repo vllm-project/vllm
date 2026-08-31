@@ -22,9 +22,9 @@ import uvicorn
 import uvloop
 from fastapi import FastAPI, Response
 
-import vllm.envs as envs
-from vllm.logger import init_logger
-from vllm.utils.system_utils import (
+import vllm.foundation.system.envs as envs
+from vllm.foundation.observability.logger import init_logger
+from vllm.foundation.utilities.system_utils import (
     decorate_logs,
     kill_process_tree,
     set_process_title,

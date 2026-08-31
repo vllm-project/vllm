@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-import vllm.envs as envs
+import vllm.foundation.system.envs as envs
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,

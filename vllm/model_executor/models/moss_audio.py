@@ -16,8 +16,8 @@ from transformers import BatchFeature, PretrainedConfig, Qwen3Config
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -56,9 +56,9 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
+from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,

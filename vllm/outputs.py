@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from typing_extensions import TypeVar
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats

@@ -31,20 +31,20 @@ from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interfaces_base import VllmModel
-from vllm.utils.collection_utils import common_prefix
-from vllm.utils.func_utils import supports_kw
+from vllm.foundation.utilities.collection_utils import common_prefix
+from vllm.foundation.utilities.func_utils import supports_kw
 
 if TYPE_CHECKING:
-    from vllm.config import (
+    from vllm.foundation.config import (
         ModelConfig,
         SpeechToTextConfig,
         SpeechToTextParams,
         VllmConfig,
     )
-    from vllm.config.multimodal import VideoPruningMethod
+    from vllm.foundation.config.multimodal import VideoPruningMethod
     from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
@@ -1240,7 +1240,7 @@ class SupportsQuant:
     @staticmethod
     def _find_quant_config(*args, **kwargs) -> QuantizationConfig | None:
         """Find quant config passed through model constructor args"""
-        from vllm.config import VllmConfig  # avoid circular import
+        from vllm.foundation.config import VllmConfig  # avoid circular import
 
         args_values = list(args) + list(kwargs.values())
         for arg in args_values:

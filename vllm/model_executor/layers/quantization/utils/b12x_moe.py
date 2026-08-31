@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
-from vllm.utils.math_utils import round_up
+from vllm.foundation.utilities.math_utils import round_up
 
 
 def _pad_gated_weights(

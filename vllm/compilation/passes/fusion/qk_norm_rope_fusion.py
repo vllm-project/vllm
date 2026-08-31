@@ -11,8 +11,8 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
-from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 

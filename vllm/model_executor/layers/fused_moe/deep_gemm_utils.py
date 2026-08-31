@@ -12,8 +12,8 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
-from vllm.utils.math_utils import round_up
+from vllm.foundation.utilities.deep_gemm import get_mk_alignment_for_contiguous_layout
+from vllm.foundation.utilities.math_utils import round_up
 
 
 def expert_num_tokens_round_up_and_sum(
@@ -61,7 +61,7 @@ def compute_aligned_M_and_alignment(
     # SM100/SM120 when smaller.
     expected_m = M * num_topk
     try:
-        from vllm.utils.deep_gemm import (
+        from vllm.foundation.utilities.deep_gemm import (
             get_theoretical_mk_alignment_for_contiguous_layout,
         )
 

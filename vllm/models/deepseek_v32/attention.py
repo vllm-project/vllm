@@ -7,7 +7,7 @@ import torch.nn as nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, VllmConfig
+from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
@@ -34,7 +34,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.foundation.utilities.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,

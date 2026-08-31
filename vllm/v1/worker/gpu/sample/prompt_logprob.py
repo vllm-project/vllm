@@ -5,7 +5,7 @@ from collections.abc import Callable
 import numpy as np
 import torch
 
-from vllm.config.model import LogprobsMode
+from vllm.foundation.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors

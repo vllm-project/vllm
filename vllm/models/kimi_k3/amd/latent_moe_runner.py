@@ -8,7 +8,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     tensor_model_parallel_all_reduce,
 )
-from vllm.logger import init_logger
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 logger = init_logger(__name__)

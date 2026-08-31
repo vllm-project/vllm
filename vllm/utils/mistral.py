@@ -1,38 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Provides lazy import of the vllm.tokenizers.mistral module."""
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from __future__ import annotations
+"""Compatibility shim: vllm.utils/mistral -> vllm.foundation.utilities.mistral (sys.modules alias)."""
+import importlib
+import sys
 
-from typing import TYPE_CHECKING, TypeGuard
-
-from vllm.tokenizers import TokenizerLike
-from vllm.utils.import_utils import LazyLoader
-
-if TYPE_CHECKING:
-    # if type checking, eagerly import the module
-    import vllm.tokenizers.mistral as mt
-else:
-    mt = LazyLoader("mt", globals(), "vllm.tokenizers.mistral")
-
-
-def is_mistral_tokenizer(obj: TokenizerLike | None) -> TypeGuard[mt.MistralTokenizer]:
-    """Return true if the tokenizer is a MistralTokenizer instance."""
-    cls = type(obj)
-    # Check for special class attribute, this avoids importing the class to
-    # do an isinstance() check.  If the attribute is True, do an isinstance
-    # check to be sure we have the correct type.
-    return bool(
-        getattr(cls, "IS_MISTRAL_TOKENIZER", False)
-        and isinstance(obj, mt.MistralTokenizer)
-    )
-
-
-def is_mistral_tool_parser(cls: type | None) -> bool:
-    """Return true if *cls* carries the ``IS_MISTRAL_TOOL_PARSER`` marker.
-
-    The marker is set on the engine-adapter subclass registered under the
-    ``"mistral"`` tool-parser key.  No import of the parser module is
-    required.
-    """
-    return bool(getattr(cls, "IS_MISTRAL_TOOL_PARSER", False))
+_real = importlib.import_module("vllm.foundation.utilities.mistral")
+sys.modules[__name__] = _real

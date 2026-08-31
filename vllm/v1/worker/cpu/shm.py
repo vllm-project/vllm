@@ -50,7 +50,7 @@ class _StreamPlaceholder:
         pass
 
 
-from vllm.utils.cpu_resource_utils import get_memory_node_info
+from vllm.foundation.utilities.cpu_resource_utils import get_memory_node_info
 
 
 def get_memory_info(*args: Any, **kwargs: Any) -> tuple[int, int]:
@@ -71,7 +71,7 @@ torch.Tensor.record_stream = noop
 torch.accelerator.get_memory_info = get_memory_info
 
 # Patch vLLM torch utils
-import vllm.utils.torch_utils as torch_utils
+import vllm.foundation.utilities.torch_utils as torch_utils
 
 
 def async_tensor_h2d(

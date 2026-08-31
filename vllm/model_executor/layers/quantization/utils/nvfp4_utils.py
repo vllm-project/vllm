@@ -7,7 +7,7 @@ from vllm._custom_ops import (
     cutlass_scaled_mm_supports_fp4,
 )
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
+from vllm.foundation.utilities.math_utils import round_up
 
 
 def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:

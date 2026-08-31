@@ -18,8 +18,8 @@ import torch
 import torch.nn as nn
 from transformers import BatchFeature
 
-from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -37,7 +37,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .qwen2_5_vl import Qwen2_5_VisionTransformer

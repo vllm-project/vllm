@@ -5,9 +5,9 @@ import torch
 import torch.nn as nn
 from typing_extensions import override
 
-from vllm.config import VllmConfig
-from vllm.config.utils import replace
-from vllm.logger import init_logger
+from vllm.foundation.config import VllmConfig
+from vllm.foundation.config.utils import replace
+from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.tokenizers.registry import get_tokenizer
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
