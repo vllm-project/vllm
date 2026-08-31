@@ -393,7 +393,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     block_size=self.swa_cache_layer.block_size,
                 )
 
-            if self.backend_cls.get_name() == "FLASHMLA_SPARSE_DSV4":
+            if self.backend_cls.get_name() in (
+                "FLASHMLA_SPARSE_DSV4",
+                "ROCM_FLASHMLA_SPARSE_DSV4",
+                "XPU_V4_MLA_SPARSE",
+            ):
                 from vllm.models.deepseek_v4.common.ops.cache_utils import (
                     _COMBINE_TOPK_SWA_INDICES_KERNEL,
                 )
