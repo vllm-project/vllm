@@ -4,7 +4,7 @@
 
 For each token and channel, the output kernel computes
 
-  out[t] = silu(sum_k w[k] * hist[j + k*dilation])
+  out[t] = residual[t] + silu(sum_k w[k] * hist[j + k*dilation])
   hist[m] = state[sid, slot_off + m, c]  if m < state_len
             x[qsl[r] + m - state_len, c] otherwise
 
@@ -13,6 +13,8 @@ layout. Decode, speculative decode, and prefill differ in their state-window
 offset and write-back rule. The write-back runs separately because it
 overwrites state read by the output kernel. Slot zero is never updated.
 """
+
+from typing import Literal
 
 import torch
 
@@ -29,7 +31,7 @@ def _ple_conv_kernel(
     x_ptr,
     state_ptr,
     w_ptr,
-    out_ptr,
+    residual_ptr,
     state_idx_ptr,
     qsl_ptr,
     num_acc_ptr,
@@ -120,12 +122,17 @@ def _ple_conv_kernel(
         ).to(tl.float32)
         acc += weight * tap
 
-    conv = acc.to(out_ptr.dtype.element_ty).to(tl.float32)
+    conv = acc.to(residual_ptr.dtype.element_ty).to(tl.float32)
     y = conv * tl.sigmoid(conv)
-    y = tl.where(out_ok, y, 0.0)
+    conv_output = tl.where(out_ok, y, 0.0).to(residual_ptr.dtype.element_ty)
+    residual = tl.load(
+        residual_ptr + t * C + c_offs,
+        mask=c_mask,
+        other=0.0,
+    )
     tl.store(
-        out_ptr + t * C + c_offs,
-        y.to(out_ptr.dtype.element_ty),
+        residual_ptr + t * C + c_offs,
+        residual + conv_output,
         mask=c_mask,
     )
 
@@ -245,98 +252,75 @@ def _get_conv_state_strides(
     )
 
 
-def ple_conv_decode(
-    x_d: torch.Tensor,
+def ple_conv(
+    inputs: torch.Tensor,
+    residual: torch.Tensor,
     conv_state: torch.Tensor,
     conv_weights: torch.Tensor,
-    state_indices_tensor_d: torch.Tensor,
-    has_initial_states_d: torch.Tensor | None,
+    state_indices: torch.Tensor,
+    *,
+    mode: Literal["decode", "spec", "prefill"],
     dilation: int,
-) -> torch.Tensor:
-    """Run decode for either supported convolution-state layout."""
-    T, C, K, state_len, state_width = _conv_dimensions(x_d, conv_weights, dilation, 1)
-    state_bs, state_ws, state_cs = _get_conv_state_strides(conv_state, C, state_width)
-    out = torch.empty_like(x_d)
-    has_init_ptr = (
-        has_initial_states_d
-        if has_initial_states_d is not None
-        else state_indices_tensor_d  # unused dummy pointer
-    )
-    _ple_conv_kernel[(T, triton.cdiv(C, BLOCK_C))](
-        x_d,
-        conv_state,
-        conv_weights,
-        out,
-        state_indices_tensor_d,
-        state_indices_tensor_d,
-        state_indices_tensor_d,
-        has_init_ptr,
-        T,
-        1,
-        state_bs,
-        state_ws,
-        state_cs,
-        C=C,
-        BLOCK_C=BLOCK_C,
-        STATE_LEN=state_len,
-        DILATION=dilation,
-        KERNEL_SIZE=K,
-        SPEC_QUERY_LEN=1,
-        MODE="decode",
-        HAS_INIT=has_initial_states_d is not None,
-        num_warps=NUM_WARPS,
-    )
-    _ple_conv_writeback_kernel[(T, triton.cdiv(C, BLOCK_C))](
-        x_d,
-        conv_state,
-        state_indices_tensor_d,
-        state_indices_tensor_d,
-        state_indices_tensor_d,
-        has_init_ptr,
-        T,
-        state_bs,
-        state_ws,
-        state_cs,
-        C=C,
-        BLOCK_C=BLOCK_C,
-        STATE_LEN=state_len,
-        SPEC_QUERY_LEN=1,
-        STATE_WIDTH=state_width,
-        MODE="decode",
-        HAS_INIT=has_initial_states_d is not None,
-        num_warps=NUM_WARPS,
-    )
-    return out
-
-
-def ple_conv_spec_decode(
-    x_spec: torch.Tensor,
-    conv_state: torch.Tensor,
-    conv_weights: torch.Tensor,
-    spec_state_indices_tensor: torch.Tensor,
-    spec_query_start_loc: torch.Tensor,
-    num_accepted_tokens: torch.Tensor,
-    dilation: int,
-    spec_query_len: int,
-) -> torch.Tensor:
-    """Run speculative decode over inputs of shape [tokens, channels]."""
+    query_start_loc: torch.Tensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
+    has_initial_states: torch.Tensor | None = None,
+    spec_query_len: int = 1,
+) -> None:
+    """Run short convolution in place for decode, spec decode, or prefill."""
+    kernel_spec_query_len = spec_query_len if mode == "spec" else 1
     T, C, K, state_len, state_width = _conv_dimensions(
-        x_spec, conv_weights, dilation, spec_query_len
+        inputs, conv_weights, dilation, kernel_spec_query_len
     )
     state_bs, state_ws, state_cs = _get_conv_state_strides(conv_state, C, state_width)
-    R = spec_state_indices_tensor.numel()
-    out = torch.empty_like(x_spec)
+
+    if mode == "decode":
+        query_start_loc_ptr = state_indices
+        num_accepted_tokens_ptr = state_indices
+        has_initial_states_ptr = (
+            has_initial_states if has_initial_states is not None else state_indices
+        )
+        num_reqs = T
+        binary_search_iters = 1
+        num_writeback_reqs = T
+        has_initial_states_arg = has_initial_states is not None
+    elif mode == "spec":
+        if query_start_loc is None or num_accepted_tokens is None:
+            raise ValueError(
+                "query_start_loc and num_accepted_tokens are required for spec decode"
+            )
+        query_start_loc_ptr = query_start_loc
+        num_accepted_tokens_ptr = num_accepted_tokens
+        has_initial_states_ptr = query_start_loc
+        num_reqs = state_indices.numel()
+        binary_search_iters = max(num_reqs, 1).bit_length()
+        num_writeback_reqs = num_reqs
+        has_initial_states_arg = False
+    elif mode == "prefill":
+        if query_start_loc is None or has_initial_states is None:
+            raise ValueError(
+                "query_start_loc and has_initial_states are required for prefill"
+            )
+        query_start_loc_ptr = query_start_loc
+        num_accepted_tokens_ptr = query_start_loc
+        has_initial_states_ptr = has_initial_states
+        num_reqs = state_indices.numel()
+        binary_search_iters = max(num_reqs, 1).bit_length()
+        num_writeback_reqs = num_reqs
+        has_initial_states_arg = True
+    else:
+        raise ValueError(f"Unsupported short-conv mode: {mode}")
+
     _ple_conv_kernel[(T, triton.cdiv(C, BLOCK_C))](
-        x_spec,
+        inputs,
         conv_state,
         conv_weights,
-        out,
-        spec_state_indices_tensor,
-        spec_query_start_loc,
-        num_accepted_tokens,
-        spec_query_start_loc,  # unused dummy pointer
-        R,
-        max(R, 1).bit_length(),
+        residual,
+        state_indices,
+        query_start_loc_ptr,
+        num_accepted_tokens_ptr,
+        has_initial_states_ptr,
+        num_reqs,
+        binary_search_iters,
         state_bs,
         state_ws,
         state_cs,
@@ -345,91 +329,28 @@ def ple_conv_spec_decode(
         STATE_LEN=state_len,
         DILATION=dilation,
         KERNEL_SIZE=K,
-        SPEC_QUERY_LEN=spec_query_len,
-        MODE="spec",
-        HAS_INIT=False,
+        SPEC_QUERY_LEN=kernel_spec_query_len,
+        MODE=mode,
+        HAS_INIT=has_initial_states_arg,
         num_warps=NUM_WARPS,
     )
-    _ple_conv_writeback_kernel[(R, triton.cdiv(C, BLOCK_C))](
-        x_spec,
+    _ple_conv_writeback_kernel[(num_writeback_reqs, triton.cdiv(C, BLOCK_C))](
+        inputs,
         conv_state,
-        spec_state_indices_tensor,
-        spec_query_start_loc,
-        num_accepted_tokens,
-        spec_query_start_loc,  # unused dummy pointer
-        R,
+        state_indices,
+        query_start_loc_ptr,
+        num_accepted_tokens_ptr,
+        has_initial_states_ptr,
+        num_reqs,
         state_bs,
         state_ws,
         state_cs,
         C=C,
         BLOCK_C=BLOCK_C,
         STATE_LEN=state_len,
-        SPEC_QUERY_LEN=spec_query_len,
+        SPEC_QUERY_LEN=kernel_spec_query_len,
         STATE_WIDTH=state_width,
-        MODE="spec",
-        HAS_INIT=False,
+        MODE=mode,
+        HAS_INIT=has_initial_states_arg,
         num_warps=NUM_WARPS,
     )
-    return out
-
-
-def ple_conv_prefill(
-    x_p: torch.Tensor,
-    conv_state: torch.Tensor,
-    conv_weights: torch.Tensor,
-    state_indices_tensor_p: torch.Tensor,
-    has_initial_states_p: torch.Tensor,
-    query_start_loc_p: torch.Tensor,
-    dilation: int,
-) -> torch.Tensor:
-    """Run prefill over flat variable-length input sequences."""
-    T, C, K, state_len, state_width = _conv_dimensions(x_p, conv_weights, dilation, 1)
-    state_bs, state_ws, state_cs = _get_conv_state_strides(conv_state, C, state_width)
-    R = state_indices_tensor_p.numel()
-    out = torch.empty_like(x_p)
-    has_init_ptr = has_initial_states_p
-    _ple_conv_kernel[(T, triton.cdiv(C, BLOCK_C))](
-        x_p,
-        conv_state,
-        conv_weights,
-        out,
-        state_indices_tensor_p,
-        query_start_loc_p,
-        query_start_loc_p,
-        has_init_ptr,
-        R,
-        max(R, 1).bit_length(),
-        state_bs,
-        state_ws,
-        state_cs,
-        C=C,
-        BLOCK_C=BLOCK_C,
-        STATE_LEN=state_len,
-        DILATION=dilation,
-        KERNEL_SIZE=K,
-        SPEC_QUERY_LEN=1,
-        MODE="prefill",
-        HAS_INIT=True,
-        num_warps=NUM_WARPS,
-    )
-    _ple_conv_writeback_kernel[(R, triton.cdiv(C, BLOCK_C))](
-        x_p,
-        conv_state,
-        state_indices_tensor_p,
-        query_start_loc_p,
-        query_start_loc_p,
-        has_init_ptr,
-        R,
-        state_bs,
-        state_ws,
-        state_cs,
-        C=C,
-        BLOCK_C=BLOCK_C,
-        STATE_LEN=state_len,
-        SPEC_QUERY_LEN=1,
-        STATE_WIDTH=state_width,
-        MODE="prefill",
-        HAS_INIT=True,
-        num_warps=NUM_WARPS,
-    )
-    return out

@@ -87,10 +87,10 @@ def _ple_gate(
     norm_query_w: torch.Tensor,
     norm_conv_w: torch.Tensor,
     eps: float,
-    hc: int,
-    h: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = hidden.shape[0]
+    h = value.shape[-1]
+    hc = hidden.shape[-1] // h
     assert key.stride(1) == 1 and value.stride(1) == 1
     assert hidden.is_contiguous()
     assert key.dtype == value.dtype == hidden.dtype == torch.bfloat16
@@ -126,8 +126,6 @@ def _ple_gate_fake(
     norm_query_w: torch.Tensor,
     norm_conv_w: torch.Tensor,
     eps: float,
-    hc: int,
-    h: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty_like(hidden), torch.empty_like(hidden)
 
@@ -148,9 +146,7 @@ def ple_gate(
     norm_query_w: torch.Tensor,
     norm_conv_w: torch.Tensor,
     eps: float,
-    hc: int,
-    h: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops.vllm.qwen4_exp_ple_gate(
-        key, value, hidden, norm_key_w, norm_query_w, norm_conv_w, eps, hc, h
+        key, value, hidden, norm_key_w, norm_query_w, norm_conv_w, eps
     )

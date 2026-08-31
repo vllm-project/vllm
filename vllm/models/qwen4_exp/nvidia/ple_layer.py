@@ -44,7 +44,7 @@ from vllm.v1.attention.backends.short_conv_attn import (
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from ..common.ple import PLEVocabParallelEmbedding
-from .ops.ple_conv import ple_conv_decode, ple_conv_prefill, ple_conv_spec_decode
+from .ops.ple_conv import ple_conv
 from .ops.ple_gate import ple_gate
 from .ops.ple_ngram import ple_ngram_ids
 
@@ -454,17 +454,13 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
     ) -> torch.Tensor:
-        ngram_ids = input_ids.new_empty(
-            (input_ids.shape[0], self.ngram_heads),
-            dtype=torch.long,
-        )
         # Keep num_reqs-dependent ID generation outside PIECEWISE CUDA graphs,
         # which dispatch only on the padded token count.
-        torch.ops.vllm.qwen4_exp_compute_ple_ngram_ids(
+        ngram_ids = torch.ops.vllm.qwen4_exp_compute_ple_ngram_ids(
             input_ids,
             query_start_loc,
             ngram_context,
-            ngram_ids,
+            self.ngram_heads,
             self.layer_name,
         )
         return self.ngram_embedding(ngram_ids).flatten(-2)
@@ -1001,72 +997,83 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
     def _run_short_conv_spec_decode(
         self,
         inputs: torch.Tensor,
+        residual: torch.Tensor,
         metadata: PleShortConvAttentionMetadata,
         conv_state: torch.Tensor,
         conv_weights: torch.Tensor,
         state_indices: torch.Tensor,
         use_fused_kernels: bool,
-    ) -> torch.Tensor:
+    ) -> None:
         query_start_loc = metadata.spec_query_start_loc
         num_accepted_tokens = metadata.num_accepted_tokens
         assert query_start_loc is not None
         assert num_accepted_tokens is not None
         if use_fused_kernels:
-            return ple_conv_spec_decode(
+            ple_conv(
+                inputs=inputs,
+                residual=residual,
+                conv_state=conv_state,
+                conv_weights=conv_weights,
+                state_indices=state_indices,
+                mode="spec",
+                dilation=self.short_conv_dilation,
+                query_start_loc=query_start_loc,
+                num_accepted_tokens=num_accepted_tokens,
+                spec_query_len=metadata.spec_query_len,
+            )
+        else:
+            conv_output = self._short_conv_dilated_spec_batched(
                 x_spec=inputs,
                 conv_state=conv_state,
                 conv_weights=conv_weights,
                 spec_state_indices_tensor=state_indices,
                 spec_query_start_loc=query_start_loc,
                 num_accepted_tokens=num_accepted_tokens,
-                dilation=self.short_conv_dilation,
                 spec_query_len=metadata.spec_query_len,
             )
-        return self._short_conv_dilated_spec_batched(
-            x_spec=inputs,
-            conv_state=conv_state,
-            conv_weights=conv_weights,
-            spec_state_indices_tensor=state_indices,
-            spec_query_start_loc=query_start_loc,
-            num_accepted_tokens=num_accepted_tokens,
-            spec_query_len=metadata.spec_query_len,
-        )
+            residual.add_(conv_output)
 
     def _run_short_conv_decode(
         self,
         inputs: torch.Tensor,
+        residual: torch.Tensor,
         conv_state: torch.Tensor,
         conv_weights: torch.Tensor,
         state_indices: torch.Tensor,
         has_initial_states: torch.Tensor | None,
         use_fused_kernels: bool,
-    ) -> torch.Tensor:
+    ) -> None:
         if use_fused_kernels:
-            return ple_conv_decode(
+            ple_conv(
+                inputs=inputs,
+                residual=residual,
+                conv_state=conv_state,
+                conv_weights=conv_weights,
+                state_indices=state_indices,
+                mode="decode",
+                dilation=self.short_conv_dilation,
+                has_initial_states=has_initial_states,
+            )
+        else:
+            conv_output = self._short_conv_dilated_decode_batched(
                 x_d=inputs,
                 conv_state=conv_state,
                 conv_weights=conv_weights,
                 state_indices_tensor_d=state_indices,
                 has_initial_states_d=has_initial_states,
-                dilation=self.short_conv_dilation,
             )
-        return self._short_conv_dilated_decode_batched(
-            x_d=inputs,
-            conv_state=conv_state,
-            conv_weights=conv_weights,
-            state_indices_tensor_d=state_indices,
-            has_initial_states_d=has_initial_states,
-        )
+            residual.add_(conv_output)
 
     def _run_short_conv_prefill(
         self,
         inputs: torch.Tensor,
+        residual: torch.Tensor,
         metadata: PleShortConvAttentionMetadata,
         conv_state: torch.Tensor,
         conv_weights: torch.Tensor,
         state_indices: torch.Tensor,
         use_fused_kernels: bool,
-    ) -> torch.Tensor:
+    ) -> None:
         if use_fused_kernels:
             query_start_loc = metadata.non_spec_query_start_loc
             if query_start_loc is None:
@@ -1080,34 +1087,39 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 raise ValueError(
                     "has_initial_states_p is required for prefill short-conv"
                 )
-            return ple_conv_prefill(
+            ple_conv(
+                inputs=inputs,
+                residual=residual,
+                conv_state=conv_state,
+                conv_weights=conv_weights,
+                state_indices=state_indices,
+                mode="prefill",
+                dilation=self.short_conv_dilation,
+                query_start_loc=query_start_loc,
+                has_initial_states=has_initial_states,
+            )
+        else:
+            conv_output = self._short_conv_dilated_prefill_batched(
                 x_p=inputs,
+                metadata=metadata,
                 conv_state=conv_state,
                 conv_weights=conv_weights,
                 state_indices_tensor_p=state_indices,
-                has_initial_states_p=has_initial_states,
-                query_start_loc_p=query_start_loc,
-                dilation=self.short_conv_dilation,
+                num_prefills=metadata.num_prefills,
+                num_decode_tokens=metadata.num_decode_tokens,
+                num_prefill_tokens=metadata.num_prefill_tokens,
             )
-        return self._short_conv_dilated_prefill_batched(
-            x_p=inputs,
-            metadata=metadata,
-            conv_state=conv_state,
-            conv_weights=conv_weights,
-            state_indices_tensor_p=state_indices,
-            num_prefills=metadata.num_prefills,
-            num_decode_tokens=metadata.num_decode_tokens,
-            num_prefill_tokens=metadata.num_prefill_tokens,
-        )
+            residual.add_(conv_output)
 
     def _short_conv_dilated_dispatch(
         self,
         inputs: torch.Tensor,
+        residual: torch.Tensor,
         metadata: PleShortConvAttentionMetadata,
         conv_state: torch.Tensor,
         conv_weights: torch.Tensor,
         use_fused_kernels: bool,
-    ) -> torch.Tensor:
+    ) -> None:
         num_prefills = metadata.num_prefills
         num_decodes = metadata.num_decodes
         num_decode_tokens = metadata.num_decode_tokens
@@ -1116,6 +1128,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         has_decode = num_decodes > 0
         has_spec = metadata.spec_sequence_masks is not None
         x = inputs[: metadata.num_actual_tokens]
+        residual = residual[: metadata.num_actual_tokens]
 
         # Split spec / non-spec tokens.
         if has_spec:
@@ -1126,27 +1139,34 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 non_spec_token_indices = metadata.non_spec_token_indx.long()
                 x_spec = x.index_select(0, spec_token_indices)
                 x_non_spec = x.index_select(0, non_spec_token_indices)
+                residual_spec = residual.index_select(0, spec_token_indices)
+                residual_non_spec = residual.index_select(0, non_spec_token_indices)
             else:
                 spec_token_indices = None
                 non_spec_token_indices = None
                 x_spec = x
                 x_non_spec = None
+                residual_spec = residual
+                residual_non_spec = None
         else:
             spec_token_indices = None
             non_spec_token_indices = None
             x_spec = None
             x_non_spec = x
+            residual_spec = None
+            residual_non_spec = residual
 
-        spec_output = None
         # 1. Run the multi-query speculative-decode part.
         if has_spec:
             assert metadata.spec_state_indices_tensor is not None
             assert x_spec is not None
+            assert residual_spec is not None
             spec_state_indices = metadata.spec_state_indices_tensor[
                 : metadata.num_spec_decodes
             ]
-            spec_output = self._run_short_conv_spec_decode(
+            self._run_short_conv_spec_decode(
                 inputs=x_spec,
+                residual=residual_spec,
                 metadata=metadata,
                 conv_state=conv_state,
                 conv_weights=conv_weights,
@@ -1155,10 +1175,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             )
 
         # 2. Run regular decode and prefill requests.
-        conv_out_non_spec = None
         state_indices_tensor = metadata.state_indices_tensor
         if x_non_spec is not None:
             assert state_indices_tensor is not None
+            assert residual_non_spec is not None
             if has_prefill:
                 state_indices_tensor_d, state_indices_tensor_p = torch.split(
                     state_indices_tensor,
@@ -1170,32 +1190,34 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                     [num_decode_tokens, num_prefill_tokens],
                     dim=0,
                 )
-                non_spec_parts: list[torch.Tensor] = []
+                residual_d, residual_p = torch.split(
+                    residual_non_spec,
+                    [num_decode_tokens, num_prefill_tokens],
+                    dim=0,
+                )
                 if has_decode:
-                    non_spec_parts.append(
-                        self._run_short_conv_decode(
-                            inputs=x_d,
-                            conv_state=conv_state,
-                            conv_weights=conv_weights,
-                            state_indices=state_indices_tensor_d,
-                            has_initial_states=metadata.has_initial_states_d,
-                            use_fused_kernels=use_fused_kernels,
-                        )
-                    )
-                non_spec_parts.append(
-                    self._run_short_conv_prefill(
-                        inputs=x_p,
-                        metadata=metadata,
+                    self._run_short_conv_decode(
+                        inputs=x_d,
+                        residual=residual_d,
                         conv_state=conv_state,
                         conv_weights=conv_weights,
-                        state_indices=state_indices_tensor_p,
+                        state_indices=state_indices_tensor_d,
+                        has_initial_states=metadata.has_initial_states_d,
                         use_fused_kernels=use_fused_kernels,
                     )
+                self._run_short_conv_prefill(
+                    inputs=x_p,
+                    residual=residual_p,
+                    metadata=metadata,
+                    conv_state=conv_state,
+                    conv_weights=conv_weights,
+                    state_indices=state_indices_tensor_p,
+                    use_fused_kernels=use_fused_kernels,
                 )
-                conv_out_non_spec = torch.vstack(non_spec_parts)
             else:
-                conv_out_non_spec = self._run_short_conv_decode(
+                self._run_short_conv_decode(
                     inputs=x_non_spec,
+                    residual=residual_non_spec,
                     conv_state=conv_state,
                     conv_weights=conv_weights,
                     state_indices=state_indices_tensor[: x_non_spec.size(0)],
@@ -1204,26 +1226,19 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 )
 
         # 3. Merge both parts back into the original token order.
-        if has_spec and conv_out_non_spec is not None:
-            assert spec_output is not None
+        if has_spec and residual_non_spec is not None:
             assert spec_token_indices is not None
             assert non_spec_token_indices is not None
-            output = x.new_empty((metadata.num_actual_tokens, x.size(-1)))
-            output.index_copy_(0, spec_token_indices, spec_output)
-            output.index_copy_(0, non_spec_token_indices, conv_out_non_spec)
-            return output
-        elif has_spec:
-            assert spec_output is not None
-            return spec_output
-        if conv_out_non_spec is None:
-            return x
-        return conv_out_non_spec
+            assert residual_spec is not None
+            residual.index_copy_(0, spec_token_indices, residual_spec)
+            residual.index_copy_(0, non_spec_token_indices, residual_non_spec)
 
-    def _short_conv(self, inputs: torch.Tensor) -> torch.Tensor:
+    def _short_conv(self, inputs: torch.Tensor, residual: torch.Tensor) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
-            return self._short_conv_fallback(inputs)
+            residual.add_(self._short_conv_fallback(inputs))
+            return
 
         if not isinstance(attn_metadata, dict):
             raise RuntimeError(
@@ -1234,7 +1249,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         layer_attn_metadata = attn_metadata.get(self.prefix)
         if layer_attn_metadata is None:
             # MRV2 omits Mamba-family metadata during profile warmup.
-            return self._short_conv_fallback(inputs)
+            residual.add_(self._short_conv_fallback(inputs))
+            return
         if not isinstance(layer_attn_metadata, PleShortConvAttentionMetadata):
             raise TypeError(
                 "Expected PleShortConvAttentionMetadata for layer "
@@ -1258,8 +1274,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             conv_state = conv_state.narrow(
                 state_dim, state_size - state_capacity, state_capacity
             )
-        return self._short_conv_dilated_dispatch(
+        self._short_conv_dilated_dispatch(
             inputs=inputs,
+            residual=residual,
             metadata=layer_attn_metadata,
             conv_state=conv_state,
             conv_weights=conv_weights.to(dtype=inputs.dtype),
@@ -1285,65 +1302,58 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         kv, _ = self.kv_proj(embeddings)
         key, value = kv.split(self.kv_proj.output_sizes, dim=-1)
         gated_output, conv_input = ple_gate(
-            key=key,
-            value=value,
-            hidden=hidden_states,
-            norm_key_w=self.norm_key.weight,
-            norm_query_w=self.norm_query.weight,
-            norm_conv_w=self.norm_conv.weight,
-            eps=float(self.norm_key.eps),
-            hc=self.hc_count,
-            h=self.hidden_size,
+            key,
+            value,
+            hidden_states,
+            self.norm_key.weight,
+            self.norm_query.weight,
+            self.norm_conv.weight,
+            self.norm_key.eps,
         )
-        conv_output = torch.zeros_like(conv_input)
-        torch.ops.vllm.qwen4_exp_ple_short_conv(
-            conv_input,
-            conv_output,
-            self.prefix,
-        )
-        return gated_output + conv_output
+        torch.ops.vllm.qwen4_exp_ple_short_conv(conv_input, gated_output, self.prefix)
+        return gated_output
 
 
 def qwen4_exp_compute_ple_ngram_ids(
     input_ids: torch.Tensor,
     query_start_loc: torch.Tensor,
     ngram_context: torch.Tensor,
-    output: torch.Tensor,
+    ngram_heads: int,
     layer_name: str,
-) -> None:
+) -> torch.Tensor:
     """Compute request-dependent PLE n-gram IDs outside piecewise graphs."""
+    del ngram_heads
     layer = get_forward_context().no_compile_layers[layer_name]
-    ngram_ids = layer.ple_embedding.compute_ngram_ids(
+    return layer.ple_embedding.compute_ngram_ids(
         input_ids,
         query_start_loc,
         ngram_context,
     )
-    output.copy_(ngram_ids)
 
 
 def qwen4_exp_compute_ple_ngram_ids_fake(
     input_ids: torch.Tensor,
     query_start_loc: torch.Tensor,
     ngram_context: torch.Tensor,
-    output: torch.Tensor,
+    ngram_heads: int,
     layer_name: str,
-) -> None:
-    return
+) -> torch.Tensor:
+    del query_start_loc, ngram_context, layer_name
+    return input_ids.new_empty((input_ids.numel(), ngram_heads), dtype=torch.long)
 
 
 def qwen4_exp_ple_short_conv(
     inputs: torch.Tensor,
-    output: torch.Tensor,
+    residual_output: torch.Tensor,
     layer_name: str,
 ) -> None:
     layer = get_forward_context().no_compile_layers[layer_name]
-    result = layer._short_conv(inputs)
-    output[: result.shape[0]].copy_(result)
+    layer._short_conv(inputs, residual_output)
 
 
 def qwen4_exp_ple_short_conv_fake(
     inputs: torch.Tensor,
-    output: torch.Tensor,
+    residual_output: torch.Tensor,
     layer_name: str,
 ) -> None:
     return
@@ -1352,7 +1362,7 @@ def qwen4_exp_ple_short_conv_fake(
 direct_register_custom_op(
     op_name="qwen4_exp_compute_ple_ngram_ids",
     op_func=qwen4_exp_compute_ple_ngram_ids,
-    mutates_args=["output"],
+    mutates_args=[],
     fake_impl=qwen4_exp_compute_ple_ngram_ids_fake,
 )
 
@@ -1360,7 +1370,7 @@ direct_register_custom_op(
 direct_register_custom_op(
     op_name="qwen4_exp_ple_short_conv",
     op_func=qwen4_exp_ple_short_conv,
-    mutates_args=["output"],
+    mutates_args=["residual_output"],
     fake_impl=qwen4_exp_ple_short_conv_fake,
 )
 

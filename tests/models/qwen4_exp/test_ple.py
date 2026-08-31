@@ -18,7 +18,6 @@ from vllm.models.qwen4_exp.common.ple import (
     compute_ple_shard_overlap,
     copy_ple_embedding_shard_,
 )
-from vllm.models.qwen4_exp.nvidia import ple_layer as ple_layer_module
 from vllm.models.qwen4_exp.nvidia.ple_layer import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEFp8EmbeddingMethod,
@@ -269,49 +268,6 @@ def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
     assert _get_ple_embedding_quant_method(quant_config, prefix) is None
 
 
-def test_ple_ngram_ids_custom_op_uses_current_request_layout(monkeypatch) -> None:
-    class RuntimeNGramEmbedding(nn.Module):
-        def compute_ngram_ids(
-            self,
-            input_ids: torch.Tensor,
-            query_start_loc: torch.Tensor,
-            ngram_context: torch.Tensor,
-        ) -> torch.Tensor:
-            del input_ids, ngram_context
-            num_reqs = query_start_loc.numel() - 1
-            return torch.full((4, 2), num_reqs, dtype=torch.long)
-
-    layer = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
-    nn.Module.__init__(layer)
-    layer.ple_embedding = RuntimeNGramEmbedding()
-    monkeypatch.setattr(
-        ple_layer_module,
-        "get_forward_context",
-        lambda: SimpleNamespace(no_compile_layers={"ple": layer}),
-    )
-    input_ids = torch.arange(4)
-    ngram_context = torch.zeros(2, 2, dtype=torch.long)
-    output = torch.empty(4, 2, dtype=torch.long)
-
-    ple_layer_module.qwen4_exp_compute_ple_ngram_ids(
-        input_ids,
-        torch.tensor([0, 4]),
-        ngram_context,
-        output,
-        "ple",
-    )
-    assert torch.equal(output, torch.ones_like(output))
-
-    ple_layer_module.qwen4_exp_compute_ple_ngram_ids(
-        input_ids,
-        torch.tensor([0, 2, 4]),
-        ngram_context,
-        output,
-        "ple",
-    )
-    assert torch.equal(output, torch.full_like(output, 2))
-
-
 def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:
     module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
     nn.Module.__init__(module)
@@ -380,26 +336,6 @@ def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:
     ).transpose(1, 2)[0, :2]
     torch.testing.assert_close(second_output, expected_second_output)
     torch.testing.assert_close(conv_state[1:], expected_second_state)
-
-
-def test_ple_short_conv_uses_fallback_when_profile_metadata_is_omitted(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
-    nn.Module.__init__(module)
-    module.prefix = "model.layers.1.ple"
-    inputs = torch.arange(6, dtype=torch.float32).reshape(3, 2)
-    expected = inputs + 1
-    monkeypatch.setattr(module, "_short_conv_fallback", lambda _: expected)
-    monkeypatch.setattr(
-        ple_layer_module,
-        "get_forward_context",
-        lambda: SimpleNamespace(attn_metadata={"model.layers.0.self_attn": object()}),
-    )
-
-    output = module._short_conv(inputs)
-
-    assert output is expected
 
 
 def _reference_ngram_ids(
@@ -615,7 +551,7 @@ def test_fused_conv_decode_correctness(
     dilation: int,
     state_layout: str,
 ) -> None:
-    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv_decode
+    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv
 
     device = torch.device("cuda")
     module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
@@ -632,6 +568,13 @@ def test_fused_conv_decode_correctness(
         dtype=torch.bfloat16,
         generator=generator,
     )
+    residual = torch.randn(
+        num_tokens,
+        channels,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
     state_indices = torch.arange(1, num_tokens + 1, dtype=torch.int32, device=device)
     if num_tokens > 1:
         state_indices[-1] = 0
@@ -641,27 +584,33 @@ def test_fused_conv_decode_correctness(
         state, state_layout
     )
     null_state = state_kernel_ds[0].clone()
-    output_reference = module._short_conv_dilated_decode_batched(
+    conv_reference = module._short_conv_dilated_decode_batched(
         inputs,
         state_reference,
         weights,
         state_indices,
         has_initial_states,
     )
-    output_kernel = ple_conv_decode(
+    output_reference = residual + conv_reference
+    residual_kernel = residual.clone()
+    ple_conv(
         inputs,
+        residual_kernel,
         state_kernel,
         weights,
         state_indices,
-        has_initial_states,
-        dilation,
+        mode="decode",
+        dilation=dilation,
+        has_initial_states=has_initial_states,
     )
     torch.testing.assert_close(
-        output_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
+        residual_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
     )
     assert torch.equal(state_kernel_ds, state_reference)
     assert torch.equal(state_kernel_ds[0], null_state)
-    assert torch.count_nonzero(output_kernel[state_indices == 0]) == 0
+    assert torch.equal(
+        residual_kernel[state_indices == 0], residual[state_indices == 0]
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
@@ -690,7 +639,7 @@ def test_fused_conv_spec_correctness(
     dilation: int,
     state_layout: str,
 ) -> None:
-    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv_spec_decode
+    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv
 
     device = torch.device("cuda")
     module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
@@ -718,6 +667,13 @@ def test_fused_conv_spec_correctness(
         dtype=torch.bfloat16,
         generator=generator,
     )
+    residual = torch.randn(
+        num_tokens,
+        channels,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
     state_indices = torch.arange(1, num_reqs + 1, dtype=torch.int32, device=device)
     if num_reqs > 1:
         state_indices[1] = 0
@@ -727,7 +683,7 @@ def test_fused_conv_spec_correctness(
         state, state_layout
     )
     null_state = state_kernel_ds[0].clone()
-    output_reference = module._short_conv_dilated_spec_batched(
+    conv_reference = module._short_conv_dilated_spec_batched(
         inputs,
         state_reference,
         weights,
@@ -736,22 +692,26 @@ def test_fused_conv_spec_correctness(
         num_accepted_tensor,
         spec_query_len,
     )
-    output_kernel = ple_conv_spec_decode(
+    output_reference = residual + conv_reference
+    residual_kernel = residual.clone()
+    ple_conv(
         inputs,
+        residual_kernel,
         state_kernel,
         weights,
         state_indices,
-        query_start_loc,
-        num_accepted_tensor,
-        dilation,
-        spec_query_len,
+        mode="spec",
+        dilation=dilation,
+        query_start_loc=query_start_loc,
+        num_accepted_tokens=num_accepted_tensor,
+        spec_query_len=spec_query_len,
     )
     torch.testing.assert_close(
-        output_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
+        residual_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
     )
     assert torch.equal(state_kernel_ds, state_reference)
     assert torch.equal(state_kernel_ds[0], null_state)
-    assert torch.count_nonzero(output_kernel[num_real_tokens:]) == 0
+    assert torch.equal(residual_kernel[num_real_tokens:], residual[num_real_tokens:])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
@@ -767,7 +727,7 @@ def test_fused_conv_prefill_correctness(
     dilation: int,
     state_layout: str,
 ) -> None:
-    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv_prefill
+    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv
 
     device = torch.device("cuda")
     module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
@@ -781,6 +741,13 @@ def test_fused_conv_prefill_correctness(
         [0, *accumulate(query_lens)], dtype=torch.int32, device=device
     )
     inputs = torch.randn(
+        sum(query_lens),
+        channels,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    residual = torch.randn(
         sum(query_lens),
         channels,
         device=device,
@@ -803,7 +770,7 @@ def test_fused_conv_prefill_correctness(
         state, state_layout
     )
     null_state = state_kernel_ds[0].clone()
-    output_reference = module._short_conv_dilated_prefill_batched(
+    conv_reference = module._short_conv_dilated_prefill_batched(
         inputs,
         metadata,
         state_reference,
@@ -813,28 +780,32 @@ def test_fused_conv_prefill_correctness(
         0,
         inputs.shape[0],
     )
-    output_kernel = ple_conv_prefill(
+    output_reference = residual + conv_reference
+    residual_kernel = residual.clone()
+    ple_conv(
         inputs,
+        residual_kernel,
         state_kernel,
         weights,
         state_indices,
-        has_initial_states,
-        query_start_loc,
-        dilation,
+        mode="prefill",
+        dilation=dilation,
+        query_start_loc=query_start_loc,
+        has_initial_states=has_initial_states,
     )
     torch.testing.assert_close(
-        output_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
+        residual_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
     )
     assert torch.equal(state_kernel_ds, state_reference)
     assert torch.equal(state_kernel_ds[0], null_state)
     query_start = 0
     for state_index, query_len in zip(state_indices.tolist(), query_lens):
         if state_index == 0:
-            assert (
-                torch.count_nonzero(
-                    output_kernel[query_start : query_start + query_len]
-                )
-                == 0
+            output_slice = residual_kernel[query_start : query_start + query_len]
+            residual_slice = residual[query_start : query_start + query_len]
+            assert torch.equal(
+                output_slice,
+                residual_slice,
             )
         query_start += query_len
 
@@ -901,8 +872,6 @@ def test_fused_gate_correctness(num_tokens: int, strided_kv: bool) -> None:
         norm_query,
         norm_conv,
         1e-6,
-        hc,
-        h,
     )
     key_normalized = grouped_norm(key, norm_key).reshape(num_tokens, hc, h)
     query_normalized = grouped_norm(hidden, norm_query).reshape(num_tokens, hc, h)
@@ -951,6 +920,12 @@ def test_fused_conv_mixed_batch_correctness() -> None:
         dtype=torch.bfloat16,
         generator=generator,
     )
+    residual = torch.randn(
+        inputs.shape,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
     metadata = SimpleNamespace(
         num_prefills=1,
         num_decodes=1,
@@ -977,21 +952,25 @@ def test_fused_conv_mixed_batch_correctness() -> None:
     )
     state_kernel = state.clone()
     state_eager = state.clone().transpose(-1, -2)
-    output_kernel = module._short_conv_dilated_dispatch(
+    residual_kernel = residual.clone()
+    residual_eager = residual.clone()
+    module._short_conv_dilated_dispatch(
         inputs=inputs,
+        residual=residual_kernel,
         metadata=metadata,
         conv_state=state_kernel,
         conv_weights=weights,
         use_fused_kernels=True,
     )
-    output_eager = module._short_conv_dilated_dispatch(
+    module._short_conv_dilated_dispatch(
         inputs=inputs,
+        residual=residual_eager,
         metadata=metadata,
         conv_state=state_eager,
         conv_weights=weights,
         use_fused_kernels=False,
     )
     torch.testing.assert_close(
-        output_kernel.float(), output_eager.float(), atol=3e-2, rtol=3e-2
+        residual_kernel.float(), residual_eager.float(), atol=3e-2, rtol=3e-2
     )
     assert torch.equal(state_kernel, state_eager.transpose(-1, -2).contiguous())
