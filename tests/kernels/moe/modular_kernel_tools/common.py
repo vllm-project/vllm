@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     RoutingMethodType,
+    fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -226,9 +227,13 @@ class Config:
         info = prepare_finalize_info(self.prepare_finalize_type)
         return info.supported_dtypes
 
-    def is_block_quant_supported(self):
-        info = expert_info(self.fused_experts_type)
-        return info.blocked_quantization_support
+    def is_block_quant_supported(self) -> bool:
+        fe_info = expert_info(self.fused_experts_type)
+        pf_info = prepare_finalize_info(self.prepare_finalize_type)
+        return (
+            fe_info.blocked_quantization_support
+            and pf_info.blocked_quantization_support
+        )
 
     def supports_apply_weight_on_input(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
@@ -460,7 +465,9 @@ class RankTensors:
         # first - so further quantize and dequantize will yield the same
         # values.
         if config.is_per_tensor_act_quant:
-            a_q, a_scales = ops.scaled_fp8_quant(a, use_per_token_if_dynamic=False)
+            # Use a fixed rank-invariant scale.
+            a_scales = torch.full((1,), 0.5 / FLOAT8_E4M3_MAX, device=a.device)
+            a_q, _ = ops.scaled_fp8_quant(a, a_scales)
             return a_q.float().mul(a_scales).to(dtype), a_scales
 
         if config.is_per_act_token_quant:
@@ -593,6 +600,12 @@ def reference_moe_impl(
         per_act_token_quant = config.is_per_act_token_quant
         block_shape = config.quant_block_shape
 
+    a2_scale = (
+        _static_a2_scale(a.device)
+        if _uses_fp8_per_tensor_folded_scales(config)
+        else None
+    )
+
     return torch_experts(
         a=a,
         w1=w1,
@@ -604,6 +617,7 @@ def reference_moe_impl(
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         a1_scale=a_scale,
+        a2_scale=a2_scale,
         quant_dtype=quant_dtype,
         per_act_token_quant=per_act_token_quant,
         block_shape=block_shape,
@@ -618,6 +632,25 @@ def _make_gscale(num_experts: int) -> torch.Tensor:
         device=torch.accelerator.current_device_index(),
         dtype=torch.float32,
     )
+
+
+def _is_fp8_per_tensor(config: Config) -> bool:
+    return (
+        config.quant_dtype == torch.float8_e4m3fn
+        and not config.is_per_act_token_quant
+        and config.quant_block_shape is None
+    )
+
+
+def _uses_fp8_per_tensor_folded_scales(config: Config) -> bool:
+    return (
+        _is_fp8_per_tensor(config)
+        and getattr(config.fused_experts_type, "__name__", "") == "FlashInferExperts"
+    )
+
+
+def _static_a2_scale(device: torch.device) -> torch.Tensor:
+    return torch.full((), 2.0 / FLOAT8_E4M3_MAX, device=device)
 
 
 def make_modular_kernel(
@@ -743,19 +776,38 @@ def run_modular_kernel(
     else:
         gscale = None
 
-    quant_config = FusedMoEQuantConfig.make(
-        config.quant_dtype,
-        w1_scale=rank_weights.w1_scale,
-        w2_scale=rank_weights.w2_scale,
-        a1_scale=rank_tensors.hidden_states_scale,
-        g1_alphas=(1 / rank_weights.w1_gs) if rank_weights.w1_gs is not None else None,
-        g2_alphas=(1 / rank_weights.w2_gs) if rank_weights.w2_gs is not None else None,
-        a1_gscale=gscale,
-        a2_gscale=gscale,
-        block_shape=config.quant_block_shape,
-        per_act_token_quant=config.is_per_act_token_quant,
-        per_out_ch_quant=config.is_per_out_ch_quant,
-    )
+    if _uses_fp8_per_tensor_folded_scales(config):
+        assert rank_tensors.hidden_states_scale is not None
+        a1_scale = rank_tensors.hidden_states_scale.squeeze()
+        a2_scale = _static_a2_scale(a1_scale.device)
+        quant_config = fp8_w8a8_moe_quant_config(
+            w1_scale=rank_weights.w1_scale,
+            w2_scale=rank_weights.w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            a1_gscale=(1.0 / a1_scale),
+            a2_gscale=(1.0 / a2_scale),
+            g1_alphas=(rank_weights.w1_scale * a1_scale).squeeze(),
+            g2_alphas=(rank_weights.w2_scale * a2_scale).squeeze(),
+        )
+    else:
+        quant_config = FusedMoEQuantConfig.make(
+            config.quant_dtype,
+            w1_scale=rank_weights.w1_scale,
+            w2_scale=rank_weights.w2_scale,
+            a1_scale=rank_tensors.hidden_states_scale,
+            g1_alphas=(1 / rank_weights.w1_gs)
+            if rank_weights.w1_gs is not None
+            else None,
+            g2_alphas=(1 / rank_weights.w2_gs)
+            if rank_weights.w2_gs is not None
+            else None,
+            a1_gscale=gscale,
+            a2_gscale=gscale,
+            block_shape=config.quant_block_shape,
+            per_act_token_quant=config.is_per_act_token_quant,
+            per_out_ch_quant=config.is_per_out_ch_quant,
+        )
 
     mk = make_modular_kernel(config, vllm_config, quant_config)
 
