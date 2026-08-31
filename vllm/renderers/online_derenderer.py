@@ -4,7 +4,11 @@ from typing import Any
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
-from vllm.entrypoints.generate.base.protocol import DeltaFunctionCall, DeltaMessage, ToolCall
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    ToolCall,
+)
 from vllm.entrypoints.generate.base.serving import resolve_token_id_placeholder
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,

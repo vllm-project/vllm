@@ -22,12 +22,12 @@ from collections.abc import Callable
 
 import pytest
 import pytest_asyncio
-
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
 )
+
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderStreamState,
     GenerateResponse,
@@ -1002,6 +1002,7 @@ class TestServingDerenderStreamValidation:
     @pytest.mark.asyncio
     async def test_missing_chat_request_with_parser_rejected(self):
         from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
         from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
             DerenderChatStreamRequest,
         )
@@ -1021,6 +1022,7 @@ class TestServingDerenderStreamValidation:
     @pytest.mark.asyncio
     async def test_missing_chat_request_without_parser_ok(self):
         from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
         from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
             DerenderChatStreamRequest,
         )
@@ -1041,6 +1043,7 @@ class TestServingDerenderStreamValidation:
         parse_delta cannot tell whether the prompt left reasoning open and
         would misclassify reasoning content as plain content."""
         from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
         from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
             DerenderChatStreamRequest,
         )
@@ -1061,6 +1064,7 @@ class TestServingDerenderStreamValidation:
     @pytest.mark.asyncio
     async def test_prompt_token_ids_present_with_parser_ok(self):
         from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
         from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
             DerenderChatStreamRequest,
         )
@@ -1079,6 +1083,7 @@ class TestServingDerenderStreamValidation:
     @pytest.mark.asyncio
     async def test_oversized_output_token_ids_rejected(self):
         from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
         from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
             DerenderChatStreamRequest,
         )
@@ -1103,6 +1108,7 @@ class TestServingDerenderStreamValidation:
         could never fire since derender_chat_stream itself rejects anything
         above 1 first."""
         from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
         from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
             DerenderChatStreamRequest,
         )
