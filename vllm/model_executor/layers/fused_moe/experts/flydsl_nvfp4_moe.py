@@ -66,7 +66,8 @@ class FlydslNvfp4Experts(mk.FusedMoEExpertsModular):
         inter_dim: int,
         block_m: int | None = None,
     ) -> dict[str, int]:
-        """Port AITER's BF16-by-NVFP4 FlyDSL fallback tile selection."""
+        """Default kernel hyperparameters, using
+        benchmarks/kernels/benchmark_flydsl_moe_nvfp4.py is recommended."""
         if block_m is None:
             cu_num = torch.cuda.get_device_properties("cuda").multi_processor_count
             tile_n = 128
@@ -104,7 +105,7 @@ class FlydslNvfp4Experts(mk.FusedMoEExpertsModular):
         name = (
             f"E={experts},N={inter_dim},"
             f"device_name={get_device_name_as_file_name()},"
-            "dtype=nvfp4_bf16,backend=flydsl.json"
+            "dtype=nvfp4,backend=flydsl.json"
         )
         path = Path(__file__).parent.parent / "configs" / name
         if not path.exists():

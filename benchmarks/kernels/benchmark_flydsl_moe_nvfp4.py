@@ -49,7 +49,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "vllm/model_executor/layers/fused_moe/configs"
 
 
-def get_flydsl_stage1_kernels_nvfp4_bf16(
+def get_flydsl_stage1_kernels_nvfp4(
     model_dim: int,
     inter_dim: int,
     *,
@@ -58,7 +58,7 @@ def get_flydsl_stage1_kernels_nvfp4_bf16(
     out_dtype: str = "bf16",
     lds_cap_bytes: int | None = None,
 ) -> dict[str, dict[str, int]]:
-    """Return valid AITER BF16-by-NVFP4 stage-one candidates."""
+    """Return valid stage-one candidates."""
     registry = {
         f"flydsl_moe1_abf16_wnvfp4_{out_dtype}_t{tm}x{tn}x{tk}"
         + (f"_kb{kb}" if kb != 1 else ""): {
@@ -98,7 +98,7 @@ def get_flydsl_stage1_kernels_nvfp4_bf16(
     return candidates
 
 
-def get_flydsl_stage2_kernels_nvfp4_bf16(
+def get_flydsl_stage2_kernels_nvfp4(
     model_dim: int,
     inter_dim: int,
     *,
@@ -107,7 +107,7 @@ def get_flydsl_stage2_kernels_nvfp4_bf16(
     out_dtype: str = "bf16",
     lds_cap_bytes: int | None = None,
 ) -> dict[str, dict[str, int | str]]:
-    """Return valid AITER BF16-by-NVFP4 atomic stage-two candidates."""
+    """Return valid stage-two candidates."""
     registry = {
         f"flydsl_moe2_abf16_wnvfp4_{out_dtype}_t{tm}x{tn}x{tk}_atomic": {
             "tile_m": tm,
@@ -437,10 +437,10 @@ def tune(args: argparse.Namespace) -> Path:
         lds_cap_bytes = LDS_CAP_BYTES[arch]
     except KeyError as exc:
         raise RuntimeError(f"Unsupported GPU architecture: {arch}") from exc
-    s1_registry = get_flydsl_stage1_kernels_nvfp4_bf16(
+    s1_registry = get_flydsl_stage1_kernels_nvfp4(
         args.hidden_size, args.inter_dim, lds_cap_bytes=lds_cap_bytes
     )
-    s2_registry = get_flydsl_stage2_kernels_nvfp4_bf16(
+    s2_registry = get_flydsl_stage2_kernels_nvfp4(
         args.hidden_size, args.inter_dim, lds_cap_bytes=lds_cap_bytes
     )
     visible_gpu_count = torch.accelerator.device_count()
@@ -593,7 +593,7 @@ def tune(args: argparse.Namespace) -> Path:
     name = (
         f"E={args.experts},N={args.inter_dim},"
         f"device_name={get_device_name_as_file_name()},"
-        "dtype=nvfp4_bf16,backend=flydsl.json"
+        "dtype=nvfp4,backend=flydsl.json"
     )
     output = Path(args.output_dir) / name
     output.parent.mkdir(parents=True, exist_ok=True)

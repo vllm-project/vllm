@@ -66,7 +66,6 @@ from .utils import (
 
 @functools.lru_cache(maxsize=1024)
 def compile_moe_gemm2(
-    *,
     model_dim: int,
     inter_dim: int,
     experts: int,
@@ -75,7 +74,6 @@ def compile_moe_gemm2(
     tile_n: int,
     tile_k: int,
     doweight_stage2: bool,
-    in_dtype: str = "fp8",
     group_size: int = -1,
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
@@ -83,9 +81,8 @@ def compile_moe_gemm2(
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
-    in_dtype:
-      - "nvfp4_bf16": W4A16 path: A2 is bf16, W is packed fp4_e2m1 with fp8_e4m3
-        block scales and a global f32 scale (not implemented yet)
+    W4A16 path: A2 is bf16, W is packed fp4_e2m1 with fp8_e4m3 block scales and a
+    global f32 scale.
 
     Stage2 output supports:
       - out_dtype="f16": fp16 half2 atomics (fast,
@@ -98,8 +95,6 @@ def compile_moe_gemm2(
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
 
-    if in_dtype != "nvfp4_bf16":
-        raise ValueError("only in_dtype='nvfp4_bf16' is supported")
     needs_scale_w = True
     elem_bytes = 2
     out_s = str(out_dtype).strip().lower()
@@ -116,12 +111,11 @@ def compile_moe_gemm2(
         )
     if group_size != 16:
         raise ValueError(
-            "FlyDSL nvfp4_bf16 groupwise scale requires group_size=16, "
-            f"got {group_size}."
+            f"FlyDSL nvfp4 groupwise scale requires group_size=16, got {group_size}."
         )
     if model_dim % tile_n != 0:
         raise ValueError(
-            "FlyDSL nvfp4_bf16 stage2 requires model_dim to be a positive "
+            "FlyDSL nvfp4 stage2 requires model_dim to be a positive "
             f"multiple of tile_n, got model_dim={model_dim}, tile_n={tile_n}."
         )
     use_inloop_w_scale = True
@@ -132,7 +126,7 @@ def compile_moe_gemm2(
     _is_gfx950 = "gfx95" in gpu_arch
     if gpu_arch != "gfx942" and gpu_arch != "gfx950":
         raise ValueError(
-            "FlyDSL nvfp4_bf16 MoE kernels are supported only on gfx942/gfx950, "
+            "FlyDSL nvfp4 MoE kernels are supported only on gfx942/gfx950, "
             f"got {gpu_arch!r}."
         )
     use_gfx950_cvt = _is_gfx950
@@ -233,7 +227,7 @@ def compile_moe_gemm2(
 
     # abi is mask sentinel token ids on loads/stores to avoidillegal address faults
     (
-        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}"
+        f"mfma_moe2_nvfp4_{out_s}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
         f"{_gs_tag}"
         f"_abi2"

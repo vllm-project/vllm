@@ -49,7 +49,7 @@ class NvFp4MoeBackend(Enum):
     VLLM_CUTLASS = "VLLM_CUTLASS"
     MARLIN = "MARLIN"
     HUMMING = "HUMMING"
-    AITER = "AITER"
+    FLYDSL = "FLYDSL"
     EMULATION = "EMULATION"
 
 
@@ -149,7 +149,7 @@ def backend_to_kernel_cls(
         )
 
         return [Nvfp4QuantizationEmulationTritonExperts]
-    elif backend == NvFp4MoeBackend.AITER:
+    elif backend == NvFp4MoeBackend.FLYDSL:
         from vllm.model_executor.layers.fused_moe.experts.flydsl_nvfp4_moe import (
             FlydslNvfp4Experts,
         )
@@ -172,7 +172,7 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
         "marlin": NvFp4MoeBackend.MARLIN,
         "humming": NvFp4MoeBackend.HUMMING,
         "emulation": NvFp4MoeBackend.EMULATION,
-        "aiter": NvFp4MoeBackend.AITER,
+        "flydsl": NvFp4MoeBackend.FLYDSL,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -210,7 +210,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
         NvFp4MoeBackend.HUMMING,
-        NvFp4MoeBackend.AITER,
+        NvFp4MoeBackend.FLYDSL,
         NvFp4MoeBackend.EMULATION,
     ]
 
@@ -503,7 +503,7 @@ def convert_to_nvfp4_moe_kernel_format(
         # for other experts - other selection strategies may be used.
         a13_scale = 1.0 / a13_scale.max().to(torch.float32)
         a2_scale = 1.0 / a2_scale.max().to(torch.float32)
-    elif nvfp4_backend == NvFp4MoeBackend.AITER:
+    elif nvfp4_backend == NvFp4MoeBackend.FLYDSL:
         if a13_scale is None or a2_scale is None:
             raise ValueError(
                 "Activation global scales should not be None, got"

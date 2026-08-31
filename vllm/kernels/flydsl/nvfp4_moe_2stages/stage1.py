@@ -62,7 +62,6 @@ def compile_moe_gemm1(
     # NOTE: aiter swap passes these for API symmetry; stage1 uses
     # dynamic memrefs so they are ignored.
     doweight_stage1: bool,
-    in_dtype: str = "fp8",
     group_size: int = -1,
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
@@ -70,17 +69,16 @@ def compile_moe_gemm1(
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
 
-    in_dtype:
-      - "nvfp4_bf16": W4A16 path: X is bf16, W is packed fp4_e2m1 with fp8_e4m3
-        block scales and a global f32 scale (not implemented yet)
+    W4A16 path: X is bf16, W is packed fp4_e2m1 with fp8_e4m3 block scales and
+    a global f32 scale (not implemented yet)
+
     k_batch: Split-K factor. When >1, K is partitioned across k_batch CTAs that
       atomically accumulate gate/up partials. Caller must pre-zero output.
     """
 
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
-    if in_dtype != "nvfp4_bf16":
-        raise ValueError("only in_dtype='nvfp4_bf16' is supported")
+
     needs_scale_w = True
     elem_bytes = 2
     if out_dtype not in ("f16", "bf16"):
@@ -106,12 +104,11 @@ def compile_moe_gemm1(
         )
     if group_size != 16:
         raise ValueError(
-            "FlyDSL nvfp4_bf16 groupwise scale requires group_size=16, "
-            f"got {group_size}."
+            f"FlyDSL nvfp4 groupwise scale requires group_size=16, got {group_size}."
         )
     if inter_dim % tile_n != 0:
         raise ValueError(
-            "FlyDSL nvfp4_bf16 stage1 requires inter_dim to be a positive "
+            "FlyDSL nvfp4 stage1 requires inter_dim to be a positive "
             f"multiple of tile_n, got inter_dim={inter_dim}, tile_n={tile_n}."
         )
     use_inloop_w_scale = True
@@ -123,7 +120,7 @@ def compile_moe_gemm1(
     _is_gfx950 = "gfx95" in gpu_arch
     if gpu_arch != "gfx942" and gpu_arch != "gfx950":
         raise ValueError(
-            "FlyDSL nvfp4_bf16 MoE kernels are supported only on gfx942/gfx950, "
+            "FlyDSL nvfp4 MoE kernels are supported only on gfx942/gfx950, "
             f"got {gpu_arch}."
         )
     use_gfx950_cvt = _is_gfx950
@@ -150,7 +147,7 @@ def compile_moe_gemm1(
         _k_tiles = _k_per_batch // tile_k
         if _k_tiles < 2 or _k_tiles % 2 != 0:
             raise ValueError(
-                "FlyDSL nvfp4_bf16 stage1 requires an even number of K tiles "
+                "FlyDSL nvfp4 stage1 requires an even number of K tiles "
                 f">= 2, got model_dim/tile_k={_k_tiles} "
                 f"(model_dim={model_dim}, tile_k={tile_k})."
             )
@@ -215,7 +212,7 @@ def compile_moe_gemm1(
     _gs_tag = f"_g{group_size}"
     _split_k_tag = f"_splitk{k_batch}" if _is_splitk else ""
     (
-        f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}"
+        f"mfma_moe1_nvfp4_{out_dtype}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
         f"{_gs_tag}{_split_k_tag}"
         # _abi4: also masks sentinel token ids on loads to avoid illegal address faults
