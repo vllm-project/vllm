@@ -621,3 +621,135 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         logger.debug("Replaced %s patterns", self.matched_count)
         # Clean up reshape nodes
         self.noop_cleanup(graph)
+
+class MoEAllReduceRMSNormChunkPattern(_SequenceParallelPatternHelper):
+    def get_inputs(self) -> list[torch.Tensor]:
+        mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
+        residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
+        rms_norm_weights = torch.empty([4, 4], device=self.device, dtype=self.dtype)
+        return [residual, mm_1, rms_norm_weights]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            residual: torch.Tensor,
+            mm_1: torch.Tensor,
+            rms_norm_weights: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            all_reduce = self._all_reduce(mm_1)
+            rmsnorm = vllm.ir.ops.fused_add_rms_norm(
+                all_reduce, residual, rms_norm_weights, self.epsilon
+            )
+            chunk = torch.ops.vllm.sequence_parallel_chunk_impl.default(rmsnorm[0])
+            return chunk, rmsnorm[1]
+
+        def replacement(
+            residual: torch.Tensor,
+            mm_1: torch.Tensor,
+            rms_norm_weights: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            reduce_scatter = self._reduce_scatter(mm_1)
+            local_len = reduce_scatter.size(0)
+            residual = residual[
+                self.tp_rank * local_len : self.tp_rank * local_len + local_len, ...
+            ]
+            rmsnorm = vllm.ir.ops.fused_add_rms_norm(
+                reduce_scatter, residual, rms_norm_weights, self.epsilon
+            )
+            return rmsnorm[0], rmsnorm[1]
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+class MoEAllGatherRMSNormPattern(_SequenceParallelPatternHelper):
+    def get_inputs(self) -> list[torch.Tensor]:
+        mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
+        residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
+        rms_norm_weights = torch.empty([4, 4], device=self.device, dtype=self.dtype)
+        return [residual, mm_1, rms_norm_weights]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            residual: torch.Tensor,
+            mm_1: torch.Tensor,
+            rms_norm_weights: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            all_gather = self._all_gather(mm_1)
+            rmsnorm = vllm.ir.ops.fused_add_rms_norm(
+                all_gather, residual, rms_norm_weights, self.epsilon
+            )
+            return rmsnorm[0], rmsnorm[1]
+
+        def replacement(
+            residual: torch.Tensor,
+            mm_1: torch.Tensor,
+            rms_norm_weights: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            local_len = mm_1.size(0)
+            residual = residual[
+                self.tp_rank * local_len : self.tp_rank * local_len + local_len, ...
+            ]
+            rmsnorm = vllm.ir.ops.fused_add_rms_norm(
+                mm_1, residual, rms_norm_weights, self.epsilon
+            )
+            all_gather = self._all_gather(rmsnorm[0])
+            return all_gather, rmsnorm[1]
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+        pm.register_replacement(
+            get_first_out_wrapper(pattern),
+            get_first_out_wrapper(replacement),
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+        )
+
+class SequenceParallelismMoEPass(VllmPatternMatcherPass):
+    """
+    This pass enables sequence parallelism specifically for Tensor Parallel
+    Mixture of Experts (MoE) cases. It is controlled independently of the
+    general sequence parallelism pass via `enable_sp_moe`.
+
+    It optimizes two patterns in MoE layers:
+    1. Replaces the sequence `AllReduce -> RMSNorm -> SequenceParallelChunk`
+       (typical for MoE attention output) with `ReduceScatter -> RMSNorm`.
+    2. Replaces the sequence `AllGather -> RMSNorm`
+       (typical for MoE MLP output) with `RMSNorm -> AllGather`, making it
+       compatible with AsyncTP fusions.
+    """
+
+    @enable_fake_mode
+    def __init__(self, config: VllmConfig) -> None:
+        super().__init__(config)
+
+        self.noop_cleanup = NoOpEliminationPass(config)
+        self.noop_cleanup.pass_name = f"{self.pass_name}.{self.noop_cleanup.pass_name}"
+
+        self.patterns: PatternMatcherPass = PatternMatcherPass(
+            pass_name="sequence_parallelism_moe_pass"
+        )
+
+        for epsilon in [1e-5, 1e-6]:
+            MoEAllReduceRMSNormChunkPattern(
+                epsilon, self.model_dtype, self.device
+            ).register(self.patterns)
+            MoEAllGatherRMSNormPattern(
+                epsilon, self.model_dtype, self.device
+            ).register(self.patterns)
+
+        self.dump_patterns(config, self.patterns)
+
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
+        assert (
+            self.compilation_config.use_inductor_graph_partition
+            or not self.compilation_config.splitting_ops
+        ), "SequenceParallelismMoEPass requires full-graph compilation"
+        return True
+
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: fx.Graph) -> None:
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug("Replaced %s MoE SP patterns", self.matched_count)
+        self.noop_cleanup(graph)
