@@ -20,6 +20,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
+from contextlib import AbstractContextManager
 from copy import deepcopy
 from typing import Any, NamedTuple
 
@@ -155,6 +156,7 @@ from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
     KVBlockZeroer,
+    clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
 )
@@ -524,8 +526,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return get_kv_cache_spec(self.vllm_config)
 
     def initialize_kv_cache(
-        self, kv_cache_config: KVCacheConfig, is_profiling: bool = False
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
+        # GPUWorker finalizes the PD interleave before KV cache initialization.
+        self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
 
@@ -656,6 +663,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             self.kernel_block_sizes,
             self.vllm_config,
+            kv_cache_allocation_context=kv_cache_allocation_context,
         )
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
@@ -862,9 +870,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         del hidden_states, sample_hidden_states
         self.reset_encoder_cache()
         gc.collect()
-
-    def post_kv_cache_wake_up(self) -> None:
-        self.block_tables.init_block_table_layout_tensors()
 
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:
@@ -2024,9 +2029,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         free_before_shutdown(self.vllm_config)
         if hasattr(self, "model_state"):
             del self.model_state
-        if getattr(self, "speculator", None) is not None:
+        # Detach the layer-level KV/state cache tensors before dropping the
+        # models; the model objects can outlive this runner.
+        speculator = getattr(self, "speculator", None)
+        if speculator is not None:
+            if draft_model := getattr(speculator, "model", None):
+                clear_layer_kv_caches(draft_model.modules())
             self.speculator = None
         if hasattr(self, "model"):
+            clear_layer_kv_caches(self.model.modules())
             del self.model
 
         gc.collect()
