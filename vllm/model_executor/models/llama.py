@@ -73,6 +73,7 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 
 
@@ -352,6 +353,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
             ".up_proj": (".gate_up_proj", 1),
         }
     )
+    supports_aux_hidden_states_over_pp = True
 
     def __init__(
         self,
@@ -370,8 +372,10 @@ class LlamaModel(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        if get_pp_group().is_first_rank or (
-            config.tie_word_embeddings and get_pp_group().is_last_rank
+        if (
+            get_pp_group().is_first_rank
+            or (config.tie_word_embeddings and get_pp_group().is_last_rank)
+            or spec_decode_needs_target_embed(vllm_config)
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
@@ -416,9 +420,18 @@ class LlamaModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        remote_aux: list[torch.Tensor] = []
+        if get_pp_group().is_last_rank and self.aux_hidden_state_layers:
+            remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
         for idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
         ):
             hidden_states, residual = layer(
                 positions, hidden_states, residual, **extra_layer_kwargs
@@ -428,12 +441,18 @@ class LlamaModel(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            # Merged by unpacking rather than dict.update: the compile wrapper
+            # rejects a forward whose bytecode names `update`.
+            tensors = {
+                "hidden_states": hidden_states,
+                "residual": residual,
+                **self.pack_local_aux_hidden_states(aux_hidden_states),
+            }
+            return IntermediateTensors(tensors)
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
+        aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states

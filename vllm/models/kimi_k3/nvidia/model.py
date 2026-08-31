@@ -85,6 +85,7 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.models.common.ops.sequence_parallel import (
@@ -1123,6 +1124,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         "fused_qkv_a_g_proj": ["q_a_proj", "kv_a_proj_with_mqa", "g_proj"],
     }
 
+    # Auxiliary hidden states are forwarded to the last PP stage.
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -1147,7 +1151,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             vllm_config, self.use_sequence_parallel
         )
 
-        if get_pp_group().is_first_rank:
+        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -1231,14 +1235,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         super()._set_aux_hidden_state_layers(layers)
         if self.use_attn_res:
-            # Emitted once, at configuration time. Which layers are tapped and
-            # which convention is in force are the two things you need to
-            # confirm from a running process, and neither is recoverable from
-            # the served output.
             logger.info_once(
                 "Kimi-K3 aux hidden capture: layers=%s mode=%s "
                 "(VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=%d)",
-                layers,
+                self.aux_hidden_state_layers,
                 "attn_res_stream" if self._aux_attn_res_stream else "prefix_only",
                 int(self._aux_attn_res_stream),
             )
@@ -1254,7 +1254,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         pending_mlp_out: torch.Tensor | None,
         block_residual: torch.Tensor,
     ) -> torch.Tensor:
-        """Auxiliary feature tapped after ``layer_idx`` under AttnRes.
+        """Auxiliary hidden state after ``layer_idx`` under AttnRes.
 
         The wire between layers only carries the current block's running prefix;
         the committed blocks live in the bank. The value the next consumer
@@ -1290,7 +1290,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             # Last layer of a non-final pipeline stage: the consumer lives on
             # the next rank and the output-side aggregation only exists on the
             # last one, so there is nothing here to mix against. Falling back
-            # to the running prefix keeps the tap defined rather than reaching
+            # to the running prefix keeps the state defined rather than reaching
             # for weights this rank does not construct.
             return prefix
 
@@ -1340,9 +1340,16 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
 
+        remote_aux: list[torch.Tensor] = []
+        if get_pp_group().is_last_rank and self.aux_hidden_state_layers:
+            remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
-        if self.start_layer in self.aux_hidden_state_layers:
+        if (
+            get_pp_group().is_first_rank
+            and self.start_layer in self.aux_hidden_state_layers
+        ):
             if self.use_attn_res or residual is None:
                 aux_hidden_states.append(hidden_states)
             else:
@@ -1392,9 +1399,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            # Merged by unpacking rather than dict.update: the compile wrapper
+            # rejects a forward whose bytecode names `update`.
+            tensors = {
+                "hidden_states": hidden_states,
+                "residual": residual,
+                **self.pack_local_aux_hidden_states(aux_hidden_states),
+            }
+            return IntermediateTensors(tensors)
 
         if self.use_attn_res:
             assert prefix_sum is not None
@@ -1430,6 +1442,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
+        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

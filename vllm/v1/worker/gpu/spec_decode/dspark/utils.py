@@ -1,14 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
+
 import torch.nn as nn
 
-from vllm.config import ModelConfig, VllmConfig, replace
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.config import LoadConfig, ModelConfig, VllmConfig, replace
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
+
+
+def _draft_safetensors_load_config(vllm_config: VllmConfig) -> LoadConfig:
+    """Use a non-collective loader for the last-stage-only draft model."""
+    load_config = vllm_config.load_config
+    load_format = load_config.load_format
+    if isinstance(load_format, str):
+        safe_format = "safetensors"
+    else:
+        safe_format = type(load_format)("safetensors")
+    return dataclasses.replace(load_config, load_format=safe_format)
 
 
 def _resolve_dspark_attention_backend(
@@ -43,6 +55,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
         _should_share,
         get_target_lm_head,
+        maybe_share_target_embed,
     )
 
     draft_attention_backend = _resolve_dspark_attention_backend(
@@ -66,6 +79,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             if speculative_config.kv_cache_dtype is not None
             else vllm_config.cache_config
         ),
+        load_config=_draft_safetensors_load_config(vllm_config),
     )
     # VllmConfig post-init restores the target's quant config because the target
     # config is retained for DSpark's target-layer metadata, so we must override it.
@@ -76,9 +90,6 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             vllm_config=draft_vllm_config, model_config=draft_model_config
         )
 
-    if get_pp_group().world_size != 1:
-        raise NotImplementedError("DSpark does not support pipeline parallelism.")
-
     target_language_model = (
         target_model.get_language_model()
         if hasattr(target_model, "get_language_model")
@@ -88,18 +99,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_inner = draft_model.model
     target_vocab_size = vllm_config.model_config.get_vocab_size()
 
-    target_embed = getattr(target_inner, "embed_tokens", None)
-    draft_embed = getattr(draft_inner, "embed_tokens", None)
-    if (
-        target_embed is not None
-        and draft_model_config.get_vocab_size() <= target_vocab_size
-        and _should_share(
-            draft_model, "has_own_embed_tokens", draft_embed, target_embed
-        )
-    ):
-        if draft_embed is not None:
-            del draft_inner.embed_tokens
-        draft_inner.embed_tokens = target_embed
+    maybe_share_target_embed(draft_model, draft_inner, target_inner)
 
     target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(draft_model, "lm_head", None)
