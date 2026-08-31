@@ -404,7 +404,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             _on_gfx1250
             and n % 16 == 0
             and k % 128 == 0
-            and bool(rocm_aiter_ops.is_blockscale_bpreshuffle_gemm_tuned(n, k))
+            and bool(rocm_aiter_ops.is_triton_blockscale_bpreshuffle_gemm_tuned(n, k))
         )
         if self.use_bpreshuffle:
             # The tuned preshuffle configs expect a column-major group scale.
