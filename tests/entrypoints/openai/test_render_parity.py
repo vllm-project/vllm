@@ -25,10 +25,10 @@ import pytest
 from openai.types.shared import Reasoning
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.entrypoints.generate.base.protocol import ErrorResponse
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import tokens_input
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.renderers.params import ChatParams
