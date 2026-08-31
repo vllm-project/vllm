@@ -239,37 +239,22 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
 
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
-    """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
-    MRV1 paths and off breakable cudagraphs by default."""
-    from vllm.config.vllm import (
-        ROCM_DEFAULT_MRV1_ARCHITECTURES,
-        default_breakable_cudagraph_architectures,
-    )
+    """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled MRV1 paths."""
+    from vllm.config.vllm import ROCM_DEFAULT_MRV1_ARCHITECTURES
     from vllm.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
-    # The lookup is lru_cached against a fixed platform.
-    default_breakable_cudagraph_architectures.cache_clear()
-    try:
-        assert "DeepseekV32ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-        assert "DeepseekV4ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-        assert "GlmMoeDsaForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
+    assert "DeepseekV32ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
+    assert "DeepseekV4ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
+    assert "GlmMoeDsaForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
 
-        breakable_architectures = default_breakable_cudagraph_architectures()
-        assert "DeepseekV32ForCausalLM" not in breakable_architectures
-        assert "DeepseekV32MTPModel" not in breakable_architectures
-        assert "GlmMoeDsaForCausalLM" not in breakable_architectures
-
-        # The carve-out takes effect via the runner-selection property
-        # (warning_once args must be hashable for its lru_cache).
-        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-        config = SimpleNamespace(
-            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"])
-        )
-        assert VllmConfig.use_v2_model_runner.fget(config) is False
-    finally:
-        default_breakable_cudagraph_architectures.cache_clear()
-
+    # The carve-out takes effect via the runner-selection property
+    # (warning_once args must be hashable for its lru_cache).
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"])
+    )
+    assert VllmConfig.use_v2_model_runner.fget(config) is False
 
 @pytest.mark.parametrize(
     ("model", "architecture"),
@@ -286,14 +271,12 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     from vllm.compilation.breakable_cudagraph import (
         is_breakable_cudagraph_enabled,
     )
-    from vllm.config.vllm import default_breakable_cudagraph_architectures
     from vllm.platforms import current_platform
 
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
-    default_breakable_cudagraph_architectures.cache_clear()
 
     model_config = SimpleNamespace(
         model=model,
@@ -314,9 +297,6 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     )
     config._dflash_needs_multi_kv_group = lambda: False
     config._get_v2_model_runner_unsupported_features = lambda: []
-    config._uses_breakable_cudagraph_by_default = lambda: (
-        VllmConfig._uses_breakable_cudagraph_by_default(config)
-    )
 
     try:
         assert VllmConfig.use_v2_model_runner.fget(config)
@@ -326,7 +306,6 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         assert config.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
     finally:
         os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
-        default_breakable_cudagraph_architectures.cache_clear()
 
 
 @pytest.mark.parametrize("is_rocm", [False, True])
@@ -340,14 +319,10 @@ def test_breakable_cudagraph_default_on_opt_out(monkeypatch, is_rocm):
     monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
 
     def make_config():
-        config = SimpleNamespace(
+        return SimpleNamespace(
             model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"]),
             compilation_config=CompilationConfig(),
         )
-        config._uses_breakable_cudagraph_by_default = lambda: (
-            VllmConfig._uses_breakable_cudagraph_by_default(config)
-        )
-        return config
 
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
     config = make_config()

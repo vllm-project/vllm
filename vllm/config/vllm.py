@@ -72,40 +72,6 @@ ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
     {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM", "GlmMoeDsaForCausalLM"}
 )
 
-DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
-    {
-        "DeepseekV32MTPModel",
-        "DeepseekV32ForCausalLM",
-        "DeepseekV4ForCausalLM",
-        "DeepSeekV4MTPModel",
-        "Dots3NoteForCausalLM",
-        "Dots3NoteMTPModel",
-        "GlmMoeDsaForCausalLM",
-        "HYV4ForCausalLM",
-        "HYV4MTPModel",
-        "InklingForCausalLM",
-        "InklingForConditionalGeneration",
-        "KimiK3ForConditionalGeneration",
-        "KimiK3MTPModel",
-        "KimiLinearForCausalLM",
-        "MiniMaxM3SparseForCausalLM",
-        "MiniMaxM3SparseForConditionalGeneration",
-    }
-)
-
-
-@lru_cache
-def default_breakable_cudagraph_architectures() -> frozenset[str]:
-    """Architectures defaulting to breakable CUDA graphs on this platform."""
-    from vllm.platforms import current_platform
-
-    if current_platform.is_rocm():
-        # Breakable CUDA graphs currently regress performance on ROCm, so no
-        # architecture opts in by default here. Users can still force it with
-        # VLLM_USE_BREAKABLE_CUDAGRAPH=1.
-        return frozenset()
-    return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
-
 
 class OptimizationLevel(IntEnum):
     """Optimization level enum."""
@@ -702,14 +668,6 @@ class VllmConfig:
         layer_types = getattr(draft_config.hf_config, "layer_types", None) or []
         num_sliding = sum(lt == "sliding_attention" for lt in layer_types)
         return 0 < num_sliding < len(layer_types)
-
-    def _uses_breakable_cudagraph_by_default(self) -> bool:
-        model_config = self.model_config
-        if model_config is None:
-            return False
-
-        architectures = set(model_config.architectures)
-        return bool(architectures & default_breakable_cudagraph_architectures())
 
     def _maybe_enable_breakable_cudagraph(self) -> bool:
         # Breakable cudagraphs are on by default, but yield when
