@@ -1417,25 +1417,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
                    " in CUDA target architectures")
   endif()
-
-  # DeepSeek V3 router GEMM kernel requires SM90+ and CUDA >= 12.0.
-  # (fp32_router_gemm has been migrated to _C_stable_libtorch above.)
-  cuda_archs_sm90plus(SM90PLUS_ROUTER_GEMM_ARCHS "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND SM90PLUS_ROUTER_GEMM_ARCHS)
-    set(DSV3_ROUTER_GEMM_SRC
-      "csrc/libtorch_stable/moe/dsv3_router_gemm_entry.cu"
-      "csrc/libtorch_stable/moe/dsv3_router_gemm_float_out.cu"
-      "csrc/libtorch_stable/moe/dsv3_router_gemm_bf16_out.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${DSV3_ROUTER_GEMM_SRC}"
-      CUDA_ARCHS "${SM90PLUS_ROUTER_GEMM_ARCHS}")
-    list(APPEND VLLM_MOE_EXT_SRC "${DSV3_ROUTER_GEMM_SRC}")
-
-    message(STATUS "Building DSV3 router GEMM kernels for archs: ${SM90PLUS_ROUTER_GEMM_ARCHS}")
-  else()
-    message(STATUS "Not building DSV3 router GEMM kernels as no compatible archs found"
-                   " (requires SM90+ and CUDA >= 12.0)")
-  endif()
 endif()
 
 message(STATUS "Enabling MoE C_stable extension.")
