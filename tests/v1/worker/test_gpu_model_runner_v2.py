@@ -4,6 +4,7 @@
 import contextlib
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -295,3 +296,59 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     runner.capture_model(profile_only=True)
 
     assert lock_calls == []
+
+
+def test_update_requests_streaming_prompt_append_updates_v2_req_state():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+
+    class _ReqStates:
+        req_id_to_index = {"req-1": 0}
+        num_computed_tokens_np = np.zeros(1, dtype=np.int32)
+        prefill_len = SimpleNamespace(np=np.array([5], dtype=np.int32))
+        num_computed_prefill_tokens = np.zeros(1, dtype=np.int32)
+        max_seq_len = np.array([9], dtype=np.int32)
+
+        def __init__(self):
+            self.appended: list[tuple[str, list[int]]] = []
+            self.applied = False
+
+        def append_prompt_token_ids(self, req_id: str, token_ids: list[int]) -> None:
+            self.appended.append((req_id, token_ids))
+            self.prefill_len.np[0] += len(token_ids)
+            self.max_seq_len[0] += len(token_ids)
+
+        def apply_staged_writes(self) -> None:
+            self.applied = True
+
+    class _BlockTables:
+        def __init__(self):
+            self.appended: list[tuple[int, tuple[list[int]], bool]] = []
+
+        def append_block_ids(
+            self, req_index: int, new_block_ids: tuple[list[int]], overwrite: bool
+        ) -> None:
+            self.appended.append((req_index, new_block_ids, overwrite))
+
+    runner.req_states = _ReqStates()
+    runner.block_tables = _BlockTables()
+    runner.kv_block_zeroer = None
+
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-1"],
+            num_computed_tokens=[3],
+            new_block_ids=[([7],)],
+            new_prompt_token_ids=[[11, 12]],
+        ),
+        new_block_ids_to_zero=[],
+        kv_cache_block_copies={},
+    )
+
+    GPUModelRunner.update_requests(runner, scheduler_output)
+
+    assert runner.req_states.num_computed_tokens_np[0] == 3
+    assert runner.req_states.num_computed_prefill_tokens[0] == 3
+    assert runner.req_states.max_seq_len[0] == 11
+    assert runner.req_states.appended == [("req-1", [11, 12])]
+    assert runner.req_states.applied
+    assert runner.block_tables.appended == [(0, ([7],), False)]
