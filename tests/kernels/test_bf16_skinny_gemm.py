@@ -810,20 +810,20 @@ def test_glm_dsv3_selected_shapes(
     assert cosine > 0.999
 
 
-def test_nonpacked_single_token_dsv3_falls_back() -> None:
+@pytest.mark.parametrize("num_tokens", [1, 4])
+def test_kda_f_b_nonpacked_dsv3_dispatches(num_tokens: int) -> None:
     _require_sm103_and_dsv3()
     n, k = 1536, 128
-    storage = torch.randn(1, k + 16, dtype=torch.bfloat16, device="cuda")
-    x = storage[:, :k]
+    storage = torch.randn(num_tokens, 6288, dtype=torch.bfloat16, device="cuda")
+    x = storage[:, 6144 : 6144 + k]
     weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
     spec = k3_gemm.KIMI_K3_PROJECTIONS[(n, k)]
     method = k3_gemm.KimiK3LowLatencyLinearMethod(
         k3_gemm._build_plan(spec), k3_gemm._build_residual_plan(spec)
     )
 
-    assert x.is_contiguous()
-    assert x.stride() == (k + 16, 1)
-    assert not k3_gemm._runtime_ok(x, weight)  # strict guard rejects the view
+    assert x.stride() == (6288, 1)
+    assert k3_gemm._runtime_ok(x, weight)
     output = method.apply(SimpleNamespace(weight=weight), x)
 
     reference = torch.nn.functional.linear(x, weight)
