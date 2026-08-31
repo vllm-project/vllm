@@ -24,6 +24,7 @@ from torch import nn
 
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -83,8 +84,14 @@ def _make_deepseek_v4_vl_weights_mapper(
     info=DeepseekV4VLProcessingInfo,
     dummy_inputs=DeepseekV4VLDummyInputsBuilder,
 )
-class DeepseekV4ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    """Multimodal entry point for DeepSeek-V4 checkpoints with a vision tower."""
+class DeepseekV4ForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3
+):
+    """Multimodal entry point for DeepSeek-V4 checkpoints with a vision tower.
+
+    ``SupportsEagle3`` (aux hidden-state plumbing for MTP/DSpark drafters)
+    delegates through ``language_model`` via the protocol defaults.
+    """
 
     # The MoE router needs raw token ids to detect image sentinel tokens
     # (borrowed reserved ids, see common/mm_preprocess.py) and apply bias_vl.
@@ -285,6 +292,10 @@ class DeepseekV4ForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.language_model.get_expert_mapping()
+
+    def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
+        """Pre-hc_head residual stream buffer for the MTP/DSpark draft model."""
+        return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Map HF names into this wrapper's namespace up front and sort, so

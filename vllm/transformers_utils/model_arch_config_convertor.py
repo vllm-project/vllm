@@ -591,10 +591,14 @@ class DeepseekV4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         # when the config carries a vision tower. Mutate (not just override
         # get_architectures) because model-class resolution reads the raw
         # hf_config.architectures (get_model_architecture).
-        # The VL wrapper marks the config copy it hands to the inner text
+        # Only rewrite the stock text architecture: speculative-draft configs
+        # (DSparkDraftModel / DeepSeekV4MTPModel) keep their own classes, and
+        # the VL wrapper marks the config copy it hands to the inner text
         # backbone with _dsv4_vl_inner so this rewrite does not recurse.
-        if getattr(hf_config, "vision_n_layers", 0) > 0 and not getattr(
-            hf_config, "_dsv4_vl_inner", False
+        if (
+            getattr(hf_config, "vision_n_layers", 0) > 0
+            and getattr(hf_config, "architectures", None) == ["DeepseekV4ForCausalLM"]
+            and not getattr(hf_config, "_dsv4_vl_inner", False)
         ):
             hf_config.architectures = ["DeepseekV4ForConditionalGeneration"]
         super().__init__(hf_config, hf_text_config, revision)
