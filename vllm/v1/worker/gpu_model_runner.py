@@ -3759,11 +3759,33 @@ class GPUModelRunner(
     ) -> bool:
         if not envs.VLLM_HYBRID_NVFP4_LM_HEAD:
             return False
+        if (
+            envs.VLLM_COMPUTE_NANS_IN_LOGITS
+            or envs.VLLM_BATCH_INVARIANT
+            or self.lora_config is not None
+            or self.model_config.head_dtype != self.dtype
+        ):
+            return False
         if self.broadcast_pp_output or spec_decode_metadata is not None:
             return False
         if scheduler_output.has_structured_output_requests:
             return False
         if not hasattr(self.model, "get_top_tokens"):
+            return False
+        lm_head = getattr(self.model, "lm_head", None)
+        if lm_head is None:
+            lm_head = getattr(
+                getattr(self.model, "language_model", None), "lm_head", None
+            )
+        if (
+            getattr(lm_head, "num_added_embeddings", 0) > 0
+            or getattr(
+                getattr(lm_head, "shard_indices", None), "num_added_elements", 0
+            )
+            > 0
+        ):
+            return False
+        if getattr(lm_head, "_hybrid_nvfp4_lm_head_state", None) is None:
             return False
 
         sampling_metadata = self.input_batch.sampling_metadata
@@ -3802,6 +3824,235 @@ class GPUModelRunner(
         return num_reqs > 0 and bool(
             np.all(self.input_batch.temperature_cpu[:num_reqs] == 0.0)
         )
+
+    def _get_hybrid_topk_sampling_params(
+        self,
+        scheduler_output: "SchedulerOutput",
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> tuple[int, float, float, bool] | None:
+        """Return uniform top-k params for legacy V1 compact sampling.
+
+        The legacy runner does not keep V2's persistent output-count table, but
+        it does retain committed output ids on the host.  Presence-only
+        penalties can therefore use a compact per-request id table; frequency
+        and repetition penalties still require the regular full-vocabulary
+        sampler.
+        """
+        if not envs.VLLM_HYBRID_NVFP4_LM_HEAD:
+            return None
+        if (
+            envs.VLLM_COMPUTE_NANS_IN_LOGITS
+            or envs.VLLM_BATCH_INVARIANT
+            or self.lora_config is not None
+            or self.model_config.head_dtype != self.dtype
+            or self.sampler.use_fp64_gumbel
+        ):
+            return None
+        if self.broadcast_pp_output or spec_decode_metadata is not None:
+            return None
+        if scheduler_output.has_structured_output_requests:
+            return None
+        if not hasattr(self.model, "sample_topk_tokens"):
+            return None
+
+        lm_head = getattr(self.model, "lm_head", None)
+        if lm_head is None:
+            lm_head = getattr(
+                getattr(self.model, "language_model", None), "lm_head", None
+            )
+        if (
+            getattr(lm_head, "num_added_embeddings", 0) > 0
+            or getattr(
+                getattr(lm_head, "shard_indices", None), "num_added_elements", 0
+            )
+            > 0
+            or getattr(lm_head, "_hybrid_nvfp4_lm_head_state", None) is None
+        ):
+            return None
+
+        sampling_metadata = self.input_batch.sampling_metadata
+        if not sampling_metadata.all_random or sampling_metadata.generators:
+            return None
+        if self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES:
+            return None
+        num_reqs = self.input_batch.num_reqs
+        presence_only = False
+        if not sampling_metadata.no_penalties:
+            repetition = self.input_batch.repetition_penalties_cpu[:num_reqs]
+            frequency = self.input_batch.frequency_penalties_cpu[:num_reqs]
+            presence_only = bool(
+                np.all(repetition == 1.0) and np.all(frequency == 0.0)
+            )
+            if not presence_only:
+                return None
+        if (
+            sampling_metadata.max_num_logprobs is not None
+            or sampling_metadata.logprob_token_ids
+            or sampling_metadata.allowed_token_ids_mask is not None
+            or sampling_metadata.bad_words_token_ids
+        ):
+            return None
+
+        for logitproc in sampling_metadata.logitsprocs.all:
+            # Empty built-in processors are harmless; any active processor
+            # needs a full-vocabulary logits tensor for exact semantics.
+            biases = getattr(logitproc, "biases", None)
+            if biases is not None and not biases:
+                continue
+            min_toks = getattr(logitproc, "min_toks", None)
+            if min_toks is not None and not min_toks:
+                continue
+            min_p_count = getattr(logitproc, "min_p_count", None)
+            if min_p_count is not None and not min_p_count:
+                continue
+            return None
+
+        if num_reqs == 0:
+            return None
+        top_k_cpu = self.input_batch.top_k_cpu[:num_reqs]
+        top_p_cpu = self.input_batch.top_p_cpu[:num_reqs]
+        temperature_cpu = self.input_batch.temperature_cpu[:num_reqs]
+        top_k = int(top_k_cpu[0])
+        top_p = float(top_p_cpu[0])
+        temperature = float(temperature_cpu[0])
+        if (
+            top_k <= 0
+            or top_k > 64
+            or top_p <= 0.0
+            or top_p > 1.0
+            or temperature <= 1.0e-5
+            or not np.all(top_k_cpu == top_k)
+            or not np.all(top_p_cpu == top_p)
+            or not np.all(temperature_cpu == temperature)
+        ):
+            return None
+        return top_k, top_p, temperature, presence_only
+
+    def _make_hybrid_presence_output_token_ids(
+        self,
+        sample_hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Build a compact unique output-id table for legacy presence penalty."""
+        num_reqs = self.input_batch.num_reqs
+        if sample_hidden_states.shape[0] != num_reqs:
+            # Chunked-prefill rows do not map one-to-one to request state rows.
+            return None
+
+        rows: list[list[int]] = []
+        max_tokens = 0
+        for req_idx in range(num_reqs):
+            start = int(self.input_batch.num_prompt_tokens[req_idx])
+            end = int(self.input_batch.num_tokens_no_spec[req_idx])
+            seen: set[int] = set()
+            unique_ids: list[int] = []
+            for token_id in self.input_batch.token_ids_cpu[req_idx, start:end]:
+                token_id = int(token_id)
+                if 0 <= token_id < self.vocab_size and token_id not in seen:
+                    seen.add(token_id)
+                    unique_ids.append(token_id)
+            rows.append(unique_ids)
+            max_tokens = max(max_tokens, len(unique_ids))
+
+        if max_tokens == 0:
+            return torch.empty(
+                (num_reqs, 0), dtype=torch.int64, device=sample_hidden_states.device
+            )
+        output_ids_cpu = torch.full(
+            (num_reqs, max_tokens),
+            self.vocab_size,
+            dtype=torch.int64,
+            pin_memory=PIN_MEMORY,
+        )
+        for req_idx, unique_ids in enumerate(rows):
+            if unique_ids:
+                output_ids_cpu[req_idx, : len(unique_ids)] = torch.as_tensor(
+                    unique_ids, dtype=torch.int64
+                )
+        return output_ids_cpu.to(sample_hidden_states.device, non_blocking=True)
+
+    def _get_hybrid_full_sampling_temperature(
+        self,
+        scheduler_output: "SchedulerOutput",
+        spec_decode_metadata: SpecDecodeMetadata | None,
+    ) -> float | None:
+        """Return a uniform temperature for unrestricted compact TP sampling."""
+        if not envs.VLLM_HYBRID_NVFP4_LM_HEAD:
+            return None
+        if (
+            envs.VLLM_COMPUTE_NANS_IN_LOGITS
+            or envs.VLLM_BATCH_INVARIANT
+            or self.lora_config is not None
+            or self.model_config.head_dtype != self.dtype
+        ):
+            return None
+        if self.broadcast_pp_output or spec_decode_metadata is not None:
+            return None
+        if scheduler_output.has_structured_output_requests:
+            return None
+        if not hasattr(self.model, "sample_full_tokens"):
+            return None
+
+        lm_head = getattr(self.model, "lm_head", None)
+        if lm_head is None:
+            lm_head = getattr(
+                getattr(self.model, "language_model", None), "lm_head", None
+            )
+        if (
+            getattr(lm_head, "num_added_embeddings", 0) > 0
+            or getattr(
+                getattr(lm_head, "shard_indices", None), "num_added_elements", 0
+            )
+            > 0
+            or getattr(lm_head, "_hybrid_nvfp4_lm_head_state", None) is None
+        ):
+            return None
+
+        sampling_metadata = self.input_batch.sampling_metadata
+        if not sampling_metadata.all_random or sampling_metadata.generators:
+            return None
+        if self.sampler.use_fp64_gumbel:
+            return None
+        if self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES:
+            return None
+        if (
+            sampling_metadata.max_num_logprobs is not None
+            or sampling_metadata.logprob_token_ids
+            or sampling_metadata.allowed_token_ids_mask is not None
+            or sampling_metadata.bad_words_token_ids
+            or not sampling_metadata.no_penalties
+        ):
+            return None
+
+        for logitproc in sampling_metadata.logitsprocs.all:
+            biases = getattr(logitproc, "biases", None)
+            if biases is not None and not biases:
+                continue
+            min_toks = getattr(logitproc, "min_toks", None)
+            if min_toks is not None and not min_toks:
+                continue
+            min_p_count = getattr(logitproc, "min_p_count", None)
+            if min_p_count is not None and not min_p_count:
+                continue
+            return None
+
+        holder = getattr(sampling_metadata, "thinking_budget_state_holder", None)
+        if holder is not None and holder.has_tracked_requests():
+            return None
+
+        num_reqs = self.input_batch.num_reqs
+        if num_reqs == 0:
+            return None
+        top_k_cpu = self.input_batch.top_k_cpu[:num_reqs]
+        top_p_cpu = self.input_batch.top_p_cpu[:num_reqs]
+        temperature_cpu = self.input_batch.temperature_cpu[:num_reqs]
+        if not np.all(top_k_cpu == self.vocab_size):
+            return None
+        if not np.all(top_p_cpu == 1.0):
+            return None
+        temperature = float(temperature_cpu[0])
+        if temperature <= 1.0e-5 or not np.all(temperature_cpu == temperature):
+            return None
+        return temperature
 
     def _sample(
         self,
@@ -4647,9 +4898,7 @@ class GPUModelRunner(
 
                 pre_sampled_output = None
                 sample_hidden_states = hidden_states[logits_indices]
-                if self._can_use_hybrid_greedy(
-                    scheduler_output, spec_decode_metadata
-                ):
+                if self._can_use_hybrid_greedy(scheduler_output, spec_decode_metadata):
                     logger.info_once(
                         "Using hybrid NVFP4 lm-head greedy sampling fast path.",
                         scope="global",
@@ -4661,7 +4910,70 @@ class GPUModelRunner(
                     )
                     logits = None
                 else:
-                    logits = self.model.compute_logits(sample_hidden_states)
+                    full_temperature = self._get_hybrid_full_sampling_temperature(
+                        scheduler_output, spec_decode_metadata
+                    )
+                    if full_temperature is not None:
+                        logger.info_once(
+                            "Using hybrid NVFP4 lm-head full-distribution "
+                            "sampling fast path.",
+                            scope="global",
+                        )
+                        sampled = self.model.sample_full_tokens(
+                            sample_hidden_states,
+                            temperature=full_temperature,
+                        )
+                        pre_sampled_output = SamplerOutput(
+                            sampled_token_ids=sampled.to(torch.int32).unsqueeze(-1),
+                            logprobs_tensors=None,
+                        )
+                        logits = None
+                    else:
+                        topk_params = self._get_hybrid_topk_sampling_params(
+                            scheduler_output, spec_decode_metadata
+                        )
+                        if topk_params is None:
+                            logits = self.model.compute_logits(sample_hidden_states)
+                        else:
+                            top_k, top_p, temperature, presence_only = topk_params
+                            presence_penalties = None
+                            output_token_ids = None
+                            if presence_only:
+                                output_token_ids = (
+                                    self._make_hybrid_presence_output_token_ids(
+                                        sample_hidden_states
+                                    )
+                                )
+                                if output_token_ids is None:
+                                    logits = self.model.compute_logits(
+                                        sample_hidden_states
+                                    )
+                                else:
+                                    presence_penalties = (
+                                        self.input_batch.sampling_metadata
+                                        .presence_penalties
+                                    )
+                            if not presence_only or output_token_ids is not None:
+                                logger.info_once(
+                                    "Using hybrid NVFP4 lm-head compact top-k "
+                                    "sampling fast path.",
+                                    scope="global",
+                                )
+                                sampled = self.model.sample_topk_tokens(
+                                    sample_hidden_states,
+                                    top_k=top_k,
+                                    top_p=top_p,
+                                    temperature=temperature,
+                                    presence_penalties=presence_penalties,
+                                    output_token_ids=output_token_ids,
+                                )
+                                pre_sampled_output = SamplerOutput(
+                                    sampled_token_ids=sampled.to(torch.int32).unsqueeze(
+                                        -1
+                                    ),
+                                    logprobs_tensors=None,
+                                )
+                                logits = None
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -5775,6 +6087,19 @@ class GPUModelRunner(
                 param = _get_parameter_for_reload(model, name)  # TODO: buffers?
                 param.copy_(loaded_weight)
                 loaded_weights.add(name)
+
+        # Checkpoint-format reload runs each quantization method's post-load
+        # hook above, which refreshes an existing hybrid state itself. Kernel
+        # format bypasses that hook and needs an explicit refresh here.
+        if envs.VLLM_HYBRID_NVFP4_LM_HEAD and not is_checkpoint_format:
+            from vllm.model_executor.layers.hybrid_nvfp4_lm_head import (
+                refresh_hybrid_nvfp4_lm_heads,
+            )
+
+            refresh_hybrid_nvfp4_lm_heads(
+                model,
+                candidates=envs.VLLM_HYBRID_NVFP4_LM_HEAD_CANDIDATES,
+            )
 
         self.reset_lora_state()
 

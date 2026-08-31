@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from time import perf_counter
+from typing import Any
 
 import torch
 
@@ -17,8 +18,8 @@ from vllm.model_executor.layers.hybrid_nvfp4_lm_head import (
     get_hybrid_nvfp4_lm_head,
     warmup_hybrid_nvfp4_lm_head_kernels,
 )
+
 logger = init_logger(__name__)
-_DEFAULT_MAX_ROWS = 2048
 
 
 def _collect_lm_heads(
@@ -32,30 +33,27 @@ def _collect_lm_heads(
     return heads
 
 
-def _row_shapes(worker: object) -> tuple[int, ...]:
-    config = getattr(worker, "vllm_config")
+def _row_shapes(worker: Any) -> tuple[int, ...]:
+    config = worker.vllm_config
     max_rows = int(config.scheduler_config.max_num_seqs)
     speculative_config = config.speculative_config
     if speculative_config is not None:
         max_rows *= speculative_config.num_speculative_tokens + 1
-    max_rows = max(1, max_rows)
+    max_rows = min(
+        max(1, max_rows),
+        max(1, envs.VLLM_HYBRID_NVFP4_LM_HEAD_MAX_AUTOTUNE_ROWS),
+    )
 
     capture_sizes = config.compilation_config.cudagraph_capture_sizes or []
-    shapes = sorted(
-        {
-            int(size)
-            for size in capture_sizes
-            if 0 < int(size) <= max_rows
-        }
-    )
+    shapes = sorted({int(size) for size in capture_sizes if 0 < int(size) <= max_rows})
     if not shapes:
-        shapes = list(autotune_row_buckets(max(256, max_rows)))
+        shapes = list(autotune_row_buckets(max_rows))
     if 1 not in shapes:
         shapes.insert(0, 1)
     return tuple(shapes)
 
 
-def hybrid_nvfp4_lm_head_warmup(worker: object) -> None:
+def hybrid_nvfp4_lm_head_warmup(worker: Any) -> None:
     """Tune and JIT the hybrid lm-head before CUDA graph capture."""
     if not envs.VLLM_HYBRID_NVFP4_LM_HEAD:
         return

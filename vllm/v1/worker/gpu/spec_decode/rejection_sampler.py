@@ -7,6 +7,7 @@ import torch
 
 from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
@@ -73,6 +74,48 @@ def _flatten_sampled_kernel(
 
 
 @triton.jit(do_not_specialize=["max_spec_len"])
+def _compact_rejection_sample_kernel(
+    output_token_ids_ptr,
+    cu_num_draft_tokens_ptr,
+    draft_token_ids_ptr,
+    target_draft_probs_ptr,
+    bonus_token_ids_ptr,
+    recovered_token_ids_ptr,
+    uniform_probs_ptr,
+    max_spec_len,
+):
+    """Compact top-k rejection decisions into one output row per request."""
+    req_idx = tl.program_id(0)
+    start_idx = 0 if req_idx == 0 else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
+    num_draft_tokens = end_idx - start_idx
+
+    rejected = False
+    for pos in range(num_draft_tokens):
+        if not rejected:
+            token_idx = start_idx + pos
+            draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
+            target_prob = tl.load(target_draft_probs_ptr + token_idx)
+            uniform_prob = tl.load(uniform_probs_ptr + token_idx)
+            accepted = target_prob >= uniform_prob
+            token_id = draft_token_id
+            if not accepted:
+                rejected = True
+                token_id = tl.load(recovered_token_ids_ptr + token_idx)
+            tl.store(
+                output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
+                token_id,
+            )
+
+    if not rejected:
+        bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
+        tl.store(
+            output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
+            bonus_token_id,
+        )
+
+
+@triton.jit(do_not_specialize=["max_spec_len"])
 def _compact_greedy_rejection_sample_kernel(
     output_token_ids_ptr,
     target_token_ids_ptr,
@@ -91,9 +134,9 @@ def _compact_greedy_rejection_sample_kernel(
             target_token_id = tl.load(target_token_ids_ptr + start_idx + pos).to(
                 tl.int64
             )
-            draft_token_id = tl.load(
-                draft_sampled_ptr + start_idx + pos + 1
-            ).to(tl.int64)
+            draft_token_id = tl.load(draft_sampled_ptr + start_idx + pos + 1).to(
+                tl.int64
+            )
             accepted = target_token_id == draft_token_id
             token_id = draft_token_id
             if not accepted:
@@ -107,9 +150,7 @@ def _compact_greedy_rejection_sample_kernel(
     if not rejected:
         bonus_token_id = tl.load(target_token_ids_ptr + end_idx - 1).to(tl.int64)
         tl.store(
-            output_token_ids_ptr
-            + req_idx * (max_spec_len + 1)
-            + num_draft_tokens,
+            output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
             bonus_token_id,
         )
 
@@ -338,6 +379,230 @@ class RejectionSampler:
             sampled_token_ids=sampled,
             logprobs_tensors=logprobs_tensors,
             num_nans=num_nans,
+            num_sampled=num_sampled,
+            num_rejected=num_rejected,
+        )
+
+    @staticmethod
+    def _sample_from_candidate_logits(
+        candidate_logits: torch.Tensor,
+        candidate_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Sample one token from each compact candidate row."""
+        valid = torch.isfinite(candidate_logits)
+        noise = torch.empty_like(candidate_logits)
+        noise.exponential_()
+        scores = (candidate_logits - noise.log()).masked_fill(
+            ~valid, -float("inf")
+        )
+        sample_pos = scores.argmax(dim=-1, keepdim=True)
+        return candidate_ids.gather(dim=-1, index=sample_pos).view(-1)
+
+    def _sample_from_topk_candidates_local(
+        self,
+        candidate_logits: torch.Tensor,
+        candidate_ids: torch.Tensor,
+        input_batch: InputBatch,
+    ) -> SamplerOutput:
+        """Verify one-hot drafts using compact target top-k candidates.
+
+        This is deliberately limited to the ordinary probabilistic rejection
+        sampler (no synthetic/block verification).  Candidate logits are the
+        target distribution restricted to an approximate top-k set; a missing
+        draft token therefore has zero mass and is recovered by sampling from
+        the remaining candidate set.
+        """
+        if candidate_logits.ndim != 2:
+            raise ValueError("candidate_logits must be rank 2")
+        if candidate_ids.shape != candidate_logits.shape:
+            raise ValueError("candidate_ids must match candidate_logits")
+        if candidate_logits.shape[0] != int(input_batch.cu_num_logits_np[-1]):
+            raise ValueError("candidate rows must match the logits layout")
+        if input_batch.num_draft_tokens_per_req is None:
+            raise ValueError("top-k candidate sampling requires draft tokens")
+        if self.synthetic_conditional_rates is not None or self.use_block_verification:
+            raise ValueError("compact candidates do not support this rejection mode")
+
+        num_reqs = input_batch.num_reqs
+        device = candidate_logits.device
+        bonus_indices = input_batch.cu_num_logits[1:].to(torch.int64) - 1
+        is_bonus = torch.zeros(
+            candidate_logits.shape[0], dtype=torch.bool, device=device
+        )
+        is_bonus[bonus_indices] = True
+        target_indices = torch.arange(
+            candidate_logits.shape[0], dtype=torch.int64, device=device
+        )[~is_bonus]
+        if target_indices.shape[0] != input_batch.num_draft_tokens:
+            raise ValueError("candidate rows do not match draft-token layout")
+
+        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
+        draft_token_ids = draft_sampled[target_indices + 1]
+
+        bonus_token_ids = self._sample_from_candidate_logits(
+            candidate_logits[bonus_indices], candidate_ids[bonus_indices]
+        ).to(draft_token_ids.dtype)
+        target_logits = candidate_logits[target_indices]
+        target_ids = candidate_ids[target_indices]
+        draft_ids = draft_token_ids.to(target_ids.dtype).unsqueeze(-1)
+
+        valid = torch.isfinite(target_logits)
+        draft_mask = valid & (target_ids == draft_ids)
+        safe_logits = target_logits.masked_fill(~valid, -float("inf"))
+        max_logits = safe_logits.max(dim=-1, keepdim=True).values
+        weights = torch.exp(safe_logits - max_logits)
+        weights = torch.where(valid, weights, torch.zeros_like(weights))
+        denom = weights.sum(dim=-1)
+        draft_weight = torch.where(draft_mask, weights, torch.zeros_like(weights)).sum(
+            dim=-1
+        )
+        target_draft_probs = torch.where(
+            denom > 0.0, draft_weight / denom, torch.zeros_like(denom)
+        )
+
+        recovered_mask = valid & ~draft_mask
+        noise = torch.empty_like(target_logits)
+        noise.exponential_()
+        recovered_scores = (target_logits - noise.log()).masked_fill(
+            ~recovered_mask, -float("inf")
+        )
+        recovered_pos = recovered_scores.argmax(dim=-1, keepdim=True)
+        recovered_token_ids = target_ids.gather(dim=-1, index=recovered_pos).view(-1)
+        recovered_token_ids = torch.where(
+            recovered_mask.any(dim=-1),
+            recovered_token_ids,
+            torch.zeros_like(recovered_token_ids),
+        ).to(draft_token_ids.dtype)
+
+        uniform_probs = torch.rand(
+            (input_batch.num_draft_tokens,),
+            dtype=torch.float64,
+            device=device,
+        )
+        cu_num_draft_tokens = input_batch.cu_num_logits[1:] - torch.arange(
+            1,
+            num_reqs + 1,
+            dtype=input_batch.cu_num_logits.dtype,
+            device=device,
+        )
+        sampled = torch.full(
+            (num_reqs, self.num_speculative_steps + 1),
+            -1,
+            dtype=torch.int64,
+            device=device,
+        )
+        if candidate_logits.is_cuda:
+            _compact_rejection_sample_kernel[(num_reqs,)](
+                sampled,
+                cu_num_draft_tokens,
+                draft_token_ids,
+                target_draft_probs,
+                bonus_token_ids,
+                recovered_token_ids,
+                uniform_probs,
+                self.num_speculative_steps,
+            )
+        else:
+            cu_num_draft_tokens_cpu = cu_num_draft_tokens.cpu().tolist()
+            sampled_cpu = sampled
+            offset = 0
+            for req_idx, end in enumerate(cu_num_draft_tokens_cpu):
+                rejected = False
+                for pos in range(end - offset):
+                    token_idx = offset + pos
+                    if not rejected:
+                        accepted = bool(
+                            target_draft_probs[token_idx]
+                            >= uniform_probs[token_idx].to(
+                                target_draft_probs.dtype
+                            )
+                        )
+                        token_id = draft_token_ids[token_idx]
+                        if not accepted:
+                            rejected = True
+                            token_id = recovered_token_ids[token_idx]
+                        sampled_cpu[req_idx, pos] = token_id
+                if not rejected:
+                    sampled_cpu[req_idx, end - offset] = bonus_token_ids[req_idx]
+                offset = end
+
+        num_sampled = (sampled != -1).sum(dim=-1, dtype=torch.int32)
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            num_sampled,
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.sampler.req_states.prefill_len.gpu,
+        )
+        return SamplerOutput(
+            sampled_token_ids=sampled,
+            logprobs_tensors=None,
+            num_nans=None,
+            num_sampled=num_sampled,
+            num_rejected=num_rejected,
+        )
+
+    def sample_from_topk_candidates(
+        self,
+        candidate_logits: torch.Tensor,
+        candidate_ids: torch.Tensor,
+        input_batch: InputBatch,
+    ) -> SamplerOutput:
+        """Sample compact MTP candidates once, then synchronize TP ranks.
+
+        ``get_topk_candidates`` all-gathers the candidate pairs, but random
+        rejection decisions must still be made by one rank. Otherwise a
+        different CUDA RNG state on a TP rank can produce divergent sampled
+        tokens even when every rank sees identical candidates.
+        """
+        if candidate_logits.ndim != 2:
+            raise ValueError("candidate_logits must be rank 2")
+        if candidate_ids.shape != candidate_logits.shape:
+            raise ValueError("candidate_ids must match candidate_logits")
+        if candidate_logits.shape[0] != int(input_batch.cu_num_logits_np[-1]):
+            raise ValueError("candidate rows must match the logits layout")
+        if input_batch.num_draft_tokens_per_req is None:
+            raise ValueError("top-k candidate sampling requires draft tokens")
+        if self.synthetic_conditional_rates is not None or self.use_block_verification:
+            raise ValueError("compact candidates do not support this rejection mode")
+
+        try:
+            tp_group = get_tp_group()
+        except AssertionError:
+            # Keep direct CPU/unit-test use independent of distributed setup.
+            tp_group = None
+        if tp_group is None or tp_group.world_size == 1:
+            return self._sample_from_topk_candidates_local(
+                candidate_logits, candidate_ids, input_batch
+            )
+
+        if tp_group.rank_in_group == 0:
+            output = self._sample_from_topk_candidates_local(
+                candidate_logits, candidate_ids, input_batch
+            )
+            sampled = output.sampled_token_ids
+            num_sampled = output.num_sampled
+            num_rejected = output.num_rejected
+        else:
+            sampled = torch.empty(
+                (input_batch.num_reqs, self.num_speculative_steps + 1),
+                dtype=torch.int64,
+                device=candidate_logits.device,
+            )
+            num_sampled = torch.empty(
+                (input_batch.num_reqs,),
+                dtype=torch.int32,
+                device=candidate_logits.device,
+            )
+            num_rejected = torch.empty_like(num_sampled)
+
+        tp_group.broadcast(sampled, src=0)
+        tp_group.broadcast(num_sampled, src=0)
+        tp_group.broadcast(num_rejected, src=0)
+        return SamplerOutput(
+            sampled_token_ids=sampled,
+            logprobs_tensors=None,
+            num_nans=None,
             num_sampled=num_sampled,
             num_rejected=num_rejected,
         )

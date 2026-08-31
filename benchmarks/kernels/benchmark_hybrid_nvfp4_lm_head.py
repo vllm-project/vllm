@@ -1,28 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from statistics import median
+from typing import TypedDict
 
 import torch
 import torch.nn.functional as F
 from safetensors import safe_open
 
+from vllm.model_executor.layers.argmax_triton import (
+    indexed_argmax_triton,
+    reduce_global_argmax_triton,
+)
 from vllm.model_executor.layers.hybrid_nvfp4_lm_head import (
     _global_scale,
     _select_candidate_tile,
     indexed_bf16_dot,
     select_lm_head_candidates,
-)
-from vllm.model_executor.layers.argmax_triton import (
-    indexed_argmax_triton,
-    reduce_global_argmax_triton,
 )
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import (
@@ -45,12 +48,15 @@ class Nvfp4Weight:
     output_size: int
 
 
+class TimingResult(TypedDict):
+    median_us: float
+    samples_us: list[float]
+
+
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
-        raise argparse.ArgumentTypeError(
-            f"expected a positive integer, got {value}"
-        )
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value}")
     return parsed
 
 
@@ -59,9 +65,7 @@ def _candidate_tile(value: str) -> int | None:
         return None
     parsed = int(value)
     if parsed not in (1, 2, 4, 8):
-        raise argparse.ArgumentTypeError(
-            f"expected auto, 1, 2, 4, or 8, got {value}"
-        )
+        raise argparse.ArgumentTypeError(f"expected auto, 1, 2, 4, or 8, got {value}")
     return parsed
 
 
@@ -170,11 +174,7 @@ def _candidate_indexed_argmax(
     *,
     index_offset: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if (
-        HAS_TRITON
-        and exact_logits.is_cuda
-        and 0 < exact_logits.shape[-1] <= 1024
-    ):
+    if HAS_TRITON and exact_logits.is_cuda and 0 < exact_logits.shape[-1] <= 1024:
         return indexed_argmax_triton(
             exact_logits,
             candidate_indices,
@@ -293,7 +293,7 @@ def _time_cuda_graph(
     steps: int,
     warmup: int,
     trials: int,
-) -> dict[str, float | list[float]]:
+) -> TimingResult:
     outputs = function()
     torch.cuda.synchronize()
     del outputs
@@ -372,6 +372,18 @@ def main() -> int:
     parser.add_argument("--steps", type=_positive_int, default=40)
     parser.add_argument("--warmup", type=int, default=8)
     parser.add_argument("--trials", type=_positive_int, default=3)
+    parser.add_argument(
+        "--min-candidate-recall",
+        type=float,
+        default=None,
+        help="Fail if the measured candidate recall is below this fraction.",
+    )
+    parser.add_argument(
+        "--min-exact-rate",
+        type=float,
+        default=None,
+        help="Fail if the measured refined top-k exact rate is below this fraction.",
+    )
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()
 
@@ -379,6 +391,10 @@ def main() -> int:
         raise ValueError("tp-rank must be in [0, tp-size)")
     if args.warmup < 0:
         raise ValueError("warmup must be non-negative")
+    for name in ("min_candidate_recall", "min_exact_rate"):
+        threshold = getattr(args, name)
+        if threshold is not None and not 0.0 <= threshold <= 1.0:
+            raise ValueError(f"{name.replace('_', '-')} must be in [0, 1]")
 
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
@@ -404,8 +420,9 @@ def main() -> int:
     quant_end.synchronize()
     weight_quantize_us = quant_start.elapsed_time(quant_end) * 1000.0
 
+    batch_results_by_size: dict[str, object] = {}
     payload: dict[str, object] = {
-        "standard": "nvfp4-b12x-coarse-bf16-refined-lm-head",
+        "standard": "approximate-nvfp4-b12x-coarse-bf16-refined-lm-head",
         "model_dir": str(args.model_dir),
         "weight_key": weight_key,
         "tp_size": args.tp_size,
@@ -419,8 +436,9 @@ def main() -> int:
             "tp_pair_reduce": "simulated_local_pair_gather",
         },
         "weight_quantize_us": weight_quantize_us,
-        "results": {},
+        "results": batch_results_by_size,
     }
+    quality_failures: list[str] = []
 
     for batch_size in args.batch_sizes:
         generator = torch.Generator(device=device).manual_seed(20260828 + batch_size)
@@ -560,13 +578,28 @@ def main() -> int:
                     "selector": selector_timing,
                 },
             }
+            candidate_recall = candidate_hits / candidate_total
+            exact_rate = exact_rows / (args.seeds * batch_size)
+            result["candidate_recall"] = candidate_recall
+            result["exact_rate"] = exact_rate
+            if (
+                args.min_candidate_recall is not None
+                and candidate_recall < args.min_candidate_recall
+            ):
+                quality_failures.append(
+                    f"m={batch_size} top_k={top_k} candidate recall "
+                    f"{candidate_recall:.6f} < {args.min_candidate_recall:.6f}"
+                )
+            if args.min_exact_rate is not None and exact_rate < args.min_exact_rate:
+                quality_failures.append(
+                    f"m={batch_size} top_k={top_k} exact rate "
+                    f"{exact_rate:.6f} < {args.min_exact_rate:.6f}"
+                )
             hybrid_by_tile: dict[str, object] = {}
             refine_by_tile: dict[str, object] = {}
             greedy_integrated_by_tile: dict[str, object] = {}
             for candidate_tile in args.candidate_tiles:
-                tile_label = (
-                    "auto" if candidate_tile is None else str(candidate_tile)
-                )
+                tile_label = "auto" if candidate_tile is None else str(candidate_tile)
                 refine_timing = _time_cuda_graph(
                     partial(
                         _refine_selected_topk,
@@ -689,7 +722,7 @@ def main() -> int:
                 flush=True,
             )
 
-        payload["results"][str(batch_size)] = {
+        batch_results_by_size[str(batch_size)] = {
             "native_linear": native_linear_timing,
             "nvfp4_gemm": nvfp4_gemm_timing,
             "coarse": coarse_timing,
@@ -699,10 +732,16 @@ def main() -> int:
             "top_k": batch_results,
         }
 
+    payload["quality_failures"] = quality_failures
+    if quality_failures:
+        print("Quality thresholds failed:", file=sys.stderr)
+        for failure in quality_failures:
+            print(f"- {failure}", file=sys.stderr)
+
     if args.json_out is not None:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         args.json_out.write_text(json.dumps(payload, indent=2) + "\n")
-    return 0
+    return int(bool(quality_failures))
 
 
 if __name__ == "__main__":

@@ -1381,6 +1381,21 @@ class Worker(WorkerBase):
             self._weight_update_active = False
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
+        if envs.VLLM_HYBRID_NVFP4_LM_HEAD:
+            from vllm.model_executor.layers.hybrid_nvfp4_lm_head import (
+                refresh_hybrid_nvfp4_lm_heads,
+            )
+
+            updated_model = (
+                self.model_runner.get_draft_model()
+                if self._weight_update_is_draft
+                else self.model_runner.get_model()
+            )
+            if updated_model is not None:
+                refresh_hybrid_nvfp4_lm_heads(
+                    updated_model,
+                    candidates=envs.VLLM_HYBRID_NVFP4_LM_HEAD_CANDIDATES,
+                )
         if not self._weight_update_is_draft:
             self.model_runner.reset_lora_state()
 

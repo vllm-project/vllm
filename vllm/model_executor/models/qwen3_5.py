@@ -29,6 +29,7 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -352,6 +353,21 @@ class Qwen3_5ForCausalLMBase(
             )
             if config.tie_word_embeddings:
                 self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+            # The experimental compact head is deliberately opt-in per model.
+            # Do not allocate an auxiliary copy for unrelated ParallelLMHead
+            # implementations, or when diagnostics, LoRA, adaptive
+            # verification, dtype, or batch-invariant semantics are enabled.
+            self.lm_head._supports_hybrid_nvfp4_lm_head = (
+                self.model_config.head_dtype == self.model_config.dtype
+                and not envs.VLLM_BATCH_INVARIANT
+                and not envs.VLLM_COMPUTE_NANS_IN_LOGITS
+                and self.vllm_config.lora_config is None
+                and not (
+                    self.vllm_config.speculative_config is not None
+                    and self.vllm_config.speculative_config.enable_adaptive_verification
+                )
+                and self.lm_head.num_added_embeddings == 0
+            )
         else:
             self.lm_head = PPMissingLayer()
 
@@ -437,6 +453,63 @@ class Qwen3_5ForCausalLMBase(
 
     def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
+
+    def sample_full_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        temperature: float,
+    ) -> torch.Tensor:
+        return self.logits_processor.sample_full_tokens(
+            self.lm_head,
+            hidden_states,
+            temperature=temperature,
+        )
+
+    def get_topk_candidates(
+        self,
+        hidden_states: torch.Tensor,
+        top_k: int,
+        top_p: float,
+        temperature: float,
+        presence_penalties: torch.Tensor | None = None,
+        output_token_ids: torch.Tensor | None = None,
+        output_token_counts: torch.Tensor | None = None,
+        presence_request_indices: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.logits_processor.get_topk_candidates(
+            self.lm_head,
+            hidden_states,
+            top_k=top_k,
+            top_p=top_p,
+            temperature=temperature,
+            presence_penalties=presence_penalties,
+            output_token_ids=output_token_ids,
+            output_token_counts=output_token_counts,
+            presence_request_indices=presence_request_indices,
+        )
+
+    def sample_topk_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        top_k: int,
+        top_p: float,
+        temperature: float,
+        presence_penalties: torch.Tensor | None = None,
+        output_token_ids: torch.Tensor | None = None,
+        output_token_counts: torch.Tensor | None = None,
+        presence_request_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.logits_processor.sample_topk_tokens(
+            self.lm_head,
+            hidden_states,
+            top_k=top_k,
+            top_p=top_p,
+            temperature=temperature,
+            presence_penalties=presence_penalties,
+            output_token_ids=output_token_ids,
+            output_token_counts=output_token_counts,
+            presence_request_indices=presence_request_indices,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
@@ -606,6 +679,60 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.language_model.get_top_tokens(hidden_states)
 
+    def sample_full_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        temperature: float,
+    ) -> torch.Tensor:
+        return self.language_model.sample_full_tokens(
+            hidden_states,
+            temperature=temperature,
+        )
+
+    def get_topk_candidates(
+        self,
+        hidden_states: torch.Tensor,
+        top_k: int,
+        top_p: float,
+        temperature: float,
+        presence_penalties: torch.Tensor | None = None,
+        output_token_ids: torch.Tensor | None = None,
+        output_token_counts: torch.Tensor | None = None,
+        presence_request_indices: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.language_model.get_topk_candidates(
+            hidden_states,
+            top_k=top_k,
+            top_p=top_p,
+            temperature=temperature,
+            presence_penalties=presence_penalties,
+            output_token_ids=output_token_ids,
+            output_token_counts=output_token_counts,
+            presence_request_indices=presence_request_indices,
+        )
+
+    def sample_topk_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        top_k: int,
+        top_p: float,
+        temperature: float,
+        presence_penalties: torch.Tensor | None = None,
+        output_token_ids: torch.Tensor | None = None,
+        output_token_counts: torch.Tensor | None = None,
+        presence_request_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.language_model.sample_topk_tokens(
+            hidden_states,
+            top_k=top_k,
+            top_p=top_p,
+            temperature=temperature,
+            presence_penalties=presence_penalties,
+            output_token_ids=output_token_ids,
+            output_token_counts=output_token_counts,
+            presence_request_indices=presence_request_indices,
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
@@ -659,7 +786,10 @@ class Qwen3_5_MoeMixtureOfExperts(MixtureOfExperts):
         num_physical_experts: int,
         num_local_physical_experts: int,
     ) -> None:
-        assert self.num_local_physical_experts == num_local_physical_experts
+        assert (
+            getattr(self, "num_local_physical_experts", None)
+            == num_local_physical_experts
+        )
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = num_physical_experts - self.num_logical_experts

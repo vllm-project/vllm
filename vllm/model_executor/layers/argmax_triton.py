@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from __future__ import annotations
 
 import torch
 
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import next_power_of_2
-
 
 if HAS_TRITON:
 
@@ -25,11 +27,12 @@ if HAS_TRITON:
         indices = tl.load(
             gathered_pairs + base + pair_stride_1,
             mask=mask,
-            other=0,
-        )
-        _, lane_idx = tl.max(values, axis=0, return_indices=True)
-        token_id = tl.max(
-            tl.where(lane == lane_idx, indices, 0.0),
+            other=0x7FFFFFFF,
+        ).to(tl.int32)
+        values = tl.where(values == values, values, -float("inf"))
+        max_value = tl.max(values, axis=0)
+        token_id = tl.min(
+            tl.where(values == max_value, indices, 0x7FFFFFFF),
             axis=0,
         ).to(tl.int32)
         tl.store(out_indices + row, token_id)

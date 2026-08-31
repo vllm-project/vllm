@@ -48,6 +48,25 @@ def _global_scale(tensor: torch.Tensor) -> torch.Tensor:
     return torch.where(max_abs > 0, scaled, torch.ones_like(max_abs))
 
 
+def _quantize_lm_head_weight(
+    weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Create the auxiliary NVFP4 representation for one BF16 lm-head."""
+    padded_output_size = (weight.shape[0] + 31) // 32 * 32
+    weight_for_quant = weight
+    if padded_output_size != weight.shape[0]:
+        weight_for_quant = F.pad(
+            weight,
+            (0, 0, 0, padded_output_size - weight.shape[0]),
+        )
+    global_scale = _global_scale(weight_for_quant)
+    quantized, scale = flashinfer_nvfp4_quantize_128x4(
+        weight_for_quant,
+        global_scale,
+    )
+    return quantized, scale, global_scale
+
+
 def _candidate_count_for_topk(
     configured_candidates: int,
     top_k: int,
@@ -139,9 +158,8 @@ if HAS_TRITON:
         block_candidates: tl.constexpr,
     ):
         row = tl.program_id(0)
-        candidates = (
-            tl.program_id(1) * block_candidates
-            + tl.arange(0, block_candidates)
+        candidates = tl.program_id(1) * block_candidates + tl.arange(
+            0, block_candidates
         )
         candidate_mask = candidates < num_candidates
         token_ids = tl.load(
@@ -234,8 +252,7 @@ def indexed_bf16_dot(
     else:
         if candidate_tile not in (2, 4, 8):
             raise ValueError(
-                "candidate_tile must be one of 1, 2, 4, or 8; "
-                f"got {candidate_tile}"
+                f"candidate_tile must be one of 1, 2, 4, or 8; got {candidate_tile}"
             )
         _tiled_indexed_bf16_dot_kernel[
             (num_rows, triton.cdiv(num_candidates, candidate_tile))
@@ -271,7 +288,12 @@ def select_lm_head_candidates(
         try:
             from flashinfer import top_k
 
-            _, indices = top_k(coarse_logits, candidates, sorted=False)
+            _, indices = top_k(
+                coarse_logits,
+                candidates,
+                sorted=False,
+                deterministic=True,
+            )
             return indices.contiguous()
         except (ImportError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning_once(
@@ -279,7 +301,11 @@ def select_lm_head_candidates(
                 "using torch.topk.",
                 exc,
             )
-    return torch.topk(coarse_logits, candidates, dim=-1, sorted=False).indices.contiguous()
+    # Stable descending sort gives the same lower-index tie break as the
+    # regular greedy argmax when FlashInfer is unavailable.
+    return torch.argsort(coarse_logits, dim=-1, descending=True, stable=True)[
+        ..., :candidates
+    ].contiguous()
 
 
 def autotune_row_buckets(max_rows: int) -> tuple[int, ...]:
@@ -294,18 +320,16 @@ def autotune_row_buckets(max_rows: int) -> tuple[int, ...]:
             raise ImportError("FlashInfer FP4 backend is unavailable")
         from flashinfer.fused_moe.utils import get_hybrid_num_tokens_buckets
 
-        buckets = tuple(
+        flashinfer_buckets = tuple(
             sorted({int(rows) for rows in get_hybrid_num_tokens_buckets(max_rows)})
         )
-        if buckets:
-            return buckets
+        if flashinfer_buckets:
+            return flashinfer_buckets
     except (ImportError, RuntimeError, TypeError, ValueError):
         pass
 
-    buckets = [
-        rows
-        for rows in (1, 2, 4, 8, 16, 32, 64, 128, 256)
-        if rows <= max_rows
+    buckets: list[int] = [
+        rows for rows in (1, 2, 4, 8, 16, 32, 64, 128, 256) if rows <= max_rows
     ]
     rows = 512
     while rows <= max_rows:
@@ -318,7 +342,7 @@ def autotune_row_buckets(max_rows: int) -> tuple[int, ...]:
 
 @dataclass
 class HybridNvfp4LmHead:
-    """Persistent NVFP4 weights plus transient BF16 candidate refinement."""
+    """Persistent NVFP4 weights for approximate BF16 candidate refinement."""
 
     weight: torch.Tensor
     scale: torch.Tensor
@@ -420,9 +444,7 @@ class HybridNvfp4LmHead:
         top_k: int | None = None,
     ) -> torch.Tensor:
         candidates = (
-            self.candidates
-            if top_k is None
-            else self.candidate_count_for_topk(top_k)
+            self.candidates if top_k is None else self.candidate_count_for_topk(top_k)
         )
         candidates = min(candidates, coarse_logits.shape[-1])
         return select_lm_head_candidates(coarse_logits, candidates)
@@ -457,20 +479,28 @@ def warmup_hybrid_nvfp4_lm_head_kernels(
         device=state.weight.device,
     )
     coarse_logits = state.coarse_logits(hidden_states, None)
-    candidate_indices = state.select_candidates(coarse_logits)
-    exact_logits = state.refine_logits(
-        hidden_states,
-        bf16_weight,
-        candidate_indices,
-        None,
-    )
-    if HAS_TRITON and exact_logits.shape[-1] <= 1024:
-        indexed_argmax_triton(exact_logits, candidate_indices)
+    candidate_sets = [state.select_candidates(coarse_logits)]
+    # A bounded top-k request may widen the transient candidate matrix. Warm
+    # that shape once so the first random top-k request does not pay a JIT
+    # compile or an unexpected CUDA-graph allocation.
+    wide_candidates = state.select_candidates(coarse_logits, top_k=64)
+    if wide_candidates.shape[-1] != candidate_sets[0].shape[-1]:
+        candidate_sets.append(wide_candidates)
+    for candidate_indices in candidate_sets:
+        exact_logits = state.refine_logits(
+            hidden_states,
+            bf16_weight,
+            candidate_indices,
+            None,
+        )
+        if HAS_TRITON and exact_logits.shape[-1] <= 1024:
+            indexed_argmax_triton(exact_logits, candidate_indices)
 
     rows = 16
     tiled_hidden = hidden_states.expand(rows, -1).contiguous()
-    tiled_candidates = candidate_indices.expand(rows, -1).contiguous()
-    state.refine_logits(tiled_hidden, bf16_weight, tiled_candidates, None)
+    for candidate_indices in candidate_sets:
+        tiled_candidates = candidate_indices.expand(rows, -1).contiguous()
+        state.refine_logits(tiled_hidden, bf16_weight, tiled_candidates, None)
     if HAS_TRITON and tp_size > 1:
         gathered_pairs = torch.zeros(
             (1, tp_size * 2),
@@ -525,8 +555,13 @@ def prepare_hybrid_nvfp4_lm_head(
     candidates: int,
 ) -> bool:
     """Prepare one NVFP4 b12x lm-head copy, or keep the BF16 path."""
-    if hasattr(layer, _STATE_NAME):
-        return True
+    if isinstance(getattr(layer, _STATE_NAME, None), HybridNvfp4LmHead):
+        if refresh_hybrid_nvfp4_lm_head(layer, candidates=candidates):
+            return True
+        # A changed dtype or shape cannot be refreshed in place.  Drop the
+        # auxiliary state and let the normal support checks below decide
+        # whether a new state can be built.
+        release_hybrid_nvfp4_lm_head(layer)
 
     weight = layer.weight
     shared_state = getattr(weight, _SHARED_STATE_NAME, None)
@@ -568,18 +603,7 @@ def prepare_hybrid_nvfp4_lm_head(
         )
         return False
 
-    padded_output_size = (weight.shape[0] + 31) // 32 * 32
-    weight_for_quant = weight
-    if padded_output_size != weight.shape[0]:
-        weight_for_quant = F.pad(
-            weight,
-            (0, 0, 0, padded_output_size - weight.shape[0]),
-        )
-    global_scale = _global_scale(weight_for_quant)
-    quantized, scale = flashinfer_nvfp4_quantize_128x4(
-        weight_for_quant,
-        global_scale,
-    )
+    quantized, scale, global_scale = _quantize_lm_head_weight(weight)
     state = HybridNvfp4LmHead(
         weight=quantized,
         scale=scale,
@@ -591,9 +615,9 @@ def prepare_hybrid_nvfp4_lm_head(
     _attach_state(layer, state)
     setattr(weight, _SHARED_STATE_NAME, state)
 
-    extra_mib = sum(
-        getattr(layer, name).nbytes for name in _BUFFER_NAMES
-    ) / (1024 * 1024)
+    extra_mib = sum(getattr(layer, name).nbytes for name in _BUFFER_NAMES) / (
+        1024 * 1024
+    )
     logger.info_once(
         "Prepared hybrid NVFP4 b12x lm-head for weight %s with %d candidates "
         "and %.2f MiB auxiliary storage.",
@@ -602,6 +626,69 @@ def prepare_hybrid_nvfp4_lm_head(
         extra_mib,
     )
     return True
+
+
+@torch.inference_mode()
+def refresh_hybrid_nvfp4_lm_head(
+    layer: torch.nn.Module,
+    *,
+    candidates: int | None = None,
+) -> bool:
+    """Refresh a prepared auxiliary copy after the BF16 weight is updated.
+
+    The auxiliary tensors are derived state and are intentionally not part of
+    the checkpoint.  In-place updates preserve references held by tied heads
+    and CUDA-graph setup code.
+    """
+    state = getattr(layer, _STATE_NAME, None)
+    weight = getattr(layer, "weight", None)
+    if not isinstance(state, HybridNvfp4LmHead) or not isinstance(weight, torch.Tensor):
+        return False
+    if (
+        weight.dtype != torch.bfloat16
+        or not weight.is_cuda
+        or not weight.is_contiguous()
+        or weight.ndim != 2
+        or weight.shape[0] != state.output_size
+        or weight.shape[1] != state.input_size
+    ):
+        release_hybrid_nvfp4_lm_head(layer)
+        return False
+
+    quantized, scale, global_scale = _quantize_lm_head_weight(weight)
+    if (
+        state.weight.shape != quantized.shape
+        or state.scale.shape != scale.shape
+        or state.global_scale.shape != global_scale.shape
+    ):
+        release_hybrid_nvfp4_lm_head(layer)
+        return False
+
+    state.weight.copy_(quantized)
+    state.scale.copy_(scale)
+    state.global_scale.copy_(global_scale)
+    if candidates is not None:
+        state.candidates = candidates
+    state.can_use_failure_counts.clear()
+    return True
+
+
+@torch.inference_mode()
+def refresh_hybrid_nvfp4_lm_heads(
+    model: torch.nn.Module,
+    *,
+    candidates: int | None = None,
+) -> int:
+    """Refresh each distinct prepared lm-head state in ``model``."""
+    refreshed = 0
+    seen_states: set[int] = set()
+    for layer in model.modules():
+        state = getattr(layer, _STATE_NAME, None)
+        if not isinstance(state, HybridNvfp4LmHead) or id(state) in seen_states:
+            continue
+        seen_states.add(id(state))
+        refreshed += int(refresh_hybrid_nvfp4_lm_head(layer, candidates=candidates))
+    return refreshed
 
 
 def get_hybrid_nvfp4_lm_head(
@@ -638,6 +725,8 @@ __all__ = [
     "get_hybrid_nvfp4_lm_head",
     "indexed_bf16_dot",
     "prepare_hybrid_nvfp4_lm_head",
+    "refresh_hybrid_nvfp4_lm_head",
+    "refresh_hybrid_nvfp4_lm_heads",
     "release_hybrid_nvfp4_lm_head",
     "select_lm_head_candidates",
     "warmup_hybrid_nvfp4_lm_head_kernels",

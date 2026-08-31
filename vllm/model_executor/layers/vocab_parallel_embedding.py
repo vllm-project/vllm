@@ -63,7 +63,11 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
-        elif envs.VLLM_HYBRID_NVFP4_LM_HEAD and isinstance(layer, ParallelLMHead):
+        elif (
+            envs.VLLM_HYBRID_NVFP4_LM_HEAD
+            and isinstance(layer, ParallelLMHead)
+            and getattr(layer, "_supports_hybrid_nvfp4_lm_head", False)
+        ):
             from vllm.model_executor.layers.hybrid_nvfp4_lm_head import (
                 prepare_hybrid_nvfp4_lm_head,
             )
@@ -543,6 +547,10 @@ class ParallelLMHead(VocabParallelEmbedding):
         padding_size: padding size for the vocabulary.
         disable_tp: If true, tensor parallelism will be disabled for this layer.
     """
+
+    # Model implementations opt in explicitly when their lm-head layout and
+    # dtype semantics are compatible with the experimental hybrid path.
+    _supports_hybrid_nvfp4_lm_head: bool = False
 
     # --8<-- [end:parallel_lm_head]
 

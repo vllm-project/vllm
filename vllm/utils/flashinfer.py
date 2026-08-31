@@ -1065,9 +1065,7 @@ def flashinfer_nvfp4_quantize_128x4(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not has_flashinfer():
         raise RuntimeError("FlashInfer is required for NVFP4 quantization")
-    return torch.ops.vllm.flashinfer_nvfp4_quantize_128x4.default(
-        a, a_global_sf
-    )
+    return torch.ops.vllm.flashinfer_nvfp4_quantize_128x4.default(a, a_global_sf)
 
 
 flashinfer_fp8_blockscale_gemm = _lazy_import_wrapper(

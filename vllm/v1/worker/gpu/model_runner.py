@@ -810,7 +810,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return hidden_states, sample_hidden_states
 
     @torch.inference_mode()
-    def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
+    def _dummy_sampler_run(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        warmup_top_k_top_p_rows: int | None = None,
+    ) -> None:
         num_reqs = hidden_states.shape[0]
         logits = self.model.compute_logits(hidden_states)
         dummy_input_batch = InputBatch.make_dummy(
@@ -821,6 +826,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
         assert self.sampler is not None
+        if warmup_top_k_top_p_rows is not None:
+            self.sampler.warmup_top_k_top_p_buffer(warmup_top_k_top_p_rows)
         self.sampler(logits, dummy_input_batch)
 
     @torch.inference_mode()
@@ -854,7 +861,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.is_last_pp_rank:
             assert sample_hidden_states is not None
             if self.pooling_runner is None:
-                self._dummy_sampler_run(sample_hidden_states)
+                warmup_rows = None
+                if self.num_speculative_steps > 0:
+                    # MTP verification flattens target rows for every
+                    # request. Profile that upper-bound shape before KV
+                    # cache/CUDA-graph memory is committed.
+                    warmup_rows = self.max_num_reqs * max(1, self.decode_query_len)
+                self._dummy_sampler_run(
+                    sample_hidden_states,
+                    warmup_top_k_top_p_rows=warmup_rows,
+                )
             else:
                 self._dummy_pooler_run(hidden_states)
 
@@ -1375,6 +1391,43 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return block_tables, slot_mappings
 
+    def _get_hybrid_lm_head_processor(self) -> Any | None:
+        """Find the target model's optional compact-head logits processor."""
+        processor = getattr(self.model, "logits_processor", None)
+        if processor is None:
+            language_model = getattr(self.model, "language_model", None)
+            processor = getattr(language_model, "logits_processor", None)
+        if processor is None or not hasattr(processor, "hybrid_lm_head_row_mask"):
+            return None
+        return processor
+
+    def _make_hybrid_lm_head_row_mask(
+        self, input_batch: InputBatch
+    ) -> torch.Tensor | None:
+        """Disable compact lm-head work for rows belonging to prefill requests.
+
+        The compact path is tuned for steady-state decode.  Keeping prompt
+        tail rows on the regular full head avoids paying activation
+        quantization/GEMM setup on TTFT-critical work while preserving the
+        compact path for decode rows in the same mixed batch.
+        """
+        if not envs.VLLM_HYBRID_NVFP4_LM_HEAD or not input_batch.has_prefill:
+            return None
+        num_logits_per_req = np.diff(input_batch.cu_num_logits_np)
+        if num_logits_per_req.shape[0] != input_batch.is_prefilling_np.shape[0]:
+            return None
+        row_mask_np = np.repeat(
+            np.logical_not(input_batch.is_prefilling_np), num_logits_per_req
+        )
+        return torch.from_numpy(row_mask_np).to(self.device, non_blocking=True)
+
+    def _set_hybrid_lm_head_row_mask(
+        self, row_mask: torch.Tensor | None
+    ) -> None:
+        processor = self._get_hybrid_lm_head_processor()
+        if processor is not None:
+            processor.hybrid_lm_head_row_mask = row_mask
+
     def sample(
         self,
         hidden_states: torch.Tensor,
@@ -1383,6 +1436,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         assert self.sampler is not None
+        sampler_output: SamplerOutput | None = None
+
+        lm_head = getattr(self.model, "lm_head", None)
+        if lm_head is None:
+            # Multimodal Qwen wrappers expose the language model below the
+            # outer conditional-generation module.
+            lm_head = getattr(
+                getattr(self.model, "language_model", None), "lm_head", None
+            )
 
         fast_path_params = None
         if (
@@ -1390,6 +1452,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and self.batch_sharder is None
             and grammar_output is None
             and not input_batch.has_structured_output_reqs
+            and self.lora_config is None
+            and self.adaptive_verification is None
+            and not envs.VLLM_BATCH_INVARIANT
+            and self.model_config.head_dtype == self.dtype
+            and getattr(lm_head, "num_added_embeddings", 0) == 0
+            and getattr(
+                getattr(lm_head, "shard_indices", None), "num_added_elements", 0
+            )
+            == 0
+            and getattr(lm_head, "_hybrid_nvfp4_lm_head_state", None) is not None
         ):
             fast_path_params = self.sampler.get_vocab_parallel_sampling_params(
                 input_batch
@@ -1423,8 +1495,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 and hasattr(self.model, "get_top_tokens")
             ):
                 logger.info_once(
-                    "Using the hybrid lm-head greedy speculative sampling "
-                    "fast path.",
+                    "Using the hybrid lm-head greedy speculative sampling fast path.",
                     scope="global",
                 )
                 target_token_ids = self.model.get_top_tokens(sample_hidden_states)
@@ -1437,6 +1508,104 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     sampler_output.num_sampled,
                     sampler_output.num_rejected,
                 )
+
+        if (
+            fast_path_params is not None
+            and fast_path_params[0] == "topk"
+            and not fast_path_params[4]
+            and input_batch.num_draft_tokens > 0
+            and self.rejection_sampler is not None
+            and self.speculator is not None
+            and self.speculator.draft_logits is None
+            and self.rejection_sampler.synthetic_conditional_rates is None
+            and not self.rejection_sampler.use_block_verification
+            and hasattr(self.model, "get_topk_candidates")
+        ):
+            _, top_k, top_p, temperature, _ = fast_path_params
+            logger.info_once(
+                "Using the hybrid lm-head compact top-k speculative sampling "
+                "fast path.",
+                scope="global",
+            )
+            candidate_logits, candidate_ids = self.model.get_topk_candidates(
+                sample_hidden_states,
+                top_k=top_k,
+                top_p=top_p,
+                temperature=temperature,
+            )
+            sampler_output = self.rejection_sampler.sample_from_topk_candidates(
+                candidate_logits,
+                candidate_ids,
+                input_batch,
+            )
+            return (
+                sampler_output,
+                sampler_output.num_sampled,
+                sampler_output.num_rejected,
+            )
+
+        if (
+            fast_path_params is not None
+            and fast_path_params[0] == "full"
+            and input_batch.num_draft_tokens == 0
+            and hasattr(self.model, "sample_full_tokens")
+        ):
+            _, _, _, temperature, _ = fast_path_params
+            logger.info_once(
+                "Using the hybrid lm-head full-distribution sampling fast path.",
+                scope="global",
+            )
+            sampled = self.model.sample_full_tokens(
+                sample_hidden_states,
+                temperature=temperature,
+            )
+            sampler_output = self.sampler.make_sampler_output(
+                sampled.to(torch.int64), input_batch
+            )
+            return (
+                sampler_output,
+                sampler_output.num_sampled,
+                sampler_output.num_rejected,
+            )
+
+        if (
+            fast_path_params is not None
+            and fast_path_params[0] == "topk"
+            and input_batch.num_draft_tokens == 0
+            and hasattr(self.model, "sample_topk_tokens")
+        ):
+            _, top_k, top_p, temperature, presence_only = fast_path_params
+            logger.info_once(
+                "Using the hybrid lm-head compact top-k sampling fast path.",
+                scope="global",
+            )
+            if presence_only:
+                (
+                    presence_penalties,
+                    output_token_counts,
+                    presence_request_indices,
+                ) = self.sampler.get_vocab_parallel_presence_inputs(input_batch)
+            else:
+                presence_penalties = None
+                output_token_counts = None
+                presence_request_indices = None
+            sampled = self.model.sample_topk_tokens(
+                sample_hidden_states,
+                top_k=top_k,
+                top_p=top_p,
+                temperature=temperature,
+                presence_penalties=presence_penalties,
+                output_token_counts=output_token_counts,
+                presence_request_indices=presence_request_indices,
+            )
+            sampler_output = self.sampler.make_sampler_output(
+                sampled.to(torch.int64), input_batch
+            )
+            return (
+                sampler_output,
+                sampler_output.num_sampled,
+                sampler_output.num_rejected,
+            )
 
         shard_metadata = None
         global_input_batch = input_batch
@@ -1466,7 +1635,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_output.grammar_bitmask,
             )
 
-        sampler_output: SamplerOutput | None
         if input_batch.num_reqs == 0:
             # This rank owns no requests this step. It contributes an
             # all-padding block to the gather below.
@@ -1894,9 +2062,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.pcp_manager, hidden_states, input_batch
         )
 
-        sampler_output, num_sampled, num_rejected = self.sample(
-            hidden_states, input_batch, grammar_output
+        self._set_hybrid_lm_head_row_mask(
+            self._make_hybrid_lm_head_row_mask(input_batch)
         )
+        try:
+            sampler_output, num_sampled, num_rejected = self.sample(
+                hidden_states, input_batch, grammar_output
+            )
+        finally:
+            # Prompt-logprob computation and the next draft call have a
+            # different row layout; never let a sampling-step mask leak.
+            self._set_hybrid_lm_head_row_mask(None)
 
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
