@@ -698,6 +698,14 @@ void cp_gather_indexer_k_quant_cache(
     const torch::stable::Tensor& block_table,   // [batch_size, num_blocks]
     const torch::stable::Tensor& cu_seq_lens);  // [batch_size + 1]
 
+// Fused vocab-parallel embedding lookup (see
+// vocab_parallel_embedding_kernels.cu).
+void vocab_parallel_embedding(
+    torch::stable::Tensor& out, const torch::stable::Tensor& input_ids,
+    const torch::stable::Tensor& weight, int64_t org_vocab_start_index,
+    int64_t org_vocab_end_index, int64_t num_org_vocab_padding,
+    int64_t added_vocab_start_index, int64_t added_vocab_end_index);
+
 // LongCat n-gram embedding index kernel (see ngram_embedding_kernels.cu).
 void ngram_compute_n_gram_ids(
     int64_t ne_n, int64_t ne_k, torch::stable::Tensor& ne_weights,
