@@ -422,13 +422,13 @@ class MoRIIOConnectorScheduler:
                     f"cache group spec(s): {sorted(set(unsupported))}. Pass "
                     "--disable-hybrid-kv-cache-manager to run without HMA."
                 )
-        if self._is_hma_required and self.mode == MoRIIOMode.WRITE:
-            # TODO(simondanielsson): support HMA in WRITE mode
-            raise NotImplementedError(
-                "MoRIIO WRITE mode does not support hybrid KV cache groups "
-                "(sliding-window attention). Use READ mode, or pass "
-                "--disable-hybrid-kv-cache-manager."
-            )
+            if self.mode == MoRIIOMode.WRITE:
+                # TODO(simondanielsson): support HMA in WRITE mode
+                raise NotImplementedError(
+                    "MoRIIO WRITE mode does not support hybrid KV cache groups "
+                    "(sliding-window attention). Use READ mode, or pass "
+                    "--disable-hybrid-kv-cache-manager."
+                )
 
         sw_sizes_tokens: list[tuple[int, int]] = [
             (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
