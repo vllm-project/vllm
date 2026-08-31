@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    check_moe_marlin_supports_config,
     marlin_act_int8_process_scales,
     marlin_moe_padded_intermediate,
     marlin_moe_permute_scales,
@@ -125,9 +126,11 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
 
 def _backend_incompatibility_reason(
     backend: WNA16MoEBackend,
+    moe_config: FusedMoEConfig,
     quant_config: QuantizationConfig | QuantizationArgs,
     may_have_zp: bool,
     may_have_bias: bool,
+    allow_tile_padding: bool,
 ) -> str | None:
     if backend == WNA16MoEBackend.FLASHINFER_TRTLLM and (may_have_zp or may_have_bias):
         return "zero points and bias are not supported"
@@ -149,7 +152,24 @@ def _backend_incompatibility_reason(
         ):
             return "group activation ordering is not supported"
 
-    if isinstance(quant_config, MoeWNA16Config) and backend in (
+    # Marlin only supports certain problem/group sizes.
+    allow_marlin = not isinstance(quant_config, MoeWNA16Config)
+
+    if allow_marlin and backend in (
+        WNA16MoEBackend.MARLIN,
+        WNA16MoEBackend.BATCHED_MARLIN,
+    ):
+        if isinstance(quant_config, (AutoAWQConfig, AutoGPTQConfig, QuantizationArgs)):
+            group_size = quant_config.group_size
+        else:
+            return "Marlin not supported for this layer"
+
+        if not check_moe_marlin_supports_config(
+            moe_config, group_size, allow_tile_padding
+        ):
+            return "Marlin not supported for this layer"
+
+    if not allow_marlin and backend in (
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
         WNA16MoEBackend.EMULATION,
@@ -182,6 +202,7 @@ def select_wna16_moe_backend(
     quant_config: QuantizationConfig | QuantizationArgs,
     may_have_zp: bool,
     may_have_bias: bool,
+    allow_tile_padding: bool = False,
 ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
     """Select the WNA16 MoE backend.
 
@@ -239,7 +260,12 @@ def select_wna16_moe_backend(
     if runner_backend != "auto":
         requested_backend = map_wna16_backend(runner_backend)
         reason = _backend_incompatibility_reason(
-            requested_backend, quant_config, may_have_zp, may_have_bias
+            requested_backend,
+            config,
+            quant_config,
+            may_have_zp,
+            may_have_bias,
+            allow_tile_padding,
         )
         if reason is not None:
             raise ValueError(_make_log_unsupported(requested_backend, reason))
@@ -252,7 +278,12 @@ def select_wna16_moe_backend(
 
     for backend in AVAILABLE_BACKENDS:
         reason = _backend_incompatibility_reason(
-            backend, quant_config, may_have_zp, may_have_bias
+            backend,
+            config,
+            quant_config,
+            may_have_zp,
+            may_have_bias,
+            allow_tile_padding,
         )
         if reason is not None:
             logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
@@ -327,7 +358,6 @@ def make_wna16_moe_kernel(
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
     backend: WNA16MoEBackend = WNA16MoEBackend.MARLIN,
-    layer: torch.nn.Module | None = None,
     is_k_full: bool = False,
     w13_g_idx: torch.Tensor | None = None,
     w2_g_idx: torch.Tensor | None = None,
@@ -379,10 +409,7 @@ def make_wna16_moe_kernel(
     logger.info_once("Using %s", experts_cls.__name__, scope="local")
 
     extra_args: dict[str, Any] = {}
-    if backend == WNA16MoEBackend.HUMMING:
-        assert layer is not None
-        extra_args = {"layer": layer}
-    elif issubclass(experts_cls, MarlinExpertsBase):
+    if issubclass(experts_cls, MarlinExpertsBase):
         extra_args = {
             "w13_g_idx": w13_g_idx,
             "w2_g_idx": w2_g_idx,
@@ -1016,7 +1043,7 @@ def _process_weights_xpu(
         w2:  [E, K, N]   int4 (uint8 storage [E, K, N // 2])
         w2_scales:  [E, K, N // group_size]   params_dtype
 
-    Input GPTQ layout from FusedMoE.weight_loader:
+    Input GPTQ layout from MoERunner.weight_loader:
         w13: [E, K // 8, 2*N] int32 (8 nibbles per int32 along the input dim)
         w13_scales: [E, K // group_size, 2*N] params_dtype
         w2:  [E, N // 8, K] int32
@@ -1077,9 +1104,21 @@ def _humming_wna16_weight_schema(
             "desc_act": quant_config.desc_act,
             "sym": quant_config.is_sym,
         }
+    if isinstance(quant_config, QuantizationArgs):
+        quant_type = getattr(quant_config.type, "value", quant_config.type)
+        quant_strategy = getattr(quant_config.strategy, "value", quant_config.strategy)
+        return {
+            "quant_method": "compressed-tensors",
+            "format": "pack-quantized",
+            "type": str(quant_type),
+            "num_bits": quant_config.num_bits,
+            "strategy": str(quant_strategy),
+            "group_size": quant_config.group_size,
+            "symmetric": quant_config.symmetric,
+        }
     raise TypeError(
-        "Humming WNA16 checkpoint schema requires AutoAWQConfig or "
-        "AutoGPTQConfig, "
+        "Humming WNA16 checkpoint schema requires AutoAWQConfig, "
+        "AutoGPTQConfig or QuantizationArgs, "
         f"got {type(quant_config).__name__}."
     )
 
@@ -1419,7 +1458,7 @@ def convert_to_wna16_moe_kernel_format(
 
     Args:
         backend: the selected ``WNA16MoEBackend``.
-        layer: the ``FusedMoE`` layer whose parameters are being prepared.
+        layer: the ``MoERunner`` layer whose parameters are being prepared.
         quant_config: the ``QuantizationConfig`` for this layer.
         input_dtype: optional activation dtype, usually should be 16 bit.
     """
@@ -1622,6 +1661,42 @@ def convert_to_wna16_moe_kernel_format(
             w2_uint8 = w2.transpose(1, 2).contiguous().view(torch.uint8)
             w13_scale = w13_scale.transpose(1, 2).contiguous()
             w2_scale = w2_scale.transpose(1, 2).contiguous()
+            # Zero points from compressed-tensors checkpoints are K-first int32
+            # with 8 int4 ZPs packed per element: shape (E, K//gs, N//8).
+            # fused_moe_kernel_gptq_awq expects N-first uint8 with 2 int4 ZPs
+            # per byte: shape (E, N//2, K//gs), indexed as
+            # (offs_bn // 2) * stride_bzn + offs_k_group * stride_bzk.
+            # Conversion steps:
+            #   (E, K//gs, N//8) int32
+            #   → transpose(1,2) → (E, N//8, K//gs) int32
+            #   → view(uint8)    → (E, N//8, K//gs*4)  [each int32 → 4 bytes]
+            #   → reshape(…,4)   → (E, N//8, K//gs, 4) [isolate byte index]
+            #   → permute(0,1,3,2) → (E, N//8, 4, K//gs) [byte index before K]
+            #   → reshape         → (E, N//2, K//gs)   [kernel expected layout]
+            # After this, element [e, offs_bn//2, k_group] is the uint8 byte
+            # holding the two int4 ZPs for output channels offs_bn and offs_bn+1.
+            if w13_qzeros is not None:
+                E13, Kg13, Np13 = w13_qzeros.shape
+                w13_qzeros = (
+                    w13_qzeros.transpose(1, 2)
+                    .contiguous()
+                    .view(torch.uint8)
+                    .reshape(E13, Np13, Kg13, 4)
+                    .permute(0, 1, 3, 2)
+                    .reshape(E13, Np13 * 4, Kg13)
+                    .contiguous()
+                )
+            if w2_qzeros is not None:
+                E2, Kg2, Np2 = w2_qzeros.shape
+                w2_qzeros = (
+                    w2_qzeros.transpose(1, 2)
+                    .contiguous()
+                    .view(torch.uint8)
+                    .reshape(E2, Np2, Kg2, 4)
+                    .permute(0, 1, 3, 2)
+                    .reshape(E2, Np2 * 4, Kg2)
+                    .contiguous()
+                )
         else:
             # MoeWNA16 uses N-first uint8 weights and scales.
             w13_uint8 = w13.view(torch.uint8)

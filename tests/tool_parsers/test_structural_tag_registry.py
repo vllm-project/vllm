@@ -33,7 +33,7 @@ from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
     VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS,
-    _get_function_parameters,
+    get_function_parameters,
     get_model_structural_tag,
 )
 
@@ -177,6 +177,7 @@ _K3_TOOLS_CLOSE = "<|close|>tools<|sep|>"
 _K3_CALL_CLOSE = "<|close|>call<|sep|>"
 _K3_ARG_CLOSE = "<|close|>argument<|sep|>"
 _K3_MESSAGE_CLOSE = "<|close|>message<|sep|>"
+_K3_END_OF_MSG = "<|end_of_msg|>"
 
 
 def _k3_tools_by_name() -> list[ChatCompletionToolsParam]:
@@ -357,6 +358,20 @@ def test_kimi_k3_auto_strict_allows_response_only(sample_tools_strict):
     assert _is_grammar_accept_string(grammar, _k3_response("Just answering."))
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        _K3_RESPONSE_OPEN + "answer<|close|>message",
+        _K3_RESPONSE_OPEN + "answer<|open|>tools",
+        _K3_RESPONSE_OPEN + "answer" + _K3_END_OF_MSG,
+    ],
+)
+def test_kimi_k3_response_body_rejects_reserved_marker_prefixes(body: str):
+    assert not _is_grammar_accept_string(
+        _k3_grammar("required"), body, require_termination=False
+    )
+
+
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
 def test_get_model_structural_tag_supports_named_tool_choice(
     model: str,
@@ -530,7 +545,7 @@ def test_get_function_parameters_relaxes_function_strict_false():
         strict=False,
     )
 
-    assert _get_function_parameters(function) is True
+    assert get_function_parameters(function) is True
 
 
 def _k3_tools_with_root_defs() -> list[ChatCompletionToolsParam]:

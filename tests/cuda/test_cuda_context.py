@@ -115,5 +115,82 @@ def test_get_device_capability_uses_visible_device_ordinal(monkeypatch):
     assert seen_indices == [1]
 
 
+def _stub_nvml(monkeypatch) -> dict[str, int]:
+    """Stub NVML to report SM 9.0 and count init/shutdown pairs.
+
+    Pins `NvmlCudaPlatform` rather than the `CudaPlatform` alias: that alias is
+    `NonNvmlCudaPlatform` where NVML is unavailable, and that class reads
+    `torch.cuda` instead, which needs a real device.
+    """
+    from vllm.platforms.cuda import NvmlCudaPlatform, pynvml
+
+    calls = {"init": 0, "shutdown": 0}
+
+    monkeypatch.setattr(
+        pynvml, "nvmlInit", lambda: calls.__setitem__("init", calls["init"] + 1)
+    )
+    monkeypatch.setattr(
+        pynvml,
+        "nvmlShutdown",
+        lambda: calls.__setitem__("shutdown", calls["shutdown"] + 1),
+    )
+    # Pin the visible-device mapping so the test does not depend on whatever
+    # CUDA_VISIBLE_DEVICES happens to be set to in the environment.
+    monkeypatch.setenv(NvmlCudaPlatform.device_control_env_var, "0")
+    monkeypatch.setattr(
+        NvmlCudaPlatform,
+        "device_control_id_to_physical_device_id",
+        classmethod(lambda _cls, device_id: int(device_id)),
+    )
+    monkeypatch.setattr(
+        pynvml, "nvmlDeviceGetHandleByIndex", lambda index: f"handle-{index}"
+    )
+    monkeypatch.setattr(
+        pynvml, "nvmlDeviceGetCudaComputeCapability", lambda _handle: (9, 0)
+    )
+    NvmlCudaPlatform.get_device_capability.cache_clear()
+    return calls
+
+
+def test_has_device_capability_does_not_reinit_nvml(monkeypatch):
+    """Repeated capability checks must not re-enter an NVML context.
+
+    `has_device_capability` only reads the cached `get_device_capability`, which
+    carries its own NVML context. Wrapping it in `with_nvml_context` as well
+    cost an nvmlInit()/nvmlShutdown() pair per call, and
+    `triton_reshape_and_cache_flash` calls it per attention layer per step for
+    fp8 and bfloat16 KV caches (issue #50381).
+    """
+    from vllm.platforms.cuda import NvmlCudaPlatform
+
+    calls = _stub_nvml(monkeypatch)
+    try:
+        assert NvmlCudaPlatform.has_device_capability(80)
+        for _ in range(20):
+            NvmlCudaPlatform.has_device_capability(80)
+            NvmlCudaPlatform.has_device_capability(89)
+            NvmlCudaPlatform.has_device_capability((9, 0))
+
+        assert calls["init"] == 1
+        assert calls["shutdown"] == 1
+    finally:
+        NvmlCudaPlatform.get_device_capability.cache_clear()
+
+
+def test_has_device_capability_comparisons(monkeypatch):
+    """Dropping the redundant NVML context must not change the answers."""
+    from vllm.platforms.cuda import NvmlCudaPlatform
+
+    _stub_nvml(monkeypatch)
+    try:
+        assert NvmlCudaPlatform.has_device_capability(80)
+        assert NvmlCudaPlatform.has_device_capability(90)
+        assert NvmlCudaPlatform.has_device_capability((9, 0))
+        assert not NvmlCudaPlatform.has_device_capability(100)
+        assert not NvmlCudaPlatform.has_device_capability((10, 0))
+    finally:
+        NvmlCudaPlatform.get_device_capability.cache_clear()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

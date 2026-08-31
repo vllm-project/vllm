@@ -32,7 +32,7 @@ def main(argv):
     for file in (
         *glob.glob("requirements/**/*.txt", recursive=True),
         *glob.glob("requirements/**/*.in", recursive=True),
-        "pyproject.toml",
+        *glob.glob("pyproject.toml"),
     ):
         with open(file) as f:
             lines = f.readlines()

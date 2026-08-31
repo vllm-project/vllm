@@ -11,6 +11,7 @@ import pytest
 import torch.distributed
 from torch.distributed import ProcessGroup
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -21,6 +22,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -235,6 +238,10 @@ def _deep_ep_v2_moe(
         w2_scale = w2_scale.to(device=device_idx)
 
     pg = torch.distributed.new_group(list(range(pgi.world_size)))
+    # The caller's set_random_seed() only seeds the parent; spawn() gives each
+    # worker a fresh unseeded RNG, so seed here too or the inputs below differ
+    # every run. Offset by rank to keep the ranks' data distinct.
+    set_random_seed(7 + pgi.rank)
     test_tensors = TestTensors.make(config)
 
     with set_current_vllm_config(VllmConfig()):
@@ -352,18 +359,136 @@ def test_deep_ep_v2_moe(
     )
 
 
-def _deep_ep_v2_moe_cudagraph(
+EXPERTS_BACKENDS = [
+    "flashinfer_trtllm",
+    "flashinfer_cutlass",
+    "trtllm_fp8",
+]
+
+
+def _make_experts(
+    experts_backend: str,
+    config: TestConfig,
+    moe_config,
+    num_local_experts: int,
+    rank: int,
+    w1_bf16: torch.Tensor,
+    w2_bf16: torch.Tensor,
+    test_tensors: TestTensors,
+):
+    e_start = num_local_experts * rank
+    e_end = e_start + num_local_experts
+
+    if experts_backend != "trtllm_fp8":
+        from vllm.model_executor.layers.fused_moe.config import (
+            FUSED_MOE_UNQUANTIZED_CONFIG,
+        )
+        from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+            backend_to_kernel_cls,
+            convert_to_unquantized_kernel_format,
+            map_unquantized_backend,
+        )
+
+        torch_combined = torch_experts(
+            test_tensors.rank_tokens,
+            w1_bf16,
+            w2_bf16,
+            test_tensors.topk_weights,
+            test_tensors.topk,
+        )
+        backend = map_unquantized_backend(experts_backend)
+        w1_ep, w2_ep = convert_to_unquantized_kernel_format(
+            backend,
+            moe_config,
+            w1_bf16[e_start:e_end],
+            w2_bf16[e_start:e_end],
+        )
+        experts_cls = next(
+            cls
+            for cls in backend_to_kernel_cls(backend)
+            if issubclass(cls, mk.FusedMoEExpertsModular)
+        )
+        fused_experts = experts_cls(
+            moe_config=moe_config,
+            quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+        )
+        return fused_experts, w1_ep, w2_ep, torch_combined, 1e-1, 2e-1
+
+    from tests.kernels.moe.test_moe_layer import _quantize_fp8_halves
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
+        TrtLlmFp8ExpertsModular,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        Fp8MoeBackend,
+        convert_to_fp8_moe_kernel_format,
+    )
+
+    w1_ref = w1_bf16.to(torch.float8_e4m3fn).to(torch.bfloat16)
+    w2_ref = w2_bf16.to(torch.float8_e4m3fn).to(torch.bfloat16)
+
+    block_shape = [128, 128]
+    qw = _quantize_fp8_halves(w1_ref, w2_ref, block_shape)
+    assert qw.w13_weight_scale is not None
+    assert qw.w2_weight_scale is not None
+
+    reference_topk_weights = test_tensors.topk_weights.to(torch.bfloat16).to(
+        torch.float32
+    )
+    torch_combined = torch_experts(
+        test_tensors.rank_tokens,
+        qw.w13_weight,
+        qw.w2_weight,
+        reference_topk_weights,
+        test_tensors.topk,
+        w1_scale=qw.w13_weight_scale,
+        w2_scale=qw.w2_weight_scale,
+        quant_dtype=torch.float8_e4m3fn,
+        block_shape=block_shape,
+    )
+
+    class _MockLayer:
+        weight_block_size = block_shape
+
+        class moe_config:
+            is_act_and_mul = True
+            intermediate_size_per_partition = config.n
+
+        class activation:
+            is_gated = True
+
+    w1_ep, w2_ep, w1_scale_ep, w2_scale_ep = convert_to_fp8_moe_kernel_format(
+        fp8_backend=Fp8MoeBackend.FLASHINFER_TRTLLM,
+        layer=_MockLayer(),
+        w13=qw.w13_weight[e_start:e_end],
+        w2=qw.w2_weight[e_start:e_end],
+        w13_scale=qw.w13_weight_scale[e_start:e_end],
+        w2_scale=qw.w2_weight_scale[e_start:e_end],
+        w13_input_scale=None,
+        w2_input_scale=None,
+    )
+
+    fused_experts = TrtLlmFp8ExpertsModular(
+        moe_config=moe_config,
+        quant_config=FusedMoEQuantConfig.make(
+            torch.float8_e4m3fn,
+            block_shape=block_shape,
+            w1_scale=w1_scale_ep,
+            w2_scale=w2_scale_ep,
+        ),
+    )
+    return fused_experts, w1_ep, w2_ep, torch_combined, 6e-2, 6e-2
+
+
+def _deep_ep_v2_moe_backends(
     pgi: ProcessGroupInfo,
     dp_size: int,
     config: TestConfig,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_scale: torch.Tensor | None,
-    w2_scale: torch.Tensor | None,
+    use_cudagraph: bool,
+    experts_backend: str,
 ):
-    """Worker function: verify DeepEP v2 + TrtLLM FP8 with do_expand=False."""
     import tempfile
 
+    from vllm.config import KernelConfig
     from vllm.distributed import (
         init_distributed_environment,
         initialize_model_parallel,
@@ -373,6 +498,7 @@ def _deep_ep_v2_moe_cudagraph(
     init_workspace_manager(device)
 
     pg = torch.distributed.new_group(list(range(pgi.world_size)))
+    set_random_seed(7 + pgi.rank)
     test_tensors = TestTensors.make(config)
     num_local_experts = config.num_experts // pgi.world_size
     hidden_size = config.k
@@ -397,19 +523,10 @@ def _deep_ep_v2_moe_cudagraph(
     torch.distributed.broadcast(w1_bf16, src=0, group=pg)
     torch.distributed.broadcast(w2_bf16, src=0, group=pg)
 
-    # Round-trip through FP8 before constructing the reference and kernel weights.
-    w1_fp8 = w1_bf16.to(torch.float8_e4m3fn)
-    w2_fp8 = w2_bf16.to(torch.float8_e4m3fn)
-    w1_ref = w1_fp8.to(torch.bfloat16)
-    w2_ref = w2_fp8.to(torch.bfloat16)
-
-    from vllm.config import KernelConfig
-
     vllm_cfg = VllmConfig()
     vllm_cfg.kernel_config = KernelConfig(moe_backend="flashinfer_trtllm")
 
     with set_current_vllm_config(vllm_cfg):
-        # Initialize vLLM parallel state (needed by FusedMoE layer)
         temp_file = tempfile.mktemp()
         init_distributed_environment(
             world_size=pgi.world_size,
@@ -419,77 +536,7 @@ def _deep_ep_v2_moe_cudagraph(
             backend="nccl",
         )
         initialize_model_parallel(tensor_model_parallel_size=1)
-        # Mirror production weight processing: quantize, EP-slice, then
-        # convert to the TrtLLM BlockMajorK format.
-        from tests.kernels.moe.test_moe_layer import _quantize_fp8_halves
-        from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
-            TrtLlmFp8ExpertsModular,
-        )
-        from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-            Fp8MoeBackend,
-            convert_to_fp8_moe_kernel_format,
-        )
 
-        block_shape = [128, 128]
-        qw = _quantize_fp8_halves(w1_ref, w2_ref, block_shape)
-        assert qw.w13_weight_scale is not None
-        assert qw.w2_weight_scale is not None
-
-        # Reference MoE using the same blockwise FP8 quantization scheme as
-        # the production kernel. torch_experts quantizes activations before
-        # both GEMMs and dequantizes the operands for the reference matmuls.
-        reference_topk_weights = test_tensors.topk_weights.to(torch.bfloat16).to(
-            torch.float32
-        )
-        torch_combined = torch_experts(
-            test_tensors.rank_tokens,
-            qw.w13_weight,
-            qw.w2_weight,
-            reference_topk_weights,
-            test_tensors.topk,
-            w1_scale=qw.w13_weight_scale,
-            w2_scale=qw.w2_weight_scale,
-            quant_dtype=torch.float8_e4m3fn,
-            block_shape=block_shape,
-        )
-
-        # EP-slice before format conversion
-        e_start = num_local_experts * pgi.rank
-        e_end = e_start + num_local_experts
-        w1_ep = qw.w13_weight[e_start:e_end]
-        w2_ep = qw.w2_weight[e_start:e_end]
-        w1_scale_ep = qw.w13_weight_scale[e_start:e_end]
-        w2_scale_ep = qw.w2_weight_scale[e_start:e_end]
-
-        # Convert to TrtLLM format (W31 swap + BlockMajorK shuffle)
-        class _MockLayer:
-            weight_block_size = block_shape
-
-            class moe_config:
-                is_act_and_mul = True
-                intermediate_size_per_partition = config.n
-
-            class activation:
-                is_gated = True
-
-        w1_ep, w2_ep, w1_scale_ep, w2_scale_ep = convert_to_fp8_moe_kernel_format(
-            fp8_backend=Fp8MoeBackend.FLASHINFER_TRTLLM,
-            layer=_MockLayer(),
-            w13=w1_ep,
-            w2=w2_ep,
-            w13_scale=w1_scale_ep,
-            w2_scale=w2_scale_ep,
-            w13_input_scale=None,
-            w2_input_scale=None,
-        )
-
-        # Build TrtLLM expert with correct EP params
-        quant_config = FusedMoEQuantConfig.make(
-            torch.float8_e4m3fn,
-            block_shape=block_shape,
-            w1_scale=w1_scale_ep,
-            w2_scale=w2_scale_ep,
-        )
         moe_config = make_dummy_moe_config(
             num_experts=config.num_experts,
             num_local_experts=num_local_experts,
@@ -497,20 +544,33 @@ def _deep_ep_v2_moe_cudagraph(
             hidden_dim=hidden_size,
             intermediate_size=config.n,
         )
-        moe_parallel_config = dataclasses.replace(
-            moe_config.moe_parallel_config,
-            ep_size=pgi.world_size,
-            ep_rank=pgi.rank,
-            use_ep=True,
-            all2all_backend="deepep_v2",
-        )
         moe_config = dataclasses.replace(
             moe_config,
-            moe_parallel_config=moe_parallel_config,
+            moe_parallel_config=dataclasses.replace(
+                moe_config.moe_parallel_config,
+                ep_size=pgi.world_size,
+                ep_rank=pgi.rank,
+                use_ep=True,
+                all2all_backend="deepep_v2",
+            ),
         )
-        fused_experts = TrtLlmFp8ExpertsModular(
-            moe_config=moe_config,
-            quant_config=quant_config,
+
+        (
+            fused_experts,
+            w1_ep,
+            w2_ep,
+            torch_combined,
+            atol,
+            rtol,
+        ) = _make_experts(
+            experts_backend,
+            config,
+            moe_config,
+            num_local_experts,
+            pgi.rank,
+            w1_bf16,
+            w2_bf16,
+            test_tensors,
         )
 
         v2_args = DeepEPV2Args(
@@ -526,7 +586,7 @@ def _deep_ep_v2_moe_cudagraph(
             pgi=pgi,
             dp_size=dp_size,
             v2_args=v2_args,
-            use_cudagraph=True,
+            use_cudagraph=use_cudagraph,
         )
         mk_kernel = FusedMoEKernel(
             prepare_finalize=a2a,
@@ -547,33 +607,38 @@ def _deep_ep_v2_moe_cudagraph(
                     apply_router_weight_on_input=False,
                 )
 
-        torch.testing.assert_close(
-            torch_combined,
-            out,
-            atol=6e-2,
-            rtol=6e-2,
-        )
+    torch.testing.assert_close(torch_combined, out, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("m,n,k", [(32, 256, 1024)])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
+@pytest.mark.parametrize("experts_backend", EXPERTS_BACKENDS)
+@pytest.mark.parametrize("use_cudagraph", [True, False])
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep_v2
-def test_deep_ep_v2_moe_cudagraph(
+@pytest.mark.skipif(
+    not has_flashinfer() or not current_platform.has_device_capability(100),
+    reason="Requires FlashInfer TRTLLM fused MoE (SM100)",
+)
+def test_deep_ep_v2_moe_backends(
     m: int,
     n: int,
     k: int,
     num_experts: int,
     topk: int,
     world_dp_size: tuple[int, int],
+    experts_backend: str,
+    use_cudagraph: bool,
     workspace_init,
 ):
     set_random_seed(7)
     world_size, dp_size = world_dp_size
     config = TestConfig(
-        dtype=torch.float8_e4m3fn,
+        dtype=torch.float8_e4m3fn
+        if experts_backend == "trtllm_fp8"
+        else torch.bfloat16,
         topk=topk,
         m=m,
         k=k,
@@ -583,11 +648,9 @@ def test_deep_ep_v2_moe_cudagraph(
 
     parallel_launch(
         world_size,
-        _deep_ep_v2_moe_cudagraph,
+        _deep_ep_v2_moe_backends,
         dp_size,
         config,
-        None,  # weights created inside worker
-        None,
-        None,
-        None,
+        use_cudagraph,
+        experts_backend,
     )

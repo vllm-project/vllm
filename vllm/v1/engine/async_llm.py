@@ -21,7 +21,13 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
-from vllm.exceptions import VLLMClientError, VLLMValidationError
+from vllm.exceptions import (
+    GracefulHTTPError,
+    MaxQueuedTokensError,
+    QueueOverflowError,
+    VLLMClientError,
+    VLLMValidationError,
+)
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -112,6 +118,7 @@ class AsyncLLM(EngineClient):
         self.vllm_config = vllm_config
         self._elastic_ep_lock = asyncio.Lock()
         self.model_config = vllm_config.model_config
+        self.scheduler_config = vllm_config.scheduler_config
         self.observability_config = vllm_config.observability_config
 
         tracing_endpoint = self.observability_config.otlp_traces_endpoint
@@ -273,6 +280,64 @@ class AsyncLLM(EngineClient):
         if handler is not None:
             cancel_task_threadsafe(handler)
 
+    def get_num_unfinished_requests(self) -> int:
+        return self.output_processor.get_num_unfinished_requests()
+
+    def get_num_queued_tokens(self) -> int:
+        return self.output_processor.get_num_queued_tokens()
+
+    def check_admission(self, n: int = 1, request_id: str | None = None) -> None:
+        """Reject the request if it would exceed queue limits.
+
+        Both limits return HTTP 503 (Service Unavailable) so that load
+        balancers and client SDKs retry on a different instance.
+
+        - ``max_num_queued_reqs``: hard cap on the number of unfinished requests
+          (waiting + running).  A request with ``n > 1`` counts as ``n`` slots.
+        - ``max_num_queued_tokens``: TTFT QoS — cap on the total prompt
+          tokens of requests still in prefill.
+
+        Note: ``get_num_queued_tokens`` uses ``prompt_len`` for all prefilling requests.
+        Chunked prefill progress and prefix-cache hits are not subtracted because the
+        scheduler's ``num_computed_tokens`` and ``num_cached_tokens`` are only
+        propagated to the API server after prefill completes. The overestimation is
+        conservative — earlier rejection, preserving TTFT targets.
+
+        Args:
+            n: Number of sequences the request will occupy.
+            request_id: Request id, used for logging only.
+
+        Raises:
+            QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
+            MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
+        """
+        max_num_reqs = self.scheduler_config.max_num_queued_reqs
+        if max_num_reqs is not None:
+            current = self.get_num_unfinished_requests()
+            if current + n > max_num_reqs:
+                logger.info(
+                    "Request queue full - rejecting request %s "
+                    "(current=%d, n=%d, max=%d).",
+                    request_id,
+                    current,
+                    n,
+                    max_num_reqs,
+                )
+                raise QueueOverflowError()
+
+        max_queued_tokens = self.scheduler_config.max_num_queued_tokens
+        if max_queued_tokens is not None:
+            current_tokens = self.get_num_queued_tokens()
+            if current_tokens >= max_queued_tokens:
+                logger.info(
+                    "Max queued tokens reached - rejecting request %s "
+                    "(current_tokens=%d, max=%d).",
+                    request_id,
+                    current_tokens,
+                    max_queued_tokens,
+                )
+                raise MaxQueuedTokensError()
+
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
             # Cache the result
@@ -294,6 +359,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        session_id: str | None = None,
         prompt_text: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
@@ -316,6 +382,10 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
+        if isinstance(params, SamplingParams) and params.n > 1:
+            # TODO (NickLucche) Batch check admission check for all n requests
+            self.check_admission(params.n, request_id)
+
         if isinstance(prompt, AsyncGenerator):
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
                 raise NotImplementedError
@@ -331,14 +401,16 @@ class AsyncLLM(EngineClient):
                 trace_headers,
                 priority,
                 data_parallel_rank,
+                session_id,
             )
 
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
             logger.warning_once(
                 "Passing EngineCoreRequest to AsyncLLM.generate() and .add_requests() "
-                "is deprecated and will be removed in v0.18. You should instead pass "
-                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
+                "is deprecated and will be removed in the future. You should "
+                "instead pass the outputs of Renderer.render_cmpl() or "
+                "Renderer.render_chat()."
             )
 
             request = prompt
@@ -349,18 +421,37 @@ class AsyncLLM(EngineClient):
                     "latter will be used, and the former will be ignored."
                 )
         else:
-            request = self.input_processor.process_inputs(
-                request_id,
-                prompt,
-                params,
-                supported_tasks=await self.get_supported_tasks(),
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
-                trace_headers=trace_headers,
-                priority=priority,
-                data_parallel_rank=data_parallel_rank,
-            )
+            if isinstance(prompt, dict) and "type" in prompt:
+                # Rendered EngineInput; no blocking preprocessing needed.
+                request = self.input_processor.process_inputs(
+                    request_id,
+                    prompt,
+                    params,
+                    supported_tasks=await self.get_supported_tasks(),
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    tokenization_kwargs=tokenization_kwargs,
+                    trace_headers=trace_headers,
+                    priority=priority,
+                    data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
+                )
+            else:
+                # Raw prompts require tokenization and possibly multimodal
+                # processing, which must not block the event loop.
+                request = await self.input_processor.process_inputs_async(
+                    request_id,
+                    prompt,
+                    params,
+                    supported_tasks=await self.get_supported_tasks(),
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    tokenization_kwargs=tokenization_kwargs,
+                    trace_headers=trace_headers,
+                    priority=priority,
+                    data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
+                )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
         if reasoning_ended is not None:
@@ -408,7 +499,12 @@ class AsyncLLM(EngineClient):
         index: int,
         queue: RequestOutputCollector,
     ):
-        # Add the request to OutputProcessor (this process).
+        if parent_req is None and not self.output_processor.has_request(
+            request.request_id
+        ):
+            self.check_admission(request_id=request.request_id)
+
+        # Register locally before the first await so concurrent tasks see this request.
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
@@ -428,6 +524,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        session_id: str | None = None,
     ) -> RequestOutputCollector:
         self._validate_streaming_input_sampling_params(sampling_params)
 
@@ -439,6 +536,7 @@ class AsyncLLM(EngineClient):
             trace_headers=trace_headers,
             priority=priority,
             data_parallel_rank=data_parallel_rank,
+            session_id=session_id,
         )
 
         if not sampling_params.skip_clone:
@@ -539,6 +637,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        session_id: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -568,6 +667,7 @@ class AsyncLLM(EngineClient):
                 trace_headers=trace_headers,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
+                session_id=session_id,
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
@@ -604,8 +704,8 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed (engine dead).", request_id)
             raise
 
-        # Request validation error.
-        except VLLMClientError as e:
+        # Request validation error or admission control rejection.
+        except (VLLMClientError, GracefulHTTPError) as e:
             if self.log_requests:
                 logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise
@@ -654,6 +754,8 @@ class AsyncLLM(EngineClient):
         self._logger_ref = [self.logger_manager]
         logger_ref = self._logger_ref
         renderer = self.renderer
+        # P0 multi-modal sender ("shadow") cache; None for text-only models.
+        mm_processor_cache = renderer.mm_processor_cache
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
         async def output_handler():
@@ -680,6 +782,16 @@ class AsyncLLM(EngineClient):
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
+
+                        # 2b) Recover from P0/P1 cache drift: the engine flags hashes
+                        # it couldn't find (mm_cache_miss_hashes); drop them from the
+                        # P0 shadow so the client's retry resends the data and
+                        # repopulates P1. Hot-path no-op (field is None otherwise).
+                        if mm_processor_cache is not None:
+                            for eco in outputs_slice:
+                                if eco.mm_cache_miss_hashes:
+                                    for mm_hash in eco.mm_cache_miss_hashes:
+                                        mm_processor_cache.invalidate(mm_hash)
 
                         # Allow other asyncio tasks to run between chunks
                         if end < num_outputs:
@@ -869,8 +981,8 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed (engine dead).", request_id)
             raise
 
-        # Request validation error.
-        except VLLMClientError:
+        # Request validation error or admission control rejection.
+        except (VLLMClientError, GracefulHTTPError):
             if self.log_requests:
                 logger.info("Request %s failed (bad request).", request_id)
             raise
