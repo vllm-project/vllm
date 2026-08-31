@@ -15,6 +15,7 @@ from transformers.modeling_utils import PreTrainedModel
 from vllm.third_party.deep_gemm import per_block_cast_to_fp8
 
 from .vision_attention import (
+    VisionRMSNorm,
     VisionRotaryEmbedding,
     VisionRotaryPositionEmbedding,
     apply_vision_attention_residual,
@@ -105,23 +106,6 @@ class DotsMoEVitConfig(PretrainedConfig):
         self.pre_pixel_shuffle = pre_pixel_shuffle
         self.enable_torch_compile = enable_torch_compile
         self.enable_fp8_moe = enable_fp8_moe
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
-
-    def extra_repr(self) -> str:
-        return f"{tuple(self.weight.shape)}, eps={self.eps}"
-
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
 
 # ---- FFN modules ----
@@ -333,7 +317,7 @@ class DotsPatchEmbed(nn.Module):
             kernel_size=(config.patch_size, config.patch_size),
             stride=(config.patch_size, config.patch_size),
         )
-        self.norm = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
+        self.norm = VisionRMSNorm(config.embed_dim, eps=config.rms_norm_eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.view(
@@ -359,8 +343,8 @@ class MoEVisionBlock(nn.Module):
         )
         self.attn = build_vision_attention(attn_impl, config, eager_fallback="eager_v2")
         self._attn_uses_seqlens = attn_uses_seqlens(attn_impl)
-        self.norm_1 = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
-        self.norm_2 = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
+        self.norm_1 = VisionRMSNorm(config.embed_dim, eps=config.rms_norm_eps)
+        self.norm_2 = VisionRMSNorm(config.embed_dim, eps=config.rms_norm_eps)
 
         is_moe = (
             config.pyramid_num_routed
@@ -534,7 +518,9 @@ class DotsMoEVitModel(PreTrainedModel):
         )
 
         if config.post_norm:
-            self.post_trunk_norm = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
+            self.post_trunk_norm = VisionRMSNorm(
+                config.embed_dim, eps=config.rms_norm_eps
+            )
 
         adapter_cls = _ADAPTER_CLASSES.get(config.adapter_type)
         if adapter_cls is None:
