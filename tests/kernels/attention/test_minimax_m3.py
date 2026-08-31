@@ -1047,6 +1047,21 @@ def test_aiter_consolidated_qknorm_capability_probe(monkeypatch):
     monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE", None)
     assert rocm_aiter_ops.fused_qknorm_idxrqknorm_supports_packed_shuffle()
 
+    monkeypatch.delattr(
+        aiter, "FUSED_QKNORM_IDXRQKNORM_SUPPORTS_FP8_INDEX_Q", raising=False
+    )
+    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q", None)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_supports_fp8_index_q()
+
+    monkeypatch.setattr(
+        aiter,
+        "FUSED_QKNORM_IDXRQKNORM_SUPPORTS_FP8_INDEX_Q",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q", None)
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_supports_fp8_index_q()
+
 
 def _fake_aiter_qknorm_args(kv_cache_dtype: str = "auto") -> dict:
     tensor = torch.empty(1)
@@ -1145,6 +1160,51 @@ def test_aiter_consolidated_qknorm_dtype_and_layout_mapping(
         assert kwargs["v_scale"] is None
 
 
+def test_aiter_consolidated_qknorm_fp8_index_dtype_mapping(monkeypatch):
+    import aiter
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = []
+
+    def fake_op(*args, **kwargs):
+        calls.append(kwargs)
+
+    fp8 = current_platform.fp8_dtype()
+    monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", fake_op)
+    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED", True)
+    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q", True)
+    call_args = _fake_aiter_qknorm_args("fp8")
+    call_args.update(
+        k_scale=torch.tensor([0.25]),
+        v_scale=torch.tensor([0.5]),
+        index_cache=torch.empty(1, dtype=fp8),
+        index_q_out=torch.empty(1, dtype=fp8),
+        num_index_heads=1,
+    )
+
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    assert calls[0]["index_cache_dtype"] == "fp8"
+    assert calls[0]["kv_cache_dtype"] == "fp8_e4m3_static"
+
+
+def test_aiter_consolidated_qknorm_fp8_index_q_requires_capability(monkeypatch):
+    import aiter
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    def unexpected_call(*args, **kwargs):
+        pytest.fail("fp8 index_q must fall back when AITER cannot emit it")
+
+    fp8 = current_platform.fp8_dtype()
+    monkeypatch.setattr(aiter, "fused_qknorm_idxrqknorm", unexpected_call)
+    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED", True)
+    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q", False)
+    call_args = _fake_aiter_qknorm_args()
+    call_args.update(index_q_out=torch.empty(1, dtype=fp8), num_index_heads=1)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+
+
 @pytest.mark.parametrize("skip_index_branch", [False, True])
 def test_aiter_consolidated_qknorm_full_and_skip_index_args(
     monkeypatch, skip_index_branch
@@ -1217,7 +1277,10 @@ def test_aiter_sparse_pa_slot_rebase_preserves_page_offsets():
     reason="The consolidated packed-SHUFFLE AITER op is ROCm-only",
 )
 @pytest.mark.parametrize("skip_index_branch", [False, True])
-def test_aiter_consolidated_qknorm_real_packed_shuffle(monkeypatch, skip_index_branch):
+@pytest.mark.parametrize("fp8_index", [False, True])
+def test_aiter_consolidated_qknorm_real_packed_shuffle(
+    monkeypatch, skip_index_branch, fp8_index
+):
     from vllm._aiter_ops import rocm_aiter_ops
 
     torch.manual_seed(20260831)
@@ -1267,22 +1330,38 @@ def test_aiter_consolidated_qknorm_real_packed_shuffle(monkeypatch, skip_index_b
     q_out = torch.zeros(
         num_tokens, num_heads * head_dim, dtype=torch.bfloat16, device="cuda"
     )
-    index_q_out = torch.full(
-        (num_tokens, num_index_heads * head_dim),
-        7,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    index_cache = torch.full(
-        (num_blocks, logical_block_size, head_dim),
-        7,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
+    index_dtype = fp8_dtype if fp8_index else torch.bfloat16
+    if fp8_index:
+        index_q_out = torch.empty(
+            (num_tokens, num_index_heads * head_dim),
+            dtype=index_dtype,
+            device="cuda",
+        )
+        index_cache = torch.empty(
+            (num_blocks, logical_block_size, head_dim),
+            dtype=index_dtype,
+            device="cuda",
+        )
+        index_q_out.view(torch.uint8).fill_(7)
+        index_cache.view(torch.uint8).fill_(7)
+    else:
+        index_q_out = torch.full(
+            (num_tokens, num_index_heads * head_dim),
+            7,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        index_cache = torch.full(
+            (num_blocks, logical_block_size, head_dim),
+            7,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
     scale = torch.tensor([0.02], dtype=torch.float32, device="cuda")
 
     monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED", None)
     monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE", None)
+    monkeypatch.setattr(rocm_aiter_ops, "_FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q", None)
     kwargs = {}
     if not skip_index_branch:
         kwargs = {
@@ -1318,14 +1397,26 @@ def test_aiter_consolidated_qknorm_real_packed_shuffle(monkeypatch, skip_index_b
     assert torch.isfinite(q_out).all()
     assert torch.count_nonzero(q_out) > 0
     assert torch.count_nonzero(packed) > 0
-    if skip_index_branch:
-        assert torch.all(index_q_out == 7)
-        assert torch.all(index_cache == 7)
+    if fp8_index:
+        index_q_untouched = torch.all(index_q_out.view(torch.uint8) == 7)
+        index_cache_untouched = torch.all(index_cache.view(torch.uint8) == 7)
+        index_cache_t0 = torch.all(index_cache[0, 0].view(torch.uint8) == 7)
+        index_cache_t127 = torch.all(index_cache[0, 127].view(torch.uint8) == 7)
+        index_cache_t128 = torch.all(index_cache[1, 0].view(torch.uint8) == 7)
     else:
-        assert not torch.all(index_q_out == 7)
-        assert not torch.all(index_cache[0, 0] == 7)
-        assert not torch.all(index_cache[0, 127] == 7)
-        assert not torch.all(index_cache[1, 0] == 7)
+        index_q_untouched = torch.all(index_q_out == 7)
+        index_cache_untouched = torch.all(index_cache == 7)
+        index_cache_t0 = torch.all(index_cache[0, 0] == 7)
+        index_cache_t127 = torch.all(index_cache[0, 127] == 7)
+        index_cache_t128 = torch.all(index_cache[1, 0] == 7)
+    if skip_index_branch:
+        assert index_q_untouched
+        assert index_cache_untouched
+    else:
+        assert not index_q_untouched
+        assert not index_cache_t0
+        assert not index_cache_t127
+        assert not index_cache_t128
 
 
 def test_indexer_cache_squeezes_to_contiguous_3d():

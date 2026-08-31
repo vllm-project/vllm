@@ -30,6 +30,18 @@ except ImportError:
 # which is a host op, so we cache it once here.
 FP8_DTYPE = current_platform.fp8_dtype()
 _HIPB_MM_INITIALIZED_DEVICES: set[int] = set()
+_FP8_E4M3_DTYPES = {
+    dtype
+    for dtype in (
+        getattr(torch, "float8_e4m3fn", None),
+        getattr(torch, "float8_e4m3fnuz", None),
+    )
+    if dtype is not None
+}
+
+
+def _is_fp8_e4m3_tensor(t: torch.Tensor | None) -> bool:
+    return t is not None and t.dtype in _FP8_E4M3_DTYPES
 
 
 def _ensure_hipb_mm_extension_initialized() -> None:
@@ -1764,6 +1776,7 @@ class rocm_aiter_ops:
     # this module is imported.
     _FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED: bool | None = None
     _FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE: bool | None = None
+    _FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q: bool | None = None
     # Lazily probed: whether aiter.topk_softmax supports the
     # num_shared_experts / shared_expert_scoring_func args (7-arg form).
     _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
@@ -2010,6 +2023,22 @@ class rocm_aiter_ops:
         return cls._FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE
 
     @classmethod
+    def fused_qknorm_idxrqknorm_supports_fp8_index_q(cls) -> bool:
+        """Whether AITER can emit unit-scale e4m3 index_q (4787 q_idx)."""
+        if cls._FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q is None:
+            try:
+                from aiter import (
+                    FUSED_QKNORM_IDXRQKNORM_SUPPORTS_FP8_INDEX_Q,
+                )
+
+                cls._FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q = bool(
+                    FUSED_QKNORM_IDXRQKNORM_SUPPORTS_FP8_INDEX_Q
+                )
+            except (ImportError, AttributeError):
+                cls._FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q = False
+        return cls._FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q
+
+    @classmethod
     def fused_qknorm_idxrqknorm(
         cls,
         qkv: torch.Tensor,
@@ -2062,6 +2091,14 @@ class rocm_aiter_ops:
         else:
             return False
 
+        if _is_fp8_e4m3_tensor(
+            index_q_out
+        ) and not cls.fused_qknorm_idxrqknorm_supports_fp8_index_q():
+            return False
+        aiter_index_cache_dtype = (
+            "fp8" if _is_fp8_e4m3_tensor(index_cache) else "auto"
+        )
+
         from aiter import fused_qknorm_idxrqknorm
 
         fused_qknorm_idxrqknorm(
@@ -2086,7 +2123,7 @@ class rocm_aiter_ops:
             index_q_out=index_q_out,
             index_slot_mapping=index_slot_mapping,
             kv_cache_dtype=aiter_kv_cache_dtype,
-            index_cache_dtype="auto",
+            index_cache_dtype=aiter_index_cache_dtype,
             k_scale=aiter_k_scale,
             v_scale=aiter_v_scale,
             asm_layout=True,
