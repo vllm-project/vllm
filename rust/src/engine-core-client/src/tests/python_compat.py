@@ -47,6 +47,7 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     stop_token_ids: list[int] = []
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = set()
+    routed_experts_prompt_start: int = 0
     output_kind: RequestOutputKind = RequestOutputKind.DELTA
 
 
@@ -135,6 +136,7 @@ request = EngineCoreRequest(
         stop_token_ids=[151643],
         _eos_token_id=151645,
         _all_stop_token_ids={151643, 151645},
+        routed_experts_prompt_start=1,
         output_kind=RequestOutputKind.FINAL_ONLY,
     ),
     pooling_params=None,
@@ -351,7 +353,8 @@ inline_prompt_logprobs = engine_outputs_wire(
                 ).tobytes(),
             ),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
-            None,
+            None,  # cu_num_generated_tokens
+            None,  # cu_num_generated_tokens_tensor
         ),
     )
 )
@@ -374,7 +377,8 @@ multipart_prompt_logprobs = engine_outputs_wire(
                 ).tobytes(),
             ),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
-            None,
+            None,  # cu_num_generated_tokens
+            None,  # cu_num_generated_tokens_tensor
         ),
     )
 )

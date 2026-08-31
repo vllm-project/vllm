@@ -16,14 +16,13 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.generate.base.serving import GenerateBaseServing
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
-    ErrorResponse,
     RequestResponseMetadata,
-    UsageInfo,
 )
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -124,7 +123,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         self.enable_force_include_usage = enable_force_include_usage
 
-        self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
         self.max_audio_decode_duration_s: int = envs.VLLM_MAX_AUDIO_DECODE_DURATION_S
         self.max_audio_decode_bytes: int = envs.VLLM_MAX_AUDIO_DECODE_BYTES
         if self.model_cls.supports_segment_timestamp:
@@ -273,13 +271,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             if request.to_language
             else None
         )
-
-        if len(audio_data) / 1024**2 > self.max_audio_filesize_mb:
-            raise VLLMValidationError(
-                "Maximum file size exceeded",
-                parameter="audio_filesize_mb",
-                value=len(audio_data) / 1024**2,
-            )
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
         chunks, duration = await self._decode_and_chunk_speech_async(audio_data)
@@ -449,11 +440,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         if not request.model:
             request.model = self.models.model_name()
 
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight()
 
         if request.response_format not in [
             "text",
