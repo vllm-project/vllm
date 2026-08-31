@@ -621,13 +621,20 @@ Reasoning deltas (`response.reasoning_text.delta`) count towards TTFT and ITL,
 because the server is already decoding tokens when it emits them. Only output
 text (`response.output_text.delta`) is collected as the generated text, which
 matches how the `openai-chat` backend treats `DeltaMessage.reasoning`. End-to-end
-latency is measured up to `response.completed`, and the input and output token
-counts come from the usage block that event carries.
+latency stops at the last token event, so `latency - ttft` equals `sum(itl)` and
+TPOT is comparable with the other endpoints. The input and output token counts
+come from the usage block on `response.completed`, which is still required: a
+stream that ends without a terminal event is reported as a failed request.
 
 The backend measures one streamed text-generation request per prompt. Built-in
 tools, MCP, and multi-turn state via `previous_response_id` are out of scope.
 All sampling parameter flags are supported except `--min-p`, which the
 Responses API does not accept.
+
+!!! warning
+    Do not pass `--extra-body '{"include_reasoning": false}'` when benchmarking
+    a reasoning model. The server still generates reasoning tokens but emits no
+    events for them, so the whole reasoning phase is absorbed into TTFT.
 
 #### Running With Sampling Parameters
 
