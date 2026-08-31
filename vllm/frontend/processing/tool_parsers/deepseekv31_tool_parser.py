@@ -5,8 +5,8 @@ from collections.abc import Sequence
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.generate.base.protocol import (
+from vllm.frontend.entrypoints.chat_utils import make_tool_call_id
+from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -14,7 +14,7 @@ from vllm.entrypoints.generate.base.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.foundation.observability.logger import init_logger

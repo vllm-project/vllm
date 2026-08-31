@@ -41,8 +41,8 @@ import regex as re
 from openai.types.responses import ToolChoiceFunction
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.generate.base.protocol import (
+from vllm.frontend.entrypoints.chat_utils import make_tool_call_id
+from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -50,11 +50,11 @@ from vllm.entrypoints.generate.base.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.tool_parsers.abstract_tool_parser import (
     Tool,

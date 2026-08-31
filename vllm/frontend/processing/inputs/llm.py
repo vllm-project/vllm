@@ -222,7 +222,7 @@ PromptType: TypeAlias = DecoderOnlyPrompt | EncoderDecoderPrompt
 """
 Schema for any prompt, regardless of model type.
 
-This is the input format accepted by most [`LLM`][vllm.entrypoints.llm.LLM] APIs.
+This is the input format accepted by most [`LLM`][vllm.frontend.entrypoints.llm.LLM] APIs.
 """
 
 

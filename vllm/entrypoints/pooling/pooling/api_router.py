@@ -1,39 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from http import HTTPStatus
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from fastapi import APIRouter, Depends, Request
+"""Compatibility shim: vllm.entrypoints/pooling/pooling/api_router -> vllm.frontend.entrypoints.pooling.pooling.api_router (sys.modules alias)."""
+import importlib
+import sys
 
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.utils.api_utils import (
-    load_aware_call,
-    validate_json_request,
-    with_cancellation,
-)
-
-from .protocol import PoolingRequest
-from .serving import ServingPooling
-
-router = APIRouter()
-
-
-def pooling(request: Request) -> ServingPooling:
-    handler = getattr(request.app.state, "serving_pooling", None)
-    if handler is None:
-        raise NotImplementedError("The model does not support Pooling API")
-    return handler
-
-
-@router.post(
-    "/pooling",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_pooling(request: PoolingRequest, raw_request: Request):
-    handler = pooling(raw_request)
-    return await handler(request, raw_request)
+_real = importlib.import_module("vllm.frontend.entrypoints.pooling.pooling.api_router")
+sys.modules[__name__] = _real

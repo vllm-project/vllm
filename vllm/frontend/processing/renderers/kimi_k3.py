@@ -3,7 +3,7 @@
 from typing import Any, cast
 
 from vllm.foundation.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.frontend.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,

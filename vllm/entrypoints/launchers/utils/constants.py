@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-# HTTP header limits for h11 parser
-# These constants help mitigate header abuse attacks
-H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT = 4194304  # 4 MB
-H11_MAX_HEADER_COUNT_DEFAULT = 256
+"""Compatibility shim: vllm.entrypoints/launchers/utils/constants -> vllm.frontend.entrypoints.launchers.utils.constants (sys.modules alias)."""
+import importlib
+import sys
+
+_real = importlib.import_module("vllm.frontend.entrypoints.launchers.utils.constants")
+sys.modules[__name__] = _real

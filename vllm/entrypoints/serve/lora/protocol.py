@@ -1,16 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from pydantic import BaseModel, Field
+"""Compatibility shim: vllm.entrypoints/serve/lora/protocol -> vllm.frontend.entrypoints.serve.lora.protocol (sys.modules alias)."""
+import importlib
+import sys
 
-
-class LoadLoRAAdapterRequest(BaseModel):
-    lora_name: str
-    lora_path: str
-    load_inplace: bool = False
-    is_3d_lora_weight: bool = False
-
-
-class UnloadLoRAAdapterRequest(BaseModel):
-    lora_name: str
-    lora_int_id: int | None = Field(default=None)
+_real = importlib.import_module("vllm.frontend.entrypoints.serve.lora.protocol")
+sys.modules[__name__] = _real

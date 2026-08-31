@@ -8,14 +8,14 @@ from collections.abc import Sequence
 import regex as re
 
 import vllm.foundation.system.envs as envs
-from vllm.entrypoints.generate.base.protocol import (
+from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.frontend.processing.tool_parsers.abstract_tool_parser import (

@@ -13,7 +13,7 @@ from vllm.foundation.utilities.import_utils import LazyLoader
 if TYPE_CHECKING:
     import torch
 
-    from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+    from vllm.frontend.entrypoints.chat_utils import ChatTemplateContentFormatOption
 else:
     torch = LazyLoader("torch", globals(), "torch")
 

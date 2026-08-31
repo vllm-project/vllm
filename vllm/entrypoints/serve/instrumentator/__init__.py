@@ -1,22 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from fastapi import FastAPI
+"""Compatibility shim: vllm.entrypoints/serve/instrumentator/ -> vllm.frontend.entrypoints.serve.instrumentator (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
+_real = _importlib.import_module("vllm.frontend.entrypoints.serve.instrumentator")
 
-def register_instrumentator_api_routers(app: FastAPI):
-    from .basic import router as basic_router
+def __getattr__(name):
+    return getattr(_real, name)
 
-    app.include_router(basic_router)
+def __dir__():
+    return dir(_real)
 
-    from .health import router as health_router
-
-    app.include_router(health_router)
-
-    from .metrics import attach_router as metrics_attach_router
-
-    metrics_attach_router(app)
-
-    from .offline_docs import attach_router as offline_docs_attach_router
-
-    offline_docs_attach_router(app)
+__all__ = getattr(_real, "__all__", [])

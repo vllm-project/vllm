@@ -1,26 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import argparse
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+"""Compatibility shim: vllm.entrypoints/cli/benchmark/base -> vllm.frontend.entrypoints.cli.benchmark.base (sys.modules alias)."""
+import importlib
+import sys
 
-
-class BenchmarkSubcommandBase(CLISubcommand):
-    """The base class of subcommands for `vllm bench`."""
-
-    help: str
-
-    @classmethod
-    def add_cli_args(cls, parser: FlexibleArgumentParser) -> None:
-        """Add the CLI arguments to the parser."""
-        raise NotImplementedError
-
-    @staticmethod
-    def cmd(args: argparse.Namespace) -> None:
-        """Run the benchmark.
-
-        Args:
-            args: The arguments to the command.
-        """
-        raise NotImplementedError
+_real = importlib.import_module("vllm.frontend.entrypoints.cli.benchmark.base")
+sys.modules[__name__] = _real

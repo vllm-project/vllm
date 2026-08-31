@@ -42,7 +42,7 @@ if typing.TYPE_CHECKING:
     from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs, EngineArgs
     from vllm.frontend.compat.engine.async_llm_engine import AsyncLLMEngine
     from vllm.frontend.compat.engine.llm_engine import LLMEngine
-    from vllm.entrypoints.llm import LLM
+    from vllm.frontend.entrypoints.llm import LLM
     from vllm.frontend.processing.inputs import PromptType, TextPrompt, TokensPrompt
     from vllm.model_executor.models import ModelRegistry
     from vllm.frontend.processing.outputs import (

@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.generate.base.protocol import (
+from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
 )
@@ -14,10 +14,10 @@ from vllm.frontend.processing.parser.abstract_parser import DelegatingParser
 from vllm.frontend.processing.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
+    from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
     )
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
 class KimiK3Parser(DelegatingParser):

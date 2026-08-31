@@ -15,15 +15,15 @@ from openai.types.responses import (
 from openai.types.responses.function_tool import FunctionTool
 
 import vllm.foundation.system.envs as envs
-from vllm.entrypoints.generate.base.protocol import (
+from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.responses.protocol import (
+from vllm.frontend.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
 from vllm.foundation.observability.logger import init_logger

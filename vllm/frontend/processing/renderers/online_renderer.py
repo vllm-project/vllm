@@ -7,27 +7,27 @@ from typing import Any
 from openai_harmony import Message as OpenAIMessage
 
 from vllm.foundation.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.frontend.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.completion.protocol import (
+from vllm.frontend.entrypoints.openai.completion.protocol import (
     CompletionRequest,
 )
-from vllm.entrypoints.openai.parser.harmony_utils import (
+from vllm.frontend.entrypoints.openai.parser.harmony_utils import (
     build_harmony_preamble,
     extract_instructions_from_messages,
     parse_chat_inputs_to_harmony_messages,
     render_for_completion,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.serve import create_error_response
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.frontend.entrypoints.serve import create_error_response
+from vllm.frontend.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.frontend.processing.inputs import (
     EngineInput,
     PromptType,

@@ -4,7 +4,7 @@
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.generate.base.protocol import (
+from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
 )

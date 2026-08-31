@@ -30,7 +30,7 @@ from xgrammar.structural_tag import (
     TriggeredTagsFormat,
 )
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )

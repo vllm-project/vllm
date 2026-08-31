@@ -60,7 +60,7 @@ from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
     from vllm.foundation.config import VllmConfig
-    from vllm.entrypoints.chat_utils import (
+    from vllm.frontend.entrypoints.chat_utils import (
         ChatCompletionMessageParam,
         ConversationMessage,
     )
@@ -250,7 +250,7 @@ class BaseRenderer(ABC, Generic[_T]):
         For chat requests:
         - Jinja2 template compilation
         """
-        from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
+        from vllm.frontend.entrypoints.chat_utils import ChatTemplateResolutionError
 
         # prevent MM processor hangs
         with set_default_torch_num_threads(1):

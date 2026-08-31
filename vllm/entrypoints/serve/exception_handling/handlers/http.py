@@ -1,31 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from http import HTTPStatus
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from fastapi import HTTPException, Request
-from starlette.responses import JSONResponse
+"""Compatibility shim: vllm.entrypoints/serve/exception_handling/handlers/http -> vllm.frontend.entrypoints.serve.exception_handling.handlers.http (sys.modules alias)."""
+import importlib
+import sys
 
-from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
-from vllm.foundation.observability.logger import init_logger
-
-from ..utils import sanitize_message
-
-logger = init_logger(__name__)
-
-
-async def http_exception_handler(req: Request, exc: HTTPException):
-    if req.app.state.args.log_error_stack:
-        logger.exception(
-            "HTTPException caught. Request id: %s",
-            req.state.request_metadata.request_id
-            if hasattr(req.state, "request_metadata")
-            else None,
-        )
-    err = ErrorResponse(
-        error=ErrorInfo(
-            message=sanitize_message(exc.detail),
-            type=HTTPStatus(exc.status_code).phrase,
-            code=exc.status_code,
-        )
-    )
-    return JSONResponse(err.model_dump(), status_code=exc.status_code)
+_real = importlib.import_module("vllm.frontend.entrypoints.serve.exception_handling.handlers.http")
+sys.modules[__name__] = _real

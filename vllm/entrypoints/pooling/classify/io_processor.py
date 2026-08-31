@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from ..base.io_processor import PoolingIOProcessor
+"""Compatibility shim: vllm.entrypoints/pooling/classify/io_processor -> vllm.frontend.entrypoints.pooling.classify.io_processor (sys.modules alias)."""
+import importlib
+import sys
 
-
-class ClassifyIOProcessor(PoolingIOProcessor):
-    name = "classify"
-
-
-class TokenClassifyIOProcessor(PoolingIOProcessor):
-    name = "token_classify"
+_real = importlib.import_module("vllm.frontend.entrypoints.pooling.classify.io_processor")
+sys.modules[__name__] = _real

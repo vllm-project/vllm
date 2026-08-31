@@ -14,7 +14,7 @@ input-processing library (mistral-common style) later.
 """
 
 from vllm.foundation.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.frontend.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,

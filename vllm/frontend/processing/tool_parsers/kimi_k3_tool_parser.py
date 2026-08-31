@@ -37,7 +37,7 @@ from collections.abc import Sequence
 import regex as re
 from openai.types.responses import ToolChoiceFunction
 
-from vllm.entrypoints.generate.base.protocol import (
+from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -45,11 +45,11 @@ from vllm.entrypoints.generate.base.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.tokenizers import TokenizerLike

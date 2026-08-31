@@ -1,22 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import argparse
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.benchmarks.throughput import add_cli_args, main
-from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
-from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+"""Compatibility shim: vllm.entrypoints/cli/benchmark/throughput -> vllm.frontend.entrypoints.cli.benchmark.throughput (sys.modules alias)."""
+import importlib
+import sys
 
-
-class BenchmarkThroughputSubcommand(BenchmarkSubcommandBase):
-    """The `throughput` subcommand for `vllm bench`."""
-
-    name = "throughput"
-    help = "Benchmark offline inference throughput."
-
-    @classmethod
-    def add_cli_args(cls, parser: FlexibleArgumentParser) -> None:
-        add_cli_args(parser)
-
-    @staticmethod
-    def cmd(args: argparse.Namespace) -> None:
-        main(args)
+_real = importlib.import_module("vllm.frontend.entrypoints.cli.benchmark.throughput")
+sys.modules[__name__] = _real

@@ -3,10 +3,10 @@
 from typing import Any
 
 from vllm.foundation.config import ModelConfig
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
-from vllm.entrypoints.generate.base.protocol import DeltaMessage, ToolCall
-from vllm.entrypoints.generate.base.serving import resolve_token_id_placeholder
-from vllm.entrypoints.openai.chat_completion.protocol import (
+from vllm.frontend.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.frontend.entrypoints.generate.base.protocol import DeltaMessage, ToolCall
+from vllm.frontend.entrypoints.generate.base.serving import resolve_token_id_placeholder
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
@@ -15,20 +15,20 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.openai.completion.protocol import (
+from vllm.frontend.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
     CompletionRequest,
     CompletionResponseChoice,
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
 )
-from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+from vllm.frontend.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderStreamState,
     GenerateResponse,
     GenerateStreamResponse,
 )
-from vllm.entrypoints.serve.engine.protocol import UsageInfo
-from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.frontend.entrypoints.serve.engine.protocol import UsageInfo
+from vllm.frontend.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.parser import Parser, ParserManager
 from vllm.frontend.processing.renderers import BaseRenderer

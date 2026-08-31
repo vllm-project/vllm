@@ -11,21 +11,21 @@ from functools import cached_property
 from openai.types.responses import ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
 
-from vllm.entrypoints.chat_utils import (
+from vllm.frontend.entrypoints.chat_utils import (
     get_tool_call_id_type,
     make_tool_call_id,
 )
-from vllm.entrypoints.generate.base.protocol import (
+from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
     FunctionDefinition,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.parser.metrics import record_tool_parser_invocation
 from vllm.frontend.processing.parser.utils import count_history_tool_calls

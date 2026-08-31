@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.generate.base.protocol import DeltaMessage
+from vllm.frontend.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.frontend.processing.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
 class Ernie45ReasoningParser(BaseThinkingReasoningParser):

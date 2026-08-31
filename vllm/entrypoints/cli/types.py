@@ -1,29 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-import argparse
-import typing
+"""Compatibility shim: vllm.entrypoints/cli/types -> vllm.frontend.entrypoints.cli.types (sys.modules alias)."""
+import importlib
+import sys
 
-if typing.TYPE_CHECKING:
-    from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
-else:
-    FlexibleArgumentParser = argparse.ArgumentParser
-
-
-class CLISubcommand:
-    """Base class for CLI argument handlers."""
-
-    name: str
-
-    @staticmethod
-    def cmd(args: argparse.Namespace) -> None:
-        raise NotImplementedError("Subclasses should implement this method")
-
-    def validate(self, args: argparse.Namespace) -> None:
-        # No validation by default
-        pass
-
-    def subparser_init(
-        self, subparsers: argparse._SubParsersAction
-    ) -> FlexibleArgumentParser:
-        raise NotImplementedError("Subclasses should implement this method")
+_real = importlib.import_module("vllm.frontend.entrypoints.cli.types")
+sys.modules[__name__] = _real

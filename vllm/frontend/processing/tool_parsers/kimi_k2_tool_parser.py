@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.frontend.processing.parser.engine.registered_adapters import KimiK2ParserToolAdapter
 
 

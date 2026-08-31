@@ -20,24 +20,24 @@ except ImportError as e:
     ) from e
 
 
-from vllm.entrypoints.cohere.cohere_chat_message import (
+from vllm.frontend.entrypoints.cohere.cohere_chat_message import (
     Citation,
     CitationSource,
     CohereDeltaMessage,
 )
-from vllm.entrypoints.generate.base.protocol import (
+from vllm.frontend.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.frontend.processing.reasoning import ReasoningParser
 from vllm.frontend.processing.sampling_params import StructuredOutputsParams
 from vllm.frontend.processing.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 
 REPLACEMENT_CHAR = "\ufffd"
 
@@ -420,7 +420,7 @@ def _melody_sources_to_vllm(
     :meth:`PyFilterOptions.with_message_history` the ``document_ids``
     list is empty, so we resolve the numeric address ourselves using
     ``position_to_source``, which is
-    :meth:`vllm.entrypoints.cohere.serving.CohereServingChatV2._build_position_to_source`
+    :meth:`vllm.frontend.entrypoints.cohere.serving.CohereServingChatV2._build_position_to_source`
     applied to the inbound request and forwarded through
     ``chat_template_kwargs`` at parser-construction time. Each melody
     source with ``tool_result_indices=[i, j, ...]`` fans out to one
@@ -429,7 +429,7 @@ def _melody_sources_to_vllm(
     fields; unresolved positions are silently skipped (the calling
     citation is dropped at wire-coercion time if every source in it
     ends up unresolved -- see ``_to_wire_citation`` in
-    :mod:`vllm.entrypoints.cohere.serving`).
+    :mod:`vllm.frontend.entrypoints.cohere.serving`).
 
     When ``position_to_source`` is ``None`` (parser wired outside of
     :class:`CohereServingChatV2`, e.g. a plain OpenAI chat completion

@@ -13,7 +13,7 @@ import tiktoken
 from transformers import AddedToken, BatchEncoding
 from transformers.utils import chat_template_utils as hf_chat_utils
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.frontend.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.tokenizers.protocol import TokenizerLike
 from vllm.foundation.integrations.transformers_utils.repo_utils import hf_api

@@ -1,48 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
+"""Compatibility shim: vllm.entrypoints/serve/dev/sleep/api_router -> vllm.frontend.entrypoints.serve.dev.sleep.api_router (sys.modules alias)."""
+import importlib
+import sys
 
-from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import JSONResponse, Response
-
-from vllm.frontend.compat.engine.protocol import EngineClient
-from vllm.foundation.observability.logger import init_logger
-
-logger = init_logger(__name__)
-
-
-def engine_client(request: Request) -> EngineClient:
-    return request.app.state.engine_client
-
-
-router = APIRouter()
-
-
-@router.post("/sleep")
-async def sleep(raw_request: Request):
-    # get POST params
-    level = raw_request.query_params.get("level", "1")
-    mode = raw_request.query_params.get("mode", "abort")
-    await engine_client(raw_request).sleep(int(level), mode)
-    return Response(status_code=200)
-
-
-@router.post("/wake_up")
-async def wake_up(raw_request: Request):
-    tags = raw_request.query_params.getlist("tags")
-    if tags == []:
-        # set to None to wake up all tags if no tags are provided
-        tags = None
-    logger.info("wake up the engine with tags: %s", tags)
-    await engine_client(raw_request).wake_up(tags)
-    return Response(status_code=200)
-
-
-@router.get("/is_sleeping")
-async def is_sleeping(raw_request: Request):
-    is_sleeping = await engine_client(raw_request).is_sleeping()
-    return JSONResponse(content={"is_sleeping": is_sleeping})
-
-
-def attach_router(app: FastAPI):
-    app.include_router(router)
+_real = importlib.import_module("vllm.frontend.entrypoints.serve.dev.sleep.api_router")
+sys.modules[__name__] = _real

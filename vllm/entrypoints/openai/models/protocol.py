@@ -1,19 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
+"""Compatibility shim: vllm.entrypoints/openai/models/protocol -> vllm.frontend.entrypoints.openai.models.protocol (sys.modules alias)."""
+import importlib
+import sys
 
-from dataclasses import dataclass
-
-
-@dataclass
-class BaseModelPath:
-    name: str
-    model_path: str
-
-
-@dataclass
-class LoRAModulePath:
-    name: str
-    path: str
-    base_model_name: str | None = None
-    is_3d_lora_weight: bool = False
+_real = importlib.import_module("vllm.frontend.entrypoints.openai.models.protocol")
+sys.modules[__name__] = _real

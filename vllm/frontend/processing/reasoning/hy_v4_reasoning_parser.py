@@ -8,14 +8,14 @@ from typing import TYPE_CHECKING, TypedDict
 
 import regex as re
 
-from vllm.entrypoints.generate.base.protocol import DeltaMessage
+from vllm.frontend.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.reasoning import ReasoningParser
 from vllm.frontend.processing.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.frontend.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
 
 logger = init_logger(__name__)
 

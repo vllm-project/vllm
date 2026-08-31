@@ -1,33 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
+"""Compatibility shim: vllm.entrypoints/serve/instrumentator/health -> vllm.frontend.entrypoints.serve.instrumentator.health (sys.modules alias)."""
+import importlib
+import sys
 
-from fastapi import APIRouter, Request
-from fastapi.responses import Response
-
-from vllm.frontend.compat.engine.protocol import EngineClient
-from vllm.foundation.observability.logger import init_logger
-from vllm.v1.engine.exceptions import EngineDeadError
-
-logger = init_logger(__name__)
-
-
-router = APIRouter()
-
-
-def engine_client(request: Request) -> EngineClient:
-    return request.app.state.engine_client
-
-
-@router.get("/health", response_class=Response)
-async def health(raw_request: Request) -> Response:
-    """Health check."""
-    client = engine_client(raw_request)
-    if client is None:
-        # Render-only servers have no engine; they are always healthy.
-        return Response(status_code=200)
-    try:
-        await client.check_health()
-        return Response(status_code=200)
-    except EngineDeadError:
-        return Response(status_code=503)
+_real = importlib.import_module("vllm.frontend.entrypoints.serve.instrumentator.health")
+sys.modules[__name__] = _real

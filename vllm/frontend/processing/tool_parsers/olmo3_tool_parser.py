@@ -8,11 +8,11 @@ import regex as re
 from transformers import PreTrainedTokenizerBase
 
 import vllm.foundation.system.envs as envs
-from vllm.entrypoints.generate.base.protocol import (
+from vllm.frontend.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
+from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.foundation.observability.logger import init_logger

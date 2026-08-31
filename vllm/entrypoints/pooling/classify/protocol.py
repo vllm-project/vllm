@@ -1,71 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-import time
-from typing import Annotated, TypeAlias
+"""Compatibility shim: vllm.entrypoints/pooling/classify/protocol -> vllm.frontend.entrypoints.pooling.classify.protocol (sys.modules alias)."""
+import importlib
+import sys
 
-from pydantic import BeforeValidator, Field
-
-from vllm import PoolingParams
-from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.foundation.observability.logger import init_logger
-from vllm.foundation.utilities import random_uuid
-
-from ..base.protocol import (
-    ChatRequestMixin,
-    ClassifyRequestMixin,
-    CompletionRequestMixin,
-    FixedMaxLenTokenizeParamsMixin,
-    PoolingBasicRequestMixin,
-    reject_removed_pooling_parameters,
-)
-
-logger = init_logger(__name__)
-
-
-class ClassificationCompletionRequest(
-    PoolingBasicRequestMixin,
-    CompletionRequestMixin,
-    ClassifyRequestMixin,
-    FixedMaxLenTokenizeParamsMixin,
-):
-    def to_pooling_params(self):
-        return PoolingParams(
-            task="classify",
-            use_activation=self.use_activation,
-        )
-
-
-class ClassificationChatRequest(
-    PoolingBasicRequestMixin,
-    ChatRequestMixin,
-    ClassifyRequestMixin,
-    FixedMaxLenTokenizeParamsMixin,
-):
-    def to_pooling_params(self):
-        return PoolingParams(
-            task="classify",
-            use_activation=self.use_activation,
-        )
-
-
-ClassificationRequest: TypeAlias = Annotated[
-    ClassificationCompletionRequest | ClassificationChatRequest,
-    BeforeValidator(reject_removed_pooling_parameters),
-]
-
-
-class ClassificationData(OpenAIBaseModel):
-    index: int
-    label: str | None
-    probs: list[float]
-    num_classes: int
-
-
-class ClassificationResponse(OpenAIBaseModel):
-    id: str = Field(default_factory=lambda: f"classify-{random_uuid()}")
-    object: str = "list"
-    created: int = Field(default_factory=lambda: int(time.time()))
-    model: str
-    data: list[ClassificationData]
-    usage: UsageInfo
+_real = importlib.import_module("vllm.frontend.entrypoints.pooling.classify.protocol")
+sys.modules[__name__] = _real

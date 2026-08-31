@@ -17,7 +17,7 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.generate.base.protocol import DeltaMessage
+from vllm.frontend.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.parser.engine.events import EventType, SemanticEvent
 from vllm.frontend.processing.parser.engine.parser_engine import ParserEngine
@@ -28,10 +28,10 @@ from vllm.frontend.processing.parser.engine.parser_engine_config import (
 )
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
+    from vllm.frontend.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
     )
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.frontend.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.frontend.processing.tokenizers import TokenizerLike
     from vllm.frontend.processing.tool_parsers.abstract_tool_parser import Tool
 

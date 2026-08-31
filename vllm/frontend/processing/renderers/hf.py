@@ -20,7 +20,7 @@ import jinja2.sandbox
 import torch
 from typing_extensions import override
 
-from vllm.entrypoints.chat_utils import (
+from vllm.frontend.entrypoints.chat_utils import (
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
     ChatTemplateResolutionError,
     load_chat_template,
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from collections.abc import Set
 
     from vllm.foundation.config import ModelConfig, VllmConfig
-    from vllm.entrypoints.chat_utils import (
+    from vllm.frontend.entrypoints.chat_utils import (
         ChatCompletionMessageParam,
         ChatTemplateContentFormat,
         ChatTemplateContentFormatOption,

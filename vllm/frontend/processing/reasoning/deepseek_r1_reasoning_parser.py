@@ -3,7 +3,7 @@
 
 from collections.abc import Sequence
 
-from vllm.entrypoints.generate.base.protocol import DeltaMessage
+from vllm.frontend.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.frontend.processing.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 

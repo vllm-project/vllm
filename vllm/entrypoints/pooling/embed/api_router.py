@@ -1,61 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from http import HTTPStatus
+"""Compatibility shim: vllm.entrypoints/pooling/embed/api_router -> vllm.frontend.entrypoints.pooling.embed.api_router (sys.modules alias)."""
+import importlib
+import sys
 
-from fastapi import APIRouter, Depends, Request
-
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.utils.api_utils import (
-    load_aware_call,
-    validate_json_request,
-    with_cancellation,
-)
-
-from .protocol import CohereEmbedRequest, EmbeddingRequest
-from .serving import ServingEmbedding
-
-router = APIRouter()
-
-
-def embedding(request: Request) -> ServingEmbedding:
-    handler = getattr(request.app.state, "serving_embedding", None)
-    if handler is None:
-        raise NotImplementedError("The model does not support Embeddings API")
-    return handler
-
-
-@router.post(
-    "/v1/embeddings",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_embedding(
-    request: EmbeddingRequest,
-    raw_request: Request,
-):
-    handler = embedding(raw_request)
-    return await handler(request, raw_request)
-
-
-@router.post(
-    "/v2/embed",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_cohere_embedding(
-    request: CohereEmbedRequest,
-    raw_request: Request,
-):
-    handler = embedding(raw_request)
-    return await handler(request, raw_request)
+_real = importlib.import_module("vllm.frontend.entrypoints.pooling.embed.api_router")
+sys.modules[__name__] = _real

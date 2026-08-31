@@ -11,7 +11,7 @@ The renderer's client surface is ``chat_template_kwargs`` (vLLM's
 generic passthrough for template-time inputs). It is fed by two
 different code paths, which speak different vocabularies:
 
-1. :class:`vllm.entrypoints.cohere.serving.CohereServingChatV2` --
+1. :class:`vllm.frontend.entrypoints.cohere.serving.CohereServingChatV2` --
    translates a native `Cohere Chat v2 request
    <https://docs.cohere.com/reference/chat>`__ into
    ``chat_template_kwargs``.
@@ -79,7 +79,7 @@ templates.
 Citations produced by Cohere models are surfaced through the
 Cohere-scoped ``CohereChatMessage.citations`` /
 ``CohereDeltaMessage.citations`` fields (see
-:mod:`vllm.entrypoints.cohere.cohere_chat_message`), populated by the
+:mod:`vllm.frontend.entrypoints.cohere.cohere_chat_message`), populated by the
 ``cohere2`` reasoning parser. The base OpenAI ``ChatMessage`` /
 ``DeltaMessage`` keep their declared schemas unchanged; the response
 envelope declares them as ``SerializeAsAny[...]`` so the subclass
@@ -94,7 +94,7 @@ from enum import Enum
 from typing import Any
 
 from vllm.foundation.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.frontend.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,

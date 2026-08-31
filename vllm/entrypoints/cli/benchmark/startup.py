@@ -1,22 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import argparse
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.benchmarks.startup import add_cli_args, main
-from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
-from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
+"""Compatibility shim: vllm.entrypoints/cli/benchmark/startup -> vllm.frontend.entrypoints.cli.benchmark.startup (sys.modules alias)."""
+import importlib
+import sys
 
-
-class BenchmarkStartupSubcommand(BenchmarkSubcommandBase):
-    """The `startup` subcommand for `vllm bench`."""
-
-    name = "startup"
-    help = "Benchmark the startup time of vLLM models."
-
-    @classmethod
-    def add_cli_args(cls, parser: FlexibleArgumentParser) -> None:
-        add_cli_args(parser)
-
-    @staticmethod
-    def cmd(args: argparse.Namespace) -> None:
-        main(args)
+_real = importlib.import_module("vllm.frontend.entrypoints.cli.benchmark.startup")
+sys.modules[__name__] = _real

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol, overload
 if TYPE_CHECKING:
     from transformers import BatchEncoding
 
-    from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+    from vllm.frontend.entrypoints.chat_utils import ChatCompletionMessageParam
 
 
 class TokenizerLike(Protocol):
