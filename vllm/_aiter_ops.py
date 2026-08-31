@@ -1888,9 +1888,12 @@ class rocm_aiter_ops:
         return cls.is_linear_enabled()
 
     @classmethod
-    @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FMOE_ENABLED
+        if is_aiter_found_and_supported():
+            return cls._AITER_ENABLED and cls._FMOE_ENABLED
+        if cls.is_rdna_aiter_enabled():
+            return cls._FMOE_ENABLED and envs.is_set("VLLM_ROCM_USE_AITER_MOE")
+        return False
 
     @classmethod
     @if_aiter_supported
