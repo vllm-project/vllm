@@ -41,7 +41,7 @@ from transformers.models.whisper.modeling_whisper import (
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.inputs import ModalityData, MultiModalDataDict
+from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,

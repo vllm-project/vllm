@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
 
-from vllm.inputs import (
+from vllm.frontend.processing.inputs import (
     EmbedsInput,
     EmbedsPrompt,
     EncoderDecoderInput,

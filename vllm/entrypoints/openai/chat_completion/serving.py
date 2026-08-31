@@ -55,7 +55,7 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
 from vllm.foundation.system.exceptions import GenerationError
-from vllm.inputs import EngineInput, MultiModalPlaceholders
+from vllm.frontend.processing.inputs import EngineInput, MultiModalPlaceholders
 from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.frontend.processing.outputs import RequestOutput

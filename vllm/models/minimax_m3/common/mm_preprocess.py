@@ -15,7 +15,7 @@ from vllm.foundation.config.multimodal import (
     ImageDummyOptions,
     VideoDummyOptions,
 )
-from vllm.inputs import MultiModalDataDict
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,

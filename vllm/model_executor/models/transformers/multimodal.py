@@ -27,7 +27,7 @@ from packaging.version import Version
 
 from vllm.compilation.decorators import should_torch_compile_mm_encoder
 from vllm.foundation.config.utils import getattr_iter
-from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
+from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalInput, mm_input
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,

@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from typing_extensions import assert_never
 
-from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalUUIDDict
+from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict, MultiModalUUIDDict
 from vllm.foundation.utilities.collection_utils import is_list_of
 from vllm.foundation.utilities.import_utils import LazyLoader
 
@@ -471,7 +471,7 @@ _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
     """
-    A normalized [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
+    A normalized [`MultiModalDataDict`][vllm.frontend.processing.inputs.MultiModalDataDict]
     such that each entry corresponds to a list.
     """
 
@@ -541,7 +541,7 @@ ModalityDataParser: TypeAlias = Callable[
 
 class MultiModalDataParser:
     """
-    Parses [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
+    Parses [`MultiModalDataDict`][vllm.frontend.processing.inputs.MultiModalDataDict]
     into [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
 
     Args:
@@ -814,7 +814,7 @@ class MultiModalDataParser:
 
 MultiModalUUIDItems: TypeAlias = dict[str, Sequence[str | None]]
 """
-A normalized [`MultiModalUUIDDict`][vllm.inputs.MultiModalUUIDDict]
+A normalized [`MultiModalUUIDDict`][vllm.frontend.processing.inputs.MultiModalUUIDDict]
 such that each entry corresponds to a list.
 """
 

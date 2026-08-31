@@ -1,64 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from .engine import (
-    DecoderOnlyEngineInput,
-    EmbedsInput,
-    EncoderDecoderInput,
-    EngineInput,
-    MultiModalEncDecInput,
-    MultiModalHashes,
-    MultiModalInput,
-    MultiModalPlaceholders,
-    SingletonInput,
-    TokensInput,
-    build_enc_dec_input,
-    embeds_input,
-    mm_enc_dec_input,
-    mm_input,
-    split_enc_dec_input,
-    tokens_input,
-)
-from .llm import (
-    DataPrompt,
-    EmbedsPrompt,
-    ExplicitEncoderDecoderPrompt,
-    ModalityData,
-    MultiModalDataBuiltins,
-    MultiModalDataDict,
-    MultiModalUUIDDict,
-    PromptType,
-    SingletonPrompt,
-    TextPrompt,
-    TokensPrompt,
-)
+"""Compatibility shim: vllm.inputs/ -> vllm.frontend.processing.inputs (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-__all__ = [
-    "ModalityData",
-    "MultiModalDataBuiltins",
-    "MultiModalDataDict",
-    "MultiModalUUIDDict",
-    "DataPrompt",
-    "TextPrompt",
-    "TokensPrompt",
-    "PromptType",
-    "SingletonPrompt",
-    "ExplicitEncoderDecoderPrompt",
-    "EmbedsPrompt",
-    "MultiModalHashes",
-    "MultiModalPlaceholders",
-    "TokensInput",
-    "EmbedsInput",
-    "MultiModalInput",
-    "MultiModalEncDecInput",
-    "tokens_input",
-    "embeds_input",
-    "mm_input",
-    "mm_enc_dec_input",
-    "build_enc_dec_input",
-    "split_enc_dec_input",
-    "DecoderOnlyEngineInput",
-    "EncoderDecoderInput",
-    "SingletonInput",
-    "EngineInput",
-]
+_real = _importlib.import_module("vllm.frontend.processing.inputs")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

@@ -9,7 +9,7 @@ from transformers import BatchFeature, PaliGemmaConfig
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.inputs import MultiModalDataDict, MultiModalInput
+from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalInput
 from vllm.foundation.observability.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (

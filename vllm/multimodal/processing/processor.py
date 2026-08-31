@@ -17,7 +17,7 @@ from typing import (
 import torch
 from typing_extensions import TypeVar, assert_never
 
-from vllm.inputs import (
+from vllm.frontend.processing.inputs import (
     MultiModalEncDecInput,
     MultiModalHashes,
     MultiModalInput,

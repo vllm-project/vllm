@@ -40,7 +40,7 @@ from vllm.foundation.config.multimodal import (
     BaseDummyOptions,
     VideoDummyOptions,
 )
-from vllm.inputs import MultiModalDataDict
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear

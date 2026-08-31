@@ -21,7 +21,7 @@ from transformers import BatchFeature, PretrainedConfig
 from vllm import envs
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions, VideoDummyOptions
-from vllm.inputs import MultiModalDataDict, MultiModalInput
+from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalInput
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm

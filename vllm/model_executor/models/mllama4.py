@@ -38,7 +38,7 @@ from vllm.compilation.decorators import (
 from vllm.foundation.config import VllmConfig, set_current_vllm_config
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import MultiModalDataDict
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,

@@ -23,7 +23,7 @@ from transformers import (
 from vllm.foundation.config import CacheConfig, VllmConfig
 from vllm.foundation.config.lora import LoRAConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
-from vllm.inputs import MultiModalDataDict
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear

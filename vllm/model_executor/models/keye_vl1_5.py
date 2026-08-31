@@ -14,7 +14,7 @@ from transformers.activations import GELUActivation
 from transformers.feature_extraction_utils import BatchFeature
 
 from vllm.foundation.config import VllmConfig
-from vllm.inputs import ModalityData
+from vllm.frontend.processing.inputs import ModalityData
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig

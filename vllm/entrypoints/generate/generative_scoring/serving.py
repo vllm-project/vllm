@@ -26,7 +26,7 @@ from vllm.entrypoints.serve.engine.protocol import (
 )
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.inputs import EngineInput, tokens_input
+from vllm.frontend.processing.inputs import EngineInput, tokens_input
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.outputs import RequestOutput
 from vllm.frontend.processing.sampling_params import SamplingParams

@@ -20,7 +20,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.inputs import EngineInput
+from vllm.frontend.processing.inputs import EngineInput
 from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.frontend.processing.renderers import BaseRenderer, ChatParams, merge_kwargs

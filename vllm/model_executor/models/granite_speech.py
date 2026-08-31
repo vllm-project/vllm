@@ -36,7 +36,7 @@ from transformers import BatchFeature, PretrainedConfig
 from vllm.foundation.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
+from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys

@@ -39,7 +39,7 @@ from vllm.benchmarks.datasets.utils import (
     _resolve_range_ratios,
     get_sampling_params,
 )
-from vllm.inputs import MultiModalDataDict
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal.audio import get_audio_duration

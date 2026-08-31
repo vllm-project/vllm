@@ -49,7 +49,7 @@ from vllm.foundation.config.multimodal import (
     ImageDummyOptions,
     VideoDummyOptions,
 )
-from vllm.inputs import ModalityData, MultiModalDataDict
+from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import (
     BaseResampler,

@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.foundation.config import ModelConfig, VllmConfig
-from vllm.inputs import TokensPrompt
+from vllm.frontend.processing.inputs import TokensPrompt
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.pooler import DispatchPooler

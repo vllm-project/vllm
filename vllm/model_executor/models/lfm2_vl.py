@@ -21,7 +21,7 @@ from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
-from vllm.inputs import MultiModalDataDict
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,

@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from vllm.foundation.config.multimodal import MMHasherAlgorithm
-from vllm.inputs import MultiModalHashes
+from vllm.frontend.processing.inputs import MultiModalHashes
 
 from ..hasher import MultiModalHasher
 from ..parse import MultiModalDataItems, MultiModalUUIDItems

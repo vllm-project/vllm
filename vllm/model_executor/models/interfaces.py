@@ -45,7 +45,7 @@ if TYPE_CHECKING:
         VllmConfig,
     )
     from vllm.foundation.config.multimodal import VideoPruningMethod
-    from vllm.inputs import PromptType, TokensPrompt
+    from vllm.frontend.processing.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
     from vllm.model_executor.layers.logits_processor import LogitsProcessor

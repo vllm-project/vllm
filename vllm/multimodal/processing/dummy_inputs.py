@@ -14,7 +14,7 @@ from vllm.foundation.config.multimodal import (
     ImageDummyOptions,
     VideoDummyOptions,
 )
-from vllm.inputs import MultiModalDataDict
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.foundation.observability.logger import init_logger
 
 from .context import BaseProcessingInfo

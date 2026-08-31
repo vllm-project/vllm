@@ -22,7 +22,7 @@ from vllm.frontend.compat.engine.arg_utils import AsyncEngineArgs
 from vllm.frontend.compat.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
 from vllm.foundation.system.exceptions import VLLMClientError, VLLMValidationError
-from vllm.inputs import EngineInput, PromptType
+from vllm.frontend.processing.inputs import EngineInput, PromptType
 from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry

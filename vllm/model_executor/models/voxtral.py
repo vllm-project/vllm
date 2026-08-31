@@ -21,7 +21,7 @@ from transformers import BatchFeature, WhisperConfig
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
+from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader

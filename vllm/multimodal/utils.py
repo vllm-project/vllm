@@ -13,7 +13,7 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-from vllm.inputs import MultiModalPlaceholders
+from vllm.frontend.processing.inputs import MultiModalPlaceholders
 from vllm.foundation.utilities.import_utils import LazyLoader
 
 from .inputs import (

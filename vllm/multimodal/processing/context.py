@@ -11,7 +11,7 @@ import torch
 from typing_extensions import TypeVar
 
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.inputs import MultiModalDataDict
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.foundation.observability.logger import init_logger
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
@@ -513,7 +513,7 @@ class BaseProcessingInfo:
         validate: bool = True,
     ) -> MultiModalDataItems:
         """
-        Normalize [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
+        Normalize [`MultiModalDataDict`][vllm.frontend.processing.inputs.MultiModalDataDict]
         to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
         before passing them to
         [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].

@@ -27,8 +27,8 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import EmbedsPrompt
-from vllm.inputs.engine import MultiModalInput
+from vllm.frontend.processing.inputs import EmbedsPrompt
+from vllm.frontend.processing.inputs.engine import MultiModalInput
 from vllm.foundation.observability.logger import init_logger
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (
@@ -62,8 +62,8 @@ if TYPE_CHECKING:
         ChatTemplateContentFormatOption,
         ConversationMessage,
     )
-    from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
-    from vllm.inputs.engine import TokensInput
+    from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
+    from vllm.frontend.processing.inputs.engine import TokensInput
     from vllm.multimodal.processing.processor import (
         MultiModalPromptUpdates,
         ResolvedPromptUpdate,

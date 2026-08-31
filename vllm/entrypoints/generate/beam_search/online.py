@@ -9,7 +9,7 @@ import numpy as np
 
 from vllm import CompletionOutput, RequestOutput
 from vllm.frontend.compat.engine.protocol import EngineClient
-from vllm.inputs import EngineInput
+from vllm.frontend.processing.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.frontend.processing.renderers import BaseRenderer
 from vllm.frontend.processing.sampling_params import BeamSearchParams, SamplingParams

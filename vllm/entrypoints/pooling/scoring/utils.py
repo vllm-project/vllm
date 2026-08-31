@@ -16,7 +16,7 @@ from vllm.entrypoints.chat_utils import (
     _parse_chat_message_content_parts,
 )
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalUUIDDict
 
 from .typing import (
     ScoreContentPartParam,

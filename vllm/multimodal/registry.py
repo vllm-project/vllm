@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from multiprocessing.synchronize import Lock as LockType
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, cast
 
-from vllm.inputs import MultiModalInput
+from vllm.frontend.processing.inputs import MultiModalInput
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.tokenizers import TokenizerLike, cached_tokenizer_from_config
 

@@ -15,7 +15,7 @@ from vllm.foundation.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.frontend.compat.engine.arg_utils import EngineArgs
-from vllm.inputs import EngineInput, PromptType
+from vllm.frontend.processing.inputs import EngineInput, PromptType
 from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry

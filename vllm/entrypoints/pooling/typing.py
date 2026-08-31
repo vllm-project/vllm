@@ -10,7 +10,7 @@ from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.inputs import DataPrompt, EngineInput
+from vllm.frontend.processing.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.frontend.processing.renderers import ChatParams, TokenizeParams
 from vllm.frontend.processing.renderers.inputs import DictPrompt

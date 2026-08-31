@@ -20,7 +20,7 @@ from transformers.models.siglip import SiglipImageProcessorFast
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.inputs import MultiModalDataDict, PromptType, TextPrompt
+from vllm.frontend.processing.inputs import MultiModalDataDict, PromptType, TextPrompt
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear

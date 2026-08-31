@@ -20,7 +20,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.inputs import (
+from vllm.frontend.processing.inputs import (
     EngineInput,
     MultiModalHashes,
     MultiModalInput,

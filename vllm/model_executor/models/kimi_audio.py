@@ -15,7 +15,7 @@ from transformers import WhisperConfig as HFWhisperConfig
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.inputs import PromptType, TokensPrompt
+from vllm.frontend.processing.inputs import PromptType, TokensPrompt
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,

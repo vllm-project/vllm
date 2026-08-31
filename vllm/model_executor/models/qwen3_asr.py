@@ -34,7 +34,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.foundation.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.foundation.config.speech_to_text import SpeechToTextParams
-from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
+from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,

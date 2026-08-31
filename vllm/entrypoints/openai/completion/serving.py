@@ -38,7 +38,7 @@ from vllm.entrypoints.serve.engine.protocol import (
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.foundation.system.exceptions import GenerationError, VLLMValidationError
-from vllm.inputs import EngineInput
+from vllm.frontend.processing.inputs import EngineInput
 from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.frontend.processing.outputs import RequestOutput

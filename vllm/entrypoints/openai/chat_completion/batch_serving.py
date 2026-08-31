@@ -19,7 +19,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
-from vllm.inputs import EngineInput
+from vllm.frontend.processing.inputs import EngineInput
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.outputs import RequestOutput
 from vllm.frontend.processing.parser.abstract_parser import Parser

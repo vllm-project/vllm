@@ -8,7 +8,7 @@ from typing import Any, Literal
 import vllm.foundation.system.envs as envs
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.inputs import (
+from vllm.frontend.processing.inputs import (
     EngineInput,
     PromptType,
     SingletonInput,

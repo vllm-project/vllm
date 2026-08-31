@@ -6,7 +6,7 @@ Schemas and utilities for tokenization inputs.
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TypeAlias, TypedDict
 
-from vllm.inputs import EmbedsPrompt, TokensPrompt
+from vllm.frontend.processing.inputs import EmbedsPrompt, TokensPrompt
 
 DecoderOnlyTokPrompt: TypeAlias = TokensPrompt | EmbedsPrompt
 """

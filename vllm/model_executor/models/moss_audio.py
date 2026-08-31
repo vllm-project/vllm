@@ -22,7 +22,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.inputs import ModalityData, MultiModalDataDict
+from vllm.frontend.processing.inputs import ModalityData, MultiModalDataDict
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY, SiluAndMul
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,

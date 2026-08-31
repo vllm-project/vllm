@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.frontend.compat.engine.arg_utils import EngineArgs
-from vllm.inputs import TextPrompt, TokensPrompt
+from vllm.frontend.processing.inputs import TextPrompt, TokensPrompt
 from vllm.frontend.processing.sampling_params import BeamSearchParams
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 

@@ -27,7 +27,7 @@ from transformers.modeling_outputs import BaseModelOutput
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import AudioDummyOptions, BaseDummyOptions
-from vllm.inputs import MultiModalDataDict
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.multimodal import MULTIMODAL_REGISTRY

@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass
 
-from vllm.inputs import (
+from vllm.frontend.processing.inputs import (
     DecoderOnlyEngineInput,
     EncoderDecoderInput,
     MultiModalInput,

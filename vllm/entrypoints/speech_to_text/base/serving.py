@@ -27,7 +27,7 @@ from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.inputs import EncoderDecoderInput, EngineInput
+from vllm.frontend.processing.inputs import EncoderDecoderInput, EngineInput
 from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription

@@ -19,7 +19,7 @@ from vllm.entrypoints.openai.models.serving import (
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.inputs import (
+from vllm.frontend.processing.inputs import (
     EngineInput,
     MultiModalHashes,
     MultiModalInput,

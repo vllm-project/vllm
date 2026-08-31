@@ -10,7 +10,7 @@ import torch
 from transformers import BatchFeature
 
 from vllm.foundation.config.multimodal import BaseDummyOptions, ImageDummyOptions
-from vllm.inputs import MultiModalDataDict
+from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.foundation.observability.logger import init_logger
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,

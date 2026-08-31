@@ -53,7 +53,7 @@ from typing_extensions import Required, TypedDict, override
 from vllm import envs
 from vllm.foundation.config import ModelConfig
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY
