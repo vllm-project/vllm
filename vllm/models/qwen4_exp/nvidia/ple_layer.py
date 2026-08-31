@@ -147,8 +147,11 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
     def from_quant_config(
         quant_config: QuantizationConfig | None,
         prefix: str,
+        embedding_dtype: str | None = None,
     ) -> "Qwen4ExpPLEEmbeddingMethod":
         """Select the concrete PLE embedding format for a layer."""
+        if embedding_dtype == "float8_e4m3fn":
+            return Qwen4ExpPLEFp8EmbeddingMethod()
         if quant_config is None:
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
         if isinstance(
@@ -605,7 +608,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
         embedding_prefix = f"{prefix}.ngram_embedding"
         embedding_quant_method = Qwen4ExpPLEEmbeddingMethod.from_quant_config(
-            quant_config, embedding_prefix
+            quant_config,
+            embedding_prefix,
+            getattr(config, "ple_embedding_dtype", None),
         )
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()

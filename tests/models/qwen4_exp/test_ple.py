@@ -353,6 +353,20 @@ def test_ple_embedding_respects_modelopt_exclusion() -> None:
     )
 
 
+def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = ModelOptNvFp4Config(exclude_modules=[prefix])
+
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(
+            quant_config,
+            prefix,
+            "float8_e4m3fn",
+        ),
+        Qwen4ExpPLEFp8EmbeddingMethod,
+    )
+
+
 def test_ple_prefetch_streams_are_scoped_by_layer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
