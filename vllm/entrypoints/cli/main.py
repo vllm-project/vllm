@@ -17,7 +17,6 @@ logger = init_logger(__name__)
 def main():
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env
-    import vllm.entrypoints.cli.disagg_proxy
     import vllm.entrypoints.cli.launch
     import vllm.entrypoints.cli.openai
     import vllm.entrypoints.cli.run_batch
@@ -34,7 +33,6 @@ def main():
         vllm.entrypoints.cli.launch,
         vllm.entrypoints.cli.benchmark.main,
         vllm.entrypoints.cli.collect_env,
-        vllm.entrypoints.cli.disagg_proxy,
         vllm.entrypoints.cli.run_batch,
     ]
 

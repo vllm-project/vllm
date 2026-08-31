@@ -113,7 +113,7 @@ mkdir -p "$EC_SHARED_STORAGE_PATH"
 # Starts first and empty: every worker below registers itself once it is
 # serving, so nothing here has to name them.
 ###############################################################################
-vllm disagg-proxy \
+python -m vllm.distributed.ec_transfer.proxy.epd_proxy \
     --host "0.0.0.0" \
     --port "$PROXY_PORT" \
     >"${PROXY_LOG}" 2>&1 &

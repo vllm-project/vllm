@@ -35,7 +35,16 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-MM_TYPES = {"image_url", "audio_url", "input_audio"}
+MM_TYPES = {"image_url", "audio_url", "input_audio", "video_url"}
+
+# The embeds content type each media item is rewritten to once the encoder has
+# published its embedding out of band.
+EMBEDS_TYPES = {
+    "image_url": "image_embeds",
+    "audio_url": "audio_embeds",
+    "input_audio": "audio_embeds",
+    "video_url": "video_embeds",
+}
 
 
 @dataclass
@@ -53,7 +62,9 @@ def content_uuid(item: dict) -> str:
     this value, so a per-request key would make every request a miss and
     throw away cross-request reuse of already-encoded media.
     """
-    url = (item.get("image_url") or item.get("audio_url") or {}).get("url") or ""
+    url = (
+        item.get("image_url") or item.get("audio_url") or item.get("video_url") or {}
+    ).get("url") or ""
     payload = url or json.dumps(item, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -62,9 +73,12 @@ def _b64_tensor(values: list) -> str:
     import torch
 
     buf = io.BytesIO()
-    grid = torch.tensor(values, dtype=torch.long)
-    # Downstream stacks per item, so hand over a flat (t, h, w).
-    torch.save(grid.reshape(-1)[:3], buf)
+    flat = [v for item in values for v in (item if isinstance(item, list) else [item])]
+    # Floats stay float64 so timestamp strings format exactly as the encoder
+    # computed them.
+    dtype = torch.float64 if any(isinstance(v, float) for v in flat) else None
+    # Downstream stacks per item, so hand over a flat vector.
+    torch.save(torch.tensor(flat, dtype=dtype), buf)
     return base64.b64encode(buf.getvalue()).decode()
 
 
@@ -103,6 +117,7 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
             meta = dict(item_meta.get(idx) or {})
             idx += 1
             item_uuid = meta.pop("mm_hash", None)
+            embeds_type = EMBEDS_TYPES[item["type"]]
             metadata = {key: _b64_tensor(value) for key, value in meta.items()}
             if not metadata or not item_uuid:
                 # The encoder reported no metadata (the item came from its
@@ -110,11 +125,7 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
                 new_content.append(item)
                 continue
             new_content.append(
-                {
-                    "type": "image_embeds",
-                    "image_embeds": metadata,
-                    "uuid": item_uuid,
-                }
+                {"type": embeds_type, embeds_type: metadata, "uuid": item_uuid}
             )
             rewritten += 1
         new_messages.append({**msg, "content": new_content})
@@ -522,3 +533,65 @@ async def _profile(
         )
     live = [name for name, record in targets.items() if record is not None]
     return dict(zip(live, results))
+
+
+def main() -> None:
+    """Entry point: `python -m vllm.distributed.ec_transfer.proxy.epd_proxy`."""
+    import argparse
+
+    import uvicorn
+
+    parser = argparse.ArgumentParser(
+        prog="python -m vllm.distributed.ec_transfer.proxy.epd_proxy",
+        description=(
+            "Routes multimodal requests across encode, prefill and decode "
+            "instances. The proxy holds no topology of its own: start it "
+            "first, and instances register with it as they come up."
+        ),
+    )
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--probe-interval",
+        type=float,
+        default=EPDProxyConfig.probe_interval,
+        help="Seconds between health probes. 0 disables probing.",
+    )
+    parser.add_argument(
+        "--probe-timeout", type=float, default=EPDProxyConfig.probe_timeout
+    )
+    parser.add_argument(
+        "--fail-threshold",
+        type=int,
+        default=EPDProxyConfig.fail_threshold,
+        help=(
+            "Consecutive failed probes before an instance stops being routed "
+            "to. It rejoins on its own once it responds again."
+        ),
+    )
+    parser.add_argument(
+        "--evicted-ttl",
+        type=float,
+        default=EPDProxyConfig.evicted_ttl,
+        help=(
+            "Seconds to keep probing an instance that stopped responding "
+            "before forgetting it. 0 probes forever."
+        ),
+    )
+    args = parser.parse_args()
+    if args.fail_threshold < 1:
+        parser.error("--fail-threshold must be at least 1")
+
+    app = build_app(
+        EPDProxyConfig(
+            probe_interval=args.probe_interval,
+            probe_timeout=args.probe_timeout,
+            fail_threshold=args.fail_threshold,
+            evicted_ttl=args.evicted_ttl,
+        )
+    )
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+
+
+if __name__ == "__main__":
+    main()

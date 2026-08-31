@@ -102,7 +102,7 @@ If you run a separate prefill instance, you will need --kv-transfer-config to fa
 Start the proxy first, with no topology:
 
 ```bash
-vllm disagg-proxy --port 8000
+python -m vllm.distributed.ec_transfer.proxy.epd_proxy --port 8000
 ```
 
 It comes up with an empty roster and answers `503` until instances register.

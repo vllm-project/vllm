@@ -87,7 +87,7 @@ wait_for_server() {
 cleanup_instances() {
     echo "Cleaning up any running vLLM instances..."
     pkill -f "vllm serve" || true
-    pkill -f "vllm disagg-proxy" || true
+    pkill -f 'ec_transfer[.]proxy' || true
     sleep 2
 }
 
@@ -157,7 +157,7 @@ run_epd_1e_1pd() {
     
     # Start the proxy first: it holds the roster the workers register into.
     echo "Starting EPD proxy on port $PROXY_PORT"
-    vllm disagg-proxy --host "0.0.0.0" --port "$PROXY_PORT" \
+    python -m vllm.distributed.ec_transfer.proxy.epd_proxy --host "0.0.0.0" --port "$PROXY_PORT" \
         > "$LOG_PATH"/epd_proxy.log 2>&1 &
     PIDS+=($!)
     echo "Waiting for proxy..."
@@ -358,7 +358,7 @@ run_epd_1e_1p_1d() {
     
     # Start the proxy first: it holds the roster the workers register into.
     echo "Starting EPD proxy on port $PROXY_PORT"
-    vllm disagg-proxy --host "0.0.0.0" --port "$PROXY_PORT" \
+    python -m vllm.distributed.ec_transfer.proxy.epd_proxy --host "0.0.0.0" --port "$PROXY_PORT" \
         > "$LOG_PATH"/epd_proxy.log 2>&1 &
     PIDS+=($!)
     echo "Waiting for proxy..."
