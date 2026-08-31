@@ -815,6 +815,7 @@ class EngineArgs:
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
 
     stream_interval: int = SchedulerConfig.stream_interval
+    blocked_waiting_timeout_s: float = SchedulerConfig.blocked_waiting_timeout_s
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     swa_bounded_replay: bool = CacheConfig.swa_bounded_replay
@@ -2585,6 +2586,7 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            blocked_waiting_timeout_s=self.blocked_waiting_timeout_s,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
