@@ -57,10 +57,15 @@ def _mxfp8_e4m3_quantize_torch(
     x_blocked = x_fp32.view(*orig_shape[:-1], num_blocks, MXFP8_BLOCK_SIZE)
 
     amax = x_blocked.abs().amax(dim=-1)
+    zero_blocks = amax == 0
     amax = amax.clamp(min=torch.finfo(torch.float32).tiny)
     fp8_max = torch.finfo(MXFP8_VALUE_DTYPE).max
     scale_biased = torch.ceil(torch.log2(amax / fp8_max)) + 127.0
     scale_biased = scale_biased.clamp(0, 254)
+    # Avoid a subnormal 2**-127 descale for all-zero blocks. Some GPU exp2
+    # implementations flush that value to zero, turning 0 / 0 into NaN before
+    # the FP8 cast. Any finite scale represents an all-zero block exactly.
+    scale_biased = torch.where(zero_blocks, 127.0, scale_biased)
     scales_uint8 = scale_biased.to(torch.uint8)
 
     descale = torch.exp2(scale_biased - 127.0)
@@ -123,9 +128,14 @@ def _mxfp8_quant_triton_kernel():
         # Mirror _mxfp8_e4m3_quantize_torch: the scale has to put the block amax
         # at the top of the e4m3 range rather than at 1.0, or small elements of
         # the block end up in the subnormals.
-        amax = tl.maximum(tl.max(tl.abs(x), axis=1), TINY)  # [BLOCK_M]
-        sb = tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0
+        amax = tl.max(tl.abs(x), axis=1)  # [BLOCK_M]
+        zero_blocks = amax == 0.0
+        safe_amax = tl.maximum(amax, TINY)
+        sb = tl.ceil(tl.log2(safe_amax / FP8_MAX)) + 127.0
         sb = tl.minimum(tl.maximum(sb, 0.0), 254.0)
+        # exp2(-127) may flush to zero on GPU. Use unit scale for all-zero
+        # blocks so quantization remains exactly zero instead of producing NaN.
+        sb = tl.where(zero_blocks, 127.0, sb)
         descale = tl.exp2(sb - 127.0)
         xq = (x / descale[:, None]).to(xq_ptr.dtype.element_ty)
         tl.store(

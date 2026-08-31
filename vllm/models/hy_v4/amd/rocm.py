@@ -12,6 +12,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseImpl,
     ROCMAiterMLASparseMetadata,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
 )
@@ -100,13 +101,26 @@ class HYV4ROCmMLASparseImpl(ROCMAiterMLASparseImpl):
         )
         sinks = self.sinks
         if q.shape[1] > sinks.shape[0]:
-            padded_sinks = sinks.new_full((q.shape[1],), float("-inf"))
-            padded_sinks[: sinks.shape[0]] = sinks
-            sinks = padded_sinks
+            reps = -(-q.shape[1] // sinks.shape[0])
+            if q.shape[1] % sinks.shape[0] == 0:
+                sinks = sinks.repeat_interleave(reps)
+            else:
+                sinks = sinks.repeat(reps)[: q.shape[1]]
+
+        kv_cache = kv_c_and_k_pe_cache
+        if kv_cache.ndim == 4:
+            if kv_cache.shape[2] != 1:
+                raise ValueError(
+                    "HYV4 ROCm sparse MLA expects one latent KV head, got "
+                    f"shape={tuple(kv_cache.shape)}"
+                )
+            kv_cache = kv_cache.squeeze(2)
+        kv_rows, _ = flat_kv_row_view(kv_cache, attn_metadata.block_size)
+        indices = attn_metadata.paged_kv_indices
         rocm_sparse_attn_prefill(
             q=q,
-            kv=kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1]),
-            indices=attn_metadata.paged_kv_indices,
+            kv=kv_rows.unsqueeze(1),
+            indices=indices,
             topk_length=None,
             scale=self.scale,
             head_dim=q.shape[-1],
@@ -116,7 +130,7 @@ class HYV4ROCmMLASparseImpl(ROCMAiterMLASparseImpl):
             output=output,
             value_dim=self.kv_lora_rank,
             allow_hyv4=True,
-            ragged_indices=attn_metadata.paged_kv_indices,
+            ragged_indices=indices,
             ragged_indptr=attn_metadata.paged_kv_indptr,
         )
         return AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)

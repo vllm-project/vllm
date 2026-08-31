@@ -1036,8 +1036,13 @@ class AiterMLAHelper:
         # per query head over the shared KV, so padding heads cannot affect
         # heads [0:num_heads]; they are sliced back off the output.
         reps = -(-m // num_heads)  # ceil(m / num_heads)
+        if m % num_heads == 0:
+            # get_mla_unpadded_o keeps every ``reps``-th lane in this case, so
+            # each real head must occupy one contiguous group of padded lanes.
+            return q.repeat_interleave(reps, dim=1).contiguous()
         # Slicing a tiled tensor yields a non-contiguous view. The asm decode
-        # reads q as packed [tokens, m, head_dim], so materialize it.
+        # reads q as packed [tokens, m, head_dim]. Keeping the original heads
+        # first also matches the non-divisible unpadding path.
         return q.repeat(1, reps, 1)[:, :m, :].contiguous()
 
     @staticmethod
