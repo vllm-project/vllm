@@ -231,8 +231,12 @@ def _merge_local_topks_global_with_fake_dcp(
         )
 
     fake_group = _FakeDCPGroup(torch.cat(packed_per_rank, dim=1).contiguous())
+    from vllm.model_executor.kernels.attention.dsa import dcp_topk_symm
+
     original_get_dcp_group = sparse_indexer.get_dcp_group
+    original_symm_available = dcp_topk_symm.dcp_topk_symm_available
     sparse_indexer.get_dcp_group = lambda: fake_group
+    dcp_topk_symm.dcp_topk_symm_available = lambda: False
     try:
         merged = []
         for rank, (logits, indices) in enumerate(zip(local_logits, local_topks)):
@@ -251,10 +255,11 @@ def _merge_local_topks_global_with_fake_dcp(
         return merged
     finally:
         sparse_indexer.get_dcp_group = original_get_dcp_group
+        dcp_topk_symm.dcp_topk_symm_available = original_symm_available
 
 
 @pytest.mark.parametrize(
-    ("enabled", "rows", "is_prefill", "world_size", "expected"),
+    ("workspace_available", "rows", "is_prefill", "world_size", "expected"),
     [
         (False, 32, False, 4, "explicit"),
         (True, 1, False, 2, "symm"),
@@ -267,7 +272,7 @@ def _merge_local_topks_global_with_fake_dcp(
 )
 def test_dcp_topk_symm_serving_dispatch(
     monkeypatch: pytest.MonkeyPatch,
-    enabled: bool,
+    workspace_available: bool,
     rows: int,
     is_prefill: bool,
     world_size: int,
@@ -295,7 +300,7 @@ def test_dcp_topk_symm_serving_dispatch(
         assert candidates == 512
         assert world == world_size
         calls.append("symm_init")
-        return FakeSymmWorkspace()
+        return FakeSymmWorkspace() if workspace_available else None
 
     def pack(*args):
         calls.append("pack")
@@ -308,7 +313,6 @@ def test_dcp_topk_symm_serving_dispatch(
         "_assert_cutedsl_dcp_merge_supported",
         lambda *args: None,
     )
-    monkeypatch.setattr(sparse_indexer.envs, "VLLM_DCP_TOPK_SYMM", enabled)
     monkeypatch.setattr(sparse_indexer, "get_dcp_group", lambda: FakeDcpGroup())
     monkeypatch.setattr(
         dcp_topk_symm,
@@ -341,8 +345,10 @@ def test_dcp_topk_symm_serving_dispatch(
 
     if expected == "symm":
         assert calls == ["symm_init", "symm"]
-    else:
+    elif workspace_available:
         assert calls == ["pack", "all_gather", "stable_topk"]
+    else:
+        assert calls == ["symm_init", "pack", "all_gather", "stable_topk"]
 
 
 @pytest.mark.parametrize("failure_stage", ["initialization", "merge"])
@@ -369,7 +375,6 @@ def test_dcp_topk_symm_failure_is_fatal(
         "_assert_cutedsl_dcp_merge_supported",
         lambda *args: None,
     )
-    monkeypatch.setattr(sparse_indexer.envs, "VLLM_DCP_TOPK_SYMM", True)
     monkeypatch.setattr(sparse_indexer, "get_dcp_group", unexpected_recovery)
     monkeypatch.setattr(
         dcp_topk_symm,

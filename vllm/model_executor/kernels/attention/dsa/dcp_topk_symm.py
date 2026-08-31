@@ -17,10 +17,12 @@ publication CUDA-graph safe:
 4. consume all owner mappings directly in stable top-k;
 5. release-increment ``read_seq``.
 
-This experimental path is fail-closed. It never falls back to an all-gather or
-to the symmetric-memory full-inbox implementation.
+This path is selected only when symmetric memory spans the DCP group. After
+selection it is fail-closed: initialization or execution failures do not
+recover through an all-gather or a symmetric-memory full inbox.
 """
 
+import functools
 from dataclasses import dataclass
 from typing import Any
 
@@ -416,14 +418,23 @@ _workspace: DcpTopkSymmWorkspace | None = None
 _workspace_failed = False
 
 
+@functools.cache
+def dcp_topk_symm_available() -> bool:
+    """Return whether symmetric memory spans the DCP group."""
+    from vllm.distributed import get_dcp_group
+    from vllm.v1.attention.ops.cp_common import direct_cp_enabled
+
+    return direct_cp_enabled(get_dcp_group(), torch.float32, use_direct=None)
+
+
 def get_dcp_topk_symm_workspace(
     max_rows: int,
     local_candidates: int,
     dcp_world_size: int,
 ) -> DcpTopkSymmWorkspace | None:
-    """Create or fetch the singleton symmetric workspace, with no fallback."""
+    """Create or fetch the singleton symmetric workspace when available."""
     global _workspace, _workspace_failed
-    if dcp_world_size <= 1:
+    if dcp_world_size <= 1 or not dcp_topk_symm_available():
         return None
     if _workspace_failed:
         raise RuntimeError("DCP symmetric-memory top-k workspace is unavailable.")

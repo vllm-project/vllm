@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+from collections.abc import Callable
+
 import torch
 
 import vllm.envs as envs
@@ -71,6 +73,40 @@ def _assert_cutedsl_dcp_merge_supported(
         )
 
 
+def _reduce_dcp_topk_peers_explicit(
+    logits: torch.Tensor,
+    topk_indices: torch.Tensor,
+    topk_tokens: int,
+    dcp_rank: int,
+    dcp_world_size: int,
+    cp_interleave: int,
+    row_starts: torch.Tensor | None = None,
+) -> None:
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        pack_dcp_topk_candidates_cutedsl,
+        stable_topk_from_gathered_candidates_cutedsl,
+    )
+
+    packed = torch.empty(
+        (*topk_indices.shape, 2),
+        dtype=torch.float32,
+        device=topk_indices.device,
+    )
+    pack_dcp_topk_candidates_cutedsl(
+        logits,
+        topk_indices,
+        packed,
+        dcp_rank,
+        dcp_world_size,
+        cp_interleave,
+        row_starts,
+    )
+    gathered = get_dcp_group().all_gather(packed, dim=1)
+    stable_topk_from_gathered_candidates_cutedsl(
+        gathered, topk_tokens, out=topk_indices
+    )
+
+
 def _merge_dcp_topk_global(
     logits: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -95,72 +131,41 @@ def _merge_dcp_topk_global(
     if dcp_world_size <= 1:
         return
 
-    # CuteDSL-only path (no PyTorch fallback): Triton-pack each rank's
-    # (score, global_id) candidates on-device, all-gather, then the CuteDSL
-    # stable-topk selector.
     _assert_cutedsl_dcp_merge_supported(logits, topk_indices, topk_tokens)
-    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
-        pack_dcp_topk_candidates_cutedsl,
-        stable_topk_from_gathered_candidates_cutedsl,
-    )
-
     rows = topk_indices.shape[0]
     from vllm.model_executor.kernels.attention.dsa.dcp_topk_symm import (
         can_use_dcp_topk_symm,
+        get_dcp_topk_symm_workspace,
     )
 
-    use_symm = envs.VLLM_DCP_TOPK_SYMM and can_use_dcp_topk_symm(
+    reduce_topk_peers: Callable[
+        [torch.Tensor, torch.Tensor, int, int, int, int, torch.Tensor | None], None
+    ] = _reduce_dcp_topk_peers_explicit
+    if can_use_dcp_topk_symm(
         rows,
         topk_indices.shape[1],
         dcp_world_size,
         row_starts,
-    )
-    if use_symm:
-        from vllm.model_executor.kernels.attention.dsa.dcp_topk_symm import (
-            get_dcp_topk_symm_workspace,
-        )
-
+    ):
         workspace = get_dcp_topk_symm_workspace(
             rows,
             topk_indices.shape[1],
             dcp_world_size,
         )
-        if workspace is None:
-            raise RuntimeError(
-                "DCP top-k symmetric-memory dispatch selected without a workspace."
+        if workspace is not None:
+            logger.info_once(
+                "Executing owner-sharded symmetric-memory DCP top-k merge."
             )
-        logger.info_once("Executing owner-sharded symmetric-memory DCP top-k merge.")
-        workspace.merge(
-            logits,
-            topk_indices,
-            topk_tokens,
-            dcp_rank,
-            dcp_world_size,
-            cp_interleave,
-            row_starts,
-        )
-        return
+            reduce_topk_peers = workspace.merge
 
-    # Flag-off, prefill, and decode shapes outside the bounded direct-consumer
-    # policy use the original explicit exchange. This is phase/shape routing,
-    # never recovery from a selected symmetric-memory path.
-    packed = torch.empty(
-        (*topk_indices.shape, 2),
-        dtype=torch.float32,
-        device=topk_indices.device,
-    )
-    pack_dcp_topk_candidates_cutedsl(
+    reduce_topk_peers(
         logits,
         topk_indices,
-        packed,
+        topk_tokens,
         dcp_rank,
         dcp_world_size,
         cp_interleave,
         row_starts,
-    )
-    gathered = get_dcp_group().all_gather(packed, dim=1)
-    stable_topk_from_gathered_candidates_cutedsl(
-        gathered, topk_tokens, out=topk_indices
     )
 
 
@@ -819,24 +824,16 @@ class SparseAttnIndexer(CustomOp):
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
                 "the current vLLM environment."
             )
-        if envs.VLLM_DCP_TOPK_SYMM and self.dcp_world_size > 1:
-            if not current_platform.is_cuda():
-                raise NotImplementedError(
-                    "DCP top-k symmetric memory is only supported on CUDA."
-                )
+        if self.dcp_world_size > 1:
             from vllm.model_executor.kernels.attention.dsa.dcp_topk_symm import (
                 get_dcp_topk_symm_workspace,
             )
 
-            workspace = get_dcp_topk_symm_workspace(
+            get_dcp_topk_symm_workspace(
                 get_current_vllm_config().scheduler_config.max_num_seqs,
                 self.topk_tokens,
                 self.dcp_world_size,
             )
-            if workspace is None:
-                raise RuntimeError(
-                    "DCP top-k symmetric memory was enabled without a usable workspace."
-                )
 
     @property
     def cp_kv_cache_interleave_size(self) -> int:
