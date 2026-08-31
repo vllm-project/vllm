@@ -17,6 +17,9 @@ import torch
 import vllm.envs as envs
 from vllm.config.mamba import MambaBackendEnum
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    flashinfer_replayssm_autotune_supported,
+)
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
@@ -283,6 +286,13 @@ def _replayssm_autotune_kwargs(
         config.cache_config.use_replayssm
         and config.mamba_config.backend == MambaBackendEnum.FLASHINFER
     ):
+        return None
+    if not flashinfer_replayssm_autotune_supported():
+        logger.info_once(
+            "Skipping FlashInfer ReplaySSM autotuning because "
+            "flashinfer.mamba.checkpointing_ssu.CheckpointingSSURunner "
+            "is unavailable."
+        )
         return None
     v2_runner: Any = runner
     query_len = (
