@@ -20,6 +20,7 @@ from vllm.config.vllm import VllmConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -45,6 +46,18 @@ def _attention_group() -> KVCacheGroupSpec:
     return KVCacheGroupSpec(
         ["layer"],
         FullAttentionSpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        ),
+    )
+
+
+def _circular_group() -> KVCacheGroupSpec:
+    return KVCacheGroupSpec(
+        ["circular"],
+        CircularBufferSpec(
             block_size=BLOCK_SIZE,
             num_kv_heads=1,
             head_size=1,
@@ -212,8 +225,7 @@ def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
 
 
 def _hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
-    """Full attention plus one Mamba group per cache mode, so a single manager
-    exercises every branch `_reserved_block_count` has.
+    """Attention, circular, and Mamba groups exercise every reservation branch.
 
     "none" and "all" reach the same branch of both `_reserved_block_count` and
     `MambaManager`, which tests only for "align". They are still both listed:
@@ -226,6 +238,7 @@ def _hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
         kv_cache_tensors=[],
         kv_cache_groups=[
             _attention_group(),
+            _circular_group(),
             _mamba_group("none"),
             _mamba_group("all"),
             _mamba_group("align"),

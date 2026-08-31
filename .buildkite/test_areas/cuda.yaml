@@ -2,7 +2,7 @@ group: CUDA
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) CUDA Platform"
+- label: ":nvidia: (H200 MIG 18GB) CUDA Platform"
   key: platform-tests
   timeout_in_minutes: 20
   device: h200_18gb
@@ -30,7 +30,7 @@ steps:
       - vllm/
       - tests/cuda
 
-- label: ":nvidia: (H200) CUDAGraph"
+- label: ":nvidia: (H200 MIG 35GB) CUDAGraph"
   device: h200_35gb
   key: cudagraph
   timeout_in_minutes: 30
