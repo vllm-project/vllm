@@ -27,7 +27,6 @@ from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
-    direct_register_custom_op,
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
@@ -329,24 +328,7 @@ def sparse_attn_indexer_kpool(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
         )
 
-        return sparse_attn_indexer_kpool_fake(
-            hidden_states,
-            k_cache_prefix,
-            kv_cache,
-            q_quant,
-            q_scale,
-            k,
-            weights,
-            quant_block_size,
-            scale_fmt,
-            topk_tokens,
-            head_dim,
-            max_model_len,
-            total_seq_lens,
-            topk_indices_buffer,
-            skip_k_cache_insert,
-            use_fp4_cache,
-        )
+        return topk_indices_buffer
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
     slot_mapping = attn_metadata_narrowed.slot_mapping
@@ -732,7 +714,7 @@ def sparse_attn_indexer_kpool(
                     head_dim,
                     round_scale=(scale_fmt is not None),
                 )
-        if current_platform.is_rocm() and _fill_short_decode_causal_indices(
+        if current_platform.is_cuda_alike() and _fill_short_decode_causal_indices(
             topk_indices_buffer,
             positions,
             num_decode_tokens,
@@ -894,47 +876,6 @@ def sparse_attn_indexer_kpool(
     return topk_indices_buffer
 
 
-def sparse_attn_indexer_kpool_fake(
-    hidden_states: torch.Tensor,
-    k_cache_prefix: LayerNameType,
-    kv_cache: torch.Tensor,
-    q_quant: torch.Tensor,
-    q_scale: torch.Tensor | None,
-    k: torch.Tensor,
-    weights: torch.Tensor,
-    quant_block_size: int,
-    scale_fmt: str | None,
-    topk_tokens: int,
-    head_dim: int,
-    max_model_len: int,
-    total_seq_lens: int,
-    topk_indices_buffer: torch.Tensor | None,
-    skip_k_cache_insert: bool,
-    use_fp4_cache: bool = False,
-    gate_score: torch.Tensor | None = None,
-    compress_ape: torch.Tensor | None = None,
-    index_kpool: int = 1,
-    positions: torch.Tensor | None = None,
-    tail_kv_cache: torch.Tensor | None = None,
-    tail_prefix: str | None = None,
-) -> torch.Tensor:
-    return topk_indices_buffer
-
-
-direct_register_custom_op(
-    op_name="sparse_attn_indexer_kpool",
-    op_func=sparse_attn_indexer_kpool,
-    # The indexer writes the index-K cache in place (prefill k-cache insert +
-    # kpool decode write), so kv_cache must be declared as mutated — otherwise
-    # under full-graph compile dynamo assumes it is unchanged across the
-    # indexer→MLA boundary and the MLA reads stale/misaligned KV. The paged tail
-    # cache is likewise written in place (prefill tail scatter + decode stash).
-    mutates_args=["topk_indices_buffer", "kv_cache", "tail_kv_cache"],
-    fake_impl=sparse_attn_indexer_kpool_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
-
-
 @CustomOp.register("sparse_attn_indexer_kpool")
 class SparseAttnIndexerKpool(CustomOp):
     """Sparse Attention Indexer Custom Op Layer. This layer is extracted as a
@@ -1037,9 +978,9 @@ class SparseAttnIndexerKpool(CustomOp):
             q_values, q_scale = q_quant
         else:
             q_values, q_scale = q_quant, None
-        return torch.ops.vllm.sparse_attn_indexer_kpool(
+        return sparse_attn_indexer_kpool(
             hidden_states,
-            _encode_layer_name(self.k_cache.prefix),
+            self.k_cache.prefix,
             self.k_cache.kv_cache,
             q_values,
             q_scale,
