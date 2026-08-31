@@ -70,11 +70,10 @@ class DecodeBenchTestRunner:
         # Using simplified shape for testing
         num_heads = 4
         head_dim = 64
+        layer_names = self.scheduler.kv_cache_config.kv_cache_groups[0].layer_names
         self.kv_caches = {
-            f"layer_{i}": torch.zeros(
-                num_gpu_blocks, 2, num_heads, block_size, head_dim
-            )
-            for i in range(2)  # 2 layers for testing
+            layer_name: torch.zeros(num_gpu_blocks, 2, num_heads, block_size, head_dim)
+            for layer_name in layer_names
         }
 
         # Register KV caches with worker connector
