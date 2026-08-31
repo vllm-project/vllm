@@ -23,8 +23,8 @@ from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.renderers import BaseRenderer, ChatParams, merge_kwargs
-from vllm.renderers.inputs.preprocess import (
+from vllm.frontend.processing.renderers import BaseRenderer, ChatParams, merge_kwargs
+from vllm.frontend.processing.renderers.inputs.preprocess import (
     conversation_to_seq,
     parse_model_prompt,
     prompt_to_seq,

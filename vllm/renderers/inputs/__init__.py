@@ -1,33 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from .preprocess import (
-    DecoderDictPrompt,
-    DecoderOnlyDictPrompt,
-    DictPrompt,
-    EncoderDecoderDictPrompt,
-    EncoderDictPrompt,
-    SingletonDictPrompt,
-)
-from .tokenize import (
-    DecoderOnlyTokPrompt,
-    DecoderTokPrompt,
-    EncoderDecoderTokPrompt,
-    EncoderTokPrompt,
-    SingletonTokPrompt,
-    TokPrompt,
-)
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-__all__ = [
-    "DecoderOnlyDictPrompt",
-    "EncoderDictPrompt",
-    "DecoderDictPrompt",
-    "EncoderDecoderDictPrompt",
-    "SingletonDictPrompt",
-    "DictPrompt",
-    "DecoderOnlyTokPrompt",
-    "EncoderTokPrompt",
-    "DecoderTokPrompt",
-    "EncoderDecoderTokPrompt",
-    "SingletonTokPrompt",
-    "TokPrompt",
-]
+"""Compatibility shim: vllm.renderers/inputs/ -> vllm.frontend.processing.renderers.inputs (lazy __getattr__ delegation)."""
+import importlib as _importlib
+
+_real = _importlib.import_module("vllm.frontend.processing.renderers.inputs")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

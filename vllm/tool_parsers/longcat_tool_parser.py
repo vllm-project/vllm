@@ -1,22 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-import regex as re
+"""Compatibility shim: vllm.tool_parsers/longcat_tool_parser -> vllm.frontend.processing.tool_parsers.longcat_tool_parser (sys.modules alias)."""
+import importlib
+import sys
 
-from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import Tool
-from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
-
-
-class LongcatFlashToolParser(Hermes2ProToolParser):
-    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
-        super().__init__(tokenizer, tools)
-
-        self.tool_call_start_token: str = "<longcat_tool_call>"
-        self.tool_call_end_token: str = "</longcat_tool_call>"
-
-        self.tool_call_regex = re.compile(
-            r"<longcat_tool_call>(.*?)</longcat_tool_call>"
-            r"|<longcat_tool_call>(.*)",
-            re.DOTALL,
-        )
+_real = importlib.import_module("vllm.frontend.processing.tool_parsers.longcat_tool_parser")
+sys.modules[__name__] = _real

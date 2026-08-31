@@ -12,9 +12,9 @@ from vllm.entrypoints.scale_out.factories import init_render_state
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.foundation.extensibility.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
-from vllm.renderers import renderer_from_config
-from vllm.renderers.online_derenderer import OnlineDerenderer
-from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.frontend.processing.renderers import renderer_from_config
+from vllm.frontend.processing.renderers.online_derenderer import OnlineDerenderer
+from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
 
 
 async def init_render_app_state(

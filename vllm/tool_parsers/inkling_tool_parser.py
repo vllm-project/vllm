@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.parser.engine.registered_adapters import InklingParserToolAdapter
+"""Compatibility shim: vllm.tool_parsers/inkling_tool_parser -> vllm.frontend.processing.tool_parsers.inkling_tool_parser (sys.modules alias)."""
+import importlib
+import sys
 
-
-class InklingEngineToolParser(InklingParserToolAdapter):  # type: ignore[valid-type, misc]
-    # No Inkling structural-tag grammar is wired up yet; fall back to auto
-    # parsing for named/required tool choice.
-    structural_tag_model = None
-    supports_required_and_named = False
+_real = importlib.import_module("vllm.frontend.processing.tool_parsers.inkling_tool_parser")
+sys.modules[__name__] = _real

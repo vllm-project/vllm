@@ -44,7 +44,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
-from vllm.renderers import TokenizeParams
+from vllm.frontend.processing.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 

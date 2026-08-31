@@ -84,7 +84,7 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.foundation.integrations.transformers_utils.configs.qwen3_asr import (
     Qwen3ASRConfig,
     Qwen3ASRThinkerConfig,

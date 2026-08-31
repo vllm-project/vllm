@@ -9,7 +9,7 @@ from vllm.foundation.config import ModelConfig, VllmConfig
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.foundation.observability.logger import init_logger
 from vllm.foundation.extensibility.plugins.io_processors import has_io_processor
-from vllm.renderers import BaseRenderer
+from vllm.frontend.processing.renderers import BaseRenderer
 from vllm.frontend.processing.tasks import POOLING_TASKS, SCORE_TYPE_MAP, SupportedTask
 
 from .base.io_processor import PoolingIOProcessor

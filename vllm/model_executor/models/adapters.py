@@ -557,7 +557,7 @@ def load_weights_using_from_2_way_softmax(
     with _disable_seq_cls_loading_on_inner_model(language_model, is_vlm):
         loaded_weights = model._load_pooling_model_weights(weights)
 
-    from vllm.tokenizers import get_tokenizer
+    from vllm.frontend.processing.tokenizers import get_tokenizer
 
     tokenizer = get_tokenizer(
         model_config.tokenizer,
@@ -627,7 +627,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
         # Bypass ModelForSequenceClassification to avoid infinite recursion
         loaded_weights = model._load_pooling_model_weights(weights)
 
-    from vllm.tokenizers import get_tokenizer
+    from vllm.frontend.processing.tokenizers import get_tokenizer
 
     tokenizer = get_tokenizer(
         model_config.tokenizer,

@@ -12,8 +12,8 @@ from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
-from vllm.renderers import ChatParams, TokenizeParams
-from vllm.renderers.inputs import DictPrompt
+from vllm.frontend.processing.renderers import ChatParams, TokenizeParams
+from vllm.frontend.processing.renderers.inputs import DictPrompt
 
 from ...tasks import PoolingTask
 from .classify.protocol import (

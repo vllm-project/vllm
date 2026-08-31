@@ -20,8 +20,8 @@ from vllm.entrypoints.chat_utils import (
 from vllm.inputs import tokens_input
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.outputs import PoolingOutput, PoolingRequestOutput
-from vllm.renderers import merge_kwargs
-from vllm.renderers.hf import resolve_chat_template
+from vllm.frontend.processing.renderers import merge_kwargs
+from vllm.frontend.processing.renderers.hf import resolve_chat_template
 from vllm.foundation.utilities.collection_utils import chunk_list
 from vllm.foundation.utilities.mistral import is_mistral_tokenizer
 

@@ -45,7 +45,7 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal.audio import get_audio_duration
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.utils import encode_image_url, fetch_image
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.integrations.transformers_utils.repo_utils import hf_api
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 from vllm.foundation.utilities.import_utils import PlaceholderModule

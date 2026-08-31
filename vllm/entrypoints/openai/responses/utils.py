@@ -38,7 +38,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
 from vllm.foundation.observability.logger import init_logger
-from vllm.tool_parsers.utils import (
+from vllm.frontend.processing.tool_parsers.utils import (
     build_responses_tool_call_name_map,
     flat_namespace_tool_name,
     iter_response_function_tool_dicts,

@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.parser.engine.registered_adapters import (
-    NemotronV3ParserReasoningAdapter,
-)
+"""Compatibility shim: vllm.reasoning/nemotron_v3_engine_reasoning_parser -> vllm.frontend.processing.reasoning.nemotron_v3_engine_reasoning_parser (sys.modules alias)."""
+import importlib
+import sys
 
-__all__ = ["NemotronV3ParserReasoningAdapter"]
+_real = importlib.import_module("vllm.frontend.processing.reasoning.nemotron_v3_engine_reasoning_parser")
+sys.modules[__name__] = _real

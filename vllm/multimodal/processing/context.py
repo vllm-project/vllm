@@ -19,7 +19,7 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
 from vllm.foundation.utilities.func_utils import get_allowed_kwarg_only_overrides
 from vllm.foundation.utilities.jsontree import JSONTree, json_map_leaves
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from transformers.processing_utils import ProcessorMixin
 
     from vllm.foundation.config import ModelConfig
-    from vllm.renderers import TokenizeParams
+    from vllm.frontend.processing.renderers import TokenizeParams
 else:
     PretrainedConfig = object
     BatchFeature = object
@@ -393,7 +393,7 @@ class BaseProcessingInfo:
 
     def get_default_tok_params(self) -> TokenizeParams:
         """Construct the default parameters for tokenization."""
-        from vllm.renderers import TokenizeParams
+        from vllm.frontend.processing.renderers import TokenizeParams
 
         model_config = self.ctx.model_config
         encoder_config = model_config.encoder_config or {}

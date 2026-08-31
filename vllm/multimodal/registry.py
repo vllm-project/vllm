@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, cast
 
 from vllm.inputs import MultiModalInput
 from vllm.foundation.observability.logger import init_logger
-from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
+from vllm.frontend.processing.tokenizers import TokenizerLike, cached_tokenizer_from_config
 
 from .cache import (
     BaseMultiModalProcessorCache,

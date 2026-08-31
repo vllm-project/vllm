@@ -31,7 +31,7 @@ from vllm.inputs import EngineInput
 from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.observability.tracing import (
     contains_trace_headers,
     extract_trace_headers,

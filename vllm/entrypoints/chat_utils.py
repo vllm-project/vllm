@@ -67,7 +67,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.renderers.embed_utils import (
+from vllm.frontend.processing.renderers.embed_utils import (
     safe_load_prompt_embeds,
     safe_load_prompt_embeds_async,
 )

@@ -1,19 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.tool_parsers.rust_tool_parser import RustToolParser
+"""Compatibility shim: vllm.tool_parsers/minimax_m3_tool_parser -> vllm.frontend.processing.tool_parsers.minimax_m3_tool_parser (sys.modules alias)."""
+import importlib
+import sys
 
-
-class MinimaxM3ToolParser(RustToolParser):
-    """Adapter from the Rust MiniMax M3 parser to vLLM ToolParser.
-
-    The real M3 grammar lives in the Rust tool-parser crate. This class only
-    configures the generic Rust bridge with the MiniMax M3 parser name.
-
-    M3 is not M2 with renamed tags: it prefixes each structural tag with the
-    MiniMax namespace marker, allows multiple ``<invoke>`` tags in one wrapper,
-    and represents nested arguments with parameter-name XML tags.
-    """
-
-    rust_parser_name = "MinimaxM3ToolParser"
-    tool_call_start_token = "]<]minimax[>[<tool_call>"
+_real = importlib.import_module("vllm.frontend.processing.tool_parsers.minimax_m3_tool_parser")
+sys.modules[__name__] = _real

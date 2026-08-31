@@ -34,7 +34,7 @@ from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionResponse,
 )
 from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
-from vllm.renderers import ChatParams, TokenizeParams
+from vllm.frontend.processing.renderers import ChatParams, TokenizeParams
 
 
 class RendererRequest(Protocol):

@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.parser.engine.registered_adapters import SeedOssParserReasoningAdapter
+"""Compatibility shim: vllm.reasoning/seed_oss_engine_reasoning_parser -> vllm.frontend.processing.reasoning.seed_oss_engine_reasoning_parser (sys.modules alias)."""
+import importlib
+import sys
 
-__all__ = ["SeedOssParserReasoningAdapter"]
+_real = importlib.import_module("vllm.frontend.processing.reasoning.seed_oss_engine_reasoning_parser")
+sys.modules[__name__] = _real

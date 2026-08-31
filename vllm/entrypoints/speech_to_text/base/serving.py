@@ -34,10 +34,10 @@ from vllm.model_executor.models import SupportsTranscription
 from vllm.multimodal.audio import get_audio_duration, split_audio
 from vllm.multimodal.media.audio import load_audio
 from vllm.frontend.processing.outputs import RequestOutput
-from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
-from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
+from vllm.frontend.processing.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
+from vllm.frontend.processing.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.frontend.processing.sampling_params import BeamSearchParams, SamplingParams
-from vllm.tokenizers import get_tokenizer
+from vllm.frontend.processing.tokenizers import get_tokenizer
 from vllm.foundation.utilities.async_utils import make_async_with_semaphore, merge_async_iterators
 
 from ..transcription.protocol import (

@@ -30,7 +30,7 @@ from vllm.inputs import EngineInput, tokens_input
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.outputs import RequestOutput
 from vllm.frontend.processing.sampling_params import SamplingParams
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.observability.tracing import (
     contains_trace_headers,
     extract_trace_headers,

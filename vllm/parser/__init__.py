@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.parser.abstract_parser import (
-    DelegatingParser,
-    Parser,
-)
-from vllm.parser.harmony import HarmonyParser
-from vllm.parser.parser_manager import ParserManager
+"""Compatibility shim: vllm.parser/ -> vllm.frontend.processing.parser (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-__all__ = [
-    "Parser",
-    "DelegatingParser",
-    "HarmonyParser",
-    "ParserManager",
-]
+_real = _importlib.import_module("vllm.frontend.processing.parser")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.parser.engine.registered_adapters import DeepSeekV4ParserToolAdapter
+"""Compatibility shim: vllm.tool_parsers/deepseekv4_engine_tool_parser -> vllm.frontend.processing.tool_parsers.deepseekv4_engine_tool_parser (sys.modules alias)."""
+import importlib
+import sys
 
-
-class DeepSeekV4EngineToolParser(DeepSeekV4ParserToolAdapter):  # type: ignore[valid-type, misc]
-    structural_tag_model = "deepseek_v4"
+_real = importlib.import_module("vllm.frontend.processing.tool_parsers.deepseekv4_engine_tool_parser")
+sys.modules[__name__] = _real

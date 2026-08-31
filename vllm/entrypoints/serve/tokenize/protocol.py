@@ -14,7 +14,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.frontend.processing.renderers import ChatParams, TokenizeParams, merge_kwargs
 
 
 class TokenizeCompletionRequest(OpenAIBaseModel):

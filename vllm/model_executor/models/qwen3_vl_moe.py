@@ -39,7 +39,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers.registry import cached_tokenizer_from_config
+from vllm.frontend.processing.tokenizers.registry import cached_tokenizer_from_config
 
 from .interfaces import MixtureOfExperts
 from .qwen3_moe import (

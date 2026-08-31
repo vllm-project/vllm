@@ -20,8 +20,8 @@ from vllm.entrypoints.serve.utils.api_utils import (
     log_version_and_model,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.reasoning import ReasoningParserManager
-from vllm.tool_parsers import ToolParserManager
+from vllm.frontend.processing.reasoning import ReasoningParserManager
+from vllm.frontend.processing.tool_parsers import ToolParserManager
 from vllm.foundation.observability.tracing import instrument
 from vllm.foundation.utilities.network_utils import find_process_using_port, is_valid_ipv6_address
 from vllm.foundation.utilities.system_utils import set_ulimit

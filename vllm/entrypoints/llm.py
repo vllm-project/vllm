@@ -48,7 +48,7 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.frontend.processing.outputs import PoolingRequestOutput, RequestOutput
 from vllm.platforms import current_platform
 from vllm.frontend.processing.sampling_params import SamplingParams
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.observability.usage.usage_lib import UsageContext
 from vllm.foundation.utilities.counter import Counter
 from vllm.v1.engine import PauseMode

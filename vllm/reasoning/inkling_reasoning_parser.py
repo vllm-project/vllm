@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.parser.engine.registered_adapters import InklingParserReasoningAdapter
+"""Compatibility shim: vllm.reasoning/inkling_reasoning_parser -> vllm.frontend.processing.reasoning.inkling_reasoning_parser (sys.modules alias)."""
+import importlib
+import sys
 
-__all__ = ["InklingParserReasoningAdapter"]
+_real = importlib.import_module("vllm.frontend.processing.reasoning.inkling_reasoning_parser")
+sys.modules[__name__] = _real

@@ -20,7 +20,7 @@ from vllm.entrypoints.chat_utils import (
     validate_chat_template,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm.tool_parsers import ToolParserManager
+from vllm.frontend.processing.tool_parsers import ToolParserManager
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 
 from .utils.constants import (

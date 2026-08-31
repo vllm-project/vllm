@@ -26,7 +26,7 @@ from vllm.inputs import (
     MultiModalPlaceholders,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.renderers.online_derenderer import OnlineDerenderer
+from vllm.frontend.processing.renderers.online_derenderer import OnlineDerenderer
 
 from ..token_in_token_out.mm_serde import encode_mm_kwargs_item
 from ..token_in_token_out.protocol import (

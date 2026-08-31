@@ -11,7 +11,7 @@
 import torch
 from PIL import Image
 
-from vllm.tokenizers.hf import HfTokenizer
+from vllm.frontend.processing.tokenizers.hf import HfTokenizer
 
 from .internvl import (
     InternVLImageProcessor,

@@ -11,7 +11,7 @@ from vllm import CompletionOutput, RequestOutput
 from vllm.frontend.compat.engine.protocol import EngineClient
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
-from vllm.renderers import BaseRenderer
+from vllm.frontend.processing.renderers import BaseRenderer
 from vllm.frontend.processing.sampling_params import BeamSearchParams, SamplingParams
 from vllm.foundation.utilities import random_uuid
 from vllm.foundation.utilities.async_utils import collect_from_async_generator

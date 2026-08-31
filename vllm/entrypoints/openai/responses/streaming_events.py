@@ -77,7 +77,7 @@ from vllm.entrypoints.openai.responses.utils import (
     resolve_responses_tool_call_name,
 )
 from vllm.frontend.processing.outputs import CompletionOutput
-from vllm.parser.harmony import Segment
+from vllm.frontend.processing.parser.harmony import Segment
 from vllm.foundation.utilities import random_uuid
 
 TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {

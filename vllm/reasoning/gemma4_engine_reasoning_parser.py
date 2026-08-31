@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.parser.engine.registered_adapters import Gemma4ParserReasoningAdapter
+"""Compatibility shim: vllm.reasoning/gemma4_engine_reasoning_parser -> vllm.frontend.processing.reasoning.gemma4_engine_reasoning_parser (sys.modules alias)."""
+import importlib
+import sys
 
-__all__ = ["Gemma4ParserReasoningAdapter"]
+_real = importlib.import_module("vllm.frontend.processing.reasoning.gemma4_engine_reasoning_parser")
+sys.modules[__name__] = _real

@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.foundation.config import VllmConfig
-    from vllm.tokenizers import TokenizerLike
+    from vllm.frontend.processing.tokenizers import TokenizerLike
 else:
     VllmConfig = object
     TokenizerLike = object

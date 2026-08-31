@@ -14,7 +14,7 @@ from transformers import (
 )
 from transformers.audio_utils import AudioInput
 
-from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.frontend.processing.tokenizers.mistral import MistralTokenizer
 
 
 class MistralCommonFeatureExtractor(SequenceFeatureExtractor):

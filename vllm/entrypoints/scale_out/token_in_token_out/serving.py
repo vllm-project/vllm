@@ -40,7 +40,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.frontend.processing.outputs import RequestOutput
-from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
 from vllm.frontend.processing.sampling_params import RequestOutputKind, SamplingParams
 from vllm.foundation.utilities.collection_utils import as_list
 from vllm.foundation.utilities.serial_utils import numpy2base64

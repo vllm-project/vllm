@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from __future__ import annotations
+"""Compatibility shim: vllm.tool_parsers/ling3_tool_parser -> vllm.frontend.processing.tool_parsers.ling3_tool_parser (sys.modules alias)."""
+import importlib
+import sys
 
-from vllm.parser.ling3 import Ling3ParserToolAdapter
-
-
-class Ling3ToolParser(Ling3ParserToolAdapter):  # type: ignore[valid-type, misc]
-    supports_required_and_named = False
-    structural_tag_model = "glm_4_7"
+_real = importlib.import_module("vllm.frontend.processing.tool_parsers.ling3_tool_parser")
+sys.modules[__name__] = _real

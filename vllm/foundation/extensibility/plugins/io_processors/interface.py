@@ -8,7 +8,7 @@ from vllm.foundation.config import VllmConfig
 from vllm.inputs import PromptType
 from vllm.frontend.processing.outputs import PoolingRequestOutput
 from vllm.frontend.processing.pooling_params import PoolingParams
-from vllm.renderers import BaseRenderer
+from vllm.frontend.processing.renderers import BaseRenderer
 from vllm.frontend.processing.sampling_params import SamplingParams
 
 IOProcessorInput = TypeVar("IOProcessorInput")

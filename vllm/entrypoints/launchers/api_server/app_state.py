@@ -14,8 +14,8 @@ from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import process_lora_modules
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.foundation.extensibility.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
-from vllm.renderers.online_derenderer import OnlineDerenderer
-from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.frontend.processing.renderers.online_derenderer import OnlineDerenderer
+from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
 from vllm.frontend.processing.tasks import FALLBACK_SUPPORTED_TASKS, POOLING_TASKS, SupportedTask
 
 
@@ -28,7 +28,7 @@ async def init_app_state(
     vllm_config = engine_client.vllm_config
 
     if args.tool_call_parser is not None:
-        from vllm.parser.metrics import init_parser_metrics
+        from vllm.frontend.processing.parser.metrics import init_parser_metrics
 
         init_parser_metrics(
             model_name=cast(str, vllm_config.model_config.served_model_name)

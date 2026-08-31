@@ -8,7 +8,7 @@ It provides two things:
 
 * :class:`Citation` / :class:`CitationSource`: the vLLM-internal citation
   representation produced by the Cohere reasoning parser
-  (:mod:`vllm.reasoning.cohere_command_reasoning_parser`) and consumed by
+  (:mod:`vllm.frontend.processing.reasoning.cohere_command_reasoning_parser`) and consumed by
   :mod:`vllm.entrypoints.cohere.serving`. This is *not* the on-wire Cohere
   SDK shape -- that conversion happens in the serving layer.
 * :class:`CohereChatMessage` / :class:`CohereDeltaMessage`: :class:`ChatMessage`
@@ -44,7 +44,7 @@ class CitationSource(OpenAIBaseModel):
 
     Sources are fully resolved by the reasoning parser at emit time
     (see :func:`_melody_sources_to_vllm` in
-    :mod:`vllm.reasoning.cohere_command_reasoning_parser`) using the
+    :mod:`vllm.frontend.processing.reasoning.cohere_command_reasoning_parser`) using the
     ``POSITION_TO_SOURCE_KEY`` map forwarded through
     ``chat_template_kwargs`` by
     :meth:`vllm.entrypoints.cohere.serving.CohereServingChatV2._apply_cohere_template_kwargs`.
@@ -122,7 +122,7 @@ class CohereDeltaMessage(DeltaMessage):
     """:class:`DeltaMessage` extension carrying grounding citations for streaming.
 
     Emitted by
-    :class:`vllm.reasoning.cohere_command_reasoning_parser.BaseCohereCommandReasoningParser`
+    :class:`vllm.frontend.processing.reasoning.cohere_command_reasoning_parser.BaseCohereCommandReasoningParser`
     on delta events whose payload includes citations. Non-Cohere parsers
     return plain :class:`DeltaMessage`, so their streamed shape is
     unchanged.

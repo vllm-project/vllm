@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.observability.logger import init_logger
-from vllm.reasoning import ReasoningParserManager
-from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.frontend.processing.reasoning import ReasoningParserManager
+from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.foundation.utilities.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
-    from vllm.reasoning import ReasoningParser
+    from vllm.frontend.processing.reasoning import ReasoningParser
     from vllm.v1.request import Request
 else:
     torch = LazyLoader("torch", globals(), "torch")

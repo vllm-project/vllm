@@ -1,36 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from openai.types.responses import ToolChoiceFunction
+"""Compatibility shim: vllm.tool_parsers/gemma4_engine_tool_parser -> vllm.frontend.processing.tool_parsers.gemma4_engine_tool_parser (sys.modules alias)."""
+import importlib
+import sys
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.parser.engine.registered_adapters import Gemma4ParserToolAdapter
-
-
-class Gemma4EngineToolParser(Gemma4ParserToolAdapter):  # type: ignore[valid-type, misc]
-    supports_required_and_named = False
-
-    def adjust_request(
-        self, request: ChatCompletionRequest | ResponsesRequest
-    ) -> ChatCompletionRequest | ResponsesRequest:
-        """Skip structured-output JSON for required/named tool choice.
-
-        Gemma4 emits its native ``<|tool_call>call:...`` syntax, which the
-        parser extracts directly. The base ``ToolParser.adjust_request`` would
-        set ``structured_outputs`` for required/named and force JSON via guided
-        decoding, conflicting with that native syntax (it leaks as content and
-        crashes EngineCore under speculative decoding). Skip it so the model
-        emits its native format (mirrors the GLM4 parser).
-        """
-        if request.tools:
-            tc = request.tool_choice
-            if tc == "required" or isinstance(
-                tc, (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction)
-            ):
-                request.skip_special_tokens = False
-                return request
-        return super().adjust_request(request)
+_real = importlib.import_module("vllm.frontend.processing.tool_parsers.gemma4_engine_tool_parser")
+sys.modules[__name__] = _real

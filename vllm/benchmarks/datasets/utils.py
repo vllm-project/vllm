@@ -9,7 +9,7 @@ import math
 
 import numpy as np
 
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 
 logger = logging.getLogger(__name__)
 

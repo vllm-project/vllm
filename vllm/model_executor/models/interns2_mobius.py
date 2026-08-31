@@ -29,7 +29,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers.registry import cached_tokenizer_from_config
+from vllm.frontend.processing.tokenizers.registry import cached_tokenizer_from_config
 
 from .interfaces import EagleModelMixin
 from .interns2_preview import (

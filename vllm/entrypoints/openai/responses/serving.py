@@ -95,10 +95,10 @@ from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.frontend.processing.outputs import CompletionOutput
-from vllm.parser import Parser, ParserManager
-from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.frontend.processing.parser import Parser, ParserManager
+from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
 from vllm.frontend.processing.sampling_params import SamplingParams, StructuredOutputsParams
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.utilities import random_uuid
 from vllm.foundation.utilities.collection_utils import as_list
 

@@ -47,7 +47,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
 
 logger = logging.getLogger(__name__)
 

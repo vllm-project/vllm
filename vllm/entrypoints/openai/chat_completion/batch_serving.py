@@ -22,8 +22,8 @@ from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import EngineInput
 from vllm.foundation.observability.logger import init_logger
 from vllm.frontend.processing.outputs import RequestOutput
-from vllm.parser.abstract_parser import Parser
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.parser.abstract_parser import Parser
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.utilities.async_utils import merge_async_iterators
 from vllm.foundation.utilities.collection_utils import as_list
 

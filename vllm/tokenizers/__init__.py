@@ -1,20 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from .hf import maybe_make_thread_pool
-from .protocol import TokenizerLike
-from .registry import (
-    TokenizerRegistry,
-    cached_get_tokenizer,
-    cached_tokenizer_from_config,
-    get_tokenizer,
-)
+"""Compatibility shim: vllm.tokenizers/ -> vllm.frontend.processing.tokenizers (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-__all__ = [
-    "TokenizerLike",
-    "TokenizerRegistry",
-    "cached_get_tokenizer",
-    "get_tokenizer",
-    "cached_tokenizer_from_config",
-    "maybe_make_thread_pool",
-]
+_real = _importlib.import_module("vllm.frontend.processing.tokenizers")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

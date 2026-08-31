@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.parser.engine.registered_adapters import DeepSeekV4ParserReasoningAdapter
+"""Compatibility shim: vllm.reasoning/deepseek_v4_engine_reasoning_parser -> vllm.frontend.processing.reasoning.deepseek_v4_engine_reasoning_parser (sys.modules alias)."""
+import importlib
+import sys
 
-__all__ = ["DeepSeekV4ParserReasoningAdapter"]
+_real = importlib.import_module("vllm.frontend.processing.reasoning.deepseek_v4_engine_reasoning_parser")
+sys.modules[__name__] = _real

@@ -63,7 +63,7 @@ from vllm.entrypoints.speech_to_text.translation.protocol import (
 )
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
-from vllm.reasoning import ReasoningParserManager
+from vllm.frontend.processing.reasoning import ReasoningParserManager
 from vllm.foundation.utilities import random_uuid
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 from vllm.foundation.utilities.mem_constants import MiB_bytes

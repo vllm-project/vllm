@@ -107,8 +107,8 @@ from vllm.multimodal.video_prune.vidcom2 import (
     compute_retention_mask as vidcom2_compute_retention_mask,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers.protocol import TokenizerLike
-from vllm.tokenizers.registry import cached_tokenizer_from_config
+from vllm.frontend.processing.tokenizers.protocol import TokenizerLike
+from vllm.frontend.processing.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.foundation.utilities.cache import LRUCache
 from vllm.foundation.utilities.collection_utils import is_list_of

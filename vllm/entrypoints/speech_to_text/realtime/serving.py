@@ -15,7 +15,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import PromptType
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsRealtime
-from vllm.renderers.inputs.preprocess import parse_model_prompt
+from vllm.frontend.processing.renderers.inputs.preprocess import parse_model_prompt
 
 logger = init_logger(__name__)
 

@@ -64,7 +64,7 @@ from vllm.entrypoints.generate.base.protocol import StopParam
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.frontend.processing.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.frontend.processing.sampling_params import (
     RequestOutputKind,
     SamplingParams,

@@ -7,10 +7,10 @@
 Implements ``POST /cohere/v2/chat`` by translating the incoming Cohere v2 request
 into a standard :class:`ChatCompletionRequest` and delegating to
 :class:`OpenAIServingChat`. The actual prompt rendering is handled by
-vLLM's renderer pipeline (``vllm.renderers``):
+vLLM's renderer pipeline (``vllm.frontend.processing.renderers``):
 
 - For Cohere Command-family models, set ``--tokenizer-mode cohere`` and the
-  :class:`vllm.renderers.cohere.CohereRenderer` will template the request
+  :class:`vllm.frontend.processing.renderers.cohere.CohereRenderer` will template the request
   via the ``cohere_melody`` library (``render_cmd3`` / ``render_cmd4``)
   and surface citations through the Cohere-scoped
   :class:`CohereChatMessage` / :class:`CohereDeltaMessage` subclasses
@@ -88,15 +88,15 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.parser.abstract_parser import Parser
-from vllm.renderers.cohere import (
+from vllm.frontend.processing.parser.abstract_parser import Parser
+from vllm.frontend.processing.renderers.cohere import (
     MESSAGES_CITATIONS_KEY,
     POSITION_TO_SOURCE_KEY,
     TOOL_MESSAGE_V2_CONTENT_KEY,
 )
 
 if TYPE_CHECKING:
-    from vllm.renderers.online_renderer import OnlineRenderer
+    from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +224,7 @@ class CohereServingChatV2(OpenAIServingChat):
     as ``documents``, ``safety_mode`` and ``citation_options`` via
     ``chat_template_kwargs``) and delegates to the underlying chat
     completion machinery. All Cohere-specific templating happens in the
-    renderer (:class:`vllm.renderers.cohere.CohereRenderer`) when the
+    renderer (:class:`vllm.frontend.processing.renderers.cohere.CohereRenderer`) when the
     engine is started with ``--tokenizer-mode cohere``.
 
     Citations flow through ``CohereChatMessage`` / ``CohereDeltaMessage``
@@ -515,7 +515,7 @@ class CohereServingChatV2(OpenAIServingChat):
         # :meth:`_collect_v2_tool_message_content` forwards the
         # original v2 content blocks under
         # :data:`TOOL_MESSAGE_V2_CONTENT_KEY`, and the renderer applies
-        # :func:`vllm.renderers.cohere._v2_tool_content_to_melody_block`
+        # :func:`vllm.frontend.processing.renderers.cohere._v2_tool_content_to_melody_block`
         # to produce the melody-shape ``document`` blocks cmd3/cmd4
         # tool-result rendering expects. Outbound citation binding is
         # unaffected either way: sources resolve through the
@@ -652,7 +652,7 @@ class CohereServingChatV2(OpenAIServingChat):
     ) -> None:
         """Forward Cohere-specific request fields into ``chat_template_kwargs``.
 
-        The :class:`vllm.renderers.cohere.CohereRenderer` consumes these
+        The :class:`vllm.frontend.processing.renderers.cohere.CohereRenderer` consumes these
         kwargs to drive ``cohere_melody.render_cmd3`` / ``render_cmd4``.
         Other renderers ignore unknown kwargs, so this is also a no-op for
         non-cohere ``--tokenizer-mode`` settings.
@@ -1112,7 +1112,7 @@ class CohereServingChatV2(OpenAIServingChat):
         """Copy grounding citations off the reasoning parser onto the message.
 
         The Cohere reasoning parser
-        (:mod:`vllm.reasoning.cohere_command_reasoning_parser`) caches the
+        (:mod:`vllm.frontend.processing.reasoning.cohere_command_reasoning_parser`) caches the
         citations produced by its most recent unary ``extract_reasoning``
         call on ``last_unary_citations``. We surface them here on
         :class:`CohereChatMessage` so downstream response conversion can
@@ -1146,7 +1146,7 @@ class CohereServingChatV2(OpenAIServingChat):
         reasoning parser's ``last_unary_citations`` cache). Sources are
         already fully resolved by the parser (see
         :func:`_melody_sources_to_vllm` in
-        :mod:`vllm.reasoning.cohere_command_reasoning_parser`) using
+        :mod:`vllm.frontend.processing.reasoning.cohere_command_reasoning_parser`) using
         the position map forwarded via ``chat_template_kwargs``. This
         method's remaining job is:
 
@@ -1343,7 +1343,7 @@ class CohereServingChatV2(OpenAIServingChat):
         :meth:`_apply_cohere_template_kwargs` stashes under
         :data:`TOOL_MESSAGE_V2_CONTENT_KEY` for the renderer to
         consume (see the constant definition in
-        :mod:`vllm.renderers.cohere` for why the map exists). Walks
+        :mod:`vllm.frontend.processing.renderers.cohere` for why the map exists). Walks
         ``request.messages`` -- not the OpenAI-shape messages built by
         :meth:`_convert_messages` -- because that flattening step
         already threw away the structural distinction between text and
@@ -1357,7 +1357,7 @@ class CohereServingChatV2(OpenAIServingChat):
         Only emits an entry for a tool message whose content is a
         non-empty list of blocks; a bare-string tool message renders
         fine through the default text-block path in
-        :func:`vllm.renderers.cohere._content_blocks`, so no forwarded
+        :func:`vllm.frontend.processing.renderers.cohere._content_blocks`, so no forwarded
         blocks are needed there. Returns an empty dict when there is
         nothing to forward, so the caller can use truthiness to decide
         whether to stash the key at all.

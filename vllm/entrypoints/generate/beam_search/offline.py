@@ -17,7 +17,7 @@ from vllm.frontend.processing.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 from vllm.v1.structured_output.request import get_structured_output_key
 

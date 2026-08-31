@@ -46,8 +46,8 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.tokenizers.hf import HfTokenizer
+from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
+from vllm.frontend.processing.tokenizers.hf import HfTokenizer
 from vllm.foundation.integrations.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.foundation.integrations.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,

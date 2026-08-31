@@ -40,7 +40,7 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.frontend.processing.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.frontend.processing.sampling_params import (
     BeamSearchParams,
     RepetitionDetectionParams,

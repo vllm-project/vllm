@@ -27,11 +27,11 @@ from vllm.inputs import (
     MultiModalPlaceholders,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.renderers.inputs.preprocess import (
+from vllm.frontend.processing.renderers.inputs.preprocess import (
     extract_prompt_components,
     extract_prompt_len,
 )
-from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
 from vllm.foundation.utilities import random_uuid
 
 logger = init_logger(__name__)

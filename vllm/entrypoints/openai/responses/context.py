@@ -38,8 +38,8 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_tool_dicts,
 )
 from vllm.frontend.processing.outputs import RequestOutput
-from vllm.parser.abstract_parser import Parser
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.parser.abstract_parser import Parser
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.utilities import random_uuid
 
 if TYPE_CHECKING:
@@ -606,7 +606,7 @@ class HarmonyContext(ConversationContext):
         function_tool_names: frozenset[str],
         response_parser: Parser | None = None,
     ):
-        from vllm.parser.harmony import HarmonyParser, Segment
+        from vllm.frontend.processing.parser.harmony import HarmonyParser, Segment
 
         assert isinstance(response_parser, HarmonyParser)
 

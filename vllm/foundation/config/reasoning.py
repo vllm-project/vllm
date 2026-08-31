@@ -5,8 +5,8 @@ from dataclasses import field
 
 from vllm.foundation.config.model import ModelConfig
 from vllm.foundation.config.utils import config
-from vllm.reasoning import ReasoningParserManager
-from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.frontend.processing.reasoning import ReasoningParserManager
+from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 
 
 @config

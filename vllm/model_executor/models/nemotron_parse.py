@@ -53,7 +53,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.renderers import TokenizeParams
+from vllm.frontend.processing.renderers import TokenizeParams
 from vllm.foundation.integrations.transformers_utils.configs.radio import RadioConfig
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backend import AttentionType

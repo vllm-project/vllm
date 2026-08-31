@@ -15,7 +15,7 @@ from vllm.v1.structured_output.backend_types import (
 )
 
 if TYPE_CHECKING:
-    from vllm.reasoning import ReasoningParser
+    from vllm.frontend.processing.reasoning import ReasoningParser
 
 
 @dataclasses.dataclass

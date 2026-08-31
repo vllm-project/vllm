@@ -42,9 +42,9 @@ from vllm.inputs import EngineInput
 from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.frontend.processing.outputs import RequestOutput
-from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.frontend.processing.renderers.online_renderer import OnlineRenderer
 from vllm.frontend.processing.sampling_params import BeamSearchParams, SamplingParams
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.utilities.async_utils import merge_async_iterators
 from vllm.foundation.utilities.collection_utils import as_list
 from vllm.foundation.utilities.serial_utils import numpy2base64

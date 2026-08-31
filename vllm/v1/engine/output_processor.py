@@ -20,7 +20,7 @@ from vllm.frontend.processing.outputs import (
     SamplingMask,
 )
 from vllm.frontend.processing.sampling_params import RequestOutputKind
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.observability.tracing import (
     SpanAttributes,
     SpanKind,

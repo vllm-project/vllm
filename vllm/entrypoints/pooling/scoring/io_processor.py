@@ -7,9 +7,9 @@ from typing import Any, TypeAlias, cast
 import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
-from vllm.renderers import TokenizeParams
-from vllm.renderers.hf import safe_apply_chat_template
-from vllm.renderers.inputs.preprocess import (
+from vllm.frontend.processing.renderers import TokenizeParams
+from vllm.frontend.processing.renderers.hf import safe_apply_chat_template
+from vllm.frontend.processing.renderers.inputs.preprocess import (
     extract_target_prompt,
     parse_model_prompt,
     prompt_to_seq,

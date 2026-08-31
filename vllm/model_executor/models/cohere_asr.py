@@ -51,8 +51,8 @@ from vllm.multimodal.processing import (
     TimingContext,
 )
 from vllm.multimodal.processing.processor import MultiModalProcessingInfo
-from vllm.renderers import TokenizeParams
-from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.frontend.processing.renderers import TokenizeParams
+from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.foundation.integrations.transformers_utils.processors.cohere_asr import (
     INF_VAL,
     CohereASRFeatureExtractor,

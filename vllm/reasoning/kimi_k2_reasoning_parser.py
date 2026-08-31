@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.parser.engine.registered_adapters import KimiK2ParserReasoningAdapter
+"""Compatibility shim: vllm.reasoning/kimi_k2_reasoning_parser -> vllm.frontend.processing.reasoning.kimi_k2_reasoning_parser (sys.modules alias)."""
+import importlib
+import sys
 
-KimiK2ReasoningParser = KimiK2ParserReasoningAdapter
-
-__all__ = ["KimiK2ReasoningParser"]
+_real = importlib.import_module("vllm.frontend.processing.reasoning.kimi_k2_reasoning_parser")
+sys.modules[__name__] = _real

@@ -15,7 +15,7 @@ from vllm.inputs import EngineInput, PromptType
 from vllm.lora.request import LoRARequest
 from vllm.frontend.processing.outputs import PoolingRequestOutput, RequestOutput
 from vllm.frontend.processing.pooling_params import PoolingParams
-from vllm.renderers import BaseRenderer
+from vllm.frontend.processing.renderers import BaseRenderer
 from vllm.frontend.processing.sampling_params import SamplingParams
 from vllm.frontend.processing.tasks import SupportedTask
 from vllm.v1.engine import EngineCoreRequest

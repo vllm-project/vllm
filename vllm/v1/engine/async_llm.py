@@ -28,11 +28,11 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.frontend.processing.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.frontend.processing.pooling_params import PoolingParams
-from vllm.renderers import renderer_from_config
-from vllm.renderers.inputs.preprocess import extract_prompt_components
+from vllm.frontend.processing.renderers import renderer_from_config
+from vllm.frontend.processing.renderers.inputs.preprocess import extract_prompt_components
 from vllm.frontend.processing.sampling_params import RequestOutputKind, SamplingParams
 from vllm.frontend.processing.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.observability.tracing import init_tracer
 from vllm.foundation.integrations.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.foundation.observability.usage.usage_lib import UsageContext

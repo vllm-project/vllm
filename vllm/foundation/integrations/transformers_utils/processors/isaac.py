@@ -16,7 +16,7 @@ from transformers import (
 from transformers.processing_utils import ProcessingKwargs
 from typing_extensions import Unpack
 
-from vllm.tokenizers.hf import HfTokenizer
+from vllm.frontend.processing.tokenizers.hf import HfTokenizer
 
 MAX_PIXELS = 60_000_000  # 60-megapixel ceiling ≈ 8200 × 7300 px
 

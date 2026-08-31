@@ -1,20 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.parser.engine.registered_adapters import KimiK2ParserToolAdapter
+"""Compatibility shim: vllm.tool_parsers/kimi_k2_tool_parser -> vllm.frontend.processing.tool_parsers.kimi_k2_tool_parser (sys.modules alias)."""
+import importlib
+import sys
 
-
-class KimiK2ToolParser(KimiK2ParserToolAdapter):  # type: ignore[valid-type, misc]
-    structural_tag_model = "kimi"
-
-    def adjust_request(
-        self,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> ChatCompletionRequest | ResponsesRequest:
-        if request.tools and request.tool_choice != "none":
-            request.skip_special_tokens = False
-        return request
+_real = importlib.import_module("vllm.frontend.processing.tool_parsers.kimi_k2_tool_parser")
+sys.modules[__name__] = _real

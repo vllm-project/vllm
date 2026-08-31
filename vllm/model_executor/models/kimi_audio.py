@@ -50,8 +50,8 @@ from vllm.multimodal.processing.processor import (
     ProcessorInputs,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers import cached_get_tokenizer
-from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
+from vllm.frontend.processing.tokenizers import cached_get_tokenizer
+from vllm.frontend.processing.tokenizers.kimi_audio import KimiAudioTokenizer
 from vllm.foundation.integrations.transformers_utils.processor import cached_feature_extractor_from_config
 from vllm.foundation.integrations.transformers_utils.processors.kimi_audio import KimiAudioProcessor
 

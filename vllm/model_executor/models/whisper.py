@@ -61,7 +61,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.renderers import TokenizeParams
+from vllm.frontend.processing.renderers import TokenizeParams
 from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
 from vllm.foundation.utilities.jsontree import json_map_leaves
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape

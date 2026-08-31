@@ -36,7 +36,7 @@ from vllm.multimodal.processing.processor import (
     PlaceholderFeaturesInfo,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.foundation.utilities.torch_utils import is_torch_equal_or_newer
 
 from .utils import (

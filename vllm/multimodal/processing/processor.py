@@ -25,7 +25,7 @@ from vllm.inputs import (
     mm_input,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.utilities.collection_utils import flatten_2d_lists, full_groupby
 
 from ..inputs import (

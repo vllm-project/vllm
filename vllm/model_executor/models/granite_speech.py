@@ -58,7 +58,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
 from vllm.foundation.utilities.gpu_sync_debug import gpu_sync_allowed
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape

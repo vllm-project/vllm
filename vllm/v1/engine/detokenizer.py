@@ -10,8 +10,8 @@ from tokenizers import Tokenizer
 from transformers import TokenizersBackend
 
 from vllm.foundation.observability.logger import init_logger
-from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.detokenizer_utils import (
+from vllm.frontend.processing.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
 )

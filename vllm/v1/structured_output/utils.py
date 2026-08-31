@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     import transformers.file_utils as file_utils
     import xgrammar as xgr
 
-    from vllm.tokenizers import TokenizerLike
+    from vllm.frontend.processing.tokenizers import TokenizerLike
     from vllm.v1.worker.gpu_input_batch import InputBatch
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
@@ -311,9 +311,9 @@ def maybe_wrap_mistral_common_tokenizer(tokenizer: TokenizerLike) -> TokenizerLi
     if not isinstance(tokenizer, MistralCommonBackend):
         return tokenizer
 
-    # Deferred: `vllm.tokenizers.mistral` pulls in a large dependency tree, and
+    # Deferred: `vllm.frontend.processing.tokenizers.mistral` pulls in a large dependency tree, and
     # this module is imported by `vllm.v1.worker.gpu_model_runner`.
-    from vllm.tokenizers.mistral import MistralTokenizer
+    from vllm.frontend.processing.tokenizers.mistral import MistralTokenizer
 
     return MistralTokenizer(tokenizer)
 

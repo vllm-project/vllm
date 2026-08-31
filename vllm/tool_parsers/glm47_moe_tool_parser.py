@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from __future__ import annotations
+"""Compatibility shim: vllm.tool_parsers/glm47_moe_tool_parser -> vllm.frontend.processing.tool_parsers.glm47_moe_tool_parser (sys.modules alias)."""
+import importlib
+import sys
 
-from vllm.parser.engine.registered_adapters import Glm47MoeParserToolAdapter
-
-
-class Glm47MoeModelToolParser(Glm47MoeParserToolAdapter):  # type: ignore[valid-type, misc]
-    supports_required_and_named = False
-    structural_tag_model = "glm_4_7"
+_real = importlib.import_module("vllm.frontend.processing.tool_parsers.glm47_moe_tool_parser")
+sys.modules[__name__] = _real

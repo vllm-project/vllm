@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Provides lazy import of the vllm.tokenizers.mistral module."""
+"""Provides lazy import of the vllm.frontend.processing.tokenizers.mistral module."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypeGuard
 
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.utilities.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     # if type checking, eagerly import the module
-    import vllm.tokenizers.mistral as mt
+    import vllm.frontend.processing.tokenizers.mistral as mt
 else:
-    mt = LazyLoader("mt", globals(), "vllm.tokenizers.mistral")
+    mt = LazyLoader("mt", globals(), "vllm.frontend.processing.tokenizers.mistral")
 
 
 def is_mistral_tokenizer(obj: TokenizerLike | None) -> TypeGuard[mt.MistralTokenizer]:

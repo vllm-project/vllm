@@ -29,7 +29,7 @@ from vllm.lora.request import LoRARequest
 from vllm.frontend.processing.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.frontend.processing.sampling_params import BeamSearchParams
-from vllm.tokenizers import TokenizerLike, get_tokenizer
+from vllm.frontend.processing.tokenizers import TokenizerLike, get_tokenizer
 from vllm.foundation.utilities.argparse_utils import FlexibleArgumentParser
 from vllm.foundation.utilities.async_utils import merge_async_iterators
 

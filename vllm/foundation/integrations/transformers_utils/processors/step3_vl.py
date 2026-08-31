@@ -15,7 +15,7 @@ from transformers import (
     TensorType,
 )
 
-from vllm.tokenizers import TokenizerLike
+from vllm.frontend.processing.tokenizers import TokenizerLike
 
 MAX_IMAGE_SIZE: int = 3024
 

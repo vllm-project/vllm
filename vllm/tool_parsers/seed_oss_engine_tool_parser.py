@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-from vllm.parser.engine.registered_adapters import SeedOssParserToolAdapter
+"""Compatibility shim: vllm.tool_parsers/seed_oss_engine_tool_parser -> vllm.frontend.processing.tool_parsers.seed_oss_engine_tool_parser (sys.modules alias)."""
+import importlib
+import sys
 
-
-class SeedOssEngineToolParser(SeedOssParserToolAdapter):  # type: ignore[valid-type, misc]
-    structural_tag_model = None
+_real = importlib.import_module("vllm.frontend.processing.tool_parsers.seed_oss_engine_tool_parser")
+sys.modules[__name__] = _real

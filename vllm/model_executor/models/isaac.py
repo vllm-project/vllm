@@ -57,7 +57,7 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.foundation.integrations.transformers_utils.config import patch_rope_parameters
 from vllm.foundation.integrations.transformers_utils.configs.isaac import (
     IsaacConfig,
