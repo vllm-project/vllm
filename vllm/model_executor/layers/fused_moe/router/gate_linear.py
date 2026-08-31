@@ -4,14 +4,25 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
 from vllm.platforms import current_platform
+from vllm.utils.hpc import (
+    has_hpc_bf16xfp32_gemm,
+    hpc_gemm_bf16xfp32,
+)
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
+
+
+class GateLinearWeightProcess(UnquantizedLinearMethod):
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer._process_gate_weights_after_loading()
+        super().process_weights_after_loading(layer)
 
 
 @PluggableLayer.register("gate_linear")
@@ -96,6 +107,11 @@ class GateLinear(ReplicatedLinear):
             vllm_config is not None
             and vllm_config.kernel_config.enable_bf16x3_router_gemm
         )
+        self._hpc_workspace_max_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+            if vllm_config is not None
+            else _HPC_GEMM_DEFAULT_MAX_TOKENS
+        )
         self.allow_fp32_router_gemm = (
             not bias
             and self.weight.dtype == torch.float32
@@ -146,6 +162,31 @@ class GateLinear(ReplicatedLinear):
                 and is_available()
             )
 
+        self._is_hopper = is_hopper
+        self.allow_hpc_router_gemm = self._compute_allow_hpc_router_gemm()
+
+        if self.allow_hpc_router_gemm:
+            self.quant_method = GateLinearWeightProcess()
+            logger.info_once("Enabled HPC BF16xFP32 router GEMM.")
+
+    def _compute_allow_hpc_router_gemm(self) -> bool:
+        """HPC BF16xFP32 router GEMM eligibility.
+
+        Shared by __init__ and set_out_dtype() since out_dtype may only be
+        known after construction.
+        """
+        return (
+            envs.VLLM_ENABLE_HPC_ROUTER_GEMM
+            and self._router_gemm_no_bias
+            and self.weight.dtype == torch.float32
+            and current_platform.is_cuda()
+            and self._is_hopper
+            and self.input_size % 8 == 0
+            and self.output_size % 64 == 0
+            and has_hpc_bf16xfp32_gemm()
+            and self.out_dtype == torch.float32
+        )
+
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
 
@@ -175,6 +216,35 @@ class GateLinear(ReplicatedLinear):
                 and is_available()
             )
 
+        # out_dtype may start as None -> recompute HPC eligibility here too
+        self.allow_hpc_router_gemm = self._compute_allow_hpc_router_gemm()
+        if self.allow_hpc_router_gemm:
+            self.quant_method = GateLinearWeightProcess()
+            logger.info_once("Enabled HPC BF16xFP32 router GEMM.")
+
+    def _process_gate_weights_after_loading(self):
+        if not self.allow_hpc_router_gemm:
+            return
+
+        import hpc
+
+        with torch.no_grad():
+            y = self.weight.data
+            w_high = y.to(torch.bfloat16)
+            w_low = ((y - w_high.float()) / _HPC_GEMM_WEIGHT_SCALE).to(torch.bfloat16)
+
+            if getattr(self, "hpc_w_high", None) is None:
+                # Allocate once: CUDA graph capture and weight-reload flows
+                # depend on these storage addresses staying stable.
+                self.hpc_w_high = w_high
+                self.hpc_w_low = w_low
+                self.hpc_split_flag = hpc.get_gemm_bf16xfp32_workspace(
+                    y.shape[0], max_tokens=self._hpc_workspace_max_tokens
+                )
+            else:
+                self.hpc_w_high.copy_(w_high)
+                self.hpc_w_low.copy_(w_low)
+
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
@@ -193,6 +263,23 @@ class GateLinear(ReplicatedLinear):
                 hidden_states=x,
                 router_weight=self.weight,
                 output_dtype=self.out_dtype,
+            )
+            return output, None
+
+        # HPC BF16 activation x FP32 router weight.
+        if (
+            self.allow_hpc_router_gemm
+            and x.ndim == 2
+            and x.dtype == torch.bfloat16
+            and x.shape[0] > _FP32_ROUTER_GEMM_MAX_TOKENS
+            and x.shape[0] <= self._hpc_workspace_max_tokens
+        ):
+            output = hpc_gemm_bf16xfp32(
+                x=x,
+                weight_high=self.hpc_w_high,
+                weight_low=self.hpc_w_low,
+                scale=_HPC_GEMM_WEIGHT_SCALE,
+                split_flag=self.hpc_split_flag,
             )
             return output, None
 
@@ -272,3 +359,13 @@ direct_register_custom_op(
     op_func=fp32_router_gemm_dispatch_impl,
     fake_impl=fp32_router_gemm_dispatch_fake,
 )
+
+
+# The HPC-Ops bf16xfp32 GEMM consumes the fp32 weight decomposed into two
+# bf16 halves: w_high = w.bf16 and w_low = ((w - w_high) / scale).bf16 with
+# scale = 1/256, so that w ~= w_high + scale * w_low.
+_HPC_GEMM_WEIGHT_SCALE = 1.0 / 256.0
+
+# hpc.get_gemm_bf16xfp32_workspace()'s own default when no vLLM config is
+# available to size the split-K workspace from.
+_HPC_GEMM_DEFAULT_MAX_TOKENS = 131072
