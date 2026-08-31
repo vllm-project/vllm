@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from time import perf_counter
+from weakref import WeakSet
 
 import torch
 import torch.nn.functional as F
@@ -284,6 +285,13 @@ def select_lm_head_candidates(
             f"candidate count must be in [1, {coarse_logits.shape[-1]}], "
             f"got {candidates}"
         )
+    # Match the argmax/reduction contract for invalid logits even when NaN
+    # diagnostics are disabled.  Passing NaNs to either FlashInfer or
+    # ``argsort`` can otherwise make candidate membership nondeterministic.
+    # This tensor is a temporary coarse projection and is not observed after
+    # candidate selection.  Normalize NaNs in place to avoid another full
+    # ``[batch, vocab]`` allocation on large vocabularies.
+    coarse_logits.nan_to_num_(nan=-float("inf"))
     if coarse_logits.is_cuda and has_flashinfer():
         try:
             from flashinfer import top_k
@@ -350,7 +358,14 @@ class HybridNvfp4LmHead:
     input_size: int
     output_size: int
     candidates: int
+    max_rows: int | None = None
     can_use_failure_counts: dict[str, int] = field(default_factory=dict, repr=False)
+    # Tied input/output embeddings can attach the same derived state to more
+    # than one module.  Keep weak references so releasing one module does not
+    # invalidate the state still owned by its tied peers.
+    attached_layers: WeakSet[torch.nn.Module] = field(
+        default_factory=WeakSet, repr=False, compare=False
+    )
 
     def candidate_count_for_topk(self, top_k: int) -> int:
         return _candidate_count_for_topk(
@@ -378,6 +393,8 @@ class HybridNvfp4LmHead:
             reason = "hidden_not_contiguous"
         elif hidden_states.shape[1] != self.input_size:
             reason = "hidden_width"
+        elif self.max_rows is not None and hidden_states.shape[0] > self.max_rows:
+            reason = "rows_exceed_limit"
         elif bf16_weight.dtype != torch.bfloat16:
             reason = "weight_dtype"
         elif bf16_weight.device != hidden_states.device:
@@ -547,15 +564,34 @@ def _attach_state(layer: torch.nn.Module, state: HybridNvfp4LmHead) -> None:
     ):
         layer.register_buffer(name, value, persistent=False)
     setattr(layer, _STATE_NAME, state)
+    state.attached_layers.add(layer)
+
+
+def _release_state_attachments(state: HybridNvfp4LmHead) -> int:
+    """Detach every module sharing ``state`` and return freed bytes."""
+    released_bytes = 0
+    # ``release_hybrid_nvfp4_lm_head`` updates the weak set while iterating;
+    # materialize it first to avoid mutating a live WeakSet iterator.
+    attached_layers = list(state.attached_layers)
+    for layer in attached_layers:
+        released_bytes += release_hybrid_nvfp4_lm_head(layer)
+    return released_bytes
 
 
 def prepare_hybrid_nvfp4_lm_head(
     layer: torch.nn.Module,
     *,
     candidates: int,
+    max_rows: int | None = None,
 ) -> bool:
     """Prepare one NVFP4 b12x lm-head copy, or keep the BF16 path."""
+    normalized_max_rows = (
+        None if max_rows is None or max_rows <= 0 else int(max_rows)
+    )
     if isinstance(getattr(layer, _STATE_NAME, None), HybridNvfp4LmHead):
+        state = getattr(layer, _STATE_NAME)
+        if max_rows is not None:
+            state.max_rows = normalized_max_rows
         if refresh_hybrid_nvfp4_lm_head(layer, candidates=candidates):
             return True
         # A changed dtype or shape cannot be refreshed in place.  Drop the
@@ -566,6 +602,8 @@ def prepare_hybrid_nvfp4_lm_head(
     weight = layer.weight
     shared_state = getattr(weight, _SHARED_STATE_NAME, None)
     if isinstance(shared_state, HybridNvfp4LmHead):
+        if max_rows is not None:
+            shared_state.max_rows = normalized_max_rows
         _attach_state(layer, shared_state)
         return True
 
@@ -611,6 +649,7 @@ def prepare_hybrid_nvfp4_lm_head(
         input_size=weight.shape[1],
         output_size=weight.shape[0],
         candidates=candidates,
+        max_rows=normalized_max_rows,
     )
     _attach_state(layer, state)
     setattr(weight, _SHARED_STATE_NAME, state)
@@ -652,7 +691,10 @@ def refresh_hybrid_nvfp4_lm_head(
         or weight.shape[0] != state.output_size
         or weight.shape[1] != state.input_size
     ):
-        release_hybrid_nvfp4_lm_head(layer)
+        if state.attached_layers:
+            _release_state_attachments(state)
+        else:
+            release_hybrid_nvfp4_lm_head(layer)
         return False
 
     quantized, scale, global_scale = _quantize_lm_head_weight(weight)
@@ -661,7 +703,10 @@ def refresh_hybrid_nvfp4_lm_head(
         or state.scale.shape != scale.shape
         or state.global_scale.shape != global_scale.shape
     ):
-        release_hybrid_nvfp4_lm_head(layer)
+        if state.attached_layers:
+            _release_state_attachments(state)
+        else:
+            release_hybrid_nvfp4_lm_head(layer)
         return False
 
     state.weight.copy_(quantized)
@@ -681,14 +726,48 @@ def refresh_hybrid_nvfp4_lm_heads(
 ) -> int:
     """Refresh each distinct prepared lm-head state in ``model``."""
     refreshed = 0
-    seen_states: set[int] = set()
+    state_layers: dict[int, tuple[HybridNvfp4LmHead, list[torch.nn.Module]]] = {}
     for layer in model.modules():
         state = getattr(layer, _STATE_NAME, None)
-        if not isinstance(state, HybridNvfp4LmHead) or id(state) in seen_states:
+        if not isinstance(state, HybridNvfp4LmHead):
             continue
-        seen_states.add(id(state))
-        refreshed += int(refresh_hybrid_nvfp4_lm_head(layer, candidates=candidates))
+        state_layers.setdefault(id(state), (state, []))[1].append(layer)
+    for state, layers in state_layers.values():
+        if refresh_hybrid_nvfp4_lm_head(layers[0], candidates=candidates):
+            refreshed += 1
+        else:
+            # The first refresh may already detach all known owners.  Keep the
+            # explicit loop for modules outside the current model traversal or
+            # stale weak-set entries.
+            _release_state_attachments(state)
+            for layer in layers:
+                release_hybrid_nvfp4_lm_head(layer)
     return refreshed
+
+
+def release_hybrid_nvfp4_lm_heads(model: torch.nn.Module) -> int:
+    """Release all distinct auxiliary states owned by ``model``."""
+    states: dict[int, tuple[HybridNvfp4LmHead, list[torch.nn.Module]]] = {}
+    for layer in model.modules():
+        state = getattr(layer, _STATE_NAME, None)
+        if isinstance(state, HybridNvfp4LmHead):
+            states.setdefault(id(state), (state, []))[1].append(layer)
+    released = 0
+    for state, layers in states.values():
+        if state.attached_layers:
+            released += _release_state_attachments(state)
+            continue
+        # Legacy/custom attachments may not have populated the weak set.  In
+        # that case count the shared storage once, then detach every owner.
+        if layers:
+            released += release_hybrid_nvfp4_lm_head(layers[0])
+            for layer in layers[1:]:
+                if hasattr(layer, _STATE_NAME):
+                    delattr(layer, _STATE_NAME)
+                for name in _BUFFER_NAMES:
+                    if hasattr(layer, name):
+                        delattr(layer, name)
+    return released
 
 
 def get_hybrid_nvfp4_lm_head(
@@ -699,21 +778,41 @@ def get_hybrid_nvfp4_lm_head(
 
 def release_hybrid_nvfp4_lm_head(layer: torch.nn.Module) -> int:
     """Release a prepared auxiliary copy from a discarded lm-head."""
-    released_bytes = 0
     state = getattr(layer, _STATE_NAME, None)
-    for name in _BUFFER_NAMES:
-        value = getattr(layer, name, None)
-        if isinstance(value, torch.Tensor):
-            released_bytes += value.nbytes
+    if not isinstance(state, HybridNvfp4LmHead):
+        # Be tolerant of callers cleaning up a partially initialized module.
+        if hasattr(layer, _STATE_NAME):
+            delattr(layer, _STATE_NAME)
+        released_bytes = 0
+        for name in _BUFFER_NAMES:
+            value = getattr(layer, name, None)
+            if isinstance(value, torch.Tensor):
+                released_bytes += value.nbytes
+            if hasattr(layer, name):
+                delattr(layer, name)
+        return released_bytes
 
-    if hasattr(layer, _STATE_NAME):
-        delattr(layer, _STATE_NAME)
+    state.attached_layers.discard(layer)
+    # Removing one tied view does not release the underlying tensors.  They
+    # remain reachable through the shared state and the other attached layer.
+    if state.attached_layers:
+        released_bytes = 0
+    else:
+        released_bytes = sum(
+            value.nbytes
+            for value in (state.weight, state.scale, state.global_scale)
+            if isinstance(value, torch.Tensor)
+        )
+
     for name in _BUFFER_NAMES:
         if hasattr(layer, name):
             delattr(layer, name)
 
+    if hasattr(layer, _STATE_NAME):
+        delattr(layer, _STATE_NAME)
+
     weight = getattr(layer, "weight", None)
-    if getattr(weight, _SHARED_STATE_NAME, None) is state:
+    if not state.attached_layers and getattr(weight, _SHARED_STATE_NAME, None) is state:
         delattr(weight, _SHARED_STATE_NAME)
     return released_bytes
 
@@ -728,6 +827,7 @@ __all__ = [
     "refresh_hybrid_nvfp4_lm_head",
     "refresh_hybrid_nvfp4_lm_heads",
     "release_hybrid_nvfp4_lm_head",
+    "release_hybrid_nvfp4_lm_heads",
     "select_lm_head_candidates",
     "warmup_hybrid_nvfp4_lm_head_kernels",
 ]

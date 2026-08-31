@@ -1446,6 +1446,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 getattr(self.model, "language_model", None), "lm_head", None
             )
 
+        # Added-vocabulary/LoRA transformations may be applied after model
+        # construction.  Once the contiguous-original-vocab contract is
+        # broken, drop the auxiliary copy immediately instead of merely
+        # falling back while retaining its VRAM allocation.
+        if (
+            envs.VLLM_HYBRID_NVFP4_LM_HEAD
+            and getattr(lm_head, "_hybrid_nvfp4_lm_head_state", None) is not None
+            and (
+                getattr(lm_head, "num_added_embeddings", 0) > 0
+                or getattr(
+                    getattr(lm_head, "shard_indices", None), "num_added_elements", 0
+                )
+                > 0
+                or self.vocab_size >= (1 << 24)
+                or self.lora_config is not None
+                or self.model_config.head_dtype != self.dtype
+                or getattr(self.model_config, "dtype", self.dtype) != self.dtype
+                or envs.VLLM_BATCH_INVARIANT
+                or envs.VLLM_COMPUTE_NANS_IN_LOGITS
+                or self.adaptive_verification is not None
+            )
+        ):
+            from vllm.model_executor.layers.hybrid_nvfp4_lm_head import (
+                release_hybrid_nvfp4_lm_heads,
+            )
+
+            release_hybrid_nvfp4_lm_heads(self.model)
+            draft_model = getattr(getattr(self, "speculator", None), "model", None)
+            if isinstance(draft_model, nn.Module):
+                release_hybrid_nvfp4_lm_heads(draft_model)
+
         fast_path_params = None
         if (
             envs.VLLM_HYBRID_NVFP4_LM_HEAD
@@ -1456,6 +1487,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and self.adaptive_verification is None
             and not envs.VLLM_BATCH_INVARIANT
             and self.model_config.head_dtype == self.dtype
+            and self.vocab_size < (1 << 24)
             and getattr(lm_head, "num_added_embeddings", 0) == 0
             and getattr(
                 getattr(lm_head, "shard_indices", None), "num_added_elements", 0
@@ -1558,6 +1590,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampled = self.model.sample_full_tokens(
                 sample_hidden_states,
                 temperature=temperature,
+                expanded_idx_mapping=input_batch.expanded_idx_mapping,
+                seeds=self.sampler.sampling_states.seeds.gpu,
+                pos=input_batch.positions[input_batch.logits_indices],
+                temperature_state=self.sampler.sampling_states.temperature.gpu,
             )
             sampler_output = self.sampler.make_sampler_output(
                 sampled.to(torch.int64), input_batch
@@ -1597,6 +1633,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 presence_penalties=presence_penalties,
                 output_token_counts=output_token_counts,
                 presence_request_indices=presence_request_indices,
+                expanded_idx_mapping=input_batch.expanded_idx_mapping,
+                seeds=self.sampler.sampling_states.seeds.gpu,
+                pos=input_batch.positions[input_batch.logits_indices],
+                temperature_state=self.sampler.sampling_states.temperature.gpu,
             )
             sampler_output = self.sampler.make_sampler_output(
                 sampled.to(torch.int64), input_batch

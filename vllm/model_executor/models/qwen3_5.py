@@ -359,6 +359,7 @@ class Qwen3_5ForCausalLMBase(
             # verification, dtype, or batch-invariant semantics are enabled.
             self.lm_head._supports_hybrid_nvfp4_lm_head = (
                 self.model_config.head_dtype == self.model_config.dtype
+                and config.vocab_size < (1 << 24)
                 and not envs.VLLM_BATCH_INVARIANT
                 and not envs.VLLM_COMPUTE_NANS_IN_LOGITS
                 and self.vllm_config.lora_config is None
@@ -458,11 +459,19 @@ class Qwen3_5ForCausalLMBase(
         self,
         hidden_states: torch.Tensor,
         temperature: float,
+        expanded_idx_mapping: torch.Tensor | None = None,
+        seeds: torch.Tensor | None = None,
+        pos: torch.Tensor | None = None,
+        temperature_state: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.logits_processor.sample_full_tokens(
             self.lm_head,
             hidden_states,
             temperature=temperature,
+            expanded_idx_mapping=expanded_idx_mapping,
+            seeds=seeds,
+            pos=pos,
+            temperature_state=temperature_state,
         )
 
     def get_topk_candidates(
@@ -498,6 +507,10 @@ class Qwen3_5ForCausalLMBase(
         output_token_ids: torch.Tensor | None = None,
         output_token_counts: torch.Tensor | None = None,
         presence_request_indices: torch.Tensor | None = None,
+        expanded_idx_mapping: torch.Tensor | None = None,
+        seeds: torch.Tensor | None = None,
+        pos: torch.Tensor | None = None,
+        temperature_state: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.logits_processor.sample_topk_tokens(
             self.lm_head,
@@ -509,6 +522,10 @@ class Qwen3_5ForCausalLMBase(
             output_token_ids=output_token_ids,
             output_token_counts=output_token_counts,
             presence_request_indices=presence_request_indices,
+            expanded_idx_mapping=expanded_idx_mapping,
+            seeds=seeds,
+            pos=pos,
+            temperature_state=temperature_state,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -683,10 +700,18 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         self,
         hidden_states: torch.Tensor,
         temperature: float,
+        expanded_idx_mapping: torch.Tensor | None = None,
+        seeds: torch.Tensor | None = None,
+        pos: torch.Tensor | None = None,
+        temperature_state: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.language_model.sample_full_tokens(
             hidden_states,
             temperature=temperature,
+            expanded_idx_mapping=expanded_idx_mapping,
+            seeds=seeds,
+            pos=pos,
+            temperature_state=temperature_state,
         )
 
     def get_topk_candidates(
@@ -721,6 +746,10 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         output_token_ids: torch.Tensor | None = None,
         output_token_counts: torch.Tensor | None = None,
         presence_request_indices: torch.Tensor | None = None,
+        expanded_idx_mapping: torch.Tensor | None = None,
+        seeds: torch.Tensor | None = None,
+        pos: torch.Tensor | None = None,
+        temperature_state: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.language_model.sample_topk_tokens(
             hidden_states,
@@ -731,6 +760,10 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             output_token_ids=output_token_ids,
             output_token_counts=output_token_counts,
             presence_request_indices=presence_request_indices,
+            expanded_idx_mapping=expanded_idx_mapping,
+            seeds=seeds,
+            pos=pos,
+            temperature_state=temperature_state,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

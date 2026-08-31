@@ -6,9 +6,15 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from torch import nn
 
 import vllm.envs as envs
-from vllm.model_executor.layers.hybrid_nvfp4_lm_head import select_lm_head_candidates
+from vllm.model_executor.layers.hybrid_nvfp4_lm_head import (
+    HybridNvfp4LmHead,
+    _attach_state,
+    release_hybrid_nvfp4_lm_head,
+    select_lm_head_candidates,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.warmup.hybrid_nvfp4_lm_head_warmup import _row_shapes
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -127,6 +133,15 @@ def test_candidate_fallback_uses_lower_index_for_ties():
     assert torch.equal(candidate_indices, torch.tensor([[0, 1], [0, 1]]))
 
 
+def test_candidate_selection_masks_nan_rows():
+    coarse_logits = torch.tensor([[float("nan"), 2.0, float("nan"), 1.0]])
+
+    candidate_indices = select_lm_head_candidates(coarse_logits, candidates=3)
+
+    assert torch.equal(candidate_indices, torch.tensor([[1, 3, 0]]))
+    assert torch.isneginf(coarse_logits[0, 0])
+
+
 def test_tp_argmax_reduction_handles_ties_and_nan(monkeypatch, default_vllm_config):
     processor = _make_processor()
     gathered = torch.tensor([[1.0, 7.0, 1.0, 3.0], [float("nan"), 5.0, 2.0, 4.0]])
@@ -144,6 +159,33 @@ def test_tp_argmax_reduction_handles_ties_and_nan(monkeypatch, default_vllm_conf
     assert torch.equal(result, torch.tensor([3, 4], dtype=torch.int64))
 
 
+def test_large_vocab_argmax_reduction_keeps_int64_ids(monkeypatch, default_vllm_config):
+    processor = LogitsProcessor(1 << 24)
+    gathered_values = torch.tensor([[2.0, 2.0], [float("nan"), -float("inf")]])
+    gathered_ids = torch.tensor(
+        [[1 << 24, (1 << 24) + 1], [1 << 24, 3]], dtype=torch.int64
+    )
+    calls = []
+
+    def gather(tensor, dim):
+        del dim
+        calls.append(tensor.dtype)
+        return gathered_values if tensor.dtype.is_floating_point else gathered_ids
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.logits_processor.tensor_model_parallel_all_gather",
+        gather,
+    )
+    result = processor.reduce_local_argmax(
+        torch.tensor([2.0, float("nan")]),
+        torch.tensor([1 << 24, 3], dtype=torch.int64),
+        tp_size=2,
+    )
+
+    assert calls == [torch.float32, torch.int64]
+    assert torch.equal(result, torch.tensor([1 << 24, 3], dtype=torch.int64))
+
+
 def test_head_dtype_mismatch_disables_hybrid_state(monkeypatch, default_vllm_config):
     processor = _make_processor()
     processor.head_dtype = torch.float32
@@ -154,6 +196,23 @@ def test_head_dtype_mismatch_disables_hybrid_state(monkeypatch, default_vllm_con
     processor._apply_head = lambda *args: logits  # type: ignore[method-assign]
 
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    hidden_states = torch.zeros(4, 4, dtype=torch.bfloat16)
+    top_tokens = processor.get_top_tokens(lm_head, hidden_states)
+
+    assert torch.equal(top_tokens, logits.argmax(dim=-1))
+    assert not state.can_use_called
+
+
+def test_nan_diagnostics_disables_hybrid_state(monkeypatch, default_vllm_config):
+    processor = _make_processor()
+    lm_head = _make_lm_head()
+    state = _RecordingHybridState()
+    lm_head._hybrid_nvfp4_lm_head_state = state
+    logits = torch.arange(32, dtype=torch.float32).reshape(4, 8)
+    processor._apply_head = lambda *args: logits  # type: ignore[method-assign]
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    monkeypatch.setattr(envs, "VLLM_COMPUTE_NANS_IN_LOGITS", True)
     hidden_states = torch.zeros(4, 4, dtype=torch.bfloat16)
     top_tokens = processor.get_top_tokens(lm_head, hidden_states)
 
@@ -196,6 +255,46 @@ def test_mixed_prefill_row_mask_keeps_decode_rows_compact(
     result = processor.get_top_tokens(lm_head, hidden_states)
 
     assert torch.equal(result, torch.tensor([2, 7], dtype=torch.int64))
+    assert state.can_use_called
+
+
+def test_mixed_prefill_presence_rows_keep_exact_fallback(
+    monkeypatch, default_vllm_config
+):
+    processor = _make_processor()
+    lm_head = _make_lm_head()
+    state = _FallbackHybridState()
+    lm_head._hybrid_nvfp4_lm_head_state = state
+
+    def apply_head(_lm_head, states, _bias=None):
+        rows = []
+        for state in states:
+            if state[0] > 0:
+                rows.append([0.0, 10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0])
+            else:
+                rows.append([8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0])
+        return torch.tensor(rows, dtype=torch.float32)
+
+    processor._apply_head = apply_head  # type: ignore[method-assign]
+    processor.hybrid_lm_head_row_mask = torch.tensor([True, False])
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+
+    hidden_states = torch.zeros(2, 4, dtype=torch.bfloat16)
+    hidden_states[1, 0] = 1
+    values, token_ids = processor.get_topk_candidates(
+        lm_head,
+        hidden_states,
+        top_k=1,
+        top_p=1.0,
+        temperature=1.0,
+        presence_penalties=torch.tensor([0.5, 0.5]),
+        output_token_ids=torch.tensor([[5], [1]], dtype=torch.int64),
+    )
+
+    # The prompt row (row 1) must use the full head: the fake hybrid state
+    # never proposes token 1, while the exact row's top token is 1.
+    assert token_ids[1, 0] == 1
+    assert values[1, 0] == pytest.approx(9.5)
     assert state.can_use_called
 
 
@@ -244,12 +343,14 @@ def test_warmup_row_shapes_respect_memory_cap(monkeypatch, default_vllm_config):
     )
     worker = SimpleNamespace(vllm_config=config)
     monkeypatch.setattr(envs, "VLLM_HYBRID_NVFP4_LM_HEAD_MAX_AUTOTUNE_ROWS", 512)
+    monkeypatch.setattr(envs, "VLLM_HYBRID_NVFP4_LM_HEAD_MAX_ROWS", 512)
 
     assert _row_shapes(worker) == (1, 512)
 
     config.compilation_config.cudagraph_capture_sizes = []
     monkeypatch.setattr(envs, "VLLM_HYBRID_NVFP4_LM_HEAD_MAX_AUTOTUNE_ROWS", 128)
-    assert max(_row_shapes(worker)) <= 128
+    monkeypatch.setattr(envs, "VLLM_HYBRID_NVFP4_LM_HEAD_MAX_ROWS", 64)
+    assert max(_row_shapes(worker)) <= 64
 
 
 def test_sampler_workspace_warmup_handles_small_vocab():
@@ -259,6 +360,19 @@ def test_sampler_workspace_warmup_handles_small_vocab():
 
     # The production warmup uses top_k=20; clamp it for toy vocabularies used
     # by CPU/unit-test runners instead of indexing beyond the logits width.
+    sampler.warmup_top_k_top_p_buffer(8)
+
+
+def test_sampler_workspace_warmup_respects_byte_cap(monkeypatch):
+    sampler = object.__new__(Sampler)
+    sampler.device = torch.device("cpu")
+    sampler.sampling_states = SimpleNamespace(vocab_size=1024)
+    monkeypatch.setattr(envs, "VLLM_HYBRID_NVFP4_LM_HEAD_MAX_WARMUP_BYTES", 1024)
+
+    def fail_allocation(*args, **kwargs):
+        raise AssertionError("warmup allocation exceeded byte cap")
+
+    monkeypatch.setattr(torch, "zeros", fail_allocation)
     sampler.warmup_top_k_top_p_buffer(8)
 
 
@@ -327,6 +441,88 @@ def test_compact_topk_hybrid_widens_transient_candidates(
     assert torch.equal(values, torch.tensor([[4.0, 3.0]]))
 
 
+def test_compact_topk_tie_breaks_by_token_id(default_vllm_config):
+    processor = _make_processor()
+    values, token_ids = processor._select_compact_topk_values_ids(
+        torch.tensor([[1.0, 1.0, 0.0]]),
+        torch.tensor([[7, 3, 5]], dtype=torch.int64),
+        top_k=2,
+        top_p=1.0,
+    )
+    assert torch.equal(values, torch.tensor([[1.0, 1.0]]))
+    assert torch.equal(token_ids, torch.tensor([[3, 7]], dtype=torch.int64))
+
+
+def test_large_vocab_compact_selection_keeps_integer_ids(default_vllm_config):
+    processor = LogitsProcessor(1 << 24)
+    values, token_ids = processor._select_compact_topk_values_ids(
+        torch.tensor([[2.0, 2.0, 1.0]]),
+        torch.tensor([[1 << 24, (1 << 24) + 1, 3]], dtype=torch.int64),
+        top_k=2,
+        top_p=1.0,
+    )
+    assert torch.equal(
+        token_ids, torch.tensor([[1 << 24, (1 << 24) + 1]], dtype=torch.int64)
+    )
+
+
+def test_tied_hybrid_state_releases_after_last_attachment():
+    weight = torch.zeros((4, 4), dtype=torch.bfloat16)
+    layer_a = nn.Module()
+    layer_b = nn.Module()
+    layer_a.weight = weight
+    layer_b.weight = weight
+    state = HybridNvfp4LmHead(
+        weight=torch.ones((4, 2), dtype=torch.uint8),
+        scale=torch.ones((4, 1), dtype=torch.float32),
+        global_scale=torch.ones((), dtype=torch.float32),
+        input_size=4,
+        output_size=4,
+        candidates=2,
+    )
+    _attach_state(layer_a, state)
+    _attach_state(layer_b, state)
+    setattr(weight, "_hybrid_nvfp4_lm_head_shared_state", state)
+
+    assert release_hybrid_nvfp4_lm_head(layer_a) == 0
+    assert getattr(layer_b, "_hybrid_nvfp4_lm_head_state") is state
+    assert getattr(weight, "_hybrid_nvfp4_lm_head_shared_state") is state
+
+    released = release_hybrid_nvfp4_lm_head(layer_b)
+    assert released == (
+        state.weight.nbytes + state.scale.nbytes + state.global_scale.nbytes
+    )
+    assert not hasattr(weight, "_hybrid_nvfp4_lm_head_shared_state")
+
+
+def test_hybrid_state_row_limit_fails_closed():
+    state = HybridNvfp4LmHead(
+        weight=torch.ones((4, 2), dtype=torch.uint8),
+        scale=torch.ones((4, 1), dtype=torch.float32),
+        global_scale=torch.ones((), dtype=torch.float32),
+        input_size=4,
+        output_size=4,
+        candidates=2,
+        max_rows=2,
+    )
+    hidden_states = SimpleNamespace(
+        ndim=2,
+        dtype=torch.bfloat16,
+        is_cuda=True,
+        is_contiguous=lambda: True,
+        shape=(3, 4),
+        device=torch.device("cpu"),
+    )
+
+    assert not state.can_use(
+        hidden_states,
+        bf16_weight=torch.zeros((4, 4), dtype=torch.bfloat16),
+        active_vocab_size=4,
+        top_k=1,
+    )
+    assert state.can_use_failure_counts["rows_exceed_limit"] == 1
+
+
 def test_presence_penalty_compact_helper_uses_output_counts(default_vllm_config):
     processor = _make_processor()
     lm_head = _make_lm_head()
@@ -382,6 +578,7 @@ def _sampling_gate_stub(
     presence: float = 0.0,
     repetition: float = 1.0,
     frequency: float = 0.0,
+    explicit_seed: bool = False,
 ):
     sampler = SimpleNamespace(
         compute_nans=False,
@@ -395,7 +592,7 @@ def _sampling_gate_stub(
             top_p=SimpleNamespace(np=np.array([top_p], np.float32)),
             min_p=SimpleNamespace(np=np.array([0.0], np.float32)),
             max_num_logprobs=lambda _: NO_LOGPROBS,
-            any_explicit_seed=lambda _: False,
+            any_explicit_seed=lambda _: explicit_seed,
         ),
         logprob_token_ids_state=SimpleNamespace(max_num_token_ids=lambda _: 0),
         logit_bias_state=SimpleNamespace(use_logit_bias=np.array([False])),
@@ -434,6 +631,14 @@ def test_sampling_gate_matches_supported_penalty_modes():
     )
     assert Sampler.get_vocab_parallel_sampling_params(sampler, input_batch) is None
 
+
+def test_sampling_gate_accepts_explicit_seed_for_keyed_fast_path():
+    sampler, input_batch = _sampling_gate_stub(
+        temperature=0.7, top_k=8, top_p=0.9, explicit_seed=True
+    )
+    result = Sampler.get_vocab_parallel_sampling_params(sampler, input_batch)
+    assert result is not None and result[0] == "topk"
+
     sampler, input_batch = _sampling_gate_stub(temperature=0.7, top_k=128, top_p=1.0)
     result = Sampler.get_vocab_parallel_sampling_params(sampler, input_batch)
     assert result is not None and result[0] == "full"
@@ -443,4 +648,25 @@ def test_sampling_gate_matches_supported_penalty_modes():
     )
     # Presence-only penalties are not representable by unrestricted local
     # Gumbel-max; they must stay on the regular full-logits sampler.
+    assert Sampler.get_vocab_parallel_sampling_params(sampler, input_batch) is None
+
+
+def test_sampling_gate_rejects_fp64_gumbel():
+    sampler, input_batch = _sampling_gate_stub(
+        temperature=0.7, top_k=8, top_p=0.9
+    )
+    sampler.use_fp64_gumbel = True
+
+    assert Sampler.get_vocab_parallel_sampling_params(sampler, input_batch) is None
+
+
+def test_sampling_gate_fails_closed_without_triton(monkeypatch):
+    sampler, input_batch = _sampling_gate_stub(
+        temperature=0.7, top_k=8, top_p=0.9, explicit_seed=True
+    )
+    sampler.device = torch.device("cuda")
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.sample.sampler.HAS_TRITON", False
+    )
+
     assert Sampler.get_vocab_parallel_sampling_params(sampler, input_batch) is None

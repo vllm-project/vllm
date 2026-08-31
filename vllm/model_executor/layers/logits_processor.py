@@ -25,6 +25,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 
 indexed_argmax_triton: Any
 reduce_global_argmax_triton: Any
@@ -54,6 +55,33 @@ logger = init_logger(__name__)
 # The full local logits projection is unavoidable, but a second full-sized
 # noise/scores matrix is not.
 _FULL_SAMPLE_BLOCK_SIZE = 8192
+_MAX_FLOAT32_TOKEN_ID = 1 << 24
+
+
+def _stable_topk(
+    values: torch.Tensor,
+    k: int,
+    token_ids: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Top-k with value-descending, token-id-ascending tie handling."""
+    if k <= 0 or k > values.shape[-1]:
+        raise ValueError(f"k must be in [1, {values.shape[-1]}], got {k}")
+    rank_values = torch.where(
+        torch.isnan(values), torch.full_like(values, -float("inf")), values
+    )
+    if token_ids is None:
+        order = torch.argsort(rank_values, dim=-1, descending=True, stable=True)
+    else:
+        if token_ids.shape != values.shape:
+            raise ValueError("token_ids must have the same shape as values")
+        id_order = torch.argsort(token_ids, dim=-1, stable=True)
+        id_sorted_values = rank_values.gather(-1, id_order)
+        value_order = torch.argsort(
+            id_sorted_values, dim=-1, descending=True, stable=True
+        )
+        order = id_order.gather(-1, value_order)
+    order = order[..., :k]
+    return rank_values.gather(-1, order), order
 
 
 @cache
@@ -79,7 +107,10 @@ def _flashinfer_topk() -> Callable[..., tuple[torch.Tensor, torch.Tensor]] | Non
 def _topk(scores: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
     impl = _flashinfer_topk()
     if impl is None or not scores.is_cuda:
-        return torch.topk(scores, k, dim=-1)
+        # ``torch.topk`` does not define the order of equal values.  The
+        # stable fallback keeps local boundary candidates deterministic so a
+        # later TP merge cannot depend on kernel launch details.
+        return _stable_topk(scores, k)
     return impl(scores, k, sorted=True, deterministic=True)
 
 
@@ -337,15 +368,25 @@ class LogitsProcessor(PluggableLayer):
                 valid_mask |= (local_ids >= added_local_start) & (
                     local_ids < added_local_end
                 )
-            logits = logits.masked_fill(~valid_mask, -float("inf"))
-            local_max_vals, local_max_indices = logits.max(dim=-1)
-            global_indices = torch.where(
-                local_max_indices < num_org_padded,
-                shard_indices.padded_org_vocab_start_index + local_max_indices,
+            global_ids = torch.where(
+                local_ids < num_org_padded,
+                shard_indices.padded_org_vocab_start_index + local_ids,
                 shard_indices.padded_added_vocab_start_index
-                + local_max_indices
+                + local_ids
                 - num_org_padded,
             )
+            finite_logits = torch.where(
+                valid_mask & (logits == logits),
+                logits,
+                torch.full_like(logits, -float("inf")),
+            )
+            local_max_vals = finite_logits.max(dim=-1).values
+            tie_break_ids = torch.where(
+                valid_mask & (finite_logits == local_max_vals.unsqueeze(-1)),
+                global_ids,
+                torch.full_like(global_ids, torch.iinfo(torch.int64).max),
+            )
+            global_indices = tie_break_ids.min(dim=-1).values
             return self.reduce_local_argmax(
                 local_max_vals,
                 global_indices,
@@ -360,6 +401,7 @@ class LogitsProcessor(PluggableLayer):
             and self._is_contiguous_org_shard(lm_head)
             and self.hybrid_lm_head_enabled
             and _hybrid_enabled is not False
+            and not envs.VLLM_COMPUTE_NANS_IN_LOGITS
             and (self.head_dtype is None or self.head_dtype == hidden_states.dtype)
             and hybrid_state.can_use(
                 hidden_states,
@@ -463,6 +505,21 @@ class LogitsProcessor(PluggableLayer):
         if tp_size == 1:
             return global_indices.to(torch.int64)
 
+        # Token ids are normally packed with scores for one compact
+        # all-gather.  FP32 cannot represent every integer above 2**24, so
+        # use separate typed gathers for unusually large vocabularies rather
+        # than silently changing the argmax tie-break key.
+        if self.vocab_size >= _MAX_FLOAT32_TOKEN_ID:
+            gathered_values = tensor_model_parallel_all_gather(
+                local_max_vals.float(), dim=-1
+            )
+            gathered_ids = tensor_model_parallel_all_gather(
+                global_indices.to(torch.int64), dim=-1
+            )
+            return self._reduce_global_argmax_values_ids(
+                gathered_values, gathered_ids, tp_size
+            )
+
         local_pair = torch.stack(
             [local_max_vals.float(), global_indices.float()], dim=-1
         )
@@ -480,16 +537,31 @@ class LogitsProcessor(PluggableLayer):
                 torch.int64
             )
         gathered = gathered.view(gathered.shape[0], tp_size, 2)
-        values = torch.where(
-            gathered[:, :, 0] == gathered[:, :, 0],
-            gathered[:, :, 0],
-            torch.full_like(gathered[:, :, 0], -float("inf")),
+        return LogitsProcessor._reduce_global_argmax_values_ids(
+            gathered[:, :, 0], gathered[:, :, 1], tp_size
         )
+
+    @staticmethod
+    def _reduce_global_argmax_values_ids(
+        gathered_values: torch.Tensor,
+        gathered_ids: torch.Tensor,
+        tp_size: int,
+    ) -> torch.Tensor:
+        """Reduce separately typed ``(value, token_id)`` gathers."""
+        gathered_ids = gathered_ids.to(torch.int64)
+        values = torch.where(
+            gathered_values == gathered_values,
+            gathered_values,
+            torch.full_like(gathered_values, -float("inf")),
+        )
+        if values.ndim == 1:
+            values = values.view(-1, tp_size)
+            gathered_ids = gathered_ids.view(-1, tp_size)
         max_values = values.max(dim=-1, keepdim=True).values
         tie_break_ids = torch.where(
             values == max_values,
-            gathered[:, :, 1],
-            torch.full_like(gathered[:, :, 1], float("inf")),
+            gathered_ids,
+            torch.full_like(gathered_ids, torch.iinfo(torch.int64).max),
         )
         return tie_break_ids.min(dim=-1).values.to(torch.int64)
 
@@ -499,6 +571,10 @@ class LogitsProcessor(PluggableLayer):
         hidden_states: torch.Tensor,
         temperature: float,
         embedding_bias: torch.Tensor | None = None,
+        expanded_idx_mapping: torch.Tensor | None = None,
+        seeds: torch.Tensor | None = None,
+        pos: torch.Tensor | None = None,
+        temperature_state: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Sample an unrestricted distribution without gathering full logits.
 
@@ -537,19 +613,55 @@ class LogitsProcessor(PluggableLayer):
         logits.div_(temperature)
         self._mask_invalid_shard_logits(logits, active_vocab_size)
 
-        # Reuse the logits buffer for Gumbel scores. Keeping a separate
-        # ``scores`` tensor would add another full ``[batch, vocab]``
-        # allocation on top of the local logits and exponential noise.
-        for start in range(0, logits.shape[-1], _FULL_SAMPLE_BLOCK_SIZE):
-            end = min(start + _FULL_SAMPLE_BLOCK_SIZE, logits.shape[-1])
-            block = logits[..., start:end]
-            noise = torch.empty_like(block)
-            noise.exponential_()
-            block.sub_(noise.log_())
-            # Keep NaN diagnostics fail-closed without materializing another
-            # full score matrix.  The bool mask is bounded by one block.
-            block.masked_fill_(torch.isnan(block), -float("inf"))
-        local_scores, local_indices = logits.max(dim=-1)
+        if (
+            (expanded_idx_mapping is None) != (seeds is None)
+            or (expanded_idx_mapping is None) != (pos is None)
+            or (expanded_idx_mapping is None) != (temperature_state is None)
+        ):
+            raise ValueError(
+                "expanded_idx_mapping, seeds, pos, and temperature_state must be "
+                "provided together"
+            )
+
+        if (
+            expanded_idx_mapping is not None
+            and seeds is not None
+            and pos is not None
+            and logits.is_cuda
+            and HAS_TRITON
+        ):
+            if temperature_state is None:
+                raise ValueError(
+                    "temperature_state is required with keyed Gumbel metadata"
+                )
+            # Use the same keyed per-request Gumbel stream as the standard V2
+            # sampler. The local token offset makes TP shards use the global
+            # token id as the random key, so a TP=1 and TP>1 run agree.
+            gumbel_result = gumbel_sample(
+                logits,
+                expanded_idx_mapping,
+                temperature_state,
+                seeds,
+                pos,
+                apply_temperature=False,
+                use_fp64=False,
+                token_key_offset=shard_indices.org_vocab_start_index,
+                return_scores=True,
+            )
+            assert isinstance(gumbel_result, tuple)
+            local_indices, local_scores = gumbel_result
+        else:
+            # Direct callers and CPU tests do not carry V2 sampling state. Keep
+            # the bounded fallback for those users; runner fast paths always
+            # pass keyed state on CUDA.
+            for start in range(0, logits.shape[-1], _FULL_SAMPLE_BLOCK_SIZE):
+                end = min(start + _FULL_SAMPLE_BLOCK_SIZE, logits.shape[-1])
+                block = logits[..., start:end]
+                noise = torch.empty_like(block)
+                noise.exponential_()
+                block.sub_(noise.log_())
+                block.masked_fill_(torch.isnan(block), -float("inf"))
+            local_scores, local_indices = logits.max(dim=-1)
         global_indices = local_indices.to(torch.int64) + (
             shard_indices.org_vocab_start_index
         )
@@ -557,14 +669,31 @@ class LogitsProcessor(PluggableLayer):
         if tp_size == 1:
             return global_indices
 
-        local_pair = torch.stack(
-            [local_scores, global_indices.to(torch.float32)], dim=-1
-        )
-        gathered = tensor_model_parallel_gather(local_pair, dst=0, dim=-1)
+        if self.vocab_size >= _MAX_FLOAT32_TOKEN_ID:
+            gathered_scores = tensor_model_parallel_gather(
+                local_scores, dst=0, dim=-1
+            )
+            gathered_ids = tensor_model_parallel_gather(
+                global_indices, dst=0, dim=-1
+            )
+        else:
+            local_pair = torch.stack(
+                [local_scores, global_indices.to(torch.float32)], dim=-1
+            )
+            gathered_scores = tensor_model_parallel_gather(
+                local_pair, dst=0, dim=-1
+            )
+            gathered_ids = None
         tp_group = get_tp_group()
         if tp_group.rank_in_group == 0:
-            assert gathered is not None
-            sampled = self._reduce_global_argmax_pairs(gathered, tp_size)
+            assert gathered_scores is not None
+            if self.vocab_size >= _MAX_FLOAT32_TOKEN_ID:
+                assert gathered_ids is not None
+                sampled = self._reduce_global_argmax_values_ids(
+                    gathered_scores, gathered_ids, tp_size
+                )
+            else:
+                sampled = self._reduce_global_argmax_pairs(gathered_scores, tp_size)
         else:
             sampled = torch.empty(
                 (hidden_states.shape[0],),
@@ -881,19 +1010,11 @@ class LogitsProcessor(PluggableLayer):
             if _hybrid_enabled is not None
             else self._get_hybrid_lm_head_row_mask(hidden_states)
         )
-        if (
-            row_mask is not None
-            and not bool(row_mask.all())
-            and presence_penalties is None
-            and output_token_ids is None
-            and output_token_counts is None
-            and presence_request_indices is None
-            and embedding_bias is None
-        ):
-            # The common speculative top-k path has no request-dependent
-            # processors, so split decode rows from prompt-tail rows.  The
-            # latter use the exact full head while preserving one compact
-            # result tensor for the subsequent TP gather.
+        if row_mask is not None and not bool(row_mask.all()):
+            # Split decode rows from prompt-tail rows. The latter use the exact
+            # full head while preserving one compact result tensor for the
+            # subsequent TP gather. Presence metadata is row-aligned for
+            # penalties; the dense count table itself remains shared.
             local_values = torch.empty(
                 (hidden_states.shape[0], local_top_k),
                 dtype=torch.float32,
@@ -912,6 +1033,22 @@ class LogitsProcessor(PluggableLayer):
                     hidden_states[enabled_rows].contiguous(),
                     top_k=top_k,
                     temperature=temperature,
+                    presence_penalties=(
+                        presence_penalties[enabled_rows]
+                        if presence_penalties is not None
+                        else None
+                    ),
+                    output_token_ids=(
+                        output_token_ids[enabled_rows]
+                        if output_token_ids is not None
+                        else None
+                    ),
+                    output_token_counts=output_token_counts,
+                    presence_request_indices=(
+                        presence_request_indices[enabled_rows]
+                        if presence_request_indices is not None
+                        else None
+                    ),
                     embedding_bias=embedding_bias,
                     _hybrid_enabled=True,
                 )
@@ -923,6 +1060,22 @@ class LogitsProcessor(PluggableLayer):
                     hidden_states[disabled_rows].contiguous(),
                     top_k=top_k,
                     temperature=temperature,
+                    presence_penalties=(
+                        presence_penalties[disabled_rows]
+                        if presence_penalties is not None
+                        else None
+                    ),
+                    output_token_ids=(
+                        output_token_ids[disabled_rows]
+                        if output_token_ids is not None
+                        else None
+                    ),
+                    output_token_counts=output_token_counts,
+                    presence_request_indices=(
+                        presence_request_indices[disabled_rows]
+                        if presence_request_indices is not None
+                        else None
+                    ),
                     embedding_bias=embedding_bias,
                     _hybrid_enabled=False,
                 )
@@ -942,6 +1095,7 @@ class LogitsProcessor(PluggableLayer):
             and self.scale > 0.0
             and (self.head_dtype is None or self.head_dtype == hidden_states.dtype)
             and _hybrid_enabled is not False
+            and not envs.VLLM_COMPUTE_NANS_IN_LOGITS
             and hybrid_state.can_use(
                 hidden_states,
                 bf16_weight=lm_head.weight,
@@ -1015,10 +1169,10 @@ class LogitsProcessor(PluggableLayer):
                     )
             if temperature != 1.0:
                 exact_logits.div_(temperature)
-            local_vals, positions = torch.topk(
+            local_vals, positions = _stable_topk(
                 exact_logits,
                 local_top_k,
-                dim=-1,
+                candidate_indices,
             )
             return (
                 local_vals,
@@ -1065,10 +1219,26 @@ class LogitsProcessor(PluggableLayer):
         top_k: int,
         top_p: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        candidate_values = gathered_pairs[..., 0]
-        candidate_ids = gathered_pairs[..., 1].to(torch.int64)
+        return LogitsProcessor._select_compact_topk_values_ids(
+            gathered_pairs[..., 0], gathered_pairs[..., 1].to(torch.int64), top_k, top_p
+        )
+
+    @staticmethod
+    def _select_compact_topk_values_ids(
+        candidate_values: torch.Tensor,
+        candidate_ids: torch.Tensor,
+        top_k: int,
+        top_p: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Select compact candidates without converting integer ids to FP32."""
+        if candidate_values.shape != candidate_ids.shape:
+            raise ValueError("candidate values and ids must have matching shapes")
         top_k = min(top_k, candidate_values.shape[-1])
-        top_values, positions = torch.topk(candidate_values, top_k, dim=-1)
+        top_values, positions = _stable_topk(
+            candidate_values,
+            top_k,
+            candidate_ids,
+        )
         top_ids = candidate_ids.gather(-1, positions)
         if top_p < 1.0:
             probs = top_values.softmax(dim=-1, dtype=torch.float32)
@@ -1089,11 +1259,49 @@ class LogitsProcessor(PluggableLayer):
             [local_values, global_indices.to(torch.float32)], dim=-1
         ).flatten(start_dim=-2)
 
-    @staticmethod
     def _sample_compact_topk(
+        self,
         top_values: torch.Tensor,
         top_ids: torch.Tensor,
+        *,
+        expanded_idx_mapping: torch.Tensor | None = None,
+        seeds: torch.Tensor | None = None,
+        pos: torch.Tensor | None = None,
+        temperature_state: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if (
+            (expanded_idx_mapping is None) != (seeds is None)
+            or (expanded_idx_mapping is None) != (pos is None)
+            or (expanded_idx_mapping is None) != (temperature_state is None)
+        ):
+            raise ValueError(
+                "expanded_idx_mapping, seeds, pos, and temperature_state must be "
+                "provided together"
+            )
+        if (
+            expanded_idx_mapping is not None
+            and seeds is not None
+            and pos is not None
+            and top_values.is_cuda
+            and HAS_TRITON
+        ):
+            if temperature_state is None:
+                raise ValueError(
+                    "temperature_state is required with keyed Gumbel metadata"
+                )
+            sampled_positions = gumbel_sample(
+                top_values,
+                expanded_idx_mapping,
+                temperature_state,
+                seeds,
+                pos,
+                apply_temperature=False,
+                use_fp64=False,
+                token_keys=top_ids,
+            )
+            assert isinstance(sampled_positions, torch.Tensor)
+            return top_ids.gather(-1, sampled_positions.unsqueeze(-1)).view(-1)
+
         probs = top_values.softmax(dim=-1, dtype=torch.float32)
         noise = torch.empty_like(probs)
         noise.exponential_()
@@ -1134,10 +1342,22 @@ class LogitsProcessor(PluggableLayer):
             presence_request_indices=presence_request_indices,
             embedding_bias=embedding_bias,
         )
-        local_pairs = self._pack_topk_pairs(
-            local_values, local_indices, vocab_start
-        )
         tp_size = lm_head.tp_size
+        if self.vocab_size >= _MAX_FLOAT32_TOKEN_ID:
+            local_ids = local_indices.to(torch.int64) + vocab_start
+            if tp_size > 1:
+                gathered_values = tensor_model_parallel_all_gather(
+                    local_values, dim=-1
+                )
+                gathered_ids = tensor_model_parallel_all_gather(local_ids, dim=-1)
+            else:
+                gathered_values = local_values
+                gathered_ids = local_ids
+            return self._select_compact_topk_values_ids(
+                gathered_values, gathered_ids, top_k, top_p
+            )
+
+        local_pairs = self._pack_topk_pairs(local_values, local_indices, vocab_start)
         if tp_size > 1:
             gathered_pairs = tensor_model_parallel_all_gather(local_pairs, dim=-1)
             gathered_pairs = gathered_pairs.view(
@@ -1161,6 +1381,10 @@ class LogitsProcessor(PluggableLayer):
         output_token_counts: torch.Tensor | None = None,
         presence_request_indices: torch.Tensor | None = None,
         embedding_bias: torch.Tensor | None = None,
+        expanded_idx_mapping: torch.Tensor | None = None,
+        seeds: torch.Tensor | None = None,
+        pos: torch.Tensor | None = None,
+        temperature_state: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Sample from a compact uniform top-k candidate set."""
         if top_k <= 0:
@@ -1184,33 +1408,84 @@ class LogitsProcessor(PluggableLayer):
             presence_request_indices=presence_request_indices,
             embedding_bias=embedding_bias,
         )
-        local_pairs = self._pack_topk_pairs(
-            local_values, local_indices, vocab_start
-        )
         tp_size = lm_head.tp_size
+        if self.vocab_size >= _MAX_FLOAT32_TOKEN_ID:
+            local_ids = local_indices.to(torch.int64) + vocab_start
+            if tp_size == 1:
+                top_values, top_ids = self._select_compact_topk_values_ids(
+                    local_values, local_ids, top_k, top_p
+                )
+                return self._sample_compact_topk(
+                    top_values,
+                    top_ids,
+                    expanded_idx_mapping=expanded_idx_mapping,
+                    seeds=seeds,
+                    pos=pos,
+                    temperature_state=temperature_state,
+                )
+            gathered_values = tensor_model_parallel_gather(
+                local_values, dst=0, dim=-1
+            )
+            gathered_ids = tensor_model_parallel_gather(local_ids, dst=0, dim=-1)
+        else:
+            local_pairs = self._pack_topk_pairs(
+                local_values, local_indices, vocab_start
+            )
+            gathered_values = tensor_model_parallel_gather(local_pairs, dst=0, dim=-1)
+
         if tp_size == 1:
-            gathered_pairs = local_pairs.view(
-                hidden_states.shape[0], local_values.shape[-1], 2
+            if self.vocab_size >= _MAX_FLOAT32_TOKEN_ID:
+                top_values, top_ids = self._select_compact_topk_values_ids(
+                    local_values, local_ids, top_k, top_p
+                )
+            else:
+                gathered_pairs = local_pairs.view(
+                    hidden_states.shape[0], local_values.shape[-1], 2
+                )
+                top_values, top_ids = self._select_compact_topk_pairs(
+                    gathered_pairs, top_k, top_p
+                )
+            return self._sample_compact_topk(
+                top_values,
+                top_ids,
+                expanded_idx_mapping=expanded_idx_mapping,
+                seeds=seeds,
+                pos=pos,
+                temperature_state=temperature_state,
             )
-            top_values, top_ids = self._select_compact_topk_pairs(
-                gathered_pairs, top_k, top_p
-            )
-            return self._sample_compact_topk(top_values, top_ids)
 
         # Sampling must happen once and be broadcast.  Independent RNG draws
         # on TP ranks can otherwise produce different tokens even though the
         # candidate pairs are identical.
-        gathered_pairs = tensor_model_parallel_gather(local_pairs, dst=0, dim=-1)
         tp_group = get_tp_group()
         if tp_group.rank_in_group == 0:
-            assert gathered_pairs is not None
-            gathered_pairs = gathered_pairs.view(
-                hidden_states.shape[0], tp_size * local_values.shape[-1], 2
+            assert gathered_values is not None
+            if self.vocab_size >= _MAX_FLOAT32_TOKEN_ID:
+                assert gathered_ids is not None
+                gathered_values = gathered_values.view(
+                    hidden_states.shape[0], tp_size * local_values.shape[-1]
+                )
+                gathered_ids = gathered_ids.view(
+                    hidden_states.shape[0], tp_size * local_values.shape[-1]
+                )
+                top_values, top_ids = self._select_compact_topk_values_ids(
+                    gathered_values, gathered_ids, top_k, top_p
+                )
+            else:
+                gathered_pairs = gathered_values.view(
+                    hidden_states.shape[0], tp_size * local_values.shape[-1], 2
+                )
+                top_values, top_ids = self._select_compact_topk_pairs(
+                    gathered_pairs, top_k, top_p
+                )
+            sampled = self._sample_compact_topk(
+                top_values,
+                top_ids,
+                expanded_idx_mapping=expanded_idx_mapping,
+                seeds=seeds,
+                pos=pos,
+                temperature_state=temperature_state,
             )
-            top_values, top_ids = self._select_compact_topk_pairs(
-                gathered_pairs, top_k, top_p
-            )
-            sampled = self._sample_compact_topk(top_values, top_ids)
         else:
             sampled = torch.empty(
                 (hidden_states.shape[0],),

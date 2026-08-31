@@ -107,6 +107,10 @@ def gumbel_noised_argmax(
     # on H100/Ada/Blackwell and empirically indistinguishable for Gumbel-max.
     if USE_FP64:
         logits = logits.to(tl.float64)
+    # Keep NaN rows fail-closed.  A NaN participating in ``tl.max`` can
+    # otherwise select an arbitrary lane and bypass the deterministic
+    # invalid-logit handling used by the regular sampler.
+    logits = tl.where(logits == logits, logits, float("-inf"))
     if temp != 0.0:
         gumbel_seed = tl.randint(seed, pos)
         if USE_FP64:
@@ -136,6 +140,9 @@ def gumbel_block_argmax(
     logits_cache_stride_0,
     logits_cache_stride_1,
     logits_cache_col_ptr,
+    token_keys_ptr,
+    token_keys_stride,
+    token_key_offset,
     vocab_size,
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
@@ -166,9 +173,17 @@ def gumbel_block_argmax(
 
     seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
     pos = tl.load(pos_ptr + token_idx)
+    if token_keys_ptr is None:
+        keys = block + token_key_offset
+    else:
+        keys = tl.load(
+            token_keys_ptr + token_idx * token_keys_stride + block,
+            mask=mask,
+            other=0,
+        ).to(tl.int64)
     return gumbel_noised_argmax(
         logits,
-        block,
+        keys,
         mask,
         seed,
         pos,
@@ -191,6 +206,9 @@ def _gumbel_sample_kernel(
     logits_cache_col_ptr,
     logits_ptr,
     logits_stride,
+    token_keys_ptr,
+    token_keys_stride,
+    token_key_offset,
     expanded_idx_mapping_ptr,
     seeds_ptr,
     pos_ptr,
@@ -225,6 +243,9 @@ def _gumbel_sample_kernel(
         logits_cache_stride_0,
         logits_cache_stride_1,
         logits_cache_col_ptr,
+        token_keys_ptr,
+        token_keys_stride,
+        token_key_offset,
         vocab_size,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
         USE_FP64=USE_FP64,
@@ -245,12 +266,18 @@ def gumbel_sample(
     logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, vocab_size]
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
-) -> torch.Tensor:
+    token_keys: torch.Tensor | None = None,
+    token_key_offset: int = 0,
+    return_scores: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
     pos = pos.contiguous()
     if logits_cache_col is not None:
         logits_cache_col = logits_cache_col.contiguous()
+    if token_keys is not None:
+        token_keys = token_keys.contiguous()
+        assert token_keys.shape == logits.shape
     num_tokens, vocab_size = logits.shape
     if logits_cache is not None:
         assert logits_cache.size(-1) >= vocab_size, (
@@ -275,6 +302,9 @@ def gumbel_sample(
         logits_cache_col,
         logits,
         logits.stride(0),
+        token_keys,
+        token_keys.stride(0) if token_keys is not None else 0,
+        token_key_offset,
         expanded_idx_mapping,
         seed,
         pos,
@@ -288,4 +318,7 @@ def gumbel_sample(
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)
     sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
+    if return_scores:
+        max_scores = local_max.gather(dim=-1, index=max_block_idx).view(-1)
+        return sampled, max_scores
     return sampled

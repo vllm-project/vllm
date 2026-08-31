@@ -8,8 +8,10 @@ import vllm.envs as envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.config.reasoning import ReasoningConfig
 from vllm.sampling_params import SamplingParams
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
+    apply_top_k_top_p_pytorch,
     flashinfer_sample,
     flashinfer_sampler_supported,
 )
@@ -83,6 +85,15 @@ class Sampler:
         vocab_size = self.sampling_states.vocab_size
         if vocab_size <= 0:
             return
+        max_warmup_bytes = envs.VLLM_HYBRID_NVFP4_LM_HEAD_MAX_WARMUP_BYTES
+        if max_warmup_bytes > 0:
+            # ``apply_top_k_top_p`` materializes a float32 logits workspace.
+            # Bound the profile-only allocation so speculative warmup cannot
+            # consume the KV-cache headroom on large vocabularies.
+            max_rows_by_memory = max_warmup_bytes // (vocab_size * 4)
+            if max_rows_by_memory < 8:
+                return
+            num_rows = min(num_rows, max_rows_by_memory)
         logits = torch.zeros(
             (num_rows, vocab_size), dtype=torch.float32, device=self.device
         )
@@ -92,7 +103,13 @@ class Sampler:
         top_p = torch.full(
             (num_rows,), 0.95, dtype=torch.float32, device=self.device
         )
-        apply_top_k_top_p(logits, top_k, top_p)
+        # A CPU sampler can be constructed by unit tests even when the
+        # process-wide platform is CUDA.  The dispatcher otherwise sees
+        # ``HAS_TRITON`` and attempts to launch a Triton kernel on CPU tensors.
+        if self.device.type == "cpu":
+            apply_top_k_top_p_pytorch(logits, top_k, top_p, allow_cpu_sync=True)
+        else:
+            apply_top_k_top_p(logits, top_k, top_p)
         # Profiling normally runs on CUDA, but keeping the helper usable by
         # CPU/unit-test runners avoids asking torch.accelerator to initialize
         # a nonexistent CUDA device.
@@ -144,11 +161,13 @@ class Sampler:
         """Return uniform parameters for a compact vocab-parallel sampler.
 
         The vocab-parallel path can preserve an unrestricted distribution via
-        local Gumbel-max, and a bounded top-k distribution when the only logits
-        processor is presence penalty. Repetition and frequency penalties are
-        non-constant over a token's sign/count and therefore remain on the
-        full-vocabulary path. The boolean in the return tuple indicates that
-        presence-only metadata must be passed to the model-level sampler.
+        keyed local Gumbel-max, and a bounded top-k distribution when the only
+        logits processor is presence penalty. Repetition and frequency
+        penalties are non-constant over a token's sign/count and therefore
+        remain on the full-vocabulary path. The boolean in the return tuple
+        indicates that presence-only metadata must be passed to the model-level
+        sampler. Request seeds are handled by the keyed V2 kernels; the legacy
+        runner keeps its separate generator gate.
         """
         idx_mapping_np = input_batch.idx_mapping_np
         if (
@@ -158,7 +177,13 @@ class Sampler:
             or self.trace_replay_state is not None
             or self.sampling_states.max_num_logprobs(idx_mapping_np) != NO_LOGPROBS
             or self.logprob_token_ids_state.max_num_token_ids(idx_mapping_np) > 0
-            or self.sampling_states.any_explicit_seed(idx_mapping_np)
+            # The keyed request RNG is implemented by Triton.  Do not accept
+            # a CUDA-like device without Triton and silently fall back to the
+            # global RNG, because that would violate explicit-seed semantics.
+            or (
+                getattr(getattr(self, "device", None), "type", "cpu") != "cpu"
+                and not HAS_TRITON
+            )
         ):
             return None
 

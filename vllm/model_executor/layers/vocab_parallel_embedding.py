@@ -75,6 +75,7 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
             prepare_hybrid_nvfp4_lm_head(
                 layer,
                 candidates=envs.VLLM_HYBRID_NVFP4_LM_HEAD_CANDIDATES,
+                max_rows=envs.VLLM_HYBRID_NVFP4_LM_HEAD_MAX_ROWS,
             )
 
     def apply(

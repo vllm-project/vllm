@@ -3764,6 +3764,7 @@ class GPUModelRunner(
             or envs.VLLM_BATCH_INVARIANT
             or self.lora_config is not None
             or self.model_config.head_dtype != self.dtype
+            or self.vocab_size >= (1 << 24)
         ):
             return False
         if self.broadcast_pp_output or spec_decode_metadata is not None:
@@ -3846,6 +3847,7 @@ class GPUModelRunner(
             or self.lora_config is not None
             or self.model_config.head_dtype != self.dtype
             or self.sampler.use_fp64_gumbel
+            or self.vocab_size >= (1 << 24)
         ):
             return None
         if self.broadcast_pp_output or spec_decode_metadata is not None:
@@ -3983,6 +3985,7 @@ class GPUModelRunner(
             or envs.VLLM_BATCH_INVARIANT
             or self.lora_config is not None
             or self.model_config.head_dtype != self.dtype
+            or self.vocab_size >= (1 << 24)
         ):
             return None
         if self.broadcast_pp_output or spec_decode_metadata is not None:
@@ -4898,6 +4901,41 @@ class GPUModelRunner(
 
                 pre_sampled_output = None
                 sample_hidden_states = hidden_states[logits_indices]
+                lm_head = getattr(self.model, "lm_head", None)
+                if lm_head is None:
+                    lm_head = getattr(
+                        getattr(self.model, "language_model", None), "lm_head", None
+                    )
+                if (
+                    envs.VLLM_HYBRID_NVFP4_LM_HEAD
+                    and getattr(lm_head, "_hybrid_nvfp4_lm_head_state", None)
+                    is not None
+                    and (
+                        getattr(lm_head, "num_added_embeddings", 0) > 0
+                        or getattr(
+                            getattr(lm_head, "shard_indices", None),
+                            "num_added_elements",
+                            0,
+                        )
+                        > 0
+                        or self.vocab_size >= (1 << 24)
+                        or self.lora_config is not None
+                        or self.model_config.head_dtype != self.dtype
+                        or getattr(self.model_config, "dtype", self.dtype)
+                        != self.dtype
+                        or getattr(self, "adaptive_verification", None) is not None
+                        or envs.VLLM_BATCH_INVARIANT
+                        or envs.VLLM_COMPUTE_NANS_IN_LOGITS
+                    )
+                ):
+                    from vllm.model_executor.layers.hybrid_nvfp4_lm_head import (
+                        release_hybrid_nvfp4_lm_heads,
+                    )
+
+                    release_hybrid_nvfp4_lm_heads(self.model)
+                    draft_model = getattr(self.drafter, "model", None)
+                    if isinstance(draft_model, nn.Module):
+                        release_hybrid_nvfp4_lm_heads(draft_model)
                 if self._can_use_hybrid_greedy(scheduler_output, spec_decode_metadata):
                     logger.info_once(
                         "Using hybrid NVFP4 lm-head greedy sampling fast path.",
@@ -5791,6 +5829,45 @@ class GPUModelRunner(
             config = getattr(self, config_name)
             new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
+
+        # ``model_config`` can be changed while a worker is alive (for
+        # example by RL weight/config reload).  A previously prepared FP4
+        # copy is only valid while the model-level capability contract still
+        # holds; otherwise it is dead VRAM that the runner can no longer use.
+        if envs.VLLM_HYBRID_NVFP4_LM_HEAD and hasattr(self, "model"):
+            from vllm.model_executor.layers.hybrid_nvfp4_lm_head import (
+                release_hybrid_nvfp4_lm_heads,
+            )
+
+            lm_head = getattr(self.model, "lm_head", None)
+            if lm_head is None:
+                lm_head = getattr(
+                    getattr(self.model, "language_model", None), "lm_head", None
+                )
+            speculative_config = getattr(self.vllm_config, "speculative_config", None)
+            incompatible = (
+                self.model_config.head_dtype != self.dtype
+                or getattr(self.model_config, "dtype", self.dtype) != self.dtype
+                or self.lora_config is not None
+                or self.vocab_size >= (1 << 24)
+                or envs.VLLM_BATCH_INVARIANT
+                or envs.VLLM_COMPUTE_NANS_IN_LOGITS
+                or getattr(lm_head, "num_added_embeddings", 0) > 0
+                or getattr(
+                    getattr(lm_head, "shard_indices", None), "num_added_elements", 0
+                )
+                > 0
+                or (
+                    speculative_config is not None
+                    and speculative_config.enable_adaptive_verification
+                )
+                or not getattr(lm_head, "_supports_hybrid_nvfp4_lm_head", False)
+            )
+            if incompatible:
+                release_hybrid_nvfp4_lm_heads(self.model)
+                draft_model = getattr(getattr(self, "speculator", None), "model", None)
+                if isinstance(draft_model, nn.Module):
+                    release_hybrid_nvfp4_lm_heads(draft_model)
 
     @instrument(span_name="Loading (GPU)")
     def load_model(self, load_dummy_weights: bool = False) -> None:

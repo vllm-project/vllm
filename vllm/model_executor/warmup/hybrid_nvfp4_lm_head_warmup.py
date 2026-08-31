@@ -43,6 +43,9 @@ def _row_shapes(worker: Any) -> tuple[int, ...]:
         max(1, max_rows),
         max(1, envs.VLLM_HYBRID_NVFP4_LM_HEAD_MAX_AUTOTUNE_ROWS),
     )
+    configured_max_rows = envs.VLLM_HYBRID_NVFP4_LM_HEAD_MAX_ROWS
+    if configured_max_rows > 0:
+        max_rows = min(max_rows, configured_max_rows)
 
     capture_sizes = config.compilation_config.cudagraph_capture_sizes or []
     shapes = sorted({int(size) for size in capture_sizes if 0 < int(size) <= max_rows})
@@ -70,10 +73,33 @@ def hybrid_nvfp4_lm_head_warmup(worker: Any) -> None:
     started = perf_counter()
     shapes = _row_shapes(worker)
     for layer, state in heads.values():
+        # Autotune materializes a BF16 coarse-logit matrix.  Keep that
+        # profile-only allocation below the same explicit budget used by the
+        # sampler workspace; otherwise a large vocabulary can evict the KV
+        # cache before graph capture even starts.
+        max_warmup_bytes = envs.VLLM_HYBRID_NVFP4_LM_HEAD_MAX_WARMUP_BYTES
+        if max_warmup_bytes > 0:
+            max_rows_by_memory = max_warmup_bytes // (state.output_size * 2)
+            if max_rows_by_memory < 1:
+                logger.warning_once(
+                    "Skipping hybrid NVFP4 lm-head warmup for output size %d: "
+                    "the configured memory budget (%d bytes) is smaller than "
+                    "one coarse-logit row.",
+                    state.output_size,
+                    max_warmup_bytes,
+                )
+                continue
+            shapes_for_state = tuple(
+                rows for rows in shapes if rows <= max_rows_by_memory
+            )
+            if not shapes_for_state:
+                shapes_for_state = (1,)
+        else:
+            shapes_for_state = shapes
         _, tuned_shapes = autotune_hybrid_nvfp4_lm_head(
             state,
             layer.weight,
-            shapes,
+            shapes_for_state,
         )
         warmup_hybrid_nvfp4_lm_head_kernels(
             state,

@@ -8,7 +8,7 @@ import torch
 from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 from vllm.v1.worker.gpu.input_batch import (
@@ -16,6 +16,7 @@ from vllm.v1.worker.gpu.input_batch import (
     get_num_sampled_and_rejected,
 )
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample, tl_rand32
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -81,7 +82,9 @@ def _compact_rejection_sample_kernel(
     target_draft_probs_ptr,
     bonus_token_ids_ptr,
     recovered_token_ids_ptr,
-    uniform_probs_ptr,
+    target_req_indices_ptr,
+    target_pos_ptr,
+    seeds_ptr,
     max_spec_len,
 ):
     """Compact top-k rejection decisions into one output row per request."""
@@ -96,7 +99,10 @@ def _compact_rejection_sample_kernel(
             token_idx = start_idx + pos
             draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
             target_prob = tl.load(target_draft_probs_ptr + token_idx)
-            uniform_prob = tl.load(uniform_probs_ptr + token_idx)
+            req_state_idx = tl.load(target_req_indices_ptr + token_idx).to(tl.int64)
+            token_pos = tl.load(target_pos_ptr + token_idx)
+            seed = tl.load(seeds_ptr + req_state_idx)
+            uniform_prob = tl_rand32(seed, token_pos, includes_zero=False)
             accepted = target_prob >= uniform_prob
             token_id = draft_token_id
             if not accepted:
@@ -383,12 +389,51 @@ class RejectionSampler:
             num_rejected=num_rejected,
         )
 
-    @staticmethod
     def _sample_from_candidate_logits(
+        self,
         candidate_logits: torch.Tensor,
         candidate_ids: torch.Tensor,
+        *,
+        expanded_idx_mapping: torch.Tensor | None = None,
+        seeds: torch.Tensor | None = None,
+        pos: torch.Tensor | None = None,
+        temperature_state: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Sample one token from each compact candidate row."""
+        if (
+            (expanded_idx_mapping is None) != (seeds is None)
+            or (expanded_idx_mapping is None) != (pos is None)
+            or (expanded_idx_mapping is None) != (temperature_state is None)
+        ):
+            raise ValueError(
+                "expanded_idx_mapping, seeds, pos, and temperature_state must be "
+                "provided together"
+            )
+        if (
+            expanded_idx_mapping is not None
+            and seeds is not None
+            and pos is not None
+            and candidate_logits.is_cuda
+            and HAS_TRITON
+        ):
+            if temperature_state is None:
+                raise ValueError(
+                    "temperature_state is required with keyed Gumbel metadata"
+                )
+            sampled_positions = gumbel_sample(
+                candidate_logits,
+                expanded_idx_mapping,
+                temperature_state,
+                seeds,
+                pos,
+                apply_temperature=False,
+                token_keys=candidate_ids,
+            )
+            assert isinstance(sampled_positions, torch.Tensor)
+            return candidate_ids.gather(
+                dim=-1, index=sampled_positions.unsqueeze(-1)
+            ).view(-1)
+
         valid = torch.isfinite(candidate_logits)
         noise = torch.empty_like(candidate_logits)
         noise.exponential_()
@@ -439,8 +484,36 @@ class RejectionSampler:
         draft_sampled = input_batch.input_ids[input_batch.logits_indices]
         draft_token_ids = draft_sampled[target_indices + 1]
 
+        # The compact rows are interleaved with one bonus row per request.
+        # Keep request state and absolute position alongside the filtered
+        # target rows so rejection draws use the same keyed stream as the
+        # regular V2 sampler, independent of TP rank and row packing.
+        all_expanded_idx_mapping = getattr(input_batch, "expanded_idx_mapping", None)
+        all_pos = None
+        target_req_indices = None
+        target_positions = None
+        seeds = None
+        temperature_state = None
+        if all_expanded_idx_mapping is not None:
+            all_pos = input_batch.positions[input_batch.logits_indices]
+            target_req_indices = all_expanded_idx_mapping[target_indices].contiguous()
+            target_positions = all_pos[target_indices].contiguous()
+            seeds = self.sampler.sampling_states.seeds.gpu
+            temperature_state = self.sampler.sampling_states.temperature.gpu
+
+        bonus_kwargs: dict[str, torch.Tensor | None] = {}
+        if all_expanded_idx_mapping is not None:
+            assert all_pos is not None
+            bonus_kwargs = {
+                "expanded_idx_mapping": all_expanded_idx_mapping[bonus_indices],
+                "seeds": seeds,
+                "pos": all_pos[bonus_indices],
+                "temperature_state": temperature_state,
+            }
         bonus_token_ids = self._sample_from_candidate_logits(
-            candidate_logits[bonus_indices], candidate_ids[bonus_indices]
+            candidate_logits[bonus_indices],
+            candidate_ids[bonus_indices],
+            **bonus_kwargs,
         ).to(draft_token_ids.dtype)
         target_logits = candidate_logits[target_indices]
         target_ids = candidate_ids[target_indices]
@@ -461,24 +534,27 @@ class RejectionSampler:
         )
 
         recovered_mask = valid & ~draft_mask
-        noise = torch.empty_like(target_logits)
-        noise.exponential_()
-        recovered_scores = (target_logits - noise.log()).masked_fill(
+        recovered_logits = target_logits.masked_fill(
             ~recovered_mask, -float("inf")
         )
-        recovered_pos = recovered_scores.argmax(dim=-1, keepdim=True)
-        recovered_token_ids = target_ids.gather(dim=-1, index=recovered_pos).view(-1)
+        recovered_kwargs: dict[str, torch.Tensor | None] = {}
+        if target_req_indices is not None:
+            assert target_positions is not None
+            recovered_kwargs = {
+                "expanded_idx_mapping": target_req_indices,
+                "seeds": seeds,
+                "pos": target_positions,
+                "temperature_state": temperature_state,
+            }
+        recovered_token_ids = self._sample_from_candidate_logits(
+            recovered_logits, target_ids, **recovered_kwargs
+        )
         recovered_token_ids = torch.where(
             recovered_mask.any(dim=-1),
             recovered_token_ids,
             torch.zeros_like(recovered_token_ids),
         ).to(draft_token_ids.dtype)
 
-        uniform_probs = torch.rand(
-            (input_batch.num_draft_tokens,),
-            dtype=torch.float64,
-            device=device,
-        )
         cu_num_draft_tokens = input_batch.cu_num_logits[1:] - torch.arange(
             1,
             num_reqs + 1,
@@ -491,7 +567,12 @@ class RejectionSampler:
             dtype=torch.int64,
             device=device,
         )
-        if candidate_logits.is_cuda:
+        if (
+            candidate_logits.is_cuda
+            and target_req_indices is not None
+            and HAS_TRITON
+        ):
+            assert target_positions is not None and seeds is not None
             _compact_rejection_sample_kernel[(num_reqs,)](
                 sampled,
                 cu_num_draft_tokens,
@@ -499,10 +580,17 @@ class RejectionSampler:
                 target_draft_probs,
                 bonus_token_ids,
                 recovered_token_ids,
-                uniform_probs,
+                target_req_indices,
+                target_positions,
+                seeds,
                 self.num_speculative_steps,
             )
         else:
+            uniform_probs = torch.rand(
+                (input_batch.num_draft_tokens,),
+                dtype=torch.float64,
+                device=device,
+            )
             cu_num_draft_tokens_cpu = cu_num_draft_tokens.cpu().tolist()
             sampled_cpu = sampled
             offset = 0
@@ -626,7 +714,7 @@ class RejectionSampler:
             dtype=torch.int64,
             device=target_token_ids.device,
         )
-        if target_token_ids.is_cuda:
+        if target_token_ids.is_cuda and HAS_TRITON:
             _compact_greedy_rejection_sample_kernel[(input_batch.num_reqs,)](
                 sampled,
                 target_token_ids,
