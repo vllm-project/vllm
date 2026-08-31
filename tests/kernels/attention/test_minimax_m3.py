@@ -1310,6 +1310,88 @@ def test_decode_sparse_attention_correctness(
     assert error.max().item() < 1.7e-2
 
 
+@pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
+@pytest.mark.parametrize("capture_graph", [False, True])
+def test_decode_sparse_attention_ignores_invalid_topk(
+    kv_layout: KVCacheLayout, capture_graph: bool
+):
+    """Unused top-k entries must not be dereferenced as block-table indices."""
+    torch.manual_seed(0)
+    decode_query_len = 4
+    seq_lens = torch.tensor([decode_query_len, 4096], device="cuda", dtype=torch.int32)
+    q = torch.randn(
+        seq_lens.numel() * decode_query_len,
+        NUM_Q_HEADS,
+        HEAD_DIM,
+        device="cuda",
+        dtype=DTYPE,
+    )
+    kv_cache = _allocate_main_kv_via_contract(1, kv_layout)
+
+    # All logical blocks alias the single valid page. With a contiguous two-row
+    # table, row 1's raw pointer offset -1 resolves to the final element of row
+    # 0. Poison that exact location so an unsafe load deterministically forms an
+    # out-of-range KV-cache pointer.
+    clean_block_table = torch.zeros(2, 32, device="cuda", dtype=torch.int32)
+    block_table = clean_block_table.clone()
+    block_table[0, -1] = 1_000_000
+    topk_idx = torch.full(
+        (NUM_KV_HEADS, q.shape[0], TOPK),
+        -1,
+        device="cuda",
+        dtype=torch.int32,
+    )
+    topk_idx[..., 0] = 0
+
+    expected = _reference_sparse_attn(
+        q,
+        kv_cache,
+        topk_idx,
+        clean_block_table,
+        torch.full(
+            (seq_lens.numel(),),
+            decode_query_len,
+            device="cuda",
+            dtype=torch.int32,
+        ),
+        seq_lens,
+        seq_lens - decode_query_len,
+    )
+    actual = torch.empty_like(q)
+
+    def run_decode() -> None:
+        minimax_m3_sparse_attn_decode(
+            q,
+            kv_cache,
+            topk_idx,
+            block_table,
+            seq_lens,
+            NUM_KV_HEADS,
+            SM_SCALE,
+            actual,
+            decode_query_len,
+        )
+
+    if capture_graph:
+        # An unfixed kernel faults during capture and leaves the CUDA context
+        # unusable. Run negative-control reproductions in a dedicated process.
+        run_decode()
+        current_platform.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run_decode()
+        for _ in range(3):
+            graph.replay()
+    else:
+        run_decode()
+    current_platform.synchronize()
+
+    assert torch.isfinite(actual).all()
+    error = (actual.float() - expected.float()).abs()
+    assert error.mean().item() < 2.5e-4
+    assert error.max().item() < 1.7e-2
+
+
 def test_decode_wrong_layout_breaks_parity():
     """Negative (AC-3/AC-5): consuming the physical HND buffer as if it were
     already contiguous-NHD (i.e. skipping the allocator's inverse permute)
