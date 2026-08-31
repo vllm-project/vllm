@@ -637,6 +637,44 @@ def test_quark_shared_expert_fse_exclude_is_scoped_to_the_layer() -> None:
     )
 
 
+def test_quark_shared_expert_fse_ignores_sibling_gate_exclusions() -> None:
+    """Gates beside a shared expert must not disable FSE.
+
+    Qwen3.x MoE checkpoints (e.g. amd/Qwen3.5-397B-A17B-MoE-MXFP4) quantize the
+    shared expert to MXFP4 but leave the tiny routing gates next to it in BF16:
+    ``model.language_model.layers.N.mlp.shared_expert_gate`` and
+    ``model.language_model.layers.N.mlp.gate``. Neither is a shared-expert
+    projection, so fusion must stay enabled. Matching ``shared_expert`` against
+    raw exclude entries also matches ``shared_expert_gate``, which silently
+    disables FSE on every such checkpoint.
+    """
+    expert_prefix = "model.language_model.layers.0.mlp.experts"
+    shared_expert_prefix = "model.language_model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig(
+        {
+            "exclude": [
+                "model.language_model.layers.0.mlp.gate",
+                f"{shared_expert_prefix}_gate",
+            ],
+            "global_quant_config": {},
+            "layer_quant_config": {},
+        }
+    )
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config, expert_prefix, shared_expert_prefix
+    ) == (True, None)
+
+    # The gate exclusions must not mask a genuinely unquantized shared expert.
+    quant_config.quant_config["exclude"].append(f"{shared_expert_prefix}.down_proj")
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        quant_config, expert_prefix, shared_expert_prefix
+    )
+    assert compatible is False
+    assert reason == f"Quark excludes shared experts at {shared_expert_prefix}"
+
+
 def test_quark_shared_expert_fse_requires_matching_layer_quant_configs() -> None:
     global_quant_config = {"weight": {"dtype": "fp4"}}
     quant_config = QuarkConfig(
