@@ -29,9 +29,7 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.engine.protocol import (
-    ExtractedToolCallInformation,
-)
+from vllm.entrypoints.generate.base.protocol import ExtractedToolCallInformation
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
