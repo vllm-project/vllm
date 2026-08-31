@@ -629,6 +629,11 @@ tools, MCP, and multi-turn state via `previous_response_id` are out of scope.
 All sampling parameter flags are supported except `--min-p`, which the
 Responses API does not accept.
 
+!!! warning
+    Do not pass `--extra-body '{"include_reasoning": false}'` when benchmarking
+    a reasoning model. The server still generates reasoning tokens but emits no
+    events for them, so the whole reasoning phase is absorbed into TTFT.
+
 #### Running With Sampling Parameters
 
 When using OpenAI-compatible backends such as `vllm`, optional sampling
