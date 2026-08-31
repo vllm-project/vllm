@@ -159,25 +159,12 @@ class CPUOffloadingSpec(OffloadingSpec):
 
         capacity_tokens holds a value only when a slot count converts exactly
         to a token count: exactly one group, whose blocks hold tokens (a tier
-        sized to zero chunks is then an exact zero, not None). It is None when
-        multiple groups share the slots (for now), since their split is workload- rather
-        than configuration-determined, or when blocks span no tokens (Mamba).
+        sized to zero chunks is then an exact zero, not None). It is None for
+        multiple groups, whose share of the slots is workload- rather than
+        configuration-determined, and when blocks span no tokens (Mamba).
         """
         capacity_tokens: int | None = None
-        if len(config.groups) > 1:
-            # TODO: report an approximation here instead of None. A slot holds
-            # one group's chunk, so num_blocks * tokens_per_chunk is in
-            # token*group units; converting it to tokens needs an assumption
-            # about how slots are partitioned across groups, which is
-            # workload-determined rather than configuration. A group with
-            # blocks_hold_tokens False is not another weight in that
-            # partition: it consumes slots while converting to no tokens, and
-            # a hybrid prefix replays only when both its attention KV and the
-            # enclosing recurrent checkpoint are resident, so an
-            # attention-only count would overstate what the tier can serve.
-            # Such a group has to veto the tier rather than scale a term.
-            pass
-        elif len(config.groups) == 1 and config.groups[0].blocks_hold_tokens:
+        if len(config.groups) == 1 and config.groups[0].blocks_hold_tokens:
             tokens_per_chunk = self.blocks_per_chunk * config.groups[0].tokens_per_block
             capacity_tokens = self.num_blocks * tokens_per_chunk
 
