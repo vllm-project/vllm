@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import atexit
+import contextlib
 import errno
+import fcntl
+import glob
 import mmap
 import os
 import time
@@ -19,6 +23,9 @@ logger = init_logger(__name__)
 
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
+
+_REGION_GLOB = "/dev/shm/vllm_offload_*.mmap"
+_ORPHAN_GRACE_S = 30.0
 
 
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
@@ -61,6 +68,31 @@ def _get_populate_write_fn(
         )
         return _fallback_populate_write
     return _madvise_populate_write
+
+
+def _reap_orphan_regions() -> None:
+    now = time.time()
+    for path in glob.glob(_REGION_GLOB):
+        try:
+            if now - os.lstat(path).st_mtime < _ORPHAN_GRACE_S:
+                continue
+            fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            continue
+        try:
+            os.unlink(path)
+            logger.warning(
+                "Reaped orphaned offload mmap file %s (no live holder)", path
+            )
+        except FileNotFoundError:
+            pass  # a concurrent creator already reclaimed it
+        finally:
+            os.close(fd)
 
 
 class SharedOffloadRegion:
@@ -107,6 +139,7 @@ class SharedOffloadRegion:
             # Joiner path — another worker won O_EXCL. Reopen and wait
             # for the file to reach expected size.
             self.fd = os.open(self.mmap_path, os.O_RDWR)
+            fcntl.flock(self.fd, fcntl.LOCK_SH)
             try:
                 _wait_for_file_size(self.fd, self.total_size_bytes)
             except (TimeoutError, OSError):
@@ -118,6 +151,7 @@ class SharedOffloadRegion:
             # failure here must clean up so concurrent joiners don't
             # land on a 0-byte stub and spin in _wait_for_file_size
             # for the full 30 s timeout.
+            fcntl.flock(self.fd, fcntl.LOCK_SH)
             try:
                 check_shm_free_space(self.total_size_bytes)
                 os.ftruncate(self.fd, self.total_size_bytes)
@@ -126,49 +160,76 @@ class SharedOffloadRegion:
                 os.close(self.fd)
                 raise
             self._creator = True
+            _reap_orphan_regions()
             logger.info(
                 "Created mmap file %s (%.2f GB)",
                 self.mmap_path,
                 self.total_size_bytes / 1e9,
             )
 
-        self.mmap_obj: mmap.mmap | None = mmap.mmap(
-            self.fd,
-            self.total_size_bytes,
-            flags=mmap.MAP_SHARED,
-            prot=mmap.PROT_READ | mmap.PROT_WRITE,
-        )
-
-        populate_write_fn = _get_populate_write_fn(self.mmap_obj)
-
-        if rank is not None:
-            # Populate only this worker's pages (one slot per block row).
-            worker_offset = rank * cpu_page_size
-            _t0 = time.perf_counter()
-            page_size = self.page_size
-            for block in range(num_blocks):
-                raw_offset = block * self._row_stride + worker_offset
-                aligned_offset = (raw_offset // page_size) * page_size
-                end = raw_offset + cpu_page_size
-                aligned_length = end - aligned_offset
-                populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
-            logger.debug(
-                "MADV_POPULATE_WRITE loop: %d blocks in %.3f s",
-                num_blocks,
-                time.perf_counter() - _t0,
-            )
-        else:
-            # No rank — populate the entire shared region in one call.
-            _t0 = time.perf_counter()
-            populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
-            logger.debug(
-                "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
+        try:
+            self.mmap_obj: mmap.mmap | None = mmap.mmap(
+                self.fd,
+                self.total_size_bytes,
+                flags=mmap.MAP_SHARED,
+                prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
 
-        self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
-        self._views: list[torch.Tensor] = []
-        self._canonical_offset = 0
-        self.is_pinned: bool = False
+            populate_write_fn = _get_populate_write_fn(self.mmap_obj)
+
+            if rank is not None:
+                # Populate only this worker's pages (one slot per block row).
+                worker_offset = rank * cpu_page_size
+                _t0 = time.perf_counter()
+                page_size = self.page_size
+                for block in range(num_blocks):
+                    raw_offset = block * self._row_stride + worker_offset
+                    aligned_offset = (raw_offset // page_size) * page_size
+                    end = raw_offset + cpu_page_size
+                    aligned_length = end - aligned_offset
+                    populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
+                logger.debug(
+                    "MADV_POPULATE_WRITE loop: %d blocks in %.3f s",
+                    num_blocks,
+                    time.perf_counter() - _t0,
+                )
+            else:
+                # No rank — populate the entire shared region in one call.
+                _t0 = time.perf_counter()
+                populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
+                logger.debug(
+                    "MADV_POPULATE_WRITE entire region: %.3f s",
+                    time.perf_counter() - _t0,
+                )
+
+            self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
+            self._views: list[torch.Tensor] = []
+            self._canonical_offset = 0
+            self.is_pinned: bool = False
+        except BaseException:
+            self._abort_construction()
+            raise
+
+        if self._creator:
+            atexit.register(self.cleanup)
+
+    def _abort_construction(self) -> None:
+        if getattr(self, "_views", None):
+            self._views.clear()
+        self._base = None
+        obj = getattr(self, "mmap_obj", None)
+        if obj is not None:
+            with contextlib.suppress(Exception):
+                obj.close()
+            self.mmap_obj = None
+        if self.fd is not None:
+            with contextlib.suppress(Exception):
+                os.close(self.fd)
+            self.fd = None
+        if self._creator:
+            with contextlib.suppress(Exception):
+                os.unlink(self.mmap_path)
+            self._creator = False
 
     def create_next_worker_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
@@ -307,3 +368,4 @@ class SharedOffloadRegion:
                     "Failed to unlink path %s", self.mmap_path, exc_info=True
                 )
             self._creator = False
+        atexit.unregister(self.cleanup)
