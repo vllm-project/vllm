@@ -856,6 +856,4 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             FusedAddRMSNormDynamicQuantPattern,
             FusedAddRMSNormGroupQuantPattern,
             FusedAddRMSNormNvfp4QuantPattern,
-            _flashinfer_fused_add_rms_norm_nvfp4_quant,
-            _flashinfer_fused_add_rms_norm_nvfp4_quant_fake,
         )
