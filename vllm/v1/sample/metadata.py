@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.v1.sample.mirostat_state import MirostatStateHolder
 from vllm.v1.sample.thinking_budget_state import ThinkingBudgetStateHolder
 
 
@@ -53,3 +54,8 @@ class SamplingMetadata:
     # When non-None, use ``holder.has_tracked_requests()`` to see if this batch applies
     # thinking-token-budget logits (holder may exist with an empty tracking set).
     thinking_budget_state_holder: ThinkingBudgetStateHolder | None = None
+
+    # Mirostat v2 per-request state; ``holder.has_tracked_requests()`` reports
+    # whether any request in this batch uses Mirostat (holder is always present
+    # but a no-op with an empty tracking set).
+    mirostat_state_holder: MirostatStateHolder | None = None

@@ -74,6 +74,9 @@ class CompletionRequest(OpenAIBaseModel):
     use_beam_search: bool = False
     top_k: int | None = None
     min_p: float | None = None
+    mirostat_mode: int = 0
+    mirostat_tau: float = 5.0
+    mirostat_eta: float = 0.1
     repetition_penalty: float | None = None
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
@@ -375,6 +378,9 @@ class CompletionRequest(OpenAIBaseModel):
             top_p=top_p,
             top_k=top_k,
             min_p=min_p,
+            mirostat_mode=self.mirostat_mode,
+            mirostat_tau=self.mirostat_tau,
+            mirostat_eta=self.mirostat_eta,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=stop_token_ids,

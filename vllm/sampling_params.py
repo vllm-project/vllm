@@ -263,6 +263,23 @@ class SamplingParams(
     """Represents the minimum probability for a token to be considered,
     relative to the probability of the most likely token. Must be in [0, 1].
     Set to 0 to disable this."""
+    mirostat_mode: int = 0
+    """Mirostat sampling mode. 0 disables Mirostat (default); 2 selects
+    Mirostat v2. When enabled, Mirostat replaces top-k/top-p truncation by
+    keeping the per-token surprise near ``mirostat_tau`` via a feedback
+    controller, which helps prevent runaway repetition. Requires
+    ``temperature > 0`` and ``top_k`` in {0, -1} and ``top_p == 1.0``.
+    Temperature is applied before Mirostat, so ``temperature`` close to 1.0 is
+    recommended; a much lower temperature sharpens the distribution, drives the
+    observed surprise toward 0, and makes Mirostat approach greedy sampling
+    (reintroducing the repetition it is meant to prevent)."""
+    mirostat_tau: float = 5.0
+    """Mirostat target surprise (per-token cross-entropy in bits). Lower values
+    make the output more focused, higher values more diverse. Only used when
+    ``mirostat_mode != 0``."""
+    mirostat_eta: float = 0.1
+    """Mirostat learning rate for the ``mu`` update. Only used when
+    ``mirostat_mode != 0``."""
     seed: int | None = None
     """Random seed to use for the generation."""
     stop: str | list[str] | None = None
@@ -388,6 +405,9 @@ class SamplingParams(
         top_p: float | None = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,
+        mirostat_mode: int = 0,
+        mirostat_tau: float = 5.0,
+        mirostat_eta: float = 0.1,
         seed: int | None = None,
         stop: str | list[str] | None = None,
         stop_token_ids: list[int] | None = None,
@@ -453,6 +473,9 @@ class SamplingParams(
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
             min_p=min_p,
+            mirostat_mode=mirostat_mode,
+            mirostat_tau=mirostat_tau,
+            mirostat_eta=mirostat_eta,
             seed=seed,
             stop=stop,
             stop_token_ids=stop_token_ids,
@@ -597,6 +620,39 @@ class SamplingParams(
             )
         if not 0.0 <= self.min_p <= 1.0:
             raise VLLMValidationError(f"min_p must be in [0, 1], got {self.min_p}.")
+        if self.mirostat_mode not in (0, 2):
+            raise VLLMValidationError(
+                "mirostat_mode must be 0 (disabled) or 2 (Mirostat v2), got "
+                f"{self.mirostat_mode}.",
+                parameter="mirostat_mode",
+                value=self.mirostat_mode,
+            )
+        if self.mirostat_mode != 0:
+            if self.temperature < _SAMPLING_EPS:
+                raise VLLMValidationError(
+                    "Mirostat sampling requires temperature > 0, got "
+                    f"{self.temperature}."
+                )
+            if self.top_k not in (0, -1):
+                raise VLLMValidationError(
+                    "Mirostat sampling requires top_k to be disabled (0 or -1), "
+                    f"got {self.top_k}. Mirostat replaces top-k/top-p truncation."
+                )
+            if self.top_p != 1.0:
+                raise VLLMValidationError(
+                    "Mirostat sampling requires top_p == 1.0 (disabled), got "
+                    f"{self.top_p}. Mirostat replaces top-k/top-p truncation."
+                )
+            if not math.isfinite(self.mirostat_tau) or self.mirostat_tau <= 0.0:
+                raise VLLMValidationError(
+                    "mirostat_tau must be a finite number greater than zero, got "
+                    f"{self.mirostat_tau}."
+                )
+            if not math.isfinite(self.mirostat_eta) or self.mirostat_eta <= 0.0:
+                raise VLLMValidationError(
+                    "mirostat_eta must be a finite number greater than zero, got "
+                    f"{self.mirostat_eta}."
+                )
         if self.max_tokens is not None and self.max_tokens < 1:
             raise VLLMValidationError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.",
@@ -1206,6 +1262,9 @@ class SamplingParams(
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "
             f"min_p={self.min_p}, "
+            f"mirostat_mode={self.mirostat_mode}, "
+            f"mirostat_tau={self.mirostat_tau}, "
+            f"mirostat_eta={self.mirostat_eta}, "
             f"seed={self.seed}, "
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
