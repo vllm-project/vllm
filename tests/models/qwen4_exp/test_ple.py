@@ -672,7 +672,7 @@ def test_fused_conv_spec_correctness(
     kernel_size: int,
     dilation: int,
 ) -> None:
-    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv_spec
+    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv_spec_decode
 
     device = torch.device("cuda")
     module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
@@ -731,7 +731,7 @@ def test_fused_conv_spec_correctness(
             num_accepted,
             spec_query_len,
         ),
-        lambda x, s, w: ple_conv_spec(
+        lambda x, s, w: ple_conv_spec_decode(
             x,
             s,
             w,

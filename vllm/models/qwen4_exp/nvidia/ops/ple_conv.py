@@ -280,7 +280,7 @@ def ple_conv_decode(
     return out
 
 
-def ple_conv_spec(
+def ple_conv_spec_decode(
     x_spec: torch.Tensor,
     conv_state: torch.Tensor,
     conv_weights: torch.Tensor,

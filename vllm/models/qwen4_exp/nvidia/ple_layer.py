@@ -47,7 +47,7 @@ from vllm.v1.attention.backends.short_conv_attn import (
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from ..common.ple import PLEVocabParallelEmbedding
-from .ops.ple_conv import ple_conv_decode, ple_conv_prefill, ple_conv_spec
+from .ops.ple_conv import ple_conv_decode, ple_conv_prefill, ple_conv_spec_decode
 from .ops.ple_gate import ple_gate
 
 
@@ -1060,7 +1060,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 : metadata.num_spec_decodes
             ]
             if use_kernel:
-                spec_output = ple_conv_spec(
+                spec_output = ple_conv_spec_decode(
                     x_spec,
                     conv_state,
                     conv_weights,
