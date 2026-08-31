@@ -599,7 +599,7 @@ def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
         (4, 33),
     ],
 )
-def test_qsa_decode_selection_matches_test_reference(
+def test_qsa_decode_selection_correctness(
     decode_query_len: int, num_requests: int
 ) -> None:
     torch.manual_seed(1)
@@ -673,7 +673,7 @@ def test_qsa_decode_selection_matches_test_reference(
 
 
 @requires_qsa_kernels
-def test_qsa_prefill_selection_matches_test_reference() -> None:
+def test_qsa_prefill_selection_correctness() -> None:
     torch.manual_seed(2)
     query_lens = [3, 33]
     rows, heads, head_dim = sum(query_lens), 4, 128
@@ -729,7 +729,7 @@ def test_qsa_prefill_selection_matches_test_reference() -> None:
 
 
 @requires_qsa_kernels
-def test_qsa_block_expansion_matches_test_reference() -> None:
+def test_qsa_block_expansion_correctness() -> None:
     blocks = torch.tensor([[0, -1], [1, 0]], device="cuda", dtype=torch.int32)
     query_positions = torch.tensor([5, 10], device="cuda")
     sequence_lengths = torch.tensor([6, 11], device="cuda")
@@ -771,7 +771,7 @@ def test_qsa_block_expansion_matches_test_reference() -> None:
         pytest.param(513, 6, 1, 1024, id="tp4_split1"),
     ],
 )
-def test_qsa_sparse_paged_attention_matches_test_reference(
+def test_qsa_sparse_paged_attention_correctness(
     num_rows: int,
     num_query_heads: int,
     num_kv_heads: int,
@@ -873,9 +873,7 @@ def test_qsa_sparse_paged_attention_matches_test_reference(
 
 @requires_qsa_kernels
 @pytest.mark.parametrize("decode_query_len", [1, 2, 3, 4])
-def test_qsa_split_selection_matches_test_reference(
-    workspace_init, decode_query_len: int
-) -> None:
+def test_qsa_split_selection_correctness(workspace_init, decode_query_len: int) -> None:
     query_lens = [decode_query_len, decode_query_len, 33]
     rows, heads, head_dim = sum(query_lens), 4, 128
     token_topk, compress_ratio = 2048, 4
