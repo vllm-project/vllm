@@ -15,14 +15,14 @@ import pytest
 import regex as re
 
 from tests.parser.engine.conftest import make_mock_tokenizer
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaToolCall,
     FunctionDefinition,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.adapters import make_adapters

@@ -19,12 +19,12 @@ from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
-    from vllm.entrypoints.openai.engine.protocol import (
+    from vllm.entrypoints.generate.base.protocol import (
         DeltaMessage,
         ExtractedToolCallInformation,
+    )
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
     )
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.parser.engine.parser_engine import ParserEngine
