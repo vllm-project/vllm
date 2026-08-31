@@ -1159,7 +1159,21 @@ def unify_kv_cache_spec_page_size(
             if max_page_size % layer_page_size == 0:
                 ratio = max_page_size // layer_page_size
                 new_block_size = layer_spec.block_size * ratio
-                new_spec = replace(layer_spec, block_size=new_block_size)
+                # A padded spec's page is its *padded* size, so scaling the
+                # block without scaling the pad leaves the hint stale and the
+                # spec asserts on its own invariant. Only AttentionSpec
+                # carries the pad, hence the narrowing.
+                if (
+                    isinstance(layer_spec, AttentionSpec)
+                    and layer_spec.page_size_padded is not None
+                ):
+                    new_spec = replace(
+                        layer_spec,
+                        block_size=new_block_size,
+                        page_size_padded=layer_spec.page_size_padded * ratio,
+                    )
+                else:
+                    new_spec = replace(layer_spec, block_size=new_block_size)
             elif isinstance(layer_spec, AttentionSpec) and not isinstance(
                 layer_spec, MLAAttentionSpec
             ):

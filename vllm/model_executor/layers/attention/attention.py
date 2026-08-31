@@ -42,6 +42,7 @@ from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
+    KVQuantMode,
     SlidingWindowSpec,
     get_kv_quant_mode,
 )
@@ -645,6 +646,30 @@ class Attention(nn.Module, AttentionLayerBase):
                 page_size_padded=shared_page,
             )
         else:
+            # A full-attention layer skipped from KV quantization (the operator's
+            # --kv-cache-dtype-skip-layers, or TurboQuant's first/last-N boundary
+            # layers) keeps the native layout while the primary is packed. When
+            # the two pages are not an integer multiple apart, alignment
+            # publishes a shared page for it to pad up to; as in the SW branch,
+            # take the largest kernel block that still fits so fewer padding
+            # bytes are wasted per block.
+            sibling_page = vllm_config.cache_config.sibling_page_size_padded
+            if quant_mode == KVQuantMode.NONE and sibling_page is not None:
+                per_token = self.attn_backend.customize_spec(
+                    FullAttentionSpec(
+                        block_size=1,
+                        num_kv_heads=self.num_kv_heads,
+                        head_size=self.head_size,
+                        head_size_v=self.head_size_v,
+                        dtype=self.kv_cache_torch_dtype,
+                        kv_quant_mode=quant_mode,
+                    )
+                ).real_page_size_bytes
+                block_size = _largest_kernel_block_within(
+                    self.attn_backend, per_token, sibling_page, block_size
+                )
+            else:
+                sibling_page = None
             return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
@@ -652,6 +677,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+                page_size_padded=sibling_page,
             )
 
 

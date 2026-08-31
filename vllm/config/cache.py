@@ -173,6 +173,11 @@ class CacheConfig:
     quantization (``--kv-cache-dtype-skip-layers``); set during block-size
     alignment so unquantized skip layers pad up to the quantized primary's
     page."""
+    sibling_page_size_padded: int | None = None
+    """Optional override for the page size of *full-attention* skip layers
+    (e.g. TurboQuant's first/last-N boundary layers); set during block-size
+    alignment when the native page is not an integer multiple of the quantized
+    primary's, so ``unify`` cannot reconcile them by block scaling alone."""
     mamba_block_size: int | None = Field(default=None, gt=0)
     """Size of a contiguous cache block in number of tokens for mamba cache.
     Can be set only when prefix caching is enabled.
