@@ -6068,6 +6068,8 @@ dependencies = [
  "hf-hub",
  "itertools 0.14.0",
  "reqwest 0.12.28",
+ "rmp-serde",
+ "rmpv",
  "serde",
  "serde_json",
  "serde_with",
@@ -6081,6 +6083,7 @@ dependencies = [
  "vllm-engine-core-client",
  "vllm-llm",
  "vllm-tokenizer",
+ "zeromq",
 ]
 
 [[package]]

@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Shared text-generation support used by chat and future raw completions.
+//! Shared text-generation and embedding support used by northbound frontends.
 //!
 //! This crate intentionally stays below chat semantics:
 //! prompt text handling, tokenizer/model loading, incremental detokenization,
-//! and the thin generate-facing backend interface live here.
+//! embedding preparation, and the thin model-facing backend interface live
+//! here.
 
 use std::mem::take;
 
 pub use backend::{
     DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
 };
+pub use embedding::{EmbeddingError, EmbeddingOutput, EmbeddingParams, EmbeddingRequest};
 pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
 use futures::Stream;
 pub use lower::{
@@ -29,6 +31,7 @@ use vllm_llm::{GenerateOutputStream, Llm};
 use vllm_tokenizer::DynTokenizer;
 
 pub mod backend;
+mod embedding;
 mod error;
 mod lower;
 pub mod output;
@@ -82,6 +85,7 @@ impl TextRequestProcessor {
         self.max_model_len
     }
 
+    /// Tokenize a prompt and apply its optional truncation policy.
     fn prepare_prompt_tokens(
         &self,
         prompt: Prompt,
@@ -101,6 +105,29 @@ impl TextRequestProcessor {
             prompt_truncation.apply(&mut prompt_token_ids, input_budget)?;
         }
         Ok(prompt_token_ids)
+    }
+
+    /// Validate prepared prompt tokens before submitting them to a model.
+    fn validate_prompt_tokens(&self, request_id: &str, prompt_token_ids: &[u32]) -> Result<()> {
+        if prompt_token_ids.is_empty() {
+            return Err(Error::EmptyPromptTokenIds {
+                request_id: request_id.to_string(),
+            });
+        }
+        if prompt_token_ids.len() > self.max_model_len as usize {
+            return Err(Error::PromptTooLong {
+                max_model_len: self.max_model_len,
+                prompt_len: prompt_token_ids.len() as u32,
+            });
+        }
+        let limits = SamplingLimits {
+            max_model_len: self.max_model_len,
+            max_logprobs: self.max_logprobs,
+            model_vocab_size: self.backend.model_vocab_size(),
+            tokenizer_vocab_size: self.backend.tokenizer_vocab_size(),
+        };
+        lower::token_ids::validate_prompt_token_ids(prompt_token_ids, &limits)?;
+        Ok(())
     }
 
     /// Prepare one request's prompt tokens without generation-specific lowering.
@@ -128,6 +155,7 @@ impl TextRequestProcessor {
             request.prompt_truncation,
             request.sampling_params.max_tokens,
         )?;
+        self.validate_prompt_tokens(&request.request_id, &prompt_token_ids)?;
         let tokenizer = self.backend.tokenizer();
         let sampling_hints = self.backend.sampling_hints()?;
         let sampling_limits = SamplingLimits {
@@ -149,18 +177,17 @@ impl TextRequestProcessor {
 
 /// Raw text facade above [`Llm`].
 ///
-/// This layer stays below chat semantics: prompt text or prompt token IDs flow
-/// in, decoded text deltas and terminal metadata flow out.
+/// This layer stays below chat semantics. Generation returns decoded text
+/// events; embedding returns one rank-1 vector per prompt.
 pub struct TextLlm {
-    /// Generate-only client owned by this text facade.
+    /// Token-level generation and pooling client owned by this text facade.
     llm: Llm,
     /// Shared engine-free request preparation.
     processor: TextRequestProcessor,
 }
 
 impl TextLlm {
-    /// Create a new text-generation facade from a shared LLM client plus a text
-    /// backend.
+    /// Create a text facade from a shared LLM client plus a text backend.
     pub fn new(llm: Llm, backend: DynTextBackend) -> Self {
         // The engine-reported value reflects the post-profiling, auto-fitted
         // KV cache limit used at runtime.
@@ -298,5 +325,24 @@ mod tests {
             processor.prepare(request).unwrap().generate_request.prompt_token_ids,
             vec![3, 4, 5]
         );
+    }
+
+    #[test]
+    fn tokenize_allows_an_empty_result_that_model_preparation_rejects() {
+        let processor = TextRequestProcessor::new(Arc::new(TestTextBackend), 10);
+        let request = TextRequest {
+            prompt: Prompt::TokenIds(vec![1]),
+            prompt_truncation: Some(PromptTruncation {
+                limit: PromptTruncationLimit::Fixed(0),
+                side: TruncationSide::Left,
+            }),
+            ..TextRequest::for_test()
+        };
+
+        assert!(processor.tokenize(request.clone()).unwrap().is_empty());
+        assert!(matches!(
+            processor.prepare(request),
+            Err(Error::EmptyPromptTokenIds { .. })
+        ));
     }
 }
