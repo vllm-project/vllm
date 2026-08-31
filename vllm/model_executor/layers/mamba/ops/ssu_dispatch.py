@@ -365,10 +365,12 @@ _flashinfer_replayssm_kernel: Callable[..., torch.Tensor] | None = None
 def flashinfer_replayssm_autotune_supported() -> bool:
     """Return True when FlashInfer exposes ReplaySSM autotuning."""
     try:
-        from flashinfer.mamba.checkpointing_ssu import CheckpointingSSURunner
+        from flashinfer.mamba.checkpointing_ssu import (  # noqa: F401
+            CheckpointingSSURunner,
+        )
     except ImportError:
         return False
-    return callable(CheckpointingSSURunner)
+    return True
 
 
 def selective_state_update_replayssm_flashinfer(
