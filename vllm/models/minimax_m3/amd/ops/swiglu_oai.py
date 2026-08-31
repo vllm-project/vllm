@@ -112,9 +112,7 @@ def _swiglu_oai_quant_kernel(
         up = tl.minimum(tl.maximum(up, -limit), limit)
     act = gate * tl.sigmoid(alpha * gate) * (up + beta)  # [BLOCK_M, 32] fp32
     amax = tl.maximum(tl.max(tl.abs(act), axis=1), TINY)  # [BLOCK_M]
-    sb = tl.minimum(
-        tl.maximum(tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0, 0.0), 254.0
-    )
+    sb = tl.minimum(tl.maximum(tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0, 0.0), 254.0)
     descale = tl.exp2(sb - 127.0)
     aq = (act / descale[:, None]).to(aq_ptr.dtype.element_ty)
     tl.store(
