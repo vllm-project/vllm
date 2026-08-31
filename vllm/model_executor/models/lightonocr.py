@@ -25,10 +25,10 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.frontend.processing.multimodal.parse import ImageProcessorItems, MultiModalDataItems
+from vllm.frontend.processing.multimodal.processing import (
     BaseMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,

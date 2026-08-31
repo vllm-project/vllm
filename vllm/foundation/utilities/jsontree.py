@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, overload
 if TYPE_CHECKING:
     import torch
 
-    from vllm.multimodal.inputs import BatchedTensorInputs
+    from vllm.frontend.processing.multimodal.inputs import BatchedTensorInputs
 
 _T = TypeVar("_T")
 _U = TypeVar("_U")

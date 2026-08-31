@@ -40,8 +40,8 @@ from vllm.model_executor.models import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.encoder_budget import MultiModalBudget
 from vllm.foundation.utilities.cache import LRUCache
 from vllm.foundation.utilities.torch_utils import PIN_MEMORY
 

@@ -22,7 +22,7 @@ from pydantic_core import core_schema
 
 from vllm import envs
 from vllm.foundation.observability.logger import init_logger
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal.inputs import (
     BaseMultiModalField,
     MultiModalBatchedField,
     MultiModalFieldConfig,

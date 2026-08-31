@@ -879,7 +879,7 @@ class ModelConfig:
             # Early call before multimodal init — do not clear mm_prefix yet.
             return True
 
-        from vllm.multimodal import MULTIMODAL_REGISTRY
+        from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
         supports_mm = MULTIMODAL_REGISTRY.supports_multimodal_inputs(self)
         self._supports_multimodal_inputs_cached = supports_mm

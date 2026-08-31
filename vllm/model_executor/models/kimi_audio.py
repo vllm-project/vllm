@@ -30,9 +30,9 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.models.whisper import WhisperEncoder
 from vllm.model_executor.models.whisper_utils import ISO639_1_SUPPORTED_LANGS
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import MultiModalFieldConfig
+from vllm.frontend.processing.multimodal.parse import (
     AudioItem,
     DictEmbeddingItems,
     ModalityData,
@@ -40,12 +40,12 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseProcessingInfo,
     PromptReplacement,
 )
-from vllm.multimodal.processing.processor import (
+from vllm.frontend.processing.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     ProcessorInputs,
 )

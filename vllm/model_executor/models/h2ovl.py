@@ -13,14 +13,14 @@ import torch
 from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import BatchedTensorInputs
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import BatchedTensorInputs
+from vllm.frontend.processing.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing.processor import (
+from vllm.frontend.processing.multimodal.processing.processor import (
     MultiModalProcessingInfo,
     ProcessorInputs,
     PromptReplacement,

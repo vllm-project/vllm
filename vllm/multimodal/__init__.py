@@ -1,24 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from .hasher import MultiModalHasher
-from .inputs import BatchedTensorInputs, MultiModalKwargsItems, NestedTensors
-from .registry import MultiModalRegistry
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-MULTIMODAL_REGISTRY = MultiModalRegistry()
-"""
-The global [`MultiModalRegistry`][vllm.multimodal.registry.MultiModalRegistry]
-is used by model runners to dispatch data processing according to the target
-model.
+"""Compatibility shim: vllm.multimodal/ -> vllm.frontend.processing.multimodal (lazy __getattr__ delegation)."""
+import importlib as _importlib
 
-Info:
-    [mm_processing](../../../design/mm_processing.md)
-"""
+_real = _importlib.import_module("vllm.frontend.processing.multimodal")
 
-__all__ = [
-    "BatchedTensorInputs",
-    "MultiModalHasher",
-    "MultiModalKwargsItems",
-    "NestedTensors",
-    "MULTIMODAL_REGISTRY",
-    "MultiModalRegistry",
-]
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

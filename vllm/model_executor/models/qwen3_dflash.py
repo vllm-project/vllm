@@ -31,7 +31,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.multimodal.inputs import NestedTensors
+from vllm.frontend.processing.multimodal.inputs import NestedTensors
 from vllm.foundation.integrations.transformers_utils.config import set_default_rope_theta
 from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.v1.attention.backend import AttentionType

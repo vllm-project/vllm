@@ -42,16 +42,16 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     AudioItem,
     BatchedTensorInputs,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VideoItem,
 )
-from vllm.multimodal.media.audio import load_audio_pyav
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal.media.audio import load_audio_pyav
+from vllm.frontend.processing.multimodal.parse import (
     AudioProcessorItems,
     ImageEmbeddingItems,
     ImageProcessorItems,
@@ -60,19 +60,19 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
     VideoProcessorItems,
 )
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     ProcessorInputs,
     TimingContext,
 )
-from vllm.multimodal.processing.processor import (
+from vllm.frontend.processing.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     cached_encode,
 )
-from vllm.multimodal.video_prune.evs import (
+from vllm.frontend.processing.multimodal.video_prune.evs import (
     compute_retained_tokens_count,
     compute_retention_mask,
 )

@@ -28,7 +28,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle3
-from vllm.multimodal.inputs import NestedTensors
+from vllm.frontend.processing.multimodal.inputs import NestedTensors
 
 from .laguna import LagunaDecoderLayer
 from .qwen3_dflash import DFlashQwen3Model

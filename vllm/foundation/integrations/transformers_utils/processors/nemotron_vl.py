@@ -5,7 +5,7 @@ import torch
 import torchvision.transforms as T
 from PIL import Image
 
-from vllm.multimodal.image import convert_image_mode
+from vllm.frontend.processing.multimodal.image import convert_image_mode
 from vllm.frontend.processing.tokenizers.hf import HfTokenizer
 
 from .internvl import InternVLImageProcessor, InternVLProcessor

@@ -48,13 +48,13 @@ from vllm.model_executor.models.whisper_utils import (
     ISO639_1_SUPPORTED_LANGS,
 )
 from vllm.model_executor.offloader import get_offloader
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.parse import MultiModalDataItems, MultiModalDataParser
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseProcessingInfo,
     EncDecMultiModalProcessor,

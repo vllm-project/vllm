@@ -16,15 +16,15 @@ from vllm.foundation.config.multimodal import (
     VideoDummyOptions,
 )
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -32,7 +32,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.video import (
+from vllm.frontend.processing.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
     VideoBackend,
     VideoDecoderBackend,

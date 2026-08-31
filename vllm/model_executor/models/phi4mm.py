@@ -26,13 +26,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     NestedTensors,
 )
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal.parse import (
     AudioProcessorItems,
     ImageEmbeddingItems,
     ImageProcessorItems,
@@ -40,8 +40,8 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.multimodal.processing import BaseDummyInputsBuilder
-from vllm.multimodal.processing.processor import (
+from vllm.frontend.processing.multimodal.processing import BaseDummyInputsBuilder
+from vllm.frontend.processing.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,

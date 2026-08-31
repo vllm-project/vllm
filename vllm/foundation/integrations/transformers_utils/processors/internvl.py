@@ -20,8 +20,8 @@ from transformers import (
 )
 from transformers.processing_utils import ProcessorMixin
 
-from vllm.multimodal.image import convert_image_mode
-from vllm.multimodal.processing import PromptUpdateDetails, cached_encode
+from vllm.frontend.processing.multimodal.image import convert_image_mode
+from vllm.frontend.processing.multimodal.processing import PromptUpdateDetails, cached_encode
 from vllm.frontend.processing.tokenizers.hf import HfTokenizer
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)

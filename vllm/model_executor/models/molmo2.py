@@ -52,26 +52,26 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VideoItem,
 )
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal.parse import (
     ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
+from vllm.frontend.processing.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.utilities.math_utils import round_down
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape

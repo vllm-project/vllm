@@ -29,17 +29,17 @@ from vllm.frontend.processing.inputs import (
     tokens_input,
 )
 from vllm.foundation.observability.logger import init_logger
-from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
-from vllm.multimodal.gpu_ipc_memory import maybe_init_mm_gpu_ipc_pool
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY as mm_registry
+from vllm.frontend.processing.multimodal.cache import BaseMultiModalProcessorCache
+from vllm.frontend.processing.multimodal.gpu_ipc_memory import maybe_init_mm_gpu_ipc_pool
+from vllm.frontend.processing.multimodal.parse import (
     MultiModalDataItems,
     MultiModalUUIDItems,
     parse_mm_uuids,
 )
-from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
-from vllm.multimodal.registry import MultiModalTimingRegistry
+from vllm.frontend.processing.multimodal.processing import BaseMultiModalProcessor
+from vllm.frontend.processing.multimodal.processing import ProcessorInputs as MMProcessorInputs
+from vllm.frontend.processing.multimodal.registry import MultiModalTimingRegistry
 from vllm.frontend.processing.tokenizers import TokenizerLike
 from vllm.foundation.utilities.async_utils import make_async
 from vllm.foundation.utilities.counter import AtomicCounter
@@ -226,7 +226,7 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         log_prefix: str,
     ) -> None:
-        from vllm.multimodal.processing import TimingContext
+        from vllm.frontend.processing.multimodal.processing import TimingContext
 
         model_config = self.model_config
         mm_config = model_config.get_multimodal_config()
@@ -892,7 +892,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         skip_decoder_start_token = False
         if self.mm_processor is not None:
-            from vllm.multimodal.processing import EncDecMultiModalProcessor
+            from vllm.frontend.processing.multimodal.processing import EncDecMultiModalProcessor
 
             if isinstance(self.mm_processor, EncDecMultiModalProcessor):
                 skip_decoder_start_token = self.mm_processor.skip_decoder_start_token

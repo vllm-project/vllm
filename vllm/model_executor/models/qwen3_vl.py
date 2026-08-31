@@ -76,8 +76,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalFieldElem,
@@ -86,24 +86,24 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
     VideoItem,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.video_prune.evs import (
+from vllm.frontend.processing.multimodal.video_prune.evs import (
     compute_mrope_for_media,
     compute_retained_tokens_count,
     compute_retention_mask,
     recompute_mrope_positions,
 )
-from vllm.multimodal.video_prune.vidcom2 import (
+from vllm.frontend.processing.multimodal.video_prune.vidcom2 import (
     compute_retained_tokens_count as vidcom2_compute_retained_tokens_count,
 )
-from vllm.multimodal.video_prune.vidcom2 import (
+from vllm.frontend.processing.multimodal.video_prune.vidcom2 import (
     compute_retention_mask as vidcom2_compute_retention_mask,
 )
 from vllm.sequence import IntermediateTensors

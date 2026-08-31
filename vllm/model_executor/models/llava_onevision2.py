@@ -79,20 +79,20 @@ from vllm.model_executor.models.utils import (
     _merge_multimodal_embeddings as merge_multimodal_embeddings,
 )
 from vllm.model_executor.models.vision import get_vit_attn_backend
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     ImageItem,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal.parse import (
     DictEmbeddingItems,
     ImageSize,
     ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
@@ -100,8 +100,8 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
-from vllm.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
-from vllm.multimodal.video import (
+from vllm.frontend.processing.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
+from vllm.frontend.processing.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
     VideoBackend,
     VideoSourceMetadata,

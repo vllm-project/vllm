@@ -32,20 +32,20 @@ from vllm.model_executor.models.whisper import (
     _create_fake_bias_for_k_proj,
 )
 from vllm.model_executor.models.whisper_causal import WhisperCausalEncoder
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     MultiModalKwargsOptionalItems,
     NestedTensors,
 )
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal.parse import (
     AudioProcessorItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.multimodal.processing import BaseDummyInputsBuilder
-from vllm.multimodal.processing.processor import (
+from vllm.frontend.processing.multimodal.processing import BaseDummyInputsBuilder
+from vllm.frontend.processing.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalPromptUpdates,

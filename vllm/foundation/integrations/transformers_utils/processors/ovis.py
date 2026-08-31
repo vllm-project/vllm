@@ -31,7 +31,7 @@ from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
-from vllm.multimodal.image import convert_image_mode
+from vllm.frontend.processing.multimodal.image import convert_image_mode
 
 __all__ = ["OvisProcessor"]
 IGNORE_ID = -100

@@ -31,17 +31,17 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal.parse import (
     AudioProcessorItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseProcessingInfo,
     EncDecMultiModalProcessor,
@@ -50,7 +50,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     TimingContext,
 )
-from vllm.multimodal.processing.processor import MultiModalProcessingInfo
+from vllm.frontend.processing.multimodal.processing.processor import MultiModalProcessingInfo
 from vllm.frontend.processing.renderers import TokenizeParams
 from vllm.frontend.processing.tokenizers import cached_tokenizer_from_config
 from vllm.foundation.integrations.transformers_utils.processors.cohere_asr import (

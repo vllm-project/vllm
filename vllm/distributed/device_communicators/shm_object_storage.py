@@ -346,7 +346,7 @@ class ObjectSerde(ABC):
 class MsgpackSerde(ObjectSerde):
     def __init__(self):
         # Delayed import to avoid circular dependency
-        from vllm.multimodal.inputs import MultiModalKwargsItem
+        from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsItem
         from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
         self.encoder = MsgpackEncoder()

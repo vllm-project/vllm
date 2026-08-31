@@ -10,7 +10,7 @@ from transformers.activations import GELUActivation
 from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.frontend.processing.inputs import MultiModalDataDict
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
 from .llava_next import (
     LlavaDummyInputsBuilder,

@@ -16,10 +16,10 @@ from vllm.frontend.processing.inputs import (
 )
 from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.multimodal.utils import argsort_mm_positions
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.frontend.processing.multimodal.encoder_budget import MultiModalBudget
+from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
+from vllm.frontend.processing.multimodal.utils import argsort_mm_positions
 from vllm.platforms import current_platform
 from vllm.frontend.processing.pooling_params import PoolingParams
 from vllm.frontend.processing.renderers import BaseRenderer, renderer_from_config

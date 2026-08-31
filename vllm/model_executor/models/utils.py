@@ -24,7 +24,7 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import supports_any_eagle
-from vllm.multimodal import NestedTensors
+from vllm.frontend.processing.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.foundation.utilities.torch_utils import (

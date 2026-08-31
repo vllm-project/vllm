@@ -107,7 +107,7 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     select_main_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.utilities.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import (

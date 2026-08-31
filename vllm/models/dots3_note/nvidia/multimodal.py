@@ -21,7 +21,7 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     maybe_prefix,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.foundation.integrations.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from ..common.processor import (

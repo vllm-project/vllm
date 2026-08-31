@@ -35,19 +35,19 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     PlaceholderRange,
 )
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal.parse import (
     ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,

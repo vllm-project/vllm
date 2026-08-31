@@ -59,7 +59,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
-    from vllm.multimodal.inputs import PlaceholderRange
+    from vllm.frontend.processing.multimodal.inputs import PlaceholderRange
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.request import Request

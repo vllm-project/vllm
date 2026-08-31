@@ -35,7 +35,7 @@ from vllm.model_executor.models.laguna_dflash import DFlashLagunaForCausalLM
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.foundation.utilities.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata

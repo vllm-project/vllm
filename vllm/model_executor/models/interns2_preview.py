@@ -5,7 +5,7 @@ from collections.abc import Iterable
 import torch
 from transformers import AutoProcessor
 
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
 from .qwen3_5 import Qwen3_5MoeForConditionalGeneration
 from .qwen3_vl import (

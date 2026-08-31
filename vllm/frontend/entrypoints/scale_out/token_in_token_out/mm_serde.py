@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pybase64
 
-from vllm.multimodal.inputs import MultiModalKwargsItem
+from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsItem
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 _encoder = MsgpackEncoder(size_threshold=2**62)  # force all tensors inline

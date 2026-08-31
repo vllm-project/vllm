@@ -17,18 +17,18 @@ from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
     VideoEmbeddingItems,
     VideoProcessorItems,
 )
-from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.frontend.processing.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape
 

@@ -58,7 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
 from .interfaces import MixtureOfExperts
 from .qwen3_moe import (

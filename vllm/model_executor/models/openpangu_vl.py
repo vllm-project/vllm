@@ -66,13 +66,13 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.parse import MultiModalDataItems
+from vllm.frontend.processing.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -868,7 +868,7 @@ class OpenPanguVLForConditionalGeneration(
     def _parse_preprocess_params(self, vision_config):
         self.channel = vision_config.in_channels
         self.patch_size = vision_config.patch_size
-        from vllm.multimodal import MULTIMODAL_REGISTRY
+        from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
         image_processor = (
             MULTIMODAL_REGISTRY.create_processor(self.vllm_config.model_config)

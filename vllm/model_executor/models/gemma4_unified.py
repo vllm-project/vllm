@@ -48,7 +48,7 @@ from vllm.model_executor.models.gemma4_mm import (
     _get_max_soft_tokens,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
 from .utils import (
     AutoWeightsLoader,

@@ -23,9 +23,9 @@ from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.model_executor.models.parakeet import ParakeetExtractor
-from vllm.multimodal.inputs import AudioItem
-from vllm.multimodal.processing.processor import PromptUpdateDetails, cached_encode
-from vllm.multimodal.video_prune.evs import compute_retained_tokens_count
+from vllm.frontend.processing.multimodal.inputs import AudioItem
+from vllm.frontend.processing.multimodal.processing.processor import PromptUpdateDetails, cached_encode
+from vllm.frontend.processing.multimodal.video_prune.evs import compute_retained_tokens_count
 from vllm.platforms import current_platform
 from vllm.frontend.processing.tokenizers.hf import HfTokenizer
 

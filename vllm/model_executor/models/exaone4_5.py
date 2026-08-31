@@ -48,7 +48,7 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLForConditionalGeneration,
     Qwen2VLProcessingInfo,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
 from .qwen2_vl import Qwen2VLDummyInputsBuilder as Exaone4_5_DummyInputsBuilder
 from .qwen2_vl import Qwen2VLMultiModalProcessor as Exaone4_5_MultiModalProcessor

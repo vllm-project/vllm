@@ -7,7 +7,7 @@
 # Copyright (c) 2024 NVIDIA
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
-from vllm.multimodal.processing import PromptUpdateDetails, cached_encode
+from vllm.frontend.processing.multimodal.processing import PromptUpdateDetails, cached_encode
 from vllm.frontend.processing.tokenizers.hf import HfTokenizer
 
 from .internvl import InternVLImageProcessor, InternVLProcessor

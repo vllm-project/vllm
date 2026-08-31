@@ -42,7 +42,7 @@ from vllm.models.inkling.common.mm_preprocess import (
     inkling_vision_enabled,
 )
 from vllm.models.inkling.common.towers import InklingAudio, InklingVision
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
 from ..configs import InklingMMConfig, InklingModelConfig

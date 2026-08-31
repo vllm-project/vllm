@@ -56,8 +56,8 @@ from vllm.foundation.system.exceptions import VLLMValidationError
 from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFlatField,
     MultiModalSharedField,
@@ -65,8 +65,8 @@ from vllm.multimodal.inputs import (
     VisionChunkImage,
     VisionChunkVideo,
 )
-from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
-from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.frontend.processing.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
+from vllm.frontend.processing.multimodal.processing import BaseMultiModalProcessor
 from vllm.frontend.processing.renderers.embed_utils import (
     safe_load_prompt_embeds,
     safe_load_prompt_embeds_async,

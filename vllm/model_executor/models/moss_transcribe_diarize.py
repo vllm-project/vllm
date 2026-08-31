@@ -45,19 +45,19 @@ from vllm.model_executor.models.whisper import (
     _create_fake_bias_for_k_proj,
 )
 from vllm.model_executor.models.whisper_utils import ISO639_1_SUPPORTED_LANGS
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     AudioItem,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal.parse import (
     DictEmbeddingItems,
     ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -66,7 +66,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
-from vllm.multimodal.processing.processor import ProcessorInputs
+from vllm.frontend.processing.multimodal.processing.processor import ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape

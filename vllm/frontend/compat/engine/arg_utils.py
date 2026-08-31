@@ -2766,7 +2766,7 @@ class EngineArgs:
         or None if the value cannot be determined at this stage.
         """
         try:
-            from vllm.multimodal import MULTIMODAL_REGISTRY
+            from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
             # get_processing_info returns the model's multimodal processing
             # metadata (supported modalities, token limits) without loading

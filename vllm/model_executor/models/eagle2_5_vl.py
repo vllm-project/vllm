@@ -14,7 +14,7 @@ from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.siglip import SiglipVisionModel
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.foundation.integrations.transformers_utils.processors.internvl import (
     InternVLImageProcessor,

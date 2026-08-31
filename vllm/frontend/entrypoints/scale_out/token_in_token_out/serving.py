@@ -34,7 +34,7 @@ from vllm.foundation.system.exceptions import GenerationError
 from vllm.frontend.processing.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.foundation.observability.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     PlaceholderRange,

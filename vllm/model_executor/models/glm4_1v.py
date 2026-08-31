@@ -79,15 +79,15 @@ from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VideoItem,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,

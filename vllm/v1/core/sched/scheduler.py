@@ -28,9 +28,9 @@ from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsManager,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.frontend.processing.multimodal.encoder_budget import MultiModalBudget
+from vllm.frontend.processing.multimodal.utils import get_mm_features_in_window
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,

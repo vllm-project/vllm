@@ -30,15 +30,15 @@ from vllm.frontend.entrypoints.chat_utils import (
 from vllm.frontend.processing.inputs import EmbedsPrompt
 from vllm.frontend.processing.inputs.engine import MultiModalInput
 from vllm.foundation.observability.logger import init_logger
-from vllm.multimodal.hasher import MultiModalHasher
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal.hasher import MultiModalHasher
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldElem,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     MultiModalSharedField,
     PlaceholderRange,
 )
-from vllm.multimodal.processing.processor import (
+from vllm.frontend.processing.multimodal.processing.processor import (
     PromptReplacement,
     apply_token_matches,
     find_mm_placeholders,
@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     )
     from vllm.frontend.processing.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
     from vllm.frontend.processing.inputs.engine import TokensInput
-    from vllm.multimodal.processing.processor import (
+    from vllm.frontend.processing.multimodal.processing.processor import (
         MultiModalPromptUpdates,
         ResolvedPromptUpdate,
     )

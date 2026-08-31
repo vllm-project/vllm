@@ -10,7 +10,7 @@ from typing_extensions import NotRequired, TypedDict
 if TYPE_CHECKING:
     import torch
 
-    from vllm.multimodal.inputs import AudioItem, ImageItem, VideoItem, VisionChunk
+    from vllm.frontend.processing.multimodal.inputs import AudioItem, ImageItem, VideoItem, VisionChunk
 
 
 _T = TypeVar("_T")

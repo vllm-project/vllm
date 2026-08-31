@@ -6,7 +6,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 
 from vllm.foundation.config.ec_manager_config import EncoderCacheManagerMetadata
-from vllm.multimodal.utils import strip_covered_mm_data
+from vllm.frontend.processing.multimodal.utils import strip_covered_mm_data
 
 if TYPE_CHECKING:
     import numpy as np
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
     from vllm.frontend.processing.pooling_params import PoolingParams
     from vllm.frontend.processing.sampling_params import SamplingParams
     from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy

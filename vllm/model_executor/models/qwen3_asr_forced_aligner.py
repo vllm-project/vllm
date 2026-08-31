@@ -17,7 +17,7 @@ from vllm.model_executor.models.qwen3_asr import (
     Qwen3ASRProcessingInfo,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
 

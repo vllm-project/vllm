@@ -64,18 +64,18 @@ import math
 from collections.abc import Mapping, Sequence
 
 from vllm.foundation.config import VllmConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargsItems
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsItems
+from vllm.frontend.processing.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import PromptReplacement, PromptUpdate
-from vllm.multimodal.processing.context import TimingContext
-from vllm.multimodal.processing.inputs import ProcessorInputs
-from vllm.multimodal.processing.processor import MultiModalProcessingInfo
+from vllm.frontend.processing.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.frontend.processing.multimodal.processing.context import TimingContext
+from vllm.frontend.processing.multimodal.processing.inputs import ProcessorInputs
+from vllm.frontend.processing.multimodal.processing.processor import MultiModalProcessingInfo
 from vllm.foundation.integrations.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,

@@ -519,7 +519,7 @@ class MultiModalConfig:
 
     def use_gpu_video_backend(self) -> bool:
         """Return whether the configured video loader or codec uses the GPU."""
-        from vllm.multimodal.video import VIDEO_LOADER_REGISTRY
+        from vllm.frontend.processing.multimodal.video import VIDEO_LOADER_REGISTRY
 
         video_kwargs = self.media_io_kwargs.get("video", {})
         video_loader_backend = (

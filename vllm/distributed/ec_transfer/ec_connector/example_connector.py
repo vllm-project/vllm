@@ -182,7 +182,7 @@ class ECExampleConnector(ECConnectorBase):
 
         fields: set[str] = set()
         try:
-            from vllm.multimodal import MULTIMODAL_REGISTRY
+            from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
             info = MULTIMODAL_REGISTRY.create_processor(self._model_config).info
             fields = info.data_parser.placeholder_metadata_fields(modality)

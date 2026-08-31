@@ -53,7 +53,7 @@ from vllm.distributed.weight_transfer import (
 from vllm.foundation.observability.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
-from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
+from vllm.frontend.processing.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
 from vllm.foundation.devtools.profiler.wrapper import (
     CudaProfilerWrapper,

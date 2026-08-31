@@ -69,7 +69,7 @@ from vllm.model_executor.models.glm4_1v import (
     Glm4vVisionPatchEmbed,
     Glm4vVisionTransformer,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
 
 from .utils import (
     maybe_prefix,

@@ -104,14 +104,14 @@ from vllm.model_executor.offloader import (
     set_offloader,
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.encoder_budget import MultiModalBudget
+from vllm.frontend.processing.multimodal.inputs import (
     BatchedTensorInputs,
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.multimodal.utils import (
+from vllm.frontend.processing.multimodal.utils import (
     copy_mm_embedding_modality,
     get_mm_features_in_window,
     group_and_batch_mm_kwargs,

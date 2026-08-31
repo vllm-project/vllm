@@ -44,16 +44,16 @@ from vllm.model_executor.models.kimi_k25_vit import (
     vision_tower_forward,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     NestedTensors,
     VisionChunkImage,
     VisionChunkVideo,
 )
-from vllm.multimodal.parse import MultiModalDataItems, VisionChunkProcessorItems
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.parse import MultiModalDataItems, VisionChunkProcessorItems
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,

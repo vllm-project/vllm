@@ -31,18 +31,18 @@ from vllm.model_executor.models.gemma3n_audio_utils import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal.parse import (
     ImageProcessorItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.multimodal.processing import BaseDummyInputsBuilder
-from vllm.multimodal.processing.processor import (
+from vllm.frontend.processing.multimodal.processing import BaseDummyInputsBuilder
+from vllm.frontend.processing.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalPromptUpdates,
@@ -94,7 +94,7 @@ def batch_audio_features(
 
     Audio features are unpadded per item so that a multimodal cache entry does
     not depend on the batch it was first processed in.
-    [`MultiModalFieldConfig.batched`][vllm.multimodal.inputs.MultiModalFieldConfig.batched]
+    [`MultiModalFieldConfig.batched`][vllm.frontend.processing.multimodal.inputs.MultiModalFieldConfig.batched]
     stacks items only when their shapes agree, so a batch of clips with
     differing durations reaches the model as a list and must be re-padded here.
 

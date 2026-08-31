@@ -10,7 +10,7 @@ from vllm.frontend.entrypoints.chat_utils import (
     parse_chat_messages_async,
 )
 from vllm.foundation.system.exceptions import VLLMValidationError
-from vllm.multimodal.media.connector import merge_media_io_kwargs
+from vllm.frontend.processing.multimodal.media.connector import merge_media_io_kwargs
 from vllm.frontend.processing.tokenizers.hf import HfTokenizer
 from vllm.foundation.utilities.async_utils import make_async
 

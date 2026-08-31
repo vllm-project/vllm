@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
 
 
 class EncoderCache:

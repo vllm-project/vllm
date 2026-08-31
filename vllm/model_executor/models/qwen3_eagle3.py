@@ -18,7 +18,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.qwen3 import Qwen3DecoderLayer, Qwen3ForCausalLM
-from vllm.multimodal.inputs import NestedTensors
+from vllm.frontend.processing.multimodal.inputs import NestedTensors
 
 from .utils import (
     AutoWeightsLoader,

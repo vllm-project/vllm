@@ -11,9 +11,9 @@ import torch
 
 from vllm.foundation.observability.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
-from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.inputs import MultiModalKwargsItem
-from vllm.multimodal.utils import (
+from vllm.frontend.processing.multimodal.encoder_budget import MultiModalBudget
+from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsItem
+from vllm.frontend.processing.multimodal.utils import (
     get_mm_features_in_window,
     group_and_batch_mm_kwargs,
     set_mm_embedding_modality,

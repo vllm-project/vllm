@@ -16,7 +16,7 @@ from transformers.tokenization_utils_base import (
     TextInput,
 )
 
-from vllm.multimodal.image import convert_image_mode
+from vllm.frontend.processing.multimodal.image import convert_image_mode
 
 __all__ = ["Moondream3Processor"]
 

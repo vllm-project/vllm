@@ -12,7 +12,7 @@ from vllm.foundation.system.exceptions import VLLMValidationError
 if TYPE_CHECKING:
     import torch
 
-    from vllm.multimodal.inputs import MultiModalKwargsOptionalItems, PlaceholderRange
+    from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsOptionalItems, PlaceholderRange
 
 
 class _InputOptions(TypedDict):

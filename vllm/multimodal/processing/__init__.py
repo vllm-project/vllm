@@ -1,31 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from .context import BaseProcessingInfo, InputProcessingContext, TimingContext
-from .dummy_inputs import BaseDummyInputsBuilder
-from .inputs import ProcessorInputs
-from .processor import (
-    BaseMultiModalProcessor,
-    EncDecMultiModalProcessor,
-    PromptIndexTargets,
-    PromptInsertion,
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-    cached_encode,
-)
+# COMPAT SHIM (auto-generated): old path -> canonical new path
 
-__all__ = [
-    "BaseProcessingInfo",
-    "InputProcessingContext",
-    "TimingContext",
-    "BaseDummyInputsBuilder",
-    "ProcessorInputs",
-    "BaseMultiModalProcessor",
-    "cached_encode",
-    "EncDecMultiModalProcessor",
-    "PromptUpdate",
-    "PromptIndexTargets",
-    "PromptUpdateDetails",
-    "PromptInsertion",
-    "PromptReplacement",
-]
+"""Compatibility shim: vllm.multimodal/processing/ -> vllm.frontend.processing.multimodal.processing (lazy __getattr__ delegation)."""
+import importlib as _importlib
+
+_real = _importlib.import_module("vllm.frontend.processing.multimodal.processing")
+
+def __getattr__(name):
+    return getattr(_real, name)
+
+def __dir__():
+    return dir(_real)
+
+__all__ = getattr(_real, "__all__", [])

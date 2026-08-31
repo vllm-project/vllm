@@ -27,8 +27,8 @@ from vllm.foundation.config import VllmConfig
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 from vllm.model_executor.layers.pooler.tokwise.heads import TokenPoolerHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.parse import MultiModalDataItems
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.parse import MultiModalDataItems
 
 from .interfaces import SupportsLateInteraction
 from .interfaces_base import default_pooling_type

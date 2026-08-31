@@ -40,13 +40,13 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.radio import RadioModel
 from vllm.model_executor.models.whisper import WhisperAttention, WhisperCrossAttention
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.parse import MultiModalDataItems
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseProcessingInfo,
     EncDecMultiModalProcessor,

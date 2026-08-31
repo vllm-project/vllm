@@ -10,7 +10,7 @@ import torch
 
 from vllm import PoolingParams, SamplingParams
 from vllm.foundation.observability.logger import init_logger
-from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.foundation.utilities.math_utils import cdiv
 from vllm.v1.core.sched.output import (
     CachedRequestData,

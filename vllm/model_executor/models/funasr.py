@@ -34,13 +34,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.whisper_utils import (
     ISO639_1_SUPPORTED_LANGS,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.parse import MultiModalDataItems, MultiModalDataParser
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -49,7 +49,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     TimingContext,
 )
-from vllm.multimodal.processing.processor import MultiModalProcessingInfo
+from vllm.frontend.processing.multimodal.processing.processor import MultiModalProcessingInfo
 from vllm.foundation.integrations.transformers_utils.processor import cached_processor_from_config
 from vllm.foundation.integrations.transformers_utils.processors.funasr import FunASRFeatureExtractor
 from vllm.foundation.utilities.tensor_schema import TensorSchema, TensorShape

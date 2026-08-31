@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
 if TYPE_CHECKING:
     from vllm.foundation.config import VllmConfig

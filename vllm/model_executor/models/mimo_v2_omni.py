@@ -30,10 +30,10 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.frontend.processing.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -673,7 +673,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_data_parser(self):
-        from vllm.multimodal.parse import MultiModalDataParser
+        from vllm.frontend.processing.multimodal.parse import MultiModalDataParser
 
         return MultiModalDataParser(target_sr=24000.0)
 

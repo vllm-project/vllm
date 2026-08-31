@@ -35,11 +35,11 @@ from vllm.model_executor.models.qwen3_asr import (
     Qwen3ASRProcessingInfo,
     _get_feat_extract_output_lengths,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
-from vllm.multimodal.inputs import MultiModalKwargsOptionalItems
-from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing.processor import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.cache import _I, BaseMultiModalProcessorCache
+from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsOptionalItems
+from vllm.frontend.processing.multimodal.parse import MultiModalDataItems
+from vllm.frontend.processing.multimodal.processing.processor import (
     BaseDummyInputsBuilder,
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,

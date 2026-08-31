@@ -23,7 +23,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MLAAttention,
     DeepseekV2MLP,
 )
-from vllm.multimodal.inputs import NestedTensors
+from vllm.frontend.processing.multimodal.inputs import NestedTensors
 
 from .interfaces import LocalArgmaxMixin
 from .utils import (

@@ -10,7 +10,7 @@ import torch
 from vllm.foundation.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,

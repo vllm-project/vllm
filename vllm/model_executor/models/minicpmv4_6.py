@@ -25,14 +25,14 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     NestedTensors,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize, VideoProcessorItems
-from vllm.multimodal.processing.processor import (
+from vllm.frontend.processing.multimodal.parse import ImageProcessorItems, ImageSize, VideoProcessorItems
+from vllm.frontend.processing.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdateDetails,
     ResolvedPromptUpdate,

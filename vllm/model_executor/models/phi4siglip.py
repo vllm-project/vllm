@@ -17,21 +17,21 @@ from vllm.foundation.config import VllmConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.foundation.observability.logger import init_logger
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.processing.processor import (
+from vllm.frontend.processing.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     cached_encode,

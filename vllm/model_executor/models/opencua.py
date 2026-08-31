@@ -20,13 +20,13 @@ from transformers.models.qwen2_vl import (
 )
 
 from vllm.foundation.config import VllmConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.parse import MultiModalDataItems
+from vllm.frontend.processing.multimodal.processing import (
     BaseMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,

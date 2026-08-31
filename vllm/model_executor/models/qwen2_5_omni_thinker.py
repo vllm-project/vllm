@@ -64,23 +64,23 @@ from vllm.model_executor.models.qwen2_audio import (
     _get_feat_extract_output_lengths,
 )
 from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalDataParser
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import (
     ImageItem,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal.parse import (
     AudioProcessorItems,
     DictEmbeddingItems,
     ModalityDataItems,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.processing import (
     BaseDummyInputsBuilder,
 )
-from vllm.multimodal.processing.processor import (
+from vllm.frontend.processing.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
@@ -206,7 +206,7 @@ def merge_interleaved_embeddings(
         The merged inputs_embeds tensor with multimodal embeddings scattered
         to their correct positions.
     """
-    from vllm.multimodal.utils import get_mm_embedding_modalities
+    from vllm.frontend.processing.multimodal.utils import get_mm_embedding_modalities
 
     def _merge_embedding_group(
         mask: torch.Tensor,

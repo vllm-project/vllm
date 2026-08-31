@@ -26,12 +26,12 @@ from vllm.model_executor.models.voxtral import (
     VoxtralMultiModalProcessor,
     VoxtralProcessingInfo,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
-from vllm.multimodal.inputs import MultiModalKwargsOptionalItems
-from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import BaseDummyInputsBuilder
-from vllm.multimodal.processing.processor import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.cache import _I, BaseMultiModalProcessorCache
+from vllm.frontend.processing.multimodal.inputs import MultiModalKwargsOptionalItems
+from vllm.frontend.processing.multimodal.parse import MultiModalDataItems
+from vllm.frontend.processing.multimodal.processing import BaseDummyInputsBuilder
+from vllm.frontend.processing.multimodal.processing.processor import (
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
 )

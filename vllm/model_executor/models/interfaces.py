@@ -55,8 +55,8 @@ if TYPE_CHECKING:
     )
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.models.utils import WeightsMapper
-    from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
-    from vllm.multimodal.registry import _ProcessorFactories
+    from vllm.frontend.processing.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
+    from vllm.frontend.processing.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
     from vllm.frontend.processing.tasks import ScoreType
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum

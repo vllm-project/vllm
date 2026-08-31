@@ -3,7 +3,7 @@
 from transformers import BaseImageProcessor, BatchFeature, TensorType
 from transformers.processing_utils import ProcessorMixin
 
-from vllm.multimodal.inputs import VisionChunk
+from vllm.frontend.processing.multimodal.inputs import VisionChunk
 from vllm.frontend.processing.tokenizers.hf import HfTokenizer
 
 

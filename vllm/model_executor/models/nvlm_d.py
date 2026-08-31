@@ -16,14 +16,14 @@ from transformers import PretrainedConfig
 from vllm.foundation.config.multimodal import BaseDummyOptions
 from vllm.frontend.processing.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import BatchedTensorInputs
-from vllm.multimodal.parse import (
+from vllm.frontend.processing.multimodal import MULTIMODAL_REGISTRY
+from vllm.frontend.processing.multimodal.inputs import BatchedTensorInputs
+from vllm.frontend.processing.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import (
+from vllm.frontend.processing.multimodal.processing import (
     PromptReplacement,
     PromptUpdateDetails,
     cached_encode,
