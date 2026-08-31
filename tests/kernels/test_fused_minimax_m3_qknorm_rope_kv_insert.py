@@ -16,6 +16,7 @@ import pytest
 import torch
 
 import vllm._custom_ops as ops
+from vllm.platforms import current_platform
 
 HEAD_DIM = 128
 ROTARY_DIM = 64
@@ -100,7 +101,60 @@ def assert_fp8_cache_close(kv_cache, expected_kv_cache):
     )
 
 
-# ── Test 1: dense mode (norm+rope only, no index, no insert) ─────────────────
+def assert_storage_equal(actual, expected):
+    """Compare tensor storage bit-for-bit, including signed zero."""
+    assert actual.dtype == expected.dtype
+    assert actual.shape == expected.shape
+    torch.testing.assert_close(
+        actual.view(torch.uint8), expected.view(torch.uint8), rtol=0, atol=0
+    )
+
+
+# Model dispatch eligibility
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="AITER dispatch is ROCm-only"
+)
+@pytest.mark.parametrize(
+    "layout,expected",
+    [
+        pytest.param("bf16", True, id="bf16-eligible"),
+        pytest.param("fp8", False, id="fp8-fallback"),
+        pytest.param("strided_cache", False, id="strided-cache-fallback"),
+        pytest.param("strided_mapping", False, id="strided-mapping-fallback"),
+        pytest.param("misaligned_cache", False, id="misaligned-cache-fallback"),
+    ],
+)
+def test_aiter_index_cache_insert_fusion_eligibility(layout, expected):
+    from vllm.models.minimax_m3.amd.model import (
+        _can_fuse_aiter_index_cache_insert,
+    )
+
+    num_tokens = 4
+    cache_shape = (2, 128, HEAD_DIM)
+    qkv = torch.empty(num_tokens, 1, dtype=torch.bfloat16)
+    index_cache = torch.empty(cache_shape, dtype=torch.bfloat16)
+    index_slot_mapping = torch.arange(num_tokens, dtype=torch.int64)
+
+    if layout == "fp8":
+        index_cache = torch.empty(cache_shape, dtype=torch.float8_e4m3fn)
+    elif layout == "strided_cache":
+        index_cache = torch.empty(2, 256, HEAD_DIM, dtype=torch.bfloat16)[:, ::2]
+    elif layout == "strided_mapping":
+        index_slot_mapping = torch.arange(num_tokens * 2, dtype=torch.int64)[::2]
+    elif layout == "misaligned_cache":
+        storage = torch.empty(index_cache.numel() + 1, dtype=torch.bfloat16)
+        index_cache = storage[1:].view(cache_shape)
+        assert index_cache.data_ptr() % 8 != 0
+
+    assert (
+        _can_fuse_aiter_index_cache_insert(qkv, index_cache, index_slot_mapping)
+        is expected
+    )
+
+
+# Test 1: dense mode (norm+rope only, no index, no insert)
 
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
@@ -318,6 +372,161 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
     expected_index_cache[index_slot_mapping] = index_k
     torch.testing.assert_close(
         index_cache.view(-1, HEAD_DIM), expected_index_cache, rtol=0, atol=0
+    )
+
+
+@pytest.mark.parametrize(
+    "num_tokens,slot_case,use_graph",
+    [
+        pytest.param(0, "active", False, id="zero"),
+        pytest.param(1, "active", False, id="one"),
+        pytest.param(4, "boundary", True, id="four-graph-boundary"),
+        pytest.param(12, "interspersed", False, id="twelve-padded"),
+        pytest.param(16, "all_padding", False, id="sixteen-all-padding"),
+        pytest.param(24, "boundary", True, id="twenty-four-graph-boundary"),
+        pytest.param(64, "active", False, id="sixty-four"),
+    ],
+)
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_sparse_index_only_insert_matches_triton(
+    num_tokens, slot_case, use_graph, kv_cache_dtype
+):
+    from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+        minimax_m3_insert_index_cache,
+    )
+
+    torch.manual_seed(3)
+    device, dtype, eps = "cuda", torch.bfloat16, 1e-6
+    base, max_pos = 5_000_000.0, 131_072
+    num_heads, num_kv_heads, num_idx_heads = 16, 1, 1
+    block_size, num_blocks = 128, 3
+
+    q_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    k_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    iq_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    ik_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    cos_sin = make_cos_sin_cache(max_pos, ROTARY_DIM, base, dtype, device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device) * 997
+    if num_tokens:
+        positions[-1] = max_pos - 1
+
+    qsz, kvsz = num_heads * HEAD_DIM, num_kv_heads * HEAD_DIM
+    iqsz = num_idx_heads * HEAD_DIM
+    row_size = qsz + 2 * kvsz + iqsz + HEAD_DIM
+    qkv_source = torch.randn(num_tokens, row_size, dtype=dtype, device=device)
+    if qkv_source.numel():
+        qkv_source.view(-1)[0] = 0.0
+        qkv_source.view(-1)[1] = -0.0
+        index_k_source = qkv_source[:, -HEAD_DIM:]
+        index_k_source[0].zero_()
+        index_k_source[0, 1] = -0.0
+
+    live_prefix = [0, 1, 126, 127, 128, 255, 256]
+    live_slots = live_prefix + [
+        slot for slot in range(num_blocks * block_size) if slot not in live_prefix
+    ]
+    if slot_case == "all_padding":
+        slots = [-1] * num_tokens
+    elif slot_case == "interspersed":
+        slots = [
+            -1 if token % 3 == 1 else live_slots[token] for token in range(num_tokens)
+        ]
+    elif slot_case == "boundary":
+        boundary_slots = [127, 128, 255, -1, 256]
+        remaining_slots = [
+            slot for slot in live_slots if slot not in {127, 128, 255, 256}
+        ]
+        slots = (boundary_slots + remaining_slots)[:num_tokens]
+    else:
+        slots = live_slots[:num_tokens]
+    index_slot_mapping = torch.tensor(slots, dtype=torch.int64, device=device)
+
+    poison = torch.full(
+        (num_blocks, block_size, HEAD_DIM),
+        -31.5,
+        dtype=dtype,
+        device=device,
+    )
+
+    def make_provider():
+        return (
+            qkv_source.clone(),
+            torch.empty(num_tokens, qsz, dtype=dtype, device=device),
+            torch.empty(num_tokens, iqsz, dtype=dtype, device=device),
+            poison.clone(),
+        )
+
+    def run_fused(qkv, q_out, index_q_out, index_cache=None):
+        ops.fused_minimax_m3_qknorm_rope_kv_insert(
+            qkv,
+            q_w,
+            k_w,
+            cos_sin,
+            positions,
+            num_heads,
+            num_kv_heads,
+            ROTARY_DIM,
+            eps,
+            iq_w,
+            ik_w,
+            num_idx_heads,
+            index_slot_mapping=(
+                index_slot_mapping if index_cache is not None else None
+            ),
+            index_cache=index_cache,
+            q_out=q_out,
+            index_q_out=index_q_out,
+            kv_cache_dtype=kv_cache_dtype,
+        )
+
+    def run_baseline(qkv, q_out, index_q_out, index_cache):
+        run_fused(qkv, q_out, index_q_out)
+        minimax_m3_insert_index_cache(
+            qkv[:, -HEAD_DIM:], index_cache, index_slot_mapping
+        )
+
+    baseline = make_provider()
+    candidate = make_provider()
+    if use_graph:
+        warm_baseline = make_provider()
+        warm_candidate = make_provider()
+        run_baseline(*warm_baseline)
+        run_fused(
+            warm_candidate[0],
+            warm_candidate[1],
+            warm_candidate[2],
+            warm_candidate[3],
+        )
+        torch.accelerator.synchronize()
+
+        baseline_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(baseline_graph):
+            run_baseline(*baseline)
+        candidate_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(candidate_graph):
+            run_fused(candidate[0], candidate[1], candidate[2], candidate[3])
+
+        baseline[0].copy_(qkv_source)
+        candidate[0].copy_(qkv_source)
+        baseline[3].copy_(poison)
+        candidate[3].copy_(poison)
+        index_slot_mapping.copy_(index_slot_mapping.roll(1))
+        baseline_graph.replay()
+        candidate_graph.replay()
+        torch.accelerator.synchronize()
+    else:
+        run_baseline(*baseline)
+        run_fused(candidate[0], candidate[1], candidate[2], candidate[3])
+
+    for baseline_tensor, candidate_tensor in zip(baseline, candidate):
+        assert_storage_equal(candidate_tensor, baseline_tensor)
+
+    live = index_slot_mapping[index_slot_mapping >= 0]
+    untouched = torch.ones(num_blocks * block_size, dtype=torch.bool, device=device)
+    untouched[live] = False
+    assert_storage_equal(
+        candidate[3].view(-1, HEAD_DIM)[untouched],
+        poison.view(-1, HEAD_DIM)[untouched],
     )
 
 

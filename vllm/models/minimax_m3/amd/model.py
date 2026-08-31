@@ -120,6 +120,27 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 
+def _can_fuse_aiter_index_cache_insert(
+    qkv: torch.Tensor,
+    index_cache: torch.Tensor,
+    index_slot_mapping: torch.Tensor,
+) -> bool:
+    """Whether the AITER path can fuse its BF16 index-cache insert."""
+    if not (
+        index_cache.numel() > 0
+        and qkv.dtype == torch.bfloat16
+        and index_cache.dtype == qkv.dtype
+        and index_cache.is_contiguous()
+        and index_slot_mapping.is_contiguous()
+    ):
+        return False
+    if torch.compiler.is_compiling():
+        # Cache-manager allocations are aligned; avoid unsupported pointer
+        # introspection while Dynamo traces the bound buffers.
+        return True
+    return index_cache.data_ptr() % 8 == 0 and index_slot_mapping.data_ptr() % 8 == 0
+
+
 def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
     """Layer ids whose attention runs the extra sparse "index" branch."""
     cfg = getattr(config, "sparse_attention_config", None)
@@ -943,6 +964,37 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
             index_q = qkv.new_empty((num_tokens, self.index_q_size))
             if self.use_aiter_sparse_pa:
+                index_cache = self.indexer.index_cache.kv_cache
+                if index_cache.numel() > 0:
+                    if index_cache.device != qkv.device:
+                        raise RuntimeError(
+                            "MiniMax-M3 index cache must be on the qkv device"
+                        )
+                    if (
+                        index_cache.dim() != 3
+                        or index_cache.shape[2] != self.idx_head_dim
+                        or index_cache.stride(2) != 1
+                    ):
+                        raise RuntimeError(
+                            "MiniMax-M3 index cache must have shape [B,T,128] "
+                            "with a contiguous head dimension"
+                        )
+                    if index_slot_mapping.device != qkv.device:
+                        raise RuntimeError(
+                            "MiniMax-M3 index slot mapping must be on the qkv device"
+                        )
+                    if (
+                        index_slot_mapping.dtype != torch.int64
+                        or index_slot_mapping.dim() != 1
+                        or index_slot_mapping.numel() != num_tokens
+                    ):
+                        raise RuntimeError(
+                            "MiniMax-M3 index slot mapping must be a length-N "
+                            "int64 vector"
+                        )
+                fuse_index_insert = _can_fuse_aiter_index_cache_insert(
+                    qkv, index_cache, index_slot_mapping
+                )
                 ops.fused_minimax_m3_qknorm_rope_kv_insert(
                     qkv,
                     self.q_norm.weight,
@@ -958,6 +1010,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                     self.num_idx_heads,
                     q_out=q,
                     index_q_out=index_q,
+                    index_slot_mapping=(
+                        index_slot_mapping if fuse_index_insert else None
+                    ),
+                    index_cache=index_cache if fuse_index_insert else None,
                     kv_cache_dtype=self.kv_cache_dtype,
                 )
                 k_start = self.q_size
@@ -969,9 +1025,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 v = qkv[:, v_start : v_start + self.kv_size].view(
                     num_tokens, self.num_kv_heads, self.head_dim
                 )
-                index_k = qkv[
-                    :, index_k_start : index_k_start + self.idx_head_dim
-                ].view(num_tokens, self.idx_head_dim)
+                index_k = None
+                if not fuse_index_insert:
+                    index_k = qkv[
+                        :, index_k_start : index_k_start + self.idx_head_dim
+                    ].view(num_tokens, self.idx_head_dim)
                 self._insert_aiter_sparse_pa_kv(
                     k,
                     v,

@@ -49,6 +49,7 @@
  */
 
 #include <cmath>
+#include <cstdint>
 #include <cuda_runtime.h>
 #include <type_traits>
 
@@ -291,10 +292,10 @@ __device__ __forceinline__ void storeScaledQElemsFp8(
 // Grid: 1D, ceil(num_tokens * slots_per_token / warps_per_block).
 // Each warp = one (token, slot).
 //
-// `kHasIndex`, `kProcessIndex`, and `kInsertKV` are compile-time template
-// bools, so branch decisions that distinguish the dense layer from the sparse
-// layer (index slots, KV/index inserts, V slots) fold away per instantiation.
-// Slots per token:
+// `kHasIndex`, `kProcessIndex`, `kInsertKV`, and `kInsertIndex` are
+// compile-time template bools, so branch decisions that distinguish the dense
+// layer from the sparse layer (index slots, cache inserts, V slots) fold away
+// per instantiation. Slots per token:
 //     Q : nq                            (always — norm+RoPE)
 //     K : nkv                           (always — norm+RoPE; +K-cache insert)
 //     V : nkv  only if kInsertKV        (V-cache insert; no warps in dense)
@@ -307,9 +308,8 @@ __device__ __forceinline__ void storeScaledQElemsFp8(
 // branch and writes index_q/index_k outputs. Skip-index-topk reuse layers keep
 // kHasIndex=true but set kProcessIndex=false.
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
-          typename out_idx_t, bool kHasIndex, bool kInsertKV,
-          bool kProcessIndex,
-          bool kFp8Idx>
+          typename out_idx_t, bool kHasIndex, bool kInsertKV, bool kInsertIndex,
+          bool kProcessIndex, bool kFp8Idx>
 __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
     scalar_t* __restrict__ qkv,  // [N, qkv_row] in/out (packs index if sparse)
     scalar_t* __restrict__ q_out,         // [N, nq*128] contiguous, or nullptr
@@ -346,6 +346,8 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
 
     static_assert(!kProcessIndex || kHasIndex,
                   "index processing requires sparse row layout");
+    static_assert(!kInsertIndex || kProcessIndex,
+                  "index insertion requires index processing");
 
     // Slot layout (compile-time gated: dense has neither V nor index slots).
     int const v_slots = kInsertKV ? nkv : 0;
@@ -474,20 +476,9 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
     // ── Cache inserts (sparse serving only). ───────────────────────────────
     if constexpr (kInsertKV) {
       // Guard (not early-return) so every thread reaches the PDL trigger below.
-      int64_t sm = -1;
       if (isK || isV) {
-        sm = slot_mapping[tokenIdx];
-      } else if constexpr (kProcessIndex) {
-        if (isIK) sm = index_slot_mapping[tokenIdx];
-      }
-      if (sm >= 0) {  // skip padded / unscheduled tokens
-        if (isIK) {
-          if constexpr (kFp8Idx) {
-            storeElemsFp8(index_cache + sm * kHeadDim + dim_base, elems);
-          } else {
-            storeElems<scalar_t>(index_cache + sm * kHeadDim + dim_base, elems);
-          }
-        } else if (isK || isV) {
+        int64_t const sm = slot_mapping[tokenIdx];
+        if (sm >= 0) {  // skip padded / unscheduled tokens
           // kv_cache logical shape [num_blocks, nkv, block_size, 2*head_dim].
           // Paging is logical (block = sm/block_size, token = sm%block_size);
           // the physical NHD/HND layout is honoured via the passed strides.
@@ -498,6 +489,19 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
                               t * kv_s_token +
                               (kv * kHeadDim + dim_base) * kv_s_dim;
           storeCacheElems<scalar_t, cache_t, kv_dt>(kv_cache + off, elems);
+        }
+      }
+    }
+
+    if constexpr (kInsertIndex) {
+      if (isIK) {
+        int64_t const sm = index_slot_mapping[tokenIdx];
+        if (sm >= 0) {  // skip padded / unscheduled tokens
+          if constexpr (kFp8Idx) {
+            storeElemsFp8(index_cache + sm * kHeadDim + dim_base, elems);
+          } else {
+            storeElems<scalar_t>(index_cache + sm * kHeadDim + dim_base, elems);
+          }
         }
       }
     }
@@ -526,12 +530,13 @@ void launchFusedMiniMaxM3(
     float const q_fp8_inv_scale, int const rotary_dim, int const num_tokens,
     int const nq, int const nkv, int const niq, int const block_size,
     int64_t const kv_s_block, int64_t const kv_s_head, int64_t const kv_s_token,
-    int64_t const kv_s_dim, bool const has_index, bool const insert_kv,
-    bool const process_index, bool const fp8_idx, cudaStream_t stream) {
+    int64_t const kv_s_dim, bool const has_index, bool const insert_main_kv,
+    bool const insert_index, bool const process_index, bool const fp8_idx,
+    cudaStream_t stream) {
   // Index outputs are scalar_t (bf16) or e4m3 bytes (uint8_t); reinterpret the
   // void* pointers per instantiation in the LAUNCH macro.
   // Slot count must match the kernel's compile-time gating.
-  int const v_slots = insert_kv ? nkv : 0;
+  int const v_slots = insert_main_kv ? nkv : 0;
   int const idx_slots = process_index ? niq + 1 : 0;
   int const slots_per_token = nq + nkv + v_slots + idx_slots;
 
@@ -559,25 +564,27 @@ void launchFusedMiniMaxM3(
   config.attrs = attrs;
   config.numAttrs = (sm_version >= 90) ? 1 : 0;
 
-  #define LAUNCH(HAS_INDEX, INSERT, PROCESS_INDEX, FP8, OUT_T)                 \
-    cudaLaunchKernelEx(                                                        \
-        &config,                                                               \
-        fusedMiniMaxM3QNormRopeKVInsertKernel<scalar_t, cache_t, kv_dt, OUT_T, \
-                                              HAS_INDEX, INSERT,               \
-                                              PROCESS_INDEX, FP8>,             \
-        qkv, q_out, q_fp8_out, reinterpret_cast<OUT_T*>(index_q_out),          \
-        q_norm_w, k_norm_w, iq_norm_w, ik_norm_w, cos_sin_cache, positions,    \
-        slot_mapping, index_slot_mapping, kv_cache,                            \
-        reinterpret_cast<OUT_T*>(index_cache), eps, q_fp8_inv_scale,           \
-        rotary_dim, num_tokens, nq, nkv, niq, block_size, kv_s_block,          \
+  #define LAUNCH(HAS_INDEX, INSERT_KV, INSERT_INDEX, PROCESS_INDEX, FP8,    \
+                 OUT_T)                                                     \
+    cudaLaunchKernelEx(                                                     \
+        &config,                                                            \
+        fusedMiniMaxM3QNormRopeKVInsertKernel<                              \
+            scalar_t, cache_t, kv_dt, OUT_T, HAS_INDEX, INSERT_KV,          \
+            INSERT_INDEX, PROCESS_INDEX, FP8>,                              \
+        qkv, q_out, q_fp8_out, reinterpret_cast<OUT_T*>(index_q_out),       \
+        q_norm_w, k_norm_w, iq_norm_w, ik_norm_w, cos_sin_cache, positions, \
+        slot_mapping, index_slot_mapping, kv_cache,                         \
+        reinterpret_cast<OUT_T*>(index_cache), eps, q_fp8_inv_scale,        \
+        rotary_dim, num_tokens, nq, nkv, niq, block_size, kv_s_block,       \
         kv_s_head, kv_s_token, kv_s_dim)
 #else
   // ROCm: standard kernel launch syntax (no PDL/stream serialization).
   // clang-format off
-  #define LAUNCH(HAS_INDEX, INSERT, PROCESS_INDEX, FP8, OUT_T)              \
+  #define LAUNCH(HAS_INDEX, INSERT_KV, INSERT_INDEX, PROCESS_INDEX, FP8,     \
+                 OUT_T)                                                     \
     fusedMiniMaxM3QNormRopeKVInsertKernel<                                  \
-        scalar_t, cache_t, kv_dt, OUT_T, HAS_INDEX, INSERT, PROCESS_INDEX,  \
-        FP8><<<grid, kBlockSize, 0, stream>>>(                              \
+        scalar_t, cache_t, kv_dt, OUT_T, HAS_INDEX, INSERT_KV, INSERT_INDEX,\
+        PROCESS_INDEX, FP8><<<grid, kBlockSize, 0, stream>>>(                \
         qkv, q_out, q_fp8_out, reinterpret_cast<OUT_T*>(index_q_out),       \
         q_norm_w, k_norm_w, iq_norm_w, ik_norm_w, cos_sin_cache, positions, \
         slot_mapping, index_slot_mapping, kv_cache,                         \
@@ -589,30 +596,35 @@ void launchFusedMiniMaxM3(
 
   if (has_index) {
     if (!process_index) {
-      if (insert_kv) {
-        LAUNCH(true, true, false, false, scalar_t);
+      if (insert_main_kv) {
+        LAUNCH(true, true, false, false, false, scalar_t);
       } else {
-        LAUNCH(true, false, false, false, scalar_t);
+        LAUNCH(true, false, false, false, false, scalar_t);
       }
-    } else if (insert_kv) {
+    } else if (insert_main_kv) {
       if (fp8_idx) {
-        LAUNCH(true, true, true, true,
+        LAUNCH(true, true, true, true, true,
                uint8_t);  // sparse serving, fp8 index outputs
       } else {
-        LAUNCH(true, true, true, false, scalar_t);  // sparse serving, bf16
+        LAUNCH(true, true, true, true, false,
+               scalar_t);  // sparse serving, bf16
       }
+    } else if (insert_index) {
+      LAUNCH(true, false, true, true, false,
+             scalar_t);  // sparse serving, bf16 index only
     } else {
       if (fp8_idx) {
-        LAUNCH(true, false, true, true,
+        LAUNCH(true, false, false, true, true,
                uint8_t);  // sparse profiling, fp8 index_q
       } else {
-        LAUNCH(true, false, true, false, scalar_t);  // sparse profiling, bf16
+        LAUNCH(true, false, false, true, false,
+               scalar_t);  // sparse profiling, bf16
       }
     }
   } else {
     // Dense layer: never has an index branch and never inserts here (the
     // generic Attention layer owns the KV insert).
-    LAUNCH(false, false, false, false, scalar_t);
+    LAUNCH(false, false, false, false, false, scalar_t);
   }
 #undef LAUNCH
 }
@@ -641,20 +653,23 @@ void launchFusedMiniMaxM3(
           : nullptr,                                                           \
       reinterpret_cast<st const*>(cos_sin_cache.data_ptr()),                   \
       reinterpret_cast<int64_t const*>(positions.data_ptr()),                  \
-      insert_kv ? reinterpret_cast<int64_t const*>(slot_mapping->data_ptr())   \
-                : nullptr,                                                     \
-      (insert_kv && process_index)                                             \
+      insert_main_kv                                                           \
+          ? reinterpret_cast<int64_t const*>(slot_mapping->data_ptr())         \
+          : nullptr,                                                           \
+      insert_index                                                             \
           ? reinterpret_cast<int64_t const*>(                                  \
                 effective_index_slot_mapping->data_ptr())                      \
           : nullptr,                                                           \
-      insert_kv ? reinterpret_cast<CACHE_T*>(kv_cache->data_ptr()) : nullptr,  \
-      (insert_kv && process_index)                                             \
+      insert_main_kv ? reinterpret_cast<CACHE_T*>(kv_cache->data_ptr())        \
+                     : nullptr,                                                \
+      insert_index                                                             \
           ? reinterpret_cast<void*>(index_cache->data_ptr())                   \
           : nullptr,                                                           \
       static_cast<float>(eps), 1.0f / static_cast<float>(q_fp8_scale),          \
       static_cast<int>(rotary_dim), num_tokens, nq, nkv, niq,                  \
       static_cast<int>(block_size), kv_s_block, kv_s_head, kv_s_token,         \
-      kv_s_dim, has_index, insert_kv, process_index, fp8_idx, stream)
+      kv_s_dim, has_index, insert_main_kv, insert_index, process_index,         \
+      fp8_idx, stream)
 // clang-format on
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -719,8 +734,9 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
   // The sparse layer packs the index branch ([index_q (niq heads) | index_k
   // (1 head)]) right after [q|k|v] in the same row; the dense layer does not.
   bool const has_index = niq > 0;
-  bool const insert_kv = kv_cache.has_value();
+  bool const insert_main_kv = kv_cache.has_value();
   bool const process_index = has_index && !skip_index_branch;
+  bool const insert_index = process_index && index_cache.has_value();
   vllm::Fp8KVCacheDataType const kv_dt =
       vllm::get_fp8_kv_cache_data_type(kv_cache_dtype);
   int const kHeadDim = vllm::minimax_m3_fused_ops::kHeadDim;
@@ -734,7 +750,7 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
   // Only the sparse layer inserts here (dense lets the generic Attention layer
   // own the KV write); there is no dense+insert kernel instantiation.
   STD_TORCH_CHECK(
-      !insert_kv || has_index,
+      !insert_main_kv || has_index,
       "insert mode (kv_cache) requires the index branch (sparse layer)");
   STD_TORCH_CHECK(has_index || !skip_index_branch,
                   "skip_index_branch requires sparse qkv rows");
@@ -755,19 +771,15 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
   // op argument is needed -- the strides ride along with the tensor itself.
   int64_t kv_s_block = 0, kv_s_head = 0, kv_s_token = 0, kv_s_dim = 0;
   torch::stable::Tensor const* effective_index_slot_mapping = nullptr;
-  if (insert_kv) {
+  if (insert_main_kv) {
     STD_TORCH_CHECK(
         slot_mapping.has_value() && slot_mapping->is_cuda() &&
             slot_mapping->scalar_type() == torch::headeronly::ScalarType::Long,
         "insert mode requires int64 CUDA slot_mapping");
     if (process_index) {
       STD_TORCH_CHECK(
-          !index_slot_mapping.has_value() ||
-              (index_slot_mapping->is_cuda() &&
-               index_slot_mapping->scalar_type() ==
-                   torch::headeronly::ScalarType::Long &&
-               index_slot_mapping->numel() == slot_mapping->numel()),
-          "index_slot_mapping must be int64 CUDA with slot_mapping length");
+          index_cache.has_value(),
+          "main KV insertion with index processing requires index_cache");
     }
     // Main attention KV cache: auto matches qkv, fp8 uses uint8 storage.
     if (kv_dt == vllm::Fp8KVCacheDataType::kAuto) {
@@ -778,15 +790,6 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
           kv_cache->scalar_type() == torch::headeronly::ScalarType::Byte,
           "fp8 kv_cache must use uint8 storage");
     }
-    // Indexer index-K cache: independent dtype -- qkv dtype or fp8 e4m3.
-    if (process_index) {
-      STD_TORCH_CHECK(
-          index_cache.has_value() &&
-              (index_cache->scalar_type() == qkv.scalar_type() ||
-               index_cache->scalar_type() ==
-                   torch::headeronly::ScalarType::Float8_e4m3fn),
-          "insert mode requires index_cache matching qkv dtype or fp8 e4m3");
-    }
     STD_TORCH_CHECK(kv_cache->dim() == 4 && kv_cache->stride(3) == 1,
                     "kv_cache must be [nb,nkv,bs,2*head_dim] with contiguous "
                     "content dim (stride(3)==1)");
@@ -794,11 +797,56 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     kv_s_head = kv_cache->stride(1);
     kv_s_token = kv_cache->stride(2);
     kv_s_dim = kv_cache->stride(3);
-    if (process_index) {
-      effective_index_slot_mapping = index_slot_mapping.has_value()
-                                         ? &index_slot_mapping.value()
-                                         : &slot_mapping.value();
+  }
+  if (insert_index) {
+    if (insert_main_kv) {
+      STD_TORCH_CHECK(index_cache->scalar_type() == qkv.scalar_type() ||
+                          index_cache->scalar_type() ==
+                              torch::headeronly::ScalarType::Float8_e4m3fn,
+                      "index_cache must match qkv dtype or be fp8 e4m3");
+    } else {
+      STD_TORCH_CHECK(
+          qkv.scalar_type() == torch::headeronly::ScalarType::BFloat16 &&
+              index_cache->scalar_type() ==
+                  torch::headeronly::ScalarType::BFloat16,
+          "index-only insertion requires bfloat16 qkv and index_cache");
     }
+    STD_TORCH_CHECK(index_cache->is_cuda() && index_cache->get_device_index() ==
+                                                  qkv.get_device_index(),
+                    "index_cache must be on the same CUDA device as qkv");
+    STD_TORCH_CHECK(
+        index_cache->dim() == 3 && index_cache->size(2) == kHeadDim &&
+            index_cache->is_contiguous(),
+        "index_cache must be contiguous [num_blocks, block_size, 128]");
+    STD_TORCH_CHECK(num_tokens == 0 || index_cache->numel() > 0,
+                    "index_cache must be nonempty when qkv has tokens");
+    STD_TORCH_CHECK(
+        reinterpret_cast<std::uintptr_t>(index_cache->data_ptr()) % 8 == 0,
+        "index_cache must be 8-byte aligned");
+
+    if (index_slot_mapping.has_value()) {
+      effective_index_slot_mapping = &index_slot_mapping.value();
+    } else {
+      STD_TORCH_CHECK(insert_main_kv,
+                      "index-only insertion requires index_slot_mapping");
+      effective_index_slot_mapping = &slot_mapping.value();
+    }
+    STD_TORCH_CHECK(
+        effective_index_slot_mapping->is_cuda() &&
+            effective_index_slot_mapping->get_device_index() ==
+                qkv.get_device_index() &&
+            effective_index_slot_mapping->scalar_type() ==
+                torch::headeronly::ScalarType::Long &&
+            effective_index_slot_mapping->dim() == 1 &&
+            effective_index_slot_mapping->is_contiguous() &&
+            effective_index_slot_mapping->numel() == num_tokens,
+        "index_slot_mapping must be a contiguous int64 CUDA vector with "
+        "num_tokens elements on the qkv device");
+    STD_TORCH_CHECK(reinterpret_cast<std::uintptr_t>(
+                        effective_index_slot_mapping->data_ptr()) %
+                            8 ==
+                        0,
+                    "index_slot_mapping must be 8-byte aligned");
   }
   // Optional contiguous gather targets: when given, the normed/roped q (and
   // index_q) are written here instead of in place, so callers avoid a separate

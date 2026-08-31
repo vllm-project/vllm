@@ -2738,10 +2738,12 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
       index_k]`` — the index branch is read straight out of ``qkv``.
 
     When ``kv_cache`` is given (sparse serving), also scatter-inserts the
-    normed/roped k & v into the paged KV cache by ``slot_mapping`` and the
-    index key into ``index_cache`` by ``index_slot_mapping``. ``kv_cache_dtype``
-    selects the cache storage/conversion path. If
-    ``index_slot_mapping`` is omitted, ``slot_mapping`` is used for both caches.
+    normed/roped k & v into the paged KV cache by ``slot_mapping``. A BF16
+    ``index_cache`` may be supplied independently with an explicit
+    ``index_slot_mapping`` to insert only the index key, without main K/V
+    insertion. When both caches are supplied, an omitted
+    ``index_slot_mapping`` falls back to ``slot_mapping``. ``kv_cache_dtype``
+    selects the main-cache storage/conversion path.
 
     If ``q_out`` / ``index_q_out`` (contiguous ``[N, nq*128]`` / ``[N,
     niq*128]``) are given, the normed/roped q / index_q are written there
