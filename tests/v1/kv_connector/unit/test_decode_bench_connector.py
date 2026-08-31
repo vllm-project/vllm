@@ -22,6 +22,11 @@ from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.request import Request
 
 from .utils import (
@@ -177,6 +182,56 @@ def test_decode_bench_connector_basic():
             block_data = kv_cache[block_id]
             # Should be filled with constant value 0.015
             assert torch.allclose(block_data, torch.tensor(0.015))
+
+
+def test_decode_bench_connector_fills_each_hma_group():
+    """Each cache group is filled using its own block IDs."""
+    block_size = 16
+    num_gpu_blocks = 8
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["group_0_layer"], kv_cache_spec),
+            KVCacheGroupSpec(["group_1_layer"], kv_cache_spec),
+        ],
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        kv_cache_config,
+    )
+    group_0_cache = torch.zeros(num_gpu_blocks, 2)
+    group_1_cache = torch.zeros(num_gpu_blocks, 2)
+    connector.register_kv_caches(
+        {
+            "group_0_layer": group_0_cache,
+            "group_1_layer": group_1_cache,
+        }
+    )
+    connector.bind_connector_metadata(
+        DecodeBenchConnectorMetadata(reqs_to_fill={"request": (([1], [5]), block_size)})
+    )
+
+    connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
+
+    assert torch.allclose(group_0_cache[1], torch.tensor(0.015))
+    assert torch.count_nonzero(group_0_cache[5]) == 0
+    assert torch.count_nonzero(group_1_cache[1]) == 0
+    assert torch.allclose(group_1_cache[5], torch.tensor(0.015))
 
 
 def test_decode_bench_connector_no_refill():

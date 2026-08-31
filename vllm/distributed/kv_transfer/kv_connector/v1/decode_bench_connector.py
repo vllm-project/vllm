@@ -97,7 +97,9 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = DecodeBenchConnectorScheduler(vllm_config)
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = DecodeBenchConnectorWorker(vllm_config)
+            self.connector_worker = DecodeBenchConnectorWorker(
+                vllm_config, kv_cache_config
+            )
 
     # ==============================
     # Worker-side methods
@@ -300,7 +302,7 @@ class DecodeBenchConnectorScheduler:
 class DecodeBenchConnectorWorker:
     """Worker-side implementation for DecodeBenchConnector."""
 
-    def __init__(self, vllm_config: "VllmConfig"):
+    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
@@ -314,16 +316,14 @@ class DecodeBenchConnectorWorker:
         self.kv_caches: dict[str, torch.Tensor] | None = None
 
         # Mapping from KV cache group index to list of layer names in that group
-        self.group_to_layers: dict[int, list[str]] | None = None
+        self.group_to_layers = {
+            group_idx: list(group.layer_names)
+            for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
+        }
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        """Store references to the KV cache tensors and build group mapping."""
+        """Store references to the KV cache tensors."""
         self.kv_caches = kv_caches
-
-        # For simplicity, assume all layers belong to group 0 (standard attention)
-        # For MLA models with multiple groups, the metadata will handle the mapping
-        # We just need to fill the blocks specified in the metadata
-        self.group_to_layers = {0: list(kv_caches.keys())}
 
         logger.debug(
             "DecodeBenchConnector: Registered %d KV cache layers",
@@ -343,7 +343,6 @@ class DecodeBenchConnectorWorker:
             return
 
         assert self.kv_caches is not None, "KV caches must be registered before filling"
-        assert self.group_to_layers is not None, "Group mapping must be initialized"
 
         for req_id, (block_ids_per_group, num_tokens) in metadata.reqs_to_fill.items():
             # Fill blocks for each KV cache group
@@ -372,7 +371,6 @@ class DecodeBenchConnectorWorker:
             return
 
         assert self.kv_caches is not None
-        assert self.group_to_layers is not None
 
         # Get the layers that belong to this group
         layer_names = self.group_to_layers.get(group_idx, [])
