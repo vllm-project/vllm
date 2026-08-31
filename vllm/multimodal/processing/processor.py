@@ -57,10 +57,15 @@ def cached_encode(
     tokenizer: TokenizerLike,
     text: str,
     *,
+    truncation: bool | None = None,
     add_special_tokens: bool = True,
 ) -> list[int]:
     """Encode text while caching repeated tokenizer calls."""
-    return tokenizer.encode(text, add_special_tokens=add_special_tokens)
+    return tokenizer.encode(
+        text,
+        truncation=truncation,
+        add_special_tokens=add_special_tokens,
+    )
 
 
 class _GetMatchIndex(Protocol):
@@ -1554,14 +1559,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             # let BPE merge tokens across a segment boundary, silently
             # changing how a non-special-token placeholder is tokenized.
             new_token_ids = flatten_2d_lists(
-                [
-                    cached_encode(tokenizer, text, add_special_tokens=False)
-                    for text in out_texts
-                ]
+                [tokenizer.encode(text, add_special_tokens=False) for text in out_texts]
             )
         else:
-            new_token_ids = cached_encode(
-                tokenizer, "".join(out_texts), add_special_tokens=False
+            new_token_ids = tokenizer.encode(
+                "".join(out_texts), add_special_tokens=False
             )
 
         return new_token_ids, result
