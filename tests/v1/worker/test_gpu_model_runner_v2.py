@@ -57,14 +57,19 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
             KVCacheGroupSpec(["kda"], mamba_spec),
         ],
     )
+    parallel_config = SimpleNamespace(
+        decode_context_parallel_size=dcp_size,
+        cp_kv_cache_interleave_size=1,
+    )
     vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
+        parallel_config=parallel_config,
         cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode),
     )
     runner = SimpleNamespace(
         max_model_len=max_model_len,
         is_encoder_decoder=False,
         vllm_config=vllm_config,
+        parallel_config=parallel_config,
     )
 
     class _CapturedWidths(Exception):
