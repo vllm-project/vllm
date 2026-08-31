@@ -79,6 +79,7 @@ def _stub(manager, block_size, hash_block_size, *, block_drop=True):
         mamba_fine_grained_prefix_cache=(
             partial_hit and manager.mamba_fine_grained_prefix_cache
         ),
+        mamba_elide_final_split=False,
     )
 
 
