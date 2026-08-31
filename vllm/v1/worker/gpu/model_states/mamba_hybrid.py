@@ -129,6 +129,11 @@ class MambaHybridModelState(DefaultModelState):
         # builders fall back to the last computed block).
         self._mamba_prev_last_scheduled_idx_gpu: torch.Tensor | None = None
         self._mamba_prev_last_scheduled_idx_staged: torch.Tensor | None = None
+        # Consume-once marker: the staged buffer is only meaningful for the
+        # batch whose preprocess_state filled it. Dummy runs skip
+        # preprocess_state, so without this they would read the previous real
+        # batch's anchors in the wrong row order.
+        self._mamba_prev_anchor_staged_valid = False
         if (
             self.cache_config.mamba_cache_mode == "all"
             and vllm_config.num_speculative_tokens > 0
@@ -247,6 +252,7 @@ class MambaHybridModelState(DefaultModelState):
                 FULL_DECODE_LEN=1 + self.vllm_config.num_speculative_tokens,
                 MAMBA_BLOCK_SIZE=mamba_spec.block_size,
             )
+            self._mamba_prev_anchor_staged_valid = True
         if not self._align_mode:
             return
         mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
@@ -324,14 +330,19 @@ class MambaHybridModelState(DefaultModelState):
             if self._mamba_prev_last_scheduled_idx_staged is not None:
                 # Staged in batch order by preprocess_state; padded rows are
                 # untracked (-1) so the builders take their fallback anchor.
+                # Consumed at most once per staging: batches that skipped
+                # preprocess_state (dummy runs) get all -1 instead of another
+                # batch's rows.
                 prev_last_scheduled_idx = (
-                    self._mamba_prev_last_scheduled_idx_staged.new_full(
-                        (num_reqs,), -1
+                    self._mamba_prev_last_scheduled_idx_staged.new_full((num_reqs,), -1)
+                )
+                if self._mamba_prev_anchor_staged_valid:
+                    self._mamba_prev_anchor_staged_valid = False
+                    prev_last_scheduled_idx[: input_batch.num_reqs] = (
+                        self._mamba_prev_last_scheduled_idx_staged[
+                            : input_batch.num_reqs
+                        ]
                     )
-                )
-                prev_last_scheduled_idx[: input_batch.num_reqs] = (
-                    self._mamba_prev_last_scheduled_idx_staged[: input_batch.num_reqs]
-                )
 
             # GDN uses >= 0 to select spec-decode rows, so non-decode rows
             # need the -1 sentinel rather than a raw zero draft count.
