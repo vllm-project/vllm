@@ -498,13 +498,14 @@ def test_kvcr_tier_stores_and_emits_inventory(monkeypatch):
         InventoryEvent((BlockKey(bytes(key)),), CacheTier.LOCAL_G2, False)
     )
     kvcr.inventory_sink(InventoryEvent((BlockKey(bytes(key)),), CacheTier.G3, False))
+    events = list(tier.take_events())
     assert [
-        (event.keys, event.medium, event.ownership, event.removed)
-        for event in tier.take_events()
+        (event.keys, event.medium, event.ownership, event.removed) for event in events
     ] == [
         ([key], Medium.CPU, "kvcr", False),
         ([key], Medium.STORAGE, "kvcr", False),
     ]
+    assert all(event.removal_expected for event in events)
     tier.shutdown()
 
 
