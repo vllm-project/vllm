@@ -303,6 +303,7 @@ def _make_task(
     stage: str,
     name: str,
     params: dict[str, int | str],
+    inter_dim: int,
 ) -> tuple:
     return (
         tokens,
@@ -310,7 +311,7 @@ def _make_task(
         name,
         params,
         args.hidden_size,
-        args.inter_dim,
+        inter_dim,
         args.experts,
         args.topk,
         args.warmup,
@@ -432,16 +433,21 @@ def tune(args: argparse.Namespace) -> Path:
         raise ValueError("iters must be greater than one")
     if args.warmup < 0:
         raise ValueError("warmup must be non-negative")
+    if args.tp_size <= 0:
+        raise ValueError("tp-size must be positive")
+    if args.inter_dim % args.tp_size:
+        raise ValueError("inter-dim must be divisible by tp-size")
+    inter_dim = args.inter_dim // args.tp_size
     arch = get_rocm_arch()
     try:
         lds_cap_bytes = LDS_CAP_BYTES[arch]
     except KeyError as exc:
         raise RuntimeError(f"Unsupported GPU architecture: {arch}") from exc
     s1_registry = get_flydsl_stage1_kernels_nvfp4(
-        args.hidden_size, args.inter_dim, lds_cap_bytes=lds_cap_bytes
+        args.hidden_size, inter_dim, lds_cap_bytes=lds_cap_bytes
     )
     s2_registry = get_flydsl_stage2_kernels_nvfp4(
-        args.hidden_size, args.inter_dim, lds_cap_bytes=lds_cap_bytes
+        args.hidden_size, inter_dim, lds_cap_bytes=lds_cap_bytes
     )
     visible_gpu_count = torch.accelerator.device_count()
     if visible_gpu_count < 1:
@@ -460,11 +466,11 @@ def tune(args: argparse.Namespace) -> Path:
     ) as pool:
         for tokens in args.tokens:
             tasks = [
-                _make_task(args, tokens, "stage1", name, params)
+                _make_task(args, tokens, "stage1", name, params, inter_dim)
                 for name, params in s1_registry.items()
             ]
             tasks.extend(
-                _make_task(args, tokens, "stage2", name, params)
+                _make_task(args, tokens, "stage2", name, params, inter_dim)
                 for name, params in s2_registry.items()
             )
             print(
@@ -543,7 +549,7 @@ def tune(args: argparse.Namespace) -> Path:
                 args.topk,
                 args.experts,
                 args.hidden_size,
-                args.inter_dim,
+                inter_dim,
             )
             default_stage1 = {
                 key: default[key] for key in ("tile_m", "tile_n", "tile_k", "k_batch")
@@ -591,7 +597,7 @@ def tune(args: argparse.Namespace) -> Path:
         )
 
     name = (
-        f"E={args.experts},N={args.inter_dim},"
+        f"E={args.experts},N={inter_dim},"
         f"device_name={get_device_name_as_file_name()},"
         "dtype=nvfp4,backend=flydsl.json"
     )
@@ -606,6 +612,7 @@ def main() -> None:
     parser.add_argument("--experts", type=int, default=384)
     parser.add_argument("--hidden-size", type=int, default=7168)
     parser.add_argument("--inter-dim", type=int, default=256)
+    parser.add_argument("--tp-size", type=int, default=1)
     parser.add_argument("--topk", type=int, default=8)
     parser.add_argument("--tokens", type=int, nargs="+", default=DEFAULT_TOKENS)
     parser.add_argument("--iters", type=int, default=NUM_ITERS)

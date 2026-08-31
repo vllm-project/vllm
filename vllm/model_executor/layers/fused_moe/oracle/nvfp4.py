@@ -521,7 +521,7 @@ def convert_to_nvfp4_moe_kernel_format(
             FlydslNvfp4Experts,
         )
 
-        # FlyDSL NVFP4-BF16 kernels consume weights in the kpack-bytes-8
+        # FlyDSL kernels consume weights in the kpack-bytes-8
         # preshuffled layout.
         for weight_name, weight in (("w13", w13), ("w2", w2)):
             shuffled = FlydslNvfp4Experts.shuffle_nvfp4_weight_for_flydsl(weight)
@@ -530,8 +530,8 @@ def convert_to_nvfp4_moe_kernel_format(
             else:
                 w2 = shuffled
 
-        w13_scale = w13_scale.permute(0, 2, 1).contiguous()
-        w2_scale = w2_scale.permute(0, 2, 1).contiguous()
+        w13_scale = w13_scale.permute(0, 2, 1).contiguous().view(torch.uint8)
+        w2_scale = w2_scale.permute(0, 2, 1).contiguous().view(torch.uint8)
         w13_scale_2 = w13_scale_2.to(torch.float32).contiguous()
         w2_scale_2 = w2_scale_2.to(torch.float32).contiguous()
         a13_scale = a13_scale.max().to(torch.float32)

@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NVFP4-BF16 MoE experts through vLLM's FlyDSL kernels."""
-
 import functools
 import json
 from pathlib import Path
@@ -9,7 +7,7 @@ from pathlib import Path
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.kernels.flydsl.nvfp4_moe_2stages import (
     nvfp4_moe_stage1,
     nvfp4_moe_stage2,
@@ -41,7 +39,7 @@ logger = init_logger(__name__)
 
 
 class FlydslNvfp4Experts(mk.FusedMoEExpertsModular):
-    """NVFP4-BF16 MoE experts using vLLM's FlyDSL implementation."""
+    """NVFP4 MoE experts using FlyDSL implementation."""
 
     @staticmethod
     def shuffle_nvfp4_weight_for_flydsl(weight: torch.Tensor) -> torch.Tensor:
@@ -160,7 +158,7 @@ class FlydslNvfp4Experts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # FlyDSL NVFP4-BF16 consumes BF16 activations and NVFP4 weights.
+        # Consumes BF16 activations and NVFP4 weights.
         return True
 
     @staticmethod
@@ -223,6 +221,16 @@ class FlydslNvfp4Experts(mk.FusedMoEExpertsModular):
             return (
                 False,
                 "kernel requires aiter library (not found in user environment)",
+            )
+
+        if not is_supported and not rocm_aiter_ops.is_fused_moe_enabled():
+            return (
+                False,
+                (
+                    f"{reason}. AITER MoE is not enabled, "
+                    "set VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_USE_AITER_MOE=1 "
+                    "to enable it"
+                ),
             )
 
         return is_supported, reason
@@ -308,6 +316,7 @@ class FlydslNvfp4Experts(mk.FusedMoEExpertsModular):
             expert_mask,
             num_local_tokens,
         )
+        num_valid_ids = num_valid_ids[:1].contiguous()
 
         hidden_states_qdq, _ = moe_kernel_quantize_input(
             A=hidden_states,
@@ -318,6 +327,7 @@ class FlydslNvfp4Experts(mk.FusedMoEExpertsModular):
         )
 
         intermediate = _resize_cache(workspace13, (num_tokens, topk, inter_dim))
+
         nvfp4_moe_stage1(
             hidden_states_qdq,
             w1,
