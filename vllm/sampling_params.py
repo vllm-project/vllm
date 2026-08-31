@@ -1270,6 +1270,15 @@ class SamplingParams(
             prompt_logprobs=1,
         )
 
+    @classmethod
+    def for_all_sampler_warmup_configs(cls) -> list["SamplingParams"]:
+        """Return SamplingParams covering all sampler warmup configurations."""
+        return [
+            cls.for_sampler_warmup(),
+            cls(temperature=0.9, seed=42),
+            cls(temperature=0.0),
+        ]
+
 
 class BeamSearchParams(
     msgspec.Struct,
