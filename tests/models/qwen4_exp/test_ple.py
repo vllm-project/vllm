@@ -18,11 +18,20 @@ from vllm.models.qwen4_exp.common.ple import (
     copy_ple_embedding_shard_,
 )
 from vllm.models.qwen4_exp.nvidia import ple_layer as ple_layer_module
+from vllm.models.qwen4_exp.nvidia.ops.ple_conv import varlen_dilated_conv1d
 from vllm.models.qwen4_exp.nvidia.ple_layer import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLELayer,
     _get_ple_embedding_quant_method,
+)
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+requires_ple_conv = pytest.mark.skipif(
+    not current_platform.is_cuda() or not HAS_TRITON,
+    reason="PLE varlen convolution requires CUDA and Triton",
 )
 
 
@@ -399,3 +408,148 @@ def test_ple_short_conv_uses_fallback_when_profile_metadata_is_omitted(
     output = module._short_conv(inputs)
 
     assert output is expected
+
+
+@requires_ple_conv
+@pytest.mark.parametrize(
+    "dtype,rtol,atol",
+    [
+        pytest.param(torch.float32, 1e-5, 1e-5, id="float32"),
+        pytest.param(torch.bfloat16, 2e-2, 2e-2, id="bfloat16"),
+    ],
+)
+def test_ple_varlen_dilated_conv_matches_dense_reference(
+    dtype: torch.dtype,
+    rtol: float,
+    atol: float,
+) -> None:
+    torch.manual_seed(0)
+    lengths = [2, 5, 19, 3]
+    channels = 37
+    kernel_width = 4
+    dilation = 3
+    state_len = (kernel_width - 1) * dilation
+
+    query_start_loc = torch.tensor(
+        [0, *torch.tensor(lengths).cumsum(0).tolist()],
+        dtype=torch.int64,
+        device="cuda",
+    )
+    x = torch.randn(sum(lengths), channels, dtype=dtype, device="cuda")
+    weight = torch.randn(channels, kernel_width, dtype=dtype, device="cuda")
+    conv_state = torch.randn(
+        5,
+        channels,
+        state_len,
+        dtype=torch.float32,
+        device="cuda",
+    )
+    original_state = conv_state.clone()
+    state_indices = torch.tensor(
+        [1, 2, 3, NULL_BLOCK_ID], dtype=torch.int64, device="cuda"
+    )
+    has_initial_state = torch.tensor(
+        [True, True, True, True], dtype=torch.bool, device="cuda"
+    )
+
+    actual = varlen_dilated_conv1d(
+        x,
+        weight,
+        conv_state,
+        query_start_loc,
+        state_indices,
+        has_initial_state,
+        dilation,
+    )
+
+    expected = torch.zeros_like(x)
+    expected_state = original_state.clone()
+    offset = 0
+    for sequence, length in enumerate(lengths):
+        slot = state_indices[sequence].item()
+        sequence_x = x[offset : offset + length]
+        if slot != NULL_BLOCK_ID:
+            if has_initial_state[sequence].item():
+                initial_state = original_state[slot : slot + 1, :, :state_len].to(dtype)
+            else:
+                initial_state = torch.zeros(
+                    1, channels, state_len, dtype=dtype, device="cuda"
+                )
+            history = torch.cat((initial_state, sequence_x.T.unsqueeze(0)), dim=-1)
+            expected[offset : offset + length] = (
+                F.silu(
+                    F.conv1d(
+                        history,
+                        weight.unsqueeze(1),
+                        groups=channels,
+                        dilation=dilation,
+                    )
+                )
+                .squeeze(0)
+                .T
+            )
+            expected_state[slot, :, :state_len] = history[0, :, -state_len:].to(
+                expected_state.dtype
+            )
+        offset += length
+
+    torch.testing.assert_close(actual, expected, rtol=rtol, atol=atol)
+    torch.testing.assert_close(conv_state, expected_state, rtol=0, atol=0)
+
+
+@requires_ple_conv
+@pytest.mark.parametrize("split", [1, 8, 9, 10])
+def test_ple_varlen_dilated_conv_preserves_chunk_continuity(split: int) -> None:
+    torch.manual_seed(1)
+    total_tokens = 31
+    channels = 37
+    kernel_width = 4
+    dilation = 3
+    state_len = (kernel_width - 1) * dilation
+    x = torch.randn(total_tokens, channels, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(channels, kernel_width, dtype=torch.bfloat16, device="cuda")
+    initial_state = torch.randn(
+        2,
+        channels,
+        state_len,
+        dtype=torch.float32,
+        device="cuda",
+    )
+    state_indices = torch.ones(1, dtype=torch.int64, device="cuda")
+    has_initial_state = torch.ones(1, dtype=torch.bool, device="cuda")
+
+    full_state = initial_state.clone()
+    full_output = varlen_dilated_conv1d(
+        x,
+        weight,
+        full_state,
+        torch.tensor([0, total_tokens], dtype=torch.int64, device="cuda"),
+        state_indices,
+        has_initial_state,
+        dilation,
+    )
+
+    chunked_state = initial_state.clone()
+    first_output = varlen_dilated_conv1d(
+        x[:split],
+        weight,
+        chunked_state,
+        torch.tensor([0, split], dtype=torch.int64, device="cuda"),
+        state_indices,
+        has_initial_state,
+        dilation,
+    )
+    second_output = varlen_dilated_conv1d(
+        x[split:],
+        weight,
+        chunked_state,
+        torch.tensor([0, total_tokens - split], dtype=torch.int64, device="cuda"),
+        state_indices,
+        has_initial_state,
+        dilation,
+    )
+
+    torch.testing.assert_close(
+        torch.cat((first_output, second_output)), full_output, rtol=2e-2, atol=2e-2
+    )
+    torch.testing.assert_close(chunked_state, full_state, rtol=0, atol=0)
