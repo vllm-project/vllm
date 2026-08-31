@@ -152,6 +152,12 @@ The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentic
 
 ### Protected Endpoints (Require API Key)
 
+The `/render` and `/derender` endpoints are registered on `vllm serve` only
+when `VLLM_ENABLE_RENDER_ENDPOINTS=1`. The dedicated `vllm launch render`
+server registers them without this environment variable. When registered,
+these `/v1` endpoints use the same API key authentication as the other
+protected endpoints below.
+
 When `--api-key` is configured, the following `/v1` endpoints require Bearer token authentication:
 
 - `/v1/models` - List available models

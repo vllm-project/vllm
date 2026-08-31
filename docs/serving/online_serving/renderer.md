@@ -6,6 +6,14 @@ Our renderer API is designed to disaggregate the render phase(preprocessing) and
 - Disaggregated tokenization: Support use cases such as llm-d, Dynamo, and custom frontends that need to leverage vLLM's preprocessing logic without running the full inference engine.
 - Tokens-in / tokens-out engine: Make the engine a pure token-in / token-out service, decoupled from request preprocessing.
 
+The dedicated `vllm launch render` server always exposes the `/render` and
+`/derender` endpoints. They are disabled by default on a standard inference
+server. To expose them with `vllm serve`, opt in explicitly:
+
+```bash
+VLLM_ENABLE_RENDER_ENDPOINTS=1 vllm serve <model>
+```
+
 ## API Reference
 
 - [Completions Render API](renderer.md) (`/v1/completions/render`)
