@@ -296,6 +296,7 @@ if TYPE_CHECKING:
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
+    VLLM_NVFP4_A16_MAX_M: int = 0
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -2032,6 +2033,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
     # Flag to control the v2 model runner. If unset, use config defaults.
+    # Max M for which an NVFP4 linear layer uses the weight-only (W4A16)
+    # kernel instead of W4A4. 0 disables the dispatch. Requires both kernels to
+    # declare preserves_checkpoint_layout; see nvfp4/dynamic.py.
+    "VLLM_NVFP4_A16_MAX_M": lambda: int(os.getenv("VLLM_NVFP4_A16_MAX_M", "0")),
     "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
     ),

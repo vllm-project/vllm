@@ -30,6 +30,13 @@ class NvFp4LinearKernel(ABC):
     match for the current hardware.
     """
 
+    preserves_checkpoint_layout: bool = False
+    """Whether process_weights_after_loading leaves the quantised weight and
+    scales in checkpoint-native form. Kernels that shuffle, swizzle, pad or
+    otherwise rewrite the weight must leave this False: they cannot share one
+    weight layout with a dispatch partner (see nvfp4/dynamic.py).
+    """
+
     def __init__(self, config: NvFp4LinearLayerConfig) -> None:
         assert self.can_implement(config)[0]
         assert self.is_supported()[0]

@@ -1010,6 +1010,20 @@ def init_wfp8_a16_linear_kernel(
     )
 
 
+def _first_supported(kernels, config):
+    """First kernel in `kernels` that is supported and can implement `config`."""
+    for k in kernels:
+        if k.__name__ in envs.VLLM_DISABLED_KERNELS:
+            continue
+        ok, _ = k.is_supported()
+        if not ok:
+            continue
+        ok, _ = k.can_implement(config)
+        if ok:
+            return k(config)
+    return None
+
+
 def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
@@ -1050,6 +1064,42 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
                 reason,
             )
             force_kernel = EmulationNvFp4LinearKernel
+    elif linear_backend == "auto" and use_a16 and envs.VLLM_NVFP4_A16_MAX_M > 0:
+        # Opt-in: pair a W4A16 and a W4A4 kernel and pick per forward on M.
+        # Both must consume the checkpoint-native layout, otherwise the two
+        # layouts would have to stay resident and the dispatch costs more
+        # memory than it saves. No in-tree kernel qualifies yet, so this
+        # raises with a clear reason rather than silently mis-executing.
+        from .nvfp4.dynamic import DynamicNvFp4LinearKernel
+
+        a16 = _first_supported(a16_kernels, config)
+        a4 = _first_supported(
+            tuple(
+                k
+                for k in _POSSIBLE_NVFP4_KERNELS.get(current_platform._enum, [])
+                if k not in a16_kernels
+            ),
+            config,
+        )
+        if a16 is not None and a4 is not None:
+            ok, reason = DynamicNvFp4LinearKernel.check_pairable(a16, a4)
+            if ok:
+                logger.info_once(
+                    "NVFP4 dynamic dispatch: %s for M<=%d, else %s",
+                    type(a16).__name__,
+                    envs.VLLM_NVFP4_A16_MAX_M,
+                    type(a4).__name__,
+                )
+                return DynamicNvFp4LinearKernel(
+                    config, a16, a4, envs.VLLM_NVFP4_A16_MAX_M
+                )
+            raise ValueError(
+                "VLLM_NVFP4_A16_MAX_M is set but no kernel pair can share a "
+                f"weight layout: {reason}. Unset it to fall back to the "
+                "static W4A16 path."
+            )
+        force_kernel = MarlinNvFp4LinearKernel
+
     elif linear_backend == "auto" and use_a16:
         # Force a16 (Marlin) when running weight-only quantization.
         force_kernel = MarlinNvFp4LinearKernel
