@@ -38,10 +38,10 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     run_cutlass_moe_fp8,
     run_cutlass_moe_w4a8_fp8,
 )
+from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     make_moe_prepare_and_finalize_no_dp_ep,
 )
-from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_rows,
