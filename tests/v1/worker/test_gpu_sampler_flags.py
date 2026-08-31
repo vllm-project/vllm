@@ -88,3 +88,31 @@ def test_logits_processing_cache_only_checks_active_requests():
 
     assert not np.any(sampler.needs_logits_processing[sampling_only])
     assert np.any(sampler.needs_logits_processing[with_processing])
+
+
+def test_all_sampler_warmup_configs():
+    """Test that for_all_sampler_warmup_configs returns a list of configurations
+    covering:
+    - FlashInfer (unseeded stochastic),
+    - native top-k/top-p + Gumbel (seeded), and
+    - greedy (model dtype) paths."""
+    configs = SamplingParams.for_all_sampler_warmup_configs()
+    assert len(configs) >= 3
+
+    unseeded = configs[0]
+    assert unseeded.seed is None
+    assert unseeded.temperature > 0.0
+
+    seeded = configs[1]
+    assert seeded.seed is not None
+
+    greedy = configs[2]
+    assert greedy.temperature == 0.0
+
+    sampler = _make_sampler()
+    sampler.add_request(0, 1, unseeded)
+    sampler.add_request(1, 1, seeded)
+    sampler.add_request(2, 1, greedy)
+
+    assert sampler.needs_logits_processing[0]
+    assert not sampler.needs_logits_processing[2]
