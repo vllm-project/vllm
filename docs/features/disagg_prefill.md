@@ -49,6 +49,9 @@ Now supports 9 types of connectors:
   --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
   ```
 
+!!! warning "Hybrid model requirements"
+    Hybrid SSM/Mamba models require the hybrid memory allocator (HMA). `NixlConnector` and `MooncakeConnector` currently support HMA, while `LMCacheConnectorV1` and `MoRIIOConnector` do not advertise HMA support. If HMA is disabled or the selected connector does not support it, hybrid model startup will fail. For `NixlConnector`, set `VLLM_SSM_CONV_STATE_LAYOUT=DS` on every prefill and decode instance; see the [NixlConnector Compatibility Matrix](nixl_connector_compatibility.md#hybrid-ssmmamba-models).
+
 ## Reusing prefill token ids on decode
 
 !!! note
