@@ -76,7 +76,7 @@ def _ple_gate_kernel(
     if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
     tl.store(gated_ptr + t * HC * H + offs, gated, mask=mask)
-    tl.store(normed_ptr + t * HC * H + offs, normed.to(tl.bfloat16), mask=mask)
+    tl.store(normed_ptr + t * HC * H + offs, normed, mask=mask)
 
 
 def _ple_gate(

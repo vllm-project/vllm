@@ -351,9 +351,9 @@ def _reference_ngram_ids(
     tokens = input_ids.tolist()
     starts = query_start_loc.tolist()
     contexts = ngram_context.tolist()
-    multipliers = layer_multipliers.tolist()
-    sizes = ngram_heads_vocab_sizes.tolist()
-    offsets = ngram_heads_offsets.tolist()
+    multipliers = layer_multipliers.cpu()
+    sizes = ngram_heads_vocab_sizes.cpu()
+    offsets = ngram_heads_offsets.cpu()
     rows = []
     context_len = len(contexts[0])
     for req, (start, end) in enumerate(zip(starts, starts[1:])):
@@ -367,15 +367,15 @@ def _reference_ngram_ids(
                 crossed_eos |= token == eos_token_id
 
             row = []
-            mixed = shifted[0] * multipliers[0]
+            mixed = torch.tensor(shifted[0], dtype=torch.int64) * multipliers[0]
             for ngram_order in range(2, context_len + 2):
                 shift = ngram_order - 1
                 mixed ^= shifted[shift] * multipliers[shift]
                 head_start = (ngram_order - 2) * heads_per_ngram
                 for head in range(head_start, head_start + heads_per_ngram):
-                    row.append(mixed % sizes[head] + offsets[head])
-            rows.append(row)
-    return torch.tensor(rows, dtype=torch.int64, device=input_ids.device)
+                    row.append(torch.remainder(mixed, sizes[head]) + offsets[head])
+            rows.append(torch.stack(row))
+    return torch.stack(rows).to(input_ids.device)
 
 
 _NGRAM_MULTIPLIERS = (
@@ -436,23 +436,36 @@ def _ngram_hash_params(device: torch.device, context_len: int) -> dict:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused PLE needs CUDA")
 @pytest.mark.parametrize(
-    ("query_lens", "eos_offsets", "contexts"),
+    ("query_lens", "eos_offsets", "contexts", "first_token_id"),
     [
-        ([1], [], [[11, 12]]),
-        ([3], [1], [[11]]),
-        ([4, 4], [0, 7], [[11, 12], [13, 14]]),
-        ([4, 0, 3], [], [[11, 12], [13, 14], [15, 16]]),
+        ([1], [], [[11, 12]], 20),
+        ([3], [1], [[11]], 20),
+        ([4, 4], [0, 7], [[11, 12], [13, 14]], 20),
+        ([4, 0, 3], [], [[11, 12], [13, 14], [15, 16]], 20),
         (
             [1, 33, 2],
             [5, 32],
             [[_NGRAM_EOS_TOKEN_ID, 11], [12, 13], [14, _NGRAM_EOS_TOKEN_ID]],
+            20,
         ),
         (
             [5, 12, 16, 1, 16, 17],
             [10, 40],
             [[11, 12], [13, 14], [15, 16], [17, 18], [19, 20], [21, 22]],
+            20,
         ),
-        ([5, 3], [3], [[11, 12, 13], [14, 15, 16]]),
+        ([5, 3], [3], [[11, 12, 13], [14, 15, 16]], 20),
+        (
+            [4, 0, 3],
+            [],
+            [
+                [200_000, 200_001],
+                [250_000, 250_001],
+                [300_000, 300_001],
+            ],
+            350_000,
+        ),
+        ([3], [], [[1_000_000_000, 1_000_000_001]], 1_000_000_002),
     ],
     ids=[
         "single-token",
@@ -462,12 +475,15 @@ def _ngram_hash_params(device: torch.device, context_len: int) -> dict:
         "three-requests",
         "six-requests",
         "four-gram",
+        "int64-overflow",
+        "large-int32-ids",
     ],
 )
 def test_fused_ngram_ids_correctness(
     query_lens: list[int],
     eos_offsets: list[int],
     contexts: list[list[int]],
+    first_token_id: int,
 ) -> None:
     from vllm.models.qwen4_exp.nvidia.ops.ple_ngram import ple_ngram_ids
 
@@ -476,8 +492,8 @@ def test_fused_ngram_ids_correctness(
         [0, *accumulate(query_lens)], dtype=torch.int32, device=device
     )
     input_ids = torch.arange(
-        20,
-        20 + sum(query_lens),
+        first_token_id,
+        first_token_id + sum(query_lens),
         dtype=torch.int32,
         device=device,
     )
@@ -490,6 +506,9 @@ def test_fused_ngram_ids_correctness(
     actual = ple_ngram_ids(input_ids, query_start_loc, ngram_context, **params)
 
     assert torch.equal(actual, expected)
+    offsets = params["ngram_heads_offsets"]
+    sizes = params["ngram_heads_vocab_sizes"]
+    assert torch.all((actual >= offsets) & (actual < offsets + sizes))
 
 
 _KERNEL_STATE_BLOCKS = 64
@@ -931,9 +950,13 @@ def test_fused_conv_mixed_batch_correctness() -> None:
         num_decodes=1,
         num_decode_tokens=1,
         num_prefill_tokens=5,
-        spec_sequence_masks=torch.tensor([True, True], device=device),
-        spec_token_indx=torch.arange(7, dtype=torch.int32, device=device),
-        non_spec_token_indx=torch.arange(7, 13, dtype=torch.int32, device=device),
+        spec_sequence_masks=torch.tensor([True, False, True, False], device=device),
+        spec_token_indx=torch.tensor(
+            [0, 1, 2, 4, 5, 6, 7], dtype=torch.int32, device=device
+        ),
+        non_spec_token_indx=torch.tensor(
+            [3, 8, 9, 10, 11, 12], dtype=torch.int32, device=device
+        ),
         num_actual_tokens=13,
         spec_state_indices_tensor=torch.tensor(
             [11, 12], dtype=torch.int32, device=device
@@ -960,15 +983,13 @@ def test_fused_conv_mixed_batch_correctness() -> None:
         metadata=metadata,
         conv_state=state_kernel,
         conv_weights=weights,
-        use_fused_kernels=True,
     )
-    module._short_conv_dilated_dispatch(
+    module._short_conv_dilated_dispatch_pytorch(
         inputs=inputs,
         residual=residual_eager,
         metadata=metadata,
         conv_state=state_eager,
         conv_weights=weights,
-        use_fused_kernels=False,
     )
     torch.testing.assert_close(
         residual_kernel.float(), residual_eager.float(), atol=3e-2, rtol=3e-2

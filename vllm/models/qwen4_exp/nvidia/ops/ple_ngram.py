@@ -93,7 +93,9 @@ def _ple_ngram_ids_kernel(
     # Map each hash into its embedding-table partition.
     sizes = tl.load(sizes_ptr + g, mask=head_mask, other=1)[None, :]
     head_offsets = tl.load(offsets_ptr + g, mask=head_mask, other=0)[None, :]
-    ids = mixed % sizes + head_offsets
+    remainders = mixed % sizes
+    remainders = tl.where(remainders < 0, remainders + sizes, remainders)
+    ids = remainders + head_offsets
     tl.store(
         out_ptr + token_offsets[:, None] * NGRAM_HEADS + g[None, :],
         ids,
