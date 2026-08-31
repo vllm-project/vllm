@@ -606,8 +606,7 @@ def test_registry_passes_vllm_config_to_default_requests() -> None:
         def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
             return self.CompileKey(value=value)
 
-        def get_warmup_keys(self, vllm_config: Any | None = None) -> list[CompileKey]:
-            assert vllm_config is not None
+        def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
             return [self.dispatch(value=vllm_config.bias)]
 
         def compile(self, compile_key: CompileKey) -> None:

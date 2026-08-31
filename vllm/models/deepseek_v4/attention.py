@@ -404,6 +404,18 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
             _FUSED_Q_KV_RMSNORM_KERNEL.register_warmup()
 
+            backend_name = self.backend_cls.get_name()
+            if backend_name in (
+                "FLASHMLA_SPARSE_DSV4",
+                "ROCM_FLASHMLA_SPARSE_DSV4",
+                "XPU_V4_MLA_SPARSE",
+            ):
+                from vllm.models.deepseek_v4.common.ops.cache_utils import (
+                    _COMBINE_TOPK_SWA_INDICES_KERNEL,
+                )
+
+                _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
+
             if current_platform.is_cuda():
                 from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (  # noqa: E501
                     _FUSED_INV_ROPE_FP8_QUANT_KERNEL,
@@ -418,17 +430,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
                     _BUILD_C128A_TOPK_METADATA_KERNEL.register_warmup()
 
-                backend_name = self.backend_cls.get_name()
                 if backend_name == "FLASHMLA_SPARSE_DSV4":
                     from vllm.models.deepseek_v4.common.ops.cache_utils import (
-                        _COMBINE_TOPK_SWA_INDICES_KERNEL,
                         _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL,
                         _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL,
                     )
 
                     if self.compress_ratio == 4:
                         _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL.register_warmup()
-                    _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
                     if has_cutedsl():
                         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (  # noqa: E501
                             _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,

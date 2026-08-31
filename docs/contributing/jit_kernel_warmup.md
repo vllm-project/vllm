@@ -17,10 +17,10 @@ Each warmable kernel defines its compile-key mapping and compile-only entry poin
 
 Here, a **kernel wrapper** (or just **wrapper**) is an instance of a concrete `VllmJitKernel` subclass.
 
-Expose one wrapper near the kernel's normal runtime entry point. Backend helpers may implement materialization for the wrapper. For Triton, prefer this shape:
+Expose one wrapper near the kernel's normal runtime entry point. Prefer this backend-agnostic shape:
 
 ```python
-class MyKernel(VllmTritonJitKernel["MyKernel.CompileKey"]):
+class MyKernel(VllmJitKernel["MyKernel.CompileKey"]):
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -36,22 +36,21 @@ class MyKernel(VllmTritonJitKernel["MyKernel.CompileKey"]):
     def get_warmup_keys(self, ...) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(...)
 
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        return {...}
+    def compile(self, compile_key: CompileKey) -> None:
+        ...
 
-    @kernel_launcher
-    def __call__(self, ...) -> LaunchSpec:
-        return grid, {...}
+    def __call__(self, ...):
+        return self.kernel(...)
 
 
 _MY_KERNEL = MyKernel()
 ```
 
-`CompileKey`, `dispatch(...)`, and `get_warmup_keys(...)` are backend-agnostic. Backend-specific behavior belongs in `kernel(...)`, the materialization adapter, and `__call__(...)`.
+`CompileKey`, `dispatch(...)`, and `get_warmup_keys(...)` are backend-agnostic. Backend-specific behavior belongs in `kernel(...)`, `compile(...)`, and `__call__(...)`.
 
 The module-level singleton should be used by warmup and by the runtime call path. This keeps dispatch behavior shared instead of duplicated.
 
-`VllmJitKernel.warmup(...)` materializes every key returned by `get_warmup_keys(...)`; wrappers should not reimplement it. `VllmTritonJitKernel` also provides `compile(...)`, so Triton wrappers should not implement it.
+`VllmJitKernel.warmup(...)` materializes every key returned by `get_warmup_keys(...)`; wrappers should not reimplement it.
 
 ### Choose Compile-Key Fields
 
