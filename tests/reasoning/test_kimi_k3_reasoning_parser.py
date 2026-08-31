@@ -7,6 +7,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.kimi_k3 import KimiK3Parser
 from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
@@ -239,15 +240,35 @@ def test_delegating_parser_thinking_false_streams_response_content():
     assert closed is None
 
 
-def test_adjust_request_keeps_xtml_markers_contiguous():
-    parser = KimiK3ReasoningParser(DummyTokenizer())
-    request = ChatCompletionRequest(model="test-model", messages=[])
+@pytest.mark.parametrize(
+    "request_factory",
+    [
+        pytest.param(
+            lambda: ChatCompletionRequest(model="test-model", messages=[]),
+            id="chat_completions",
+        ),
+        pytest.param(
+            lambda: ResponsesRequest(model="test-model", input="test"),
+            id="responses",
+        ),
+    ],
+)
+def test_adjust_request_keeps_xtml_markers_contiguous(request_factory):
+    """Both flags must be off on every API surface that serves this model.
 
-    adjusted = parser.adjust_request(request)
+    The detokenizer couples them -- effective spacing is
+    ``skip_special_tokens or spaces_between_special_tokens`` -- so leaving
+    either one True re-inserts spaces between the XTML control tokens and
+    the channel name, and the parser's contiguous-literal matching stops
+    matching. ``/v1/responses`` regressed exactly this way while this test
+    only covered Chat Completions.
+    """
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    adjusted = parser.adjust_request(request_factory())
 
     assert adjusted.skip_special_tokens is False
-    if hasattr(adjusted, "spaces_between_special_tokens"):
-        assert adjusted.spaces_between_special_tokens is False
+    assert adjusted.spaces_between_special_tokens is False
 
 
 OPEN_IDS = [1, 2, 3]
