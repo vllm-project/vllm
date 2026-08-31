@@ -273,6 +273,14 @@ def test_stream_without_tokens_is_not_reported_as_success():
     assert "TTFT" in output.error
 
 
+def test_truncated_stream_is_not_reported_as_success():
+    """A stream cut short after a token has no usage and an understated E2EL."""
+    output = run([PREAMBLE, text_delta("partial")])
+
+    assert not output.success
+    assert "terminal event" in output.error
+
+
 def test_mid_stream_error_is_not_reported_as_success():
     """vLLM reports a generation failure as an error payload mid-stream."""
     output = run(
