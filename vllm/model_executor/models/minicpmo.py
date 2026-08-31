@@ -282,28 +282,28 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> "MiniCPMOProcessor":
         """Get vendored MiniCPMOProcessor for multimodal (image+audio) inputs.
 
-        Creates a vendored processor that reuses the HF image processor,
-        feature extractor, and tokenizer; applies the correct audio pooling
-        configuration; and converts numpy arrays in the image processor to
-        lists for serialization compatibility. The returned processor is
+        Creates a vendored processor that uses the checkpoint-specific HF image
+        processor, feature extractor, and tokenizer; applies the correct audio
+        pooling configuration; and converts numpy arrays in the image processor
+        to lists for serialization compatibility. The returned processor is
         compatible with Transformers v5.
         """
         import numpy as np
 
         hf_processor = self.ctx.get_hf_processor(**kwargs)
+        image_processor = self._get_checkpoint_image_processor(**kwargs)
 
         from vllm.transformers_utils.processors.minicpmo import MiniCPMOProcessor
 
         # Create vendored processor with correct configuration
         vendored_processor = MiniCPMOProcessor(
-            image_processor=hf_processor.image_processor,
+            image_processor=image_processor,
             feature_extractor=hf_processor.feature_extractor,
             tokenizer=hf_processor.tokenizer,
             pool_step=self.get_default_audio_pool_step(),
         )
 
         # Convert numpy arrays in image processor to lists for serialization
-        image_processor = vendored_processor.image_processor
         for attr in ("mean", "std"):
             val = getattr(image_processor, attr, None)
             if val is not None and isinstance(val, np.ndarray):
