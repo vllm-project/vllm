@@ -5,8 +5,12 @@ from typing import Any
 import torch
 from typing_extensions import override
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+from vllm.utils.mem_constants import MiB_bytes
+from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.kv_offload.async_host_buffer import AsyncHostBuffer
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingCounterMetadata,
@@ -22,6 +26,12 @@ from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+
+logger = init_logger(__name__)
+
+# cudaHostRegister serializes other CUDA API calls. Keep each registration
+# short and yield between them so inference can continue during initialization.
+_ASYNC_HOST_REGISTER_CHUNK_SIZE_BYTES = 256 * MiB_bytes
 
 
 def _all_workers_barrier() -> None:
@@ -94,6 +104,10 @@ class CPUOffloadingSpec(OffloadingSpec):
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
 
+        self._region_init: AsyncHostBuffer[SharedOffloadRegion] | None = None
+        self._prepared_region: SharedOffloadRegion | None = None
+        self._async_kv_caches: CanonicalKVCaches | None = None
+
         cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
         if not cpu_bytes_to_use:
             raise Exception(
@@ -164,28 +178,37 @@ class CPUOffloadingSpec(OffloadingSpec):
         per-rank tensor); replicated-layout dedup is gated on this being True."""
         return current_platform.is_cuda_alike()
 
+    def _get_worker_rank(self) -> int | None:
+        if not self._uses_shared_region() or self.num_blocks <= 0:
+            return None
+        # Replicated layout puts all ranks on slot 0 (single MLA copy);
+        # otherwise each rank takes its own slot by physical device index.
+        if self.replicated_layout:
+            return 0
+        world_size = self.config.parallel.world_size
+        return torch.accelerator.current_device_index() % world_size
+
+    def _create_region(self, rank: int, populate: bool = True) -> SharedOffloadRegion:
+        return SharedOffloadRegion(
+            engine_id=self.config.engine_id,
+            num_blocks=self.num_blocks,
+            rank=rank,
+            kv_bytes_per_block=self.kv_bytes_per_chunk,
+            cpu_page_size=self.cpu_page_size_per_worker,
+            barrier=_all_workers_barrier,
+            populate=populate,
+        )
+
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        mmap_region: SharedOffloadRegion | None = None
-        # num_blocks == 0 would size the region to zero bytes, which cannot be
-        # mmap'd; fall back to the tensor path (empty tensors) as before.
-        if self._uses_shared_region() and self.num_blocks > 0:
-            # Replicated layout puts all ranks on slot 0 (single MLA copy);
-            # otherwise each rank takes its own slot by physical device index.
-            if self.replicated_layout:
-                rank = 0
-            else:
-                world_size = self.config.parallel.world_size
-                rank = torch.accelerator.current_device_index() % world_size
-            mmap_region = SharedOffloadRegion(
-                engine_id=self.config.engine_id,
-                num_blocks=self.num_blocks,
-                rank=rank,
-                kv_bytes_per_block=self.kv_bytes_per_chunk,
-                cpu_page_size=self.cpu_page_size_per_worker,
-                barrier=_all_workers_barrier,
-            )
+        mmap_region = self._prepared_region
+        if mmap_region is None:
+            rank = self._get_worker_rank()
+            # num_blocks == 0 would size the region to zero bytes, which cannot
+            # be mmap'd; fall back to the tensor path (empty tensors) as before.
+            if rank is not None:
+                mmap_region = self._create_region(rank)
         try:
-            return CPUOffloadingWorker(
+            worker = CPUOffloadingWorker(
                 kv_caches=kv_caches,
                 blocks_per_chunk=self.blocks_per_chunk,
                 num_cpu_blocks=self.num_blocks,
@@ -195,6 +218,73 @@ class CPUOffloadingSpec(OffloadingSpec):
             if mmap_region is not None:
                 mmap_region.cleanup()
             raise
+        # Only now does the worker own the region; until this point a raised
+        # exception leaves it with us, for close_async_init to release.
+        self._prepared_region = None
+        return worker
+
+    # ==============================
+    # Asynchronous initialization
+    # ==============================
+    # Faulting in and page-locking a multi-hundred-GB region takes minutes. The
+    # open/mmap/barrier handshake is a collective, so it stays on the main
+    # thread; only population and pinning, the minutes-long parts, move to a
+    # background thread. Building the worker around a ready region allocates
+    # nothing (transfer streams and descriptor buffers are lazy).
+
+    @property
+    def supports_async_init(self) -> bool:
+        return self._uses_shared_region() and self.num_blocks > 0
+
+    def start_async_init(self, kv_caches: CanonicalKVCaches) -> None:
+        rank = self._get_worker_rank()
+        assert rank is not None, "spec does not support async_init"
+        self._async_kv_caches = kv_caches
+        logger.info("Starting asynchronous KV offload host-buffer initialization")
+        region = self._create_region(rank, populate=False)
+        self._region_init = AsyncHostBuffer(
+            allocate=lambda: self._populate_and_pin(region),
+            cleanup=lambda region: region.cleanup(),
+            thread_name="vllm-kv-offload-init",
+        )
+
+    def _populate_and_pin(self, region: SharedOffloadRegion) -> SharedOffloadRegion:
+        try:
+            region.populate(self.cpu_page_size_per_worker)
+            if PIN_MEMORY:
+                region.pin(
+                    chunk_size_bytes=_ASYNC_HOST_REGISTER_CHUNK_SIZE_BYTES,
+                )
+        except BaseException:
+            region.cleanup()
+            raise
+        return region
+
+    def poll_async_init(self) -> OffloadingWorker | None:
+        if self._worker is not None:
+            return self._worker
+        if self._region_init is None:
+            # Not started, or already closed by shutdown.
+            return None
+        self._prepared_region = self._region_init.poll()
+        if self._prepared_region is None:
+            return None
+        logger.info("Asynchronous KV offload initialization completed")
+        assert self._async_kv_caches is not None
+        return self.get_worker(self._async_kv_caches)
+
+    @property
+    def async_init_failed(self) -> bool:
+        return self._region_init is not None and self._region_init.failed
+
+    def close_async_init(self) -> None:
+        if self._region_init is not None:
+            self._region_init.close()
+            self._region_init = None
+        # Prepared but never handed to a worker, so still ours to release.
+        if self._prepared_region is not None:
+            self._prepared_region.cleanup()
+            self._prepared_region = None
 
     @override
     def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
