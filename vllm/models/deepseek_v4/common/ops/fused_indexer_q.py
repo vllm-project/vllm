@@ -91,6 +91,7 @@ def _fused_indexer_q_rope_quant_kernel(
     index_weights_out_stride,
     FP8_MAX: tl.constexpr = 448.0,
     USE_FNUZ: tl.constexpr = False,
+    USE_EXPLICIT_FMA: tl.constexpr = False,
 ):
     # Layout matches the unfused reference (DeepseekV4ScalingRotaryEmbedding
     # + per_token_group_quant_fp8): GPT-J interleaved RoPE applied to the
@@ -118,8 +119,13 @@ def _fused_indexer_q_rope_quant_kernel(
     rot_base = base_ptr + INDEX_Q_NOPE_DIM
     x_even = tl.load(rot_base + half_offset * 2).to(tl.float32)
     x_odd = tl.load(rot_base + half_offset * 2 + 1).to(tl.float32)
-    r_even = x_even * cos - x_odd * sin
-    r_odd = x_odd * cos + x_even * sin
+    if USE_EXPLICIT_FMA:
+        # Match HIP rotary_embedding contraction before bf16 materialization.
+        r_even = tl.fma(x_even, cos, -(x_odd * sin))
+        r_odd = tl.fma(x_odd, cos, x_even * sin)
+    else:
+        r_even = x_even * cos - x_odd * sin
+        r_odd = x_odd * cos + x_even * sin
 
     # Match reference numerics: fp32 → bf16 → fp32 before the ue8m0 absmax.
     # Same pattern as the K-side compressor kernel (fused_compress_quant_cache.py).
@@ -467,6 +473,7 @@ def fused_indexer_q_rope_quant(
             index_weights_out.stride(0),
             FP8_MAX=fp8_max,
             USE_FNUZ=use_fnuz,
+            USE_EXPLICIT_FMA=current_platform.is_rocm(),
             num_warps=1,  # TODO: Tune this
         )
     return index_q_fp8, index_weights_out

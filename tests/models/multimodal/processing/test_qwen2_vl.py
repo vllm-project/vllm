@@ -4,13 +4,64 @@
 import pytest
 import torch
 from packaging.version import Version
+from PIL import Image
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.inputs import batched_tensors_equal
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
+
+
+def test_jina_vl_processing_order() -> None:
+    """Jina's document-first prompt keeps cached features and hashes aligned."""
+    ctx = build_model_context(
+        "jinaai/jina-reranker-m0",
+        runner="pooling",
+        limit_mm_per_prompt={"image": 2},
+        mm_processor_cache_gb=1,
+    )
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+        cache=cache,
+    )
+
+    placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    query_image = Image.new("RGB", (128, 160), color=(255, 0, 0))
+    document_image = Image.new("RGB", (192, 128), color=(0, 255, 0))
+
+    def process(images: list[Image.Image]):
+        return processor(
+            placeholder * len(images),
+            mm_items=processor.info.parse_mm_data({"image": images}),
+        )
+
+    query = process([query_image])
+    document = process([document_image])
+    pair = process([query_image, document_image])
+
+    pair_items = pair["mm_kwargs"]["image"]
+    assert pair["mm_hashes"]["image"] == [
+        document["mm_hashes"]["image"][0],
+        query["mm_hashes"]["image"][0],
+    ]
+    assert batched_tensors_equal(
+        pair_items[0].get_data(),
+        document["mm_kwargs"]["image"][0].get_data(),
+    )
+    assert batched_tensors_equal(
+        pair_items[1].get_data(),
+        query["mm_kwargs"]["image"][0].get_data(),
+    )
+    assert [item.length for item in pair["mm_placeholders"]["image"]] == [
+        document["mm_placeholders"]["image"][0].length,
+        query["mm_placeholders"]["image"][0].length,
+    ]
 
 
 @pytest.mark.parametrize(

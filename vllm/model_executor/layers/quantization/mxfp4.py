@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
@@ -376,6 +377,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         w13 = layer.w13_weight
@@ -450,7 +452,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
@@ -769,6 +771,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def process_weights_after_loading(self, layer):
         w13 = layer.w13_weight
@@ -863,7 +866,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
