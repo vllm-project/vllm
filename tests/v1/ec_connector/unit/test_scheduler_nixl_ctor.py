@@ -4,6 +4,7 @@ import uuid
 
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
 from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
+from vllm.config.ec_transfer import ECTransferConfig
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
@@ -17,6 +18,18 @@ def _region() -> ECSharedRegion:
     return ECSharedRegion(
         engine_id="eng-" + str(uuid.uuid4()), num_blocks=_N, block_size_bytes=_BS
     )
+
+
+def test_ec_enable_nixl_defaults_false():
+    cfg = ECTransferConfig()
+    assert cfg.ec_enable_nixl is False
+
+
+def test_ec_enable_nixl_settable():
+    cfg = ECTransferConfig(
+        ec_connector="ECCPUConnector", ec_role="ec_both", ec_enable_nixl=True
+    )
+    assert cfg.ec_enable_nixl is True
 
 
 def test_gate_off_builds_no_nixl(monkeypatch):
