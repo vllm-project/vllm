@@ -157,7 +157,7 @@ def _expand_prompt_embeds_placeholders(
     `token_ids` is replaced with a consecutive span of
     `tensor.shape[0]` copies, following tensors in order.
     """
-    expanded, _ = apply_token_matches(token_ids, mm_prompt_updates, tokenizer=None)
+    expanded, _ = apply_token_matches(token_ids, mm_prompt_updates)
     return expanded
 
 
@@ -171,11 +171,7 @@ def _build_prompt_embeds_positions(
     Expects `token_ids` to already contain expanded N-token spans.
     Returns `[(start_idx, length), ...]` aligned with the tensors.
     """
-    placeholders = find_mm_placeholders(
-        prompt=token_ids,
-        mm_prompt_updates=mm_prompt_updates,
-        tokenizer=None,
-    )
+    placeholders = find_mm_placeholders(token_ids, mm_prompt_updates)
     features = placeholders.get("prompt_embeds", [])
 
     if len(features) != num_tensors:
@@ -210,7 +206,7 @@ def _build_mixed_prompt_embeds(
     return full_embeds, is_token_ids.tolist()
 
 
-_PROCESSOR_CHAT_TEMPLATES = dict[tuple[str, bool], str | None]()
+_PROCESSOR_CHAT_TEMPLATES = dict[tuple[str, str | None, str | None, bool], str | None]()
 """
 Used in `_try_get_processor_chat_template` to avoid calling
 `cached_get_processor` again if the processor fails to be loaded.
@@ -222,9 +218,16 @@ This is needed because `lru_cache` does not cache when an exception happens.
 def _try_get_processor_chat_template(
     tokenizer: HfTokenizer,
     *,
+    revision: str | None,
+    code_revision: str | None,
     trust_remote_code: bool,
 ) -> str | None:
-    cache_key = (tokenizer.name_or_path, trust_remote_code)
+    cache_key = (
+        tokenizer.name_or_path,
+        revision,
+        code_revision,
+        trust_remote_code,
+    )
     if cache_key in _PROCESSOR_CHAT_TEMPLATES:
         return _PROCESSOR_CHAT_TEMPLATES[cache_key]
 
@@ -234,6 +237,8 @@ def _try_get_processor_chat_template(
         processor = cached_get_processor(
             tokenizer.name_or_path,
             processor_cls=(PythonBackend, TokenizersBackend, ProcessorMixin),
+            revision=revision,
+            code_revision=code_revision,
             trust_remote_code=trust_remote_code,
         )
         if (
@@ -271,6 +276,8 @@ def resolve_chat_template(
     if tools is None:
         chat_template = _try_get_processor_chat_template(
             tokenizer,
+            revision=model_config.revision,
+            code_revision=model_config.code_revision,
             trust_remote_code=model_config.trust_remote_code,
         )
         if chat_template is not None:
@@ -1276,8 +1283,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         embeds_prompt["prompt_embeds"] = full_embeds
         embeds_prompt["prompt_is_token_ids"] = is_token_ids_mask
 
-    @staticmethod
     def _apply_prompt_embeds_to_engine_input(
+        self,
         engine_input: MultiModalInput,
         prompt_embeds_tensors: list[torch.Tensor],
         mm_updates: MultiModalPromptUpdates,
@@ -1300,6 +1307,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         pe_kwargs_items: list[MultiModalKwargsItem] = []
         pe_hashes: list[str] = []
         pe_placeholders: list[PlaceholderRange] = []
+        mm_config = self.model_config.get_multimodal_config()
         for tensor, (start, length) in zip(
             prompt_embeds_tensors, positions, strict=True
         ):
@@ -1313,7 +1321,11 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                     }
                 )
             )
-            pe_hashes.append(MultiModalHasher.hash_kwargs(prompt_embeds=tensor))
+            pe_hashes.append(
+                MultiModalHasher.hash_kwargs(
+                    mm_config.mm_hasher_algorithm, prompt_embeds=tensor
+                )
+            )
             # `is_embed=None` matches the existing image_embeds-style
             # "no encoder, just splice the tensor directly" semantics.
             pe_placeholders.append(

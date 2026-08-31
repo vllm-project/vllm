@@ -106,6 +106,7 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     """
     mgr = object.__new__(EncoderCudaGraphManager)
     mgr.token_budgets = sorted(budgets)
+    mgr.path_token_budgets = {"default": mgr.token_budgets}
     mgr.max_batch_size = 16
     mgr.use_dp = False
     mgr.config = EncoderCudaGraphConfig(
@@ -417,6 +418,7 @@ def _make_manager_for_gpu(
     """Create EncoderCudaGraphManager bypassing VllmConfig for GPU tests."""
     mgr = object.__new__(EncoderCudaGraphManager)
     mgr.token_budgets = sorted(token_budgets)
+    mgr.path_token_budgets = {"default": mgr.token_budgets}
     mgr.max_batch_size = max_batch_size
     mgr.max_frames_per_batch = (
         max_frames_per_batch if max_frames_per_batch is not None else max_batch_size * 2
@@ -473,7 +475,9 @@ def _make_video_mm_kwargs(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
 class TestEncoderCudaGraphCaptureReplay:
     def setup_method(self):
         self.device = torch.device("cuda:0")
@@ -756,7 +760,9 @@ _VIDEO_MAX_BATCH = 4
 _VIDEO_MAX_FRAMES = 8  # 2 frames per item at max_batch_size=4
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
 class TestEncoderCudaGraphVideoReplay:
     def setup_method(self):
         self.device = torch.device("cuda:0")

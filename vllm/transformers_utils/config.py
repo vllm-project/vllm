@@ -71,10 +71,8 @@ class LazyConfigDict(dict):
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
-    arctic="ArcticConfig",
     axk1="AXK1Config",
     bagel="BagelConfig",
-    umm="CheersConfig",
     chatglm="ChatGLMConfig",
     modernvbert="ColModernVBertConfig",
     colpali="ColPaliConfig",
@@ -87,19 +85,23 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     deepseek_v4="DeepseekV4Config",
-    flex_olmo="FlexOlmoConfig",
-    fireredlid="FireRedLIDConfig",
+    dots3_note="Dots3NoteConfig",
+    k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
     granite4_vision="Granite4VisionConfig",
     hyperclovax="HyperCLOVAXConfig",
-    hyperclovax_vlm="HCXVisionConfig",
-    hunyuan_vl="HunYuanVLConfig",
     hy_v3="HYV3Config",
+    hy_v4="HYV4Config",
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="KimiK25Config",
+    muse_glimmer="MuseGlimmerConfig",
+    muse_glimmer_text="MuseGlimmerTextConfig",
+    muse_glimmer_vision="MuseGlimmerVisionConfig",
+    muse_glimmer_assistant="MuseGlimmerAssistantConfig",
+    kimi_k3="KimiK3Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     mlp_speculator="MLPSpeculatorConfig",
@@ -123,6 +125,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
+    qwen4_exp="Qwen4ExpConfig",
+    qwen4_exp_text="Qwen4ExpTextConfig",
     qwen3_5="Qwen3_5Config",
     qwen3_5_text="Qwen3_5TextConfig",
     qwen3_5_moe="Qwen3_5MoeConfig",
@@ -666,8 +670,14 @@ def maybe_override_with_speculators(
     speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
         config_dict=config_dict
     )
+    speculators_method = speculative_config["method"]
 
-    # Set the draft model to the speculators model
+    # Apply user --speculative-config overrides (e.g. attention_backend).
+    if isinstance(vllm_speculative_config, dict):
+        speculative_config.update(vllm_speculative_config)
+
+    # Lock fields dictated by the speculators format
+    speculative_config["method"] = speculators_method
     speculative_config["model"] = model
 
     # Override model and tokenizer with the verifier model from config
@@ -1069,6 +1079,7 @@ def try_get_generation_config(
     model: str,
     trust_remote_code: bool,
     revision: str | None = None,
+    code_revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
     hf_token: bool | str | None = None,
 ) -> GenerationConfig | None:
@@ -1084,6 +1095,7 @@ def try_get_generation_config(
                 model,
                 trust_remote_code=trust_remote_code,
                 revision=revision,
+                code_revision=code_revision,
                 config_format=config_format,
                 token=hf_token,
             )
@@ -1103,7 +1115,9 @@ def try_get_safetensors_metadata(
 
     try:
         return with_retry(
-            get_safetensors_metadata_partial, "Error retrieving safetensors"
+            get_safetensors_metadata_partial,
+            "Error retrieving safetensors",
+            fatal_errors=(huggingface_hub.errors.NotASafetensorsRepoError,),
         )
     except Exception:
         return None
@@ -1207,6 +1221,24 @@ def get_safetensors_params_metadata(
         )
         return {}
     return _read_safetensors_metadata_in_dir(Path(local_dir))
+
+
+@cache
+def checkpoint_has_lm_head(model: str, *, revision: str | None = None) -> bool | None:
+    """Whether the checkpoint contains an `lm_head` tensor of its own.
+
+    Args:
+        model: Name or path of the model repository.
+        revision: The specific model version to use.
+
+    Returns:
+        `None` if the checkpoint contents could not be determined, for example
+        because it is not stored as safetensors.
+    """
+    metadata = get_safetensors_params_metadata(model, revision=revision)
+    if not metadata:
+        return None
+    return any(name.endswith("lm_head.weight") for name in metadata)
 
 
 def _download_mistral_config_file(model, revision) -> dict:

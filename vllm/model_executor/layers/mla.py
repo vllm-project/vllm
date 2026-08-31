@@ -28,6 +28,7 @@ class MLAModules:
     is_sparse: bool
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
+    g_proj: torch.nn.Module | None = None
 
 
 # --8<-- [start:multi_head_latent_attention]
@@ -66,6 +67,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         skip_topk: bool = False,
+        non_causal_multi_token_decode: bool = False,
         allow_short_prefill_indexer_scoring_skip: bool = False,
     ) -> None:
         super().__init__()
@@ -89,6 +91,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.indexer = mla_modules.indexer
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
+        self.g_proj = mla_modules.g_proj
 
         # Whether to skip top-k token selection computation in this layer.
         # When True, the indexer will not be called, and the layer will reuse
@@ -120,6 +123,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             use_sparse=self.is_sparse,
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
+            non_causal_multi_token_decode=non_causal_multi_token_decode,
         )
         indexer_op = getattr(self.indexer, "indexer_op", None)
         if indexer_op is not None and hasattr(
@@ -215,5 +219,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
             q_dcp_replicated=q_dcp_replicated,
         )
+
+        if self.g_proj is not None:
+            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
 
         return self.o_proj(attn_out)[0]

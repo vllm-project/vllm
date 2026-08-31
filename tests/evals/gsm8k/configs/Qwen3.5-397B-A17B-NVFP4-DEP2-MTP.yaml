@@ -8,6 +8,6 @@ server_args: >-
   --max-model-len 16384
   --data-parallel-size 2
   --enable-expert-parallel
-  --max-num-seqs 384
+  --max-num-seqs 256
   --spec-method mtp
   --spec-tokens 3

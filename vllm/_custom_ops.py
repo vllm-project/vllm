@@ -174,6 +174,31 @@ def mla_decode_kvcache_cpu(
     torch.ops._C.mla_decode_kvcache(out, query, kv_cache, scale, block_tables, seq_lens)
 
 
+def gather_mla_context_cache_cpu(
+    *,
+    src_cache: torch.Tensor,
+    dst: torch.Tensor,
+    block_table: torch.Tensor,
+    starts: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+) -> None:
+    page_size = src_cache.shape[1]
+    flat_cache = src_cache.view(-1, src_cache.shape[-1])
+    seq_lens = cu_seq_lens[1:] - cu_seq_lens[:-1]
+
+    out_start = 0
+    for req_idx, (start, seq_len) in enumerate(zip(starts.tolist(), seq_lens.tolist())):
+        if seq_len <= 0:
+            continue
+        positions = torch.arange(start, start + seq_len, device=block_table.device)
+        block_ids = block_table[req_idx, positions // page_size].to(torch.long)
+        offsets = positions % page_size
+        slots = block_ids * page_size + offsets
+        out_end = out_start + seq_len
+        dst[out_start:out_end].copy_(flat_cache[slots])
+        out_start = out_end
+
+
 # merge attn states ops
 def merge_attn_states(
     output: torch.Tensor,
@@ -233,6 +258,49 @@ def rms_norm(
     epsilon: float,
 ) -> None:
     torch.ops._C.rms_norm(out, input, weight, epsilon)
+
+
+# Fused vocab-parallel embedding lookup
+# (see csrc/.../vocab_parallel_embedding_kernels.cu).
+def vocab_parallel_embedding(
+    input_ids: torch.Tensor,
+    weight: torch.Tensor,
+    org_vocab_start_index: int,
+    org_vocab_end_index: int,
+    num_org_vocab_padding: int,
+    added_vocab_start_index: int,
+    added_vocab_end_index: int,
+) -> torch.Tensor:
+    """Gather the embedding rows owned by this rank, zeros for the others.
+
+    Fuses the range mask, id shift, gather and output masking of the TP > 1
+    embedding path into a single kernel. Out-of-shard tokens produce zero rows,
+    so an all-reduce over the ranks yields the full embedding.
+
+    Args:
+        input_ids: ``[num_tokens]`` int32 or int64 token ids.
+        weight: ``[num_embeddings_per_partition, embedding_dim]`` shard.
+
+    Returns:
+        ``[num_tokens, embedding_dim]`` partial embeddings.
+    """
+    out = torch.empty(
+        input_ids.shape[0],
+        weight.shape[1],
+        dtype=weight.dtype,
+        device=weight.device,
+    )
+    torch.ops._C.vocab_parallel_embedding(
+        out,
+        input_ids,
+        weight,
+        org_vocab_start_index,
+        org_vocab_end_index,
+        num_org_vocab_padding,
+        added_vocab_start_index,
+        added_vocab_end_index,
+    )
+    return out
 
 
 # LongCat n-gram embedding index kernel (see csrc/.../ngram_embedding_kernels.cu).
@@ -1022,7 +1090,7 @@ def cutlass_fp4_moe_mm(
     An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs
     the gemms for each combination based on the specified problem sizes.
 
-    This is used as the MoE gemm during NVFP4 Quantized FusedMoE forward.
+    This is used as the MoE gemm during NVFP4 Quantized MoERunner forward.
     - a/b_tensors: the NVFP4 a_ptrs and b_ptrs tensors which are quantized
                      input and expert weights.
     - a_/b_scales: The blockscales in FP8-E4M3 precision
@@ -2003,6 +2071,23 @@ def scaled_int8_quant(
     Returns:
       tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] : Output int8 tensor, scales, and optionally azp.
     """
+    if current_platform.is_xpu():
+        # XPU has no _C int8 quant op; use the torch.compile reference.
+        if not symmetric:
+            raise NotImplementedError(
+                "asymmetric int8 activation quantization is unsupported on XPU"
+            )
+        if scale is not None:
+            q = (input.to(torch.float32) / scale).round().clamp(-128, 127)
+            return q.to(torch.int8), scale, None
+
+        from vllm._xpu_ops import xpu_ops
+
+        q, scales, _ = xpu_ops.dynamic_per_token_int8_quant_ref(
+            input.contiguous(), True, 8
+        )
+        return q, scales.reshape(-1, 1).to(torch.float32), None
+
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
         # static-per-tensor quantization.
@@ -2342,21 +2427,6 @@ def moe_wna16_gemm(
     )
 
 
-def dsv3_router_gemm(
-    hidden_states: torch.Tensor,
-    router_weight: torch.Tensor,
-    output_dtype: torch.dtype,
-) -> torch.Tensor:
-    output = torch.empty(
-        hidden_states.shape[0],
-        router_weight.shape[0],
-        device=hidden_states.device,
-        dtype=output_dtype,
-    )
-    torch.ops._moe_C.dsv3_router_gemm(output, hidden_states, router_weight)
-    return output
-
-
 def fp32_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
@@ -2655,6 +2725,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     index_q_out: torch.Tensor | None = None,
     kv_cache_dtype: str = "auto",
     skip_index_branch: bool = False,
+    q_fp8_out: torch.Tensor | None = None,
+    q_fp8_scale: float = 1.0,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -2676,6 +2748,9 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     instead of in place — folding the de-interleave into this kernel's store so
     callers skip a separate ``.contiguous()`` copy before the SM100 sparse
     attention's flat TMA descriptor.
+
+    If ``q_fp8_out`` is given, the same normalized q is also written in FP8
+    E4M3 using ``q_fp8_scale`` as its dequantization scale.
 
     When ``skip_index_branch`` is true, sparse rows still keep their packed
     ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
@@ -2704,6 +2779,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         index_q_out,
         kv_cache_dtype,
         skip_index_branch,
+        q_fp8_out,
+        q_fp8_scale,
     )
 
 
@@ -2749,6 +2826,45 @@ def fused_kda_decode(
         output_gate,
         norm_weight,
         norm_eps,
+    )
+    return out
+
+
+def fused_gdn_decode_post_conv_mtp(
+    mixed_qkv: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    state: torch.Tensor,
+    output_gate: torch.Tensor,
+    norm_weight: torch.Tensor,
+    out: torch.Tensor | None = None,
+    scale: float = 128**-0.5,
+    norm_eps: float = 1e-5,
+    output_gate_activation: str = "silu",
+) -> torch.Tensor:
+    if out is None:
+        out = torch.empty_like(output_gate)
+    torch.ops._C.fused_gdn_decode_post_conv_mtp(
+        mixed_qkv,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        state_indices,
+        cu_seqlens,
+        num_accepted_tokens,
+        state,
+        output_gate,
+        norm_weight,
+        out,
+        scale,
+        norm_eps,
+        output_gate_activation,
     )
     return out
 
@@ -3255,18 +3371,17 @@ def dsv3_fused_a_gemm(
     torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b, enable_pdl)
 
 
-if hasattr(torch.ops._C, "weight_packed_linear"):
-
-    @register_fake("_C::weight_packed_linear")
-    def weight_packed_linear_fake(
-        mat1: torch.Tensor,
-        mat2: torch.Tensor,
-        bias: torch.Tensor | None,
-        is_vnni: bool,
-    ) -> torch.Tensor:
-        return torch.empty(
-            (mat1.size(0), mat2.size(0)), dtype=mat1.dtype, device=mat2.device
-        )
+def weight_packed_linear_cpu(
+    x: torch.Tensor,
+    packed_weight: torch.Tensor,
+    n: int,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    output = torch.empty((*x.shape[0:-1], n), dtype=x.dtype)
+    torch.ops._C.weight_packed_linear(
+        output.reshape(-1, n), x.reshape(-1, x.size(-1)), packed_weight, bias, True
+    )
+    return output
 
 
 class CPUQuantMethod(IntEnum):
@@ -3491,6 +3606,7 @@ def chunk_gated_delta_rule_cpu(
     cu_seqlens: torch.Tensor,
     head_first: bool,
     use_qk_l2norm_in_kernel: bool,
+    initial_state_indices: torch.Tensor,
     eps: float = 1e-5,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops._C.chunk_gated_delta_rule_cpu(
@@ -3504,6 +3620,7 @@ def chunk_gated_delta_rule_cpu(
         cu_seqlens,
         head_first,
         use_qk_l2norm_in_kernel,
+        initial_state_indices,
         eps,
     )
 
@@ -3872,6 +3989,109 @@ def cpu_attention_with_kv_cache(
         v_scale,
         kv_cache_dtype,
     )
+
+
+def cpu_mla_decode(
+    query: torch.Tensor,
+    k_buffer: torch.Tensor,
+    v_buffer: torch.Tensor,
+    output: torch.Tensor,
+    key: torch.Tensor | None,
+    value: torch.Tensor | None,
+    loc: torch.Tensor | None,
+    attn_logits: torch.Tensor,
+    req_to_token: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    seq_lens: torch.Tensor,
+    sm_scale: float,
+    logit_cap: float,
+    is_cross_attn: bool,
+    sliding_window_size: int,
+    encoder_lens: torch.Tensor | None,
+    sinks: torch.Tensor | None,
+) -> None:
+    torch.ops._C.decode_attention_cpu(
+        query,
+        k_buffer,
+        v_buffer,
+        output,
+        key,
+        value,
+        loc,
+        attn_logits,
+        req_to_token,
+        req_pool_indices,
+        seq_lens,
+        sm_scale,
+        logit_cap,
+        is_cross_attn,
+        sliding_window_size,
+        encoder_lens,
+        sinks,
+    )
+
+
+def cpu_mla_extend(
+    q_extend: torch.Tensor,
+    k_extend: torch.Tensor | None,
+    v_extend: torch.Tensor | None,
+    o_extend: torch.Tensor,
+    k_buffer: torch.Tensor,
+    v_buffer: torch.Tensor,
+    req_to_token: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    seq_lens: torch.Tensor,
+    extend_seq_lens: torch.Tensor,
+    extend_start_loc: torch.Tensor,
+    max_len_extend: int,
+    sm_scale: float,
+    logit_cap: float,
+    is_cross_attn: bool,
+    sliding_window_size: int,
+    encoder_lens: torch.Tensor | None,
+    sinks: torch.Tensor | None,
+    tree_mask: torch.Tensor | None = None,
+) -> None:
+    torch.ops._C.extend_attention_cpu(
+        q_extend,
+        k_extend,
+        v_extend,
+        o_extend,
+        k_buffer,
+        v_buffer,
+        req_to_token,
+        req_pool_indices,
+        seq_lens,
+        extend_seq_lens,
+        extend_start_loc,
+        max_len_extend,
+        sm_scale,
+        logit_cap,
+        is_cross_attn,
+        sliding_window_size,
+        encoder_lens,
+        sinks,
+        tree_mask,
+    )
+
+
+def bmm_cpu(
+    out: torch.Tensor,
+    mat1: torch.Tensor,
+    mat2: torch.Tensor,
+    is_vnni: bool,
+    scale: torch.Tensor | None = None,
+) -> None:
+    torch.ops._C.bmm_cpu(out, mat1, mat2, is_vnni, scale)
+
+
+def amx_mla_concat_and_cache(
+    kv_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    torch.ops._C.concat_and_cache_mla_cpu(kv_c_normed, k_pe, kv_cache, slot_mapping)
 
 
 def cpu_gemm_wna16(

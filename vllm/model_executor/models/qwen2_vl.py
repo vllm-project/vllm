@@ -103,6 +103,7 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
+    FusedInputNorm,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
@@ -608,11 +609,12 @@ class Qwen2VisionTransformer(nn.Module):
     def rot_pos_emb(
         self, grid_thw: list[list[int]]
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        device = self.device
         pos_ids = []
         max_grid_size = 0
         for t, h, w in grid_thw:
-            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+            hpos_ids = torch.arange(h, device=device).unsqueeze(1).expand(-1, w)
+            wpos_ids = torch.arange(w, device=device).unsqueeze(0).expand(h, -1)
             hpos_ids = (
                 hpos_ids.reshape(
                     h // self.spatial_merge_size,
@@ -640,7 +642,6 @@ class Qwen2VisionTransformer(nn.Module):
         # Use pre-computed cos_sin_cache from RotaryEmbedding
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
 
-        pos_ids = pos_ids.to(cos.device, non_blocking=True)
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)
         return cos_combined, sin_combined
@@ -795,6 +796,12 @@ def _create_qwen2vl_field_factory(
 
 
 class Qwen2VLMultiModalDataParser(MultiModalDataParser):
+    # The patch grid is what sizes the placeholder range.
+    embedding_fields = {
+        "image": {"image_embeds": "values", "image_grid_thw": "metadata"},
+        "video": {"video_embeds": "values", "video_grid_thw": "metadata"},
+    }
+
     def __init__(self, spatial_merge_size: int, *args, **kwargs):
         self._spatial_merge_size = spatial_merge_size
         super().__init__(*args, **kwargs)
@@ -804,10 +811,12 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("image")
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={"image_embeds", "image_grid_thw"},
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
             )
 
@@ -818,10 +827,12 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[VideoItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("video")
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                required_fields={"video_embeds", "video_grid_thw"},
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
             )
 
@@ -846,6 +857,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return Qwen2VLMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -869,6 +881,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         do_resize: bool = True,
         image_processor: Qwen2VLImageProcessor,
         mm_kwargs: Mapping[str, object],
+        modality: str | None = None,
     ) -> tuple[ImageSize, int]:
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
@@ -876,7 +889,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = vision_config.temporal_patch_size
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs, modality=modality)
         size = image_processor.size
         if override_size := mm_kwargs.get("size"):
             size = size | override_size
@@ -924,6 +937,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             num_frames=1,
             image_processor=image_processor,
             mm_kwargs=mm_kwargs,
+            modality="image",
         )
         return num_image_tokens
 
@@ -942,6 +956,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             num_frames=num_frames,
             image_processor=image_processor,
             mm_kwargs=mm_kwargs,
+            modality="video",
         )
         return num_video_tokens
 
@@ -969,7 +984,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         if max_pixels is None:
             image_processor = self.get_image_processor()
 
-            mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+            mm_kwargs = self.ctx.get_merged_mm_kwargs({}, modality="image")
             size = image_processor.size
             if override_size := mm_kwargs.get("size"):
                 size = size | override_size
@@ -1181,6 +1196,8 @@ class Qwen2VLForConditionalGeneration(
     )
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = True
+    supports_tower_connector_lora = True
 
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
@@ -1285,6 +1302,7 @@ class Qwen2VLForConditionalGeneration(
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
@@ -1352,9 +1370,10 @@ class Qwen2VLForConditionalGeneration(
         assert grid_thw.ndim == 2
 
         if image_input["type"] == "image_embeds":
-            image_embeds = image_input["image_embeds"]
+            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
+            pixel_values = self.input_norm(pixel_values, self.visual.dtype)
 
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
@@ -1375,9 +1394,12 @@ class Qwen2VLForConditionalGeneration(
         assert grid_thw.ndim == 2
 
         if video_input["type"] == "video_embeds":
-            video_embeds = video_input["video_embeds"]
+            video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
+            pixel_values_videos = self.input_norm(
+                pixel_values_videos, self.visual.dtype
+            )
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,
