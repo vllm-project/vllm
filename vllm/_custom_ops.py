@@ -2478,7 +2478,7 @@ def topk_hash_softplus_sqrt(
     hash_indices_table: torch.Tensor | None = None,
     is_padding: torch.Tensor | None = None,
     bias_vl: torch.Tensor | None = None,
-    vocab_size: int = 0,
+    image_sentinel_lo: int = 0,
 ) -> None:
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
@@ -2492,7 +2492,7 @@ def topk_hash_softplus_sqrt(
         hash_indices_table,
         is_padding,
         bias_vl,
-        vocab_size,
+        image_sentinel_lo,
     )
 
 

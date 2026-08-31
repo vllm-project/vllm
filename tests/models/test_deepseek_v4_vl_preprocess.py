@@ -244,29 +244,26 @@ def test_processor_output():
 class _StubInfo:
     """Minimum ``ProcessingInfo`` surface for the placeholder-splicing test."""
 
-    def __init__(self, vocab_size: int) -> None:
-        self._config = SimpleNamespace(vocab_size=vocab_size)
-
     def get_hf_config(self):
-        return self._config
+        return SimpleNamespace()
 
     def get_data_parser(self):
         return MultiModalDataParser()
 
 
 def test_apply_token_matches_adds_compress_pad():
-    vocab_size = 1000
+    base = ours.IMAGE_SENTINEL_BASE_ID
     image_token_id = 7
     n_llm_h, n_llm_w = 3, 2
 
-    processor = DeepseekV4VLMultiModalProcessor(_StubInfo(vocab_size), None)
+    processor = DeepseekV4VLMultiModalProcessor(_StubInfo(), None)
 
     types, _ = ours.build_image_block_pad_free(n_llm_h, n_llm_w)
-    full = (vocab_size + types).tolist()
+    full = (base + types).tolist()
     update = PromptReplacement(
         modality="image",
         target=[image_token_id],
-        replacement=PromptUpdateDetails.select_token_id(full, vocab_size + IMAGE),
+        replacement=PromptUpdateDetails.select_token_id(full, base + IMAGE),
     )
     prompt = [11, 12, image_token_id, 13, 14, 15, image_token_id, 16]
     mm_prompt_updates = {"image": [[update.resolve(0)], [update.resolve(1)]]}
@@ -280,10 +277,10 @@ def test_apply_token_matches_adds_compress_pad():
     # block via ``build_image_block``'s ``start_pos``.
     ref_ids = [11, 12]
     ref_types, _ = ref.build_image_block(n_llm_h, n_llm_w, len(ref_ids))
-    ref_ids += (vocab_size + ref_types).tolist()
+    ref_ids += (base + ref_types).tolist()
     ref_ids += [13, 14, 15]
     ref_types, _ = ref.build_image_block(n_llm_h, n_llm_w, len(ref_ids))
-    ref_ids += (vocab_size + ref_types).tolist()
+    ref_ids += (base + ref_types).tolist()
     ref_ids += [16]
     assert new_token_ids == ref_ids
 
@@ -292,9 +289,7 @@ def test_apply_token_matches_adds_compress_pad():
     for placeholder in image_placeholders:
         compress_pad = COMPRESS_PAD_TO - 1 - placeholder.start_idx % COMPRESS_PAD_TO
         assert len(placeholder.tokens) == len(full) + compress_pad
-        assert placeholder.tokens[:compress_pad] == [vocab_size + IMAGE_PAD] * (
-            compress_pad
-        )
+        assert placeholder.tokens[:compress_pad] == [base + IMAGE_PAD] * compress_pad
         assert placeholder.tokens[compress_pad:] == full
         assert (
             new_token_ids[
@@ -306,5 +301,5 @@ def test_apply_token_matches_adds_compress_pad():
         assert is_embed.sum() == n_llm_h * n_llm_w
         assert not is_embed[:compress_pad].any()
         assert is_embed.tolist() == [
-            token == vocab_size + IMAGE for token in placeholder.tokens
+            token == base + IMAGE for token in placeholder.tokens
         ]

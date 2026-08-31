@@ -374,17 +374,6 @@ class InputProcessor:
                         prompt_token_ids, prompt_embeds
                     ),
                 )
-            if (
-                sampling_params.prompt_logprobs is not None
-                and prompt_token_ids
-                and max(prompt_token_ids) > self.model_config.get_vocab_size() - 1
-            ):
-                # Out-of-vocab placeholder ids (e.g. DeepSeek-V4 vision image
-                # sentinels) have no logits to gather prompt logprobs from.
-                raise VLLMValidationError(
-                    "prompt_logprobs is not supported for prompts containing "
-                    "out-of-vocabulary multimodal placeholder tokens."
-                )
         else:
             pooling_params = params.clone()
 

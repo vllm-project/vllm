@@ -46,7 +46,7 @@ if current_platform.is_cuda():
         routed_scaling_factor,
         input_ids_ptr,
         bias_vl_ptr,
-        vocab_size,
+        image_sentinel_lo,
         NUM_EXPERTS: tl.constexpr,
         BLOCK_N: tl.constexpr,
         HAS_VL: tl.constexpr,
@@ -59,13 +59,18 @@ if current_platform.is_cuda():
             correction_bias_ptr + expert_offsets, mask=expert_mask, other=0.0
         ).to(tl.float32)
         if HAS_VL:
-            # Image tokens carry sentinel ids >= vocab_size and use bias_vl
-            # for expert selection instead of the regular correction bias.
+            # Image tokens carry five consecutive in-vocab sentinel ids
+            # starting at image_sentinel_lo and use bias_vl for expert
+            # selection instead of the regular correction bias. Ids above the
+            # sentinel block are regular special tokens and must not match.
             token_id = tl.load(input_ids_ptr + row).to(tl.int64)
             bias_vl = tl.load(
                 bias_vl_ptr + expert_offsets, mask=expert_mask, other=0.0
             ).to(tl.float32)
-            bias = tl.where(token_id >= vocab_size, bias_vl, bias)
+            is_image = (token_id >= image_sentinel_lo) & (
+                token_id < image_sentinel_lo + 5
+            )
+            bias = tl.where(is_image, bias_vl, bias)
 
         if launch_pdl:
             tl.extra.cuda.gdc_wait()
@@ -115,10 +120,10 @@ def dsv4_topk(
     routed_scaling_factor: float,
     input_ids: torch.Tensor | None = None,
     bias_vl: torch.Tensor | None = None,
-    vocab_size: int = 0,
+    image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens, num_experts = gating_output.shape
-    has_vl = bias_vl is not None
+    has_vl = bias_vl is not None and image_sentinel_lo > 0
     if bias_vl is not None:
         assert input_ids is not None, "bias_vl routing requires input_ids"
         assert bias_vl.dtype == torch.float32 and bias_vl.is_contiguous()
@@ -136,7 +141,7 @@ def dsv4_topk(
             routed_scaling_factor,
             input_ids,
             bias_vl,
-            vocab_size,
+            image_sentinel_lo,
             NUM_EXPERTS=num_experts,
             BLOCK_N=triton.next_power_of_2(num_experts),
             HAS_VL=has_vl,

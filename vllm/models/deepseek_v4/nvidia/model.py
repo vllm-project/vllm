@@ -92,6 +92,8 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
+from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
+
 logger = init_logger(__name__)
 
 
@@ -799,7 +801,11 @@ class DeepseekV4MoE(nn.Module):
         self.gate.e_score_correction_bias = None
         self.gate.tid2eid = None
         self.gate.bias_vl = None
-        self.vocab_size = config.vocab_size
+        # Image tokens borrow five consecutive reserved in-vocab ids starting
+        # at IMAGE_SENTINEL_BASE_ID; 0 disables vision routing (text model).
+        self.image_sentinel_lo = (
+            IMAGE_SENTINEL_BASE_ID if getattr(config, "vision_n_layers", 0) > 0 else 0
+        )
         is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
         self.hash_indices_dtype = torch.int64 if self.use_mega_moe else torch.int32
         if is_hash_moe:
@@ -826,9 +832,9 @@ class DeepseekV4MoE(nn.Module):
             )
 
         if getattr(config, "vision_n_layers", 0) > 0:
-            # Vision checkpoints route image tokens (input_ids >= vocab_size)
-            # with bias_vl instead of e_score_correction_bias / the hash
-            # table. Created on every MoE layer, hash layers included.
+            # Vision checkpoints route image sentinel tokens with bias_vl
+            # instead of e_score_correction_bias / the hash table. Created on
+            # every MoE layer, hash layers included.
             self.gate.bias_vl = nn.Parameter(
                 torch.empty(config.n_routed_experts, dtype=torch.float32),
                 requires_grad=False,
@@ -966,7 +972,7 @@ class DeepseekV4MoE(nn.Module):
             e_score_correction_bias=self.gate.e_score_correction_bias,
             hash_indices_table=self.gate.tid2eid,
             bias_vl=getattr(self.gate, "bias_vl", None),
-            vocab_size=self.vocab_size,
+            image_sentinel_lo=self.image_sentinel_lo,
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
             enable_eplb=parallel_config.enable_eplb,
@@ -1003,7 +1009,7 @@ class DeepseekV4MoE(nn.Module):
             hash_indices_table=self.gate.tid2eid,
             routed_scaling_factor=self.routed_scaling_factor,
             bias_vl=bias_vl.data if bias_vl is not None else None,
-            vocab_size=self.vocab_size if bias_vl is not None else 0,
+            image_sentinel_lo=self.image_sentinel_lo if bias_vl is not None else 0,
         )
         activation_clamp = (
             float(self.swiglu_limit) if self.swiglu_limit is not None else None

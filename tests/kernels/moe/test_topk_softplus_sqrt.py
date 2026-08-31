@@ -27,34 +27,35 @@ def _torch_topk_softplus_sqrt(
     input_ids: torch.Tensor | None = None,
     hash_indices_table: torch.Tensor | None = None,
     bias_vl: torch.Tensor | None = None,
-    vocab_size: int = 0,
+    image_sentinel_lo: int = 0,
 ):
     scores = F.softplus(gating_output.float()).sqrt()
     original_scores = scores
-    if bias_vl is not None:
-        # Image tokens carry sentinel ids >= vocab_size and select experts
-        # with bias_vl instead of the regular bias / hash table.
-        assert input_ids is not None
 
     if hash_indices_table is not None:
         assert input_ids is not None
-        if bias_vl is None:
+        if bias_vl is None or image_sentinel_lo == 0:
             topk_ids = hash_indices_table[input_ids.long()]
         else:
-            # Sentinel ids are out of range for the hash table; clamp them
-            # (their rows are overwritten below) to avoid OOB reads.
-            image_mask = input_ids.long() >= vocab_size
-            safe_ids = torch.where(image_mask, 0, input_ids.long())
-            topk_ids = hash_indices_table[safe_ids]
+            image_mask = (input_ids.long() >= image_sentinel_lo) & (
+                input_ids.long() < image_sentinel_lo + 5
+            )
+            topk_ids = hash_indices_table[input_ids.long()]
             vl_ids = (scores + bias_vl).topk(topk, dim=-1).indices
             topk_ids = torch.where(
                 image_mask.unsqueeze(-1), vl_ids.to(topk_ids.dtype), topk_ids
             )
     else:
-        if bias_vl is not None:
+        if bias_vl is not None and image_sentinel_lo > 0:
+            # Image tokens carry five consecutive in-vocab sentinel ids
+            # starting at image_sentinel_lo and select experts with bias_vl
+            # instead of the regular bias.
             assert input_ids is not None
             assert e_score_correction_bias is not None
-            image_mask = (input_ids.long() >= vocab_size).unsqueeze(-1)
+            image_mask = (
+                (input_ids.long() >= image_sentinel_lo)
+                & (input_ids.long() < image_sentinel_lo + 5)
+            ).unsqueeze(-1)
             row_bias = torch.where(
                 image_mask,
                 bias_vl.unsqueeze(0),
@@ -378,16 +379,23 @@ def test_fused_topk_softplus_sqrt_padding(
 
 
 def _make_mixed_input_ids(
-    num_tokens: int, vocab_size: int, dtype: torch.dtype = torch.long
+    num_tokens: int, image_sentinel_lo: int, dtype: torch.dtype = torch.long
 ) -> torch.Tensor:
-    """Text ids below vocab_size; every third token is an image sentinel id."""
+    """Mix of text, image-sentinel, and above-sentinel ids.
+
+    Every third token is an image sentinel id (cycling through the five slots
+    [image_sentinel_lo, image_sentinel_lo + 5)); every sixth token carries an
+    id just above the sentinel block, simulating the named special tokens
+    that follow it — those must route as regular text tokens.
+    """
     input_ids = torch.randint(
-        0, vocab_size, (num_tokens,), dtype=torch.long, device="cuda"
+        0, image_sentinel_lo, (num_tokens,), dtype=torch.long, device="cuda"
     )
-    image_rows = torch.arange(num_tokens, device="cuda") % 3 == 0
-    input_ids[image_rows] = (
-        vocab_size + 1 + torch.arange(image_rows.sum().item(), device="cuda")
-    )
+    pos = torch.arange(num_tokens, device="cuda")
+    image_rows = pos % 3 == 0
+    input_ids[image_rows] = image_sentinel_lo + (pos[image_rows] // 3) % 5
+    above_rows = pos % 6 == 3
+    input_ids[above_rows] = image_sentinel_lo + 5
     return input_ids.to(dtype)
 
 
@@ -429,18 +437,25 @@ def test_fused_topk_softplus_sqrt_bias_vl(
     renormalize: bool,
     dtype: torch.dtype,
 ):
-    """Image tokens (ids >= vocab_size) must select experts with bias_vl."""
+    """Image sentinel tokens must select experts with bias_vl.
+
+    Rows with ids just above the sentinel block (image_sentinel_lo + 5)
+    simulate the named special tokens that follow it and must route through
+    the regular bias path; the reference comparison covers them.
+    """
     torch.manual_seed(0)
     num_tokens = 64
     hidden_size = 1024
     vocab_size = 128
+    image_sentinel_lo = vocab_size - 8
     hidden_states = torch.randn((num_tokens, hidden_size), dtype=dtype, device="cuda")
     gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
     e_score_correction_bias = torch.randn(
         (num_experts,), dtype=torch.float32, device="cuda"
     )
     bias_vl = torch.randn((num_experts,), dtype=torch.float32, device="cuda")
-    input_ids = _make_mixed_input_ids(num_tokens, vocab_size)
+    input_ids = _make_mixed_input_ids(num_tokens, image_sentinel_lo)
+    assert (input_ids == image_sentinel_lo + 5).any()
 
     topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
         gating_output=gating_output,
@@ -450,7 +465,7 @@ def test_fused_topk_softplus_sqrt_bias_vl(
         e_score_correction_bias=e_score_correction_bias,
         input_ids=input_ids,
         bias_vl=bias_vl,
-        vocab_size=vocab_size,
+        image_sentinel_lo=image_sentinel_lo,
     )
 
     topk_weights, topk_ids = fused_topk_bias(
@@ -463,7 +478,7 @@ def test_fused_topk_softplus_sqrt_bias_vl(
         routed_scaling_factor=1.5,
         input_tokens=input_ids,
         bias_vl=bias_vl,
-        vocab_size=vocab_size,
+        image_sentinel_lo=image_sentinel_lo,
     )
 
     _assert_topk_matches(topk_weights, topk_ids, topk_weights_ref, topk_ids_ref)
@@ -491,22 +506,24 @@ def test_fused_topk_softplus_sqrt_hash_bias_vl(
 ):
     """Hash MoE: text rows use tid2eid, image rows use topk(score + bias_vl).
 
-    Image sentinel ids are out of range for the hash table, so this also
-    verifies image rows never index tid2eid.
+    Sentinel ids are in-vocab; rows with ids above the sentinel block
+    (image_sentinel_lo + 5) must still come straight from the hash table.
     """
     torch.manual_seed(0)
     num_tokens = 64
     hidden_size = 1024
     vocab_size = 64
+    image_sentinel_lo = vocab_size - 8
     hidden_states = torch.randn((num_tokens, hidden_size), dtype=dtype, device="cuda")
     gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
     hash_indices_table = torch.stack(
         [torch.randperm(num_experts)[:topk] for _ in range(vocab_size)]
     ).to(device="cuda", dtype=indices_dtype)
     bias_vl = torch.randn((num_experts,), dtype=torch.float32, device="cuda")
-    input_ids = _make_mixed_input_ids(num_tokens, vocab_size)
-    image_rows = input_ids >= vocab_size
+    input_ids = _make_mixed_input_ids(num_tokens, image_sentinel_lo)
+    image_rows = (input_ids >= image_sentinel_lo) & (input_ids < image_sentinel_lo + 5)
     assert image_rows.any() and (~image_rows).any()
+    assert (input_ids == image_sentinel_lo + 5).any()
 
     topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
         gating_output=gating_output,
@@ -516,7 +533,7 @@ def test_fused_topk_softplus_sqrt_hash_bias_vl(
         input_ids=input_ids,
         hash_indices_table=hash_indices_table,
         bias_vl=bias_vl,
-        vocab_size=vocab_size,
+        image_sentinel_lo=image_sentinel_lo,
     )
 
     topk_weights, topk_ids = fused_topk_bias(
@@ -530,7 +547,7 @@ def test_fused_topk_softplus_sqrt_hash_bias_vl(
         hash_indices_table=hash_indices_table,
         routed_scaling_factor=2.5,
         bias_vl=bias_vl,
-        vocab_size=vocab_size,
+        image_sentinel_lo=image_sentinel_lo,
     )
 
     _assert_topk_matches(topk_weights, topk_ids, topk_weights_ref, topk_ids_ref)
@@ -552,12 +569,13 @@ def test_dsv4_fast_topk_bias_vl():
     num_tokens = 33
     num_experts = 256
     vocab_size = 128
+    image_sentinel_lo = vocab_size - 8
     gating_output = torch.randn(
         (num_tokens, num_experts), dtype=torch.float32, device="cuda"
     )
     correction_bias = torch.randn(num_experts, dtype=torch.float32, device="cuda")
     bias_vl = torch.randn(num_experts, dtype=torch.float32, device="cuda")
-    input_ids = _make_mixed_input_ids(num_tokens, vocab_size)
+    input_ids = _make_mixed_input_ids(num_tokens, image_sentinel_lo)
 
     topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
         gating_output=gating_output,
@@ -567,7 +585,7 @@ def test_dsv4_fast_topk_bias_vl():
         e_score_correction_bias=correction_bias,
         input_ids=input_ids,
         bias_vl=bias_vl,
-        vocab_size=vocab_size,
+        image_sentinel_lo=image_sentinel_lo,
     )
     topk_weights, topk_ids = dsv4_topk(
         gating_output,
@@ -576,7 +594,7 @@ def test_dsv4_fast_topk_bias_vl():
         1.5,
         input_ids=input_ids,
         bias_vl=bias_vl,
-        vocab_size=vocab_size,
+        image_sentinel_lo=image_sentinel_lo,
     )
 
     assert topk_ids.dtype == torch.int64

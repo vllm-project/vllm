@@ -8,8 +8,9 @@ Thin multimodal wrapper around the text-only ``DeepseekV4ForCausalLM``:
   sentinel positions; four learned vectors (``image_start`` / ``image_pad`` /
   ``image_newline`` / ``image_end``) fill the remaining sentinel positions.
 - Image placeholders (``<｜deepseek_image｜>``) are expanded by the processor
-  in ``common/mm_preprocess.py`` into out-of-vocab sentinel ids
-  ``vocab_size + {0..4}`` (see ``common/vision.py`` for the tower itself).
+  in ``common/mm_preprocess.py`` into sentinel blocks borrowing reserved
+  in-vocab tokens ``<|place_holder_mm_span_0431|>``..``_0435|>``
+  (see ``common/vision.py`` for the tower itself).
 - Merged embeddings enter the text model via ``inputs_embeds``, i.e. before
   its hyper-connection stream expansion. Raw ``input_ids`` still flow into
   the model so the MoE router can apply ``bias_vl`` to image tokens
@@ -36,9 +37,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ..common.mm_preprocess import (
     IMAGE_PLACEHOLDER,
+    IMAGE_SENTINEL_BASE_ID,
     DeepseekV4VLDummyInputsBuilder,
     DeepseekV4VLMultiModalProcessor,
     DeepseekV4VLProcessingInfo,
+    image_sentinel_mask,
 )
 from ..common.vision import DeepseekV4Aligner, DeepseekV4ViT
 from .model import _make_deepseek_v4_weights_mapper
@@ -84,7 +87,7 @@ class DeepseekV4ForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
     """Multimodal entry point for DeepSeek-V4 checkpoints with a vision tower."""
 
     # The MoE router needs raw token ids to detect image sentinel tokens
-    # (input_id >= vocab_size) and apply bias_vl.
+    # (borrowed reserved ids, see common/mm_preprocess.py) and apply bias_vl.
     requires_raw_input_tokens = True
 
     @classmethod
@@ -100,7 +103,6 @@ class DeepseekV4ForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         self.config = config
         self.multimodal_config = model_config.multimodal_config
         assert self.multimodal_config is not None
-        self.vocab_size = config.vocab_size
 
         image_enabled = (
             config.vision_n_layers > 0
@@ -228,28 +230,30 @@ class DeepseekV4ForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
     ) -> torch.Tensor:
         from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 
-        oov = input_ids >= self.vocab_size
-        inputs_embeds = self.language_model.embed_input_ids(
-            input_ids.masked_fill(oov, 0)
-        )
-        if oov.any():
-            # Learned sentinel vectors for the non-IMAGE positions.
-            sentinel_mask = oov
+        # All ids are in-vocab here: image-block sentinels are borrowed
+        # reserved tokens (their embedding rows are always overwritten below).
+        inputs_embeds = self.language_model.embed_input_ids(input_ids)
+
+        if self.image_start is not None:
+            # Branch-free sentinel overwrite: safe inside compiled/captured
+            # regions (no data-dependent control flow).
+            sentinel_mask = image_sentinel_mask(input_ids)
             if is_multimodal is not None:
-                sentinel_mask = oov & ~is_multimodal.to(oov.device)
-            if sentinel_mask.any():
-                assert self.image_start is not None
-                table = torch.stack(
-                    [
-                        self.image_start,
-                        self.image_pad,
-                        self.image_pad,
-                        self.image_newline,
-                        self.image_end,
-                    ]
-                )
-                idx = (input_ids[sentinel_mask] - self.vocab_size).long()
-                inputs_embeds[sentinel_mask] = table[idx].to(inputs_embeds.dtype)
+                # IMAGE positions get vision embeddings via the merge below.
+                sentinel_mask = sentinel_mask & ~is_multimodal.to(input_ids.device)
+            table = torch.stack(
+                [
+                    self.image_start,
+                    self.image_pad,
+                    self.image_pad,
+                    self.image_newline,
+                    self.image_end,
+                ]
+            ).to(inputs_embeds.dtype)
+            idx = (input_ids - IMAGE_SENTINEL_BASE_ID).clamp(0, 4)
+            inputs_embeds = torch.where(
+                sentinel_mask.unsqueeze(-1), table[idx], inputs_embeds
+            )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds

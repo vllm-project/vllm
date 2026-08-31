@@ -6,10 +6,18 @@
 The image transform and sentinel-block construction are ported from the
 official repository's ``image_processor.py`` so that token counts bit-match
 the reference. Each ``<｜deepseek_image｜>`` placeholder in the prompt expands
-to a variable-length block of out-of-vocab sentinel ids ``vocab_size + type``
-(``type`` in ``range(5)``); only positions with ``type == IMAGE`` receive
-vision embeddings, the other sentinels are looked up from learned embedding
-vectors in the model.
+to a variable-length block of sentinel tokens; only positions with
+``type == IMAGE`` receive vision embeddings, the other sentinels are looked
+up from learned embedding vectors in the model.
+
+Unlike the reference (which uses out-of-vocab ids ``vocab_size + type``),
+the sentinel block borrows five consecutive reserved tokenizer tokens
+(``<|place_holder_mm_span_0431|>`` .. ``_0435|>``): they are special tokens
+the tokenizer never emits from plain text, so the ids stay in-vocabulary and
+work with stock token validation, logprobs and detokenization. The ids are
+pure markers — every sentinel position's embedding is overwritten with
+vision/sentinel vectors before the decoder layers see it, exactly like the
+reference's out-of-vocab scheme.
 """
 
 import math
@@ -47,6 +55,38 @@ IMAGE_START, IMAGE_PAD, IMAGE, IMAGE_NEW_LINE, IMAGE_END = range(5)
 COMPRESS_PAD_TO = 4
 
 IMAGE_PLACEHOLDER = "<｜deepseek_image｜>"
+
+# Sentinel roles borrow five consecutive ``<|place_holder_mm_span_XXXX|>``
+# tokens (reserved special tokens, never emitted from plain text). The order
+# must match IMAGE_START..IMAGE_END above so that
+# ``id == IMAGE_SENTINEL_BASE_ID + type``.
+IMAGE_SENTINEL_BASE_ID = 129257
+IMAGE_SENTINEL_TOKEN_NAMES = (
+    "<|place_holder_mm_span_0431|>",  # IMAGE_START
+    "<|place_holder_mm_span_0432|>",  # IMAGE_PAD
+    "<|place_holder_mm_span_0433|>",  # IMAGE
+    "<|place_holder_mm_span_0434|>",  # IMAGE_NEW_LINE
+    "<|place_holder_mm_span_0435|>",  # IMAGE_END
+)
+
+
+def image_sentinel_mask(token_ids: torch.Tensor) -> torch.Tensor:
+    """Boolean mask for image-block sentinel positions (in-vocab ids)."""
+    return (token_ids >= IMAGE_SENTINEL_BASE_ID) & (
+        token_ids < IMAGE_SENTINEL_BASE_ID + len(IMAGE_SENTINEL_TOKEN_NAMES)
+    )
+
+
+def validate_image_sentinel_ids(tokenizer) -> None:
+    """Check the borrowed sentinel ids against the tokenizer."""
+    for i, name in enumerate(IMAGE_SENTINEL_TOKEN_NAMES):
+        token_id = tokenizer.convert_tokens_to_ids(name)
+        if token_id != IMAGE_SENTINEL_BASE_ID + i:
+            raise ValueError(
+                f"Image sentinel token {name!r} has id {token_id}, expected "
+                f"{IMAGE_SENTINEL_BASE_ID + i}; the DeepSeek-V4 vision "
+                "sentinel block requires these consecutive reserved ids."
+            )
 
 
 def grid_tokens(best_height, best_width, patch_size, downsample_ratio):
@@ -236,7 +276,7 @@ class DeepseekV4VLProcessor:
     - ``perm``: concatenated per-image ``(n_llm_h * n_llm_w,)`` int64 index
       selecting aligner outputs into the final N-layout order.
     - ``types``: concatenated per-image pad-free sentinel block types;
-      ``block ids = vocab_size + types``.
+      ``block ids = IMAGE_SENTINEL_BASE_ID + types``.
     """
 
     def __init__(self, config: DeepseekV4Config) -> None:
@@ -391,13 +431,13 @@ class DeepseekV4VLMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        vocab_size: int = self.info.get_hf_config().vocab_size
         image_token_id = self.info.get_image_placeholder_token_id()
-        image_embed_id = vocab_size + IMAGE
+        validate_image_sentinel_ids(self.info.get_tokenizer())
+        image_embed_id = IMAGE_SENTINEL_BASE_ID + IMAGE
 
         def get_image_replacement(item_idx: int) -> PromptUpdateDetails:
             types: torch.Tensor = out_mm_kwargs["image"][item_idx]["types"].data
-            full = (vocab_size + types).tolist()
+            full = (IMAGE_SENTINEL_BASE_ID + types).tolist()
             return PromptUpdateDetails.select_token_id(full, image_embed_id)
 
         return [
@@ -427,7 +467,7 @@ class DeepseekV4VLMultiModalProcessor(
             modality: [] for modality in mm_prompt_updates
         }
 
-        pad_id = self.info.get_hf_config().vocab_size + IMAGE_PAD
+        pad_id = IMAGE_SENTINEL_BASE_ID + IMAGE_PAD
 
         new_token_ids = list[int]()
         prev_end_idx = 0
