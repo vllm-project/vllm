@@ -62,6 +62,9 @@ class MockVllmConfig:
 class DummyTokenizer:
     truncation_side: str = "left"
     max_chars_per_token: int = 1
+    # Deliberately outside the range of ids `encode` returns, so a test can
+    # tell a pad token apart from a real one.
+    pad_token_id: int = 99999
 
     def __post_init__(self) -> None:
         self._captured_encode_kwargs: dict = {}
@@ -427,6 +430,58 @@ class TestRenderPrompt:
         assert len(results) == 1
         assert len(results[0]["prompt_token_ids"]) == 5
         assert results[0]["prompt_token_ids"] == list(range(5))
+
+    def test_padding_with_left_truncation_keeps_the_prompt(self):
+        """Padding must not be truncated away.
+
+        `padding` and `truncate_prompt_tokens`/`truncation_side` are all
+        settable on one pooling request. Padding to the full input length
+        before truncating from the left leaves a prompt made entirely of pad
+        tokens, and the request still succeeds -- so the model embeds nothing
+        but padding.
+        """
+        renderer = _build_renderer(MockModelConfig())
+        pad_id = renderer.tokenizer.pad_token_id
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 50)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                pad_prompt_tokens=-1,
+                truncate_prompt_tokens=5,
+                truncation_side="left",
+            ),
+        )
+
+        assert len(results) == 1
+        token_ids = results[0]["prompt_token_ids"]
+
+        # The sentinel: on a padding-first pipeline every surviving id is a
+        # pad token, so the prompt reaches the model with no content at all.
+        assert set(token_ids) != {pad_id}
+
+        # Transformers semantics: truncate to 5, then pad out to the full
+        # input length.
+        assert token_ids[:5] == list(range(45, 50))
+        assert token_ids[5:] == [pad_id] * 95
+
+    def test_padding_without_truncation_is_unchanged(self):
+        renderer = _build_renderer(MockModelConfig())
+        pad_id = renderer.tokenizer.pad_token_id
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 50)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(max_total_tokens=100, pad_prompt_tokens=-1),
+        )
+
+        assert len(results) == 1
+        assert results[0]["prompt_token_ids"] == list(range(50)) + [pad_id] * 50
 
     def test_explicit_side_text_pretokenization_guard(self):
         renderer = _build_renderer(MockModelConfig(), max_chars_per_token=1)
