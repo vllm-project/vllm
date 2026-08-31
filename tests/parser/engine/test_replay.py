@@ -35,6 +35,7 @@ from vllm.parser.engine import registered_adapters as _adapters_mod
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.parser.mistral import MistralParser
+from vllm.parser.muse_glimmer import MuseGlimmerParser
 
 # ── Parser discovery ─────────────────────────────────────────────────
 
@@ -69,6 +70,12 @@ def _discover_parsers() -> list[_ParserInfo]:
             # Mistral uses brace-balanced JSON tool args with no TOOL_END
             # token, so it does not fit this TOOL_END-based replay harness.
             # It is covered by tests/parser/mistral/ instead.
+            continue
+        if obj is MuseGlimmerParser:
+            # Reasoning-only port: the ATEM tool channel is forwarded to the
+            # legacy tool parser rather than parsed by this engine, so the
+            # tool-call replay scenarios do not apply yet. Coverage lives in
+            # test_muse_glimmer.py.
             continue
         cfg = obj(bare_tok, None).parser_engine_config
         if cfg.name not in _BUILDERS:

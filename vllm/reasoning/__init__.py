@@ -125,8 +125,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Olmo3ReasoningParser",
     ),
     "muse_glimmer": (
-        "muse_glimmer_reasoning_parser",
-        "MuseGlimmerReasoningParser",
+        "muse_glimmer_engine_reasoning_parser",
+        "MuseGlimmerParserReasoningAdapter",
     ),
     "qwen3": (
         "qwen3_engine_reasoning_parser",

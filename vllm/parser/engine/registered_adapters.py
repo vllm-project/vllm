@@ -9,13 +9,17 @@ names so that :class:`ReasoningParserManager` and
 
 from vllm.parser.deepseek_v4 import DeepSeekV4Parser
 from vllm.parser.deepseek_v32 import DeepSeekV32Parser
-from vllm.parser.engine.adapters import make_adapters
+from vllm.parser.engine.adapters import (
+    ParserEngineReasoningAdapter,
+    make_adapters,
+)
 from vllm.parser.gemma4 import Gemma4Parser
 from vllm.parser.glm47_moe import Glm47MoeParser
 from vllm.parser.inkling import InklingParser
 from vllm.parser.kimi_k2 import KimiK2Parser
 from vllm.parser.minimax_m2 import MinimaxM2Parser
 from vllm.parser.mistral import MistralParser
+from vllm.parser.muse_glimmer import MuseGlimmerParser
 from vllm.parser.nemotron_v3 import NemotronV3Parser
 from vllm.parser.qwen3 import Qwen3Parser
 from vllm.parser.seed_oss import SeedOssParser
@@ -74,3 +78,14 @@ from vllm.parser.seed_oss import SeedOssParser
     MistralParserReasoningAdapter,
     MistralParserToolAdapter,
 ) = make_adapters(MistralParser)
+
+# MuseGlimmer's tool side has not been ported to the engine yet: the legacy
+# ATEM tool parser still consumes the tool channel this engine forwards, so
+# only the reasoning adapter exists (a tool adapter would silently parse no
+# tool calls if it were ever registered).
+MuseGlimmerParserReasoningAdapter = type(
+    "MuseGlimmerParserReasoningAdapter",
+    (ParserEngineReasoningAdapter,),
+    {"_parser_engine_cls": MuseGlimmerParser},
+)
+MuseGlimmerParser.reasoning_parser_cls = MuseGlimmerParserReasoningAdapter  # type: ignore[attr-defined]

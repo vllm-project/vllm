@@ -56,6 +56,10 @@ class ParserEngineConfig:
 
     terminals: dict[str, str] = field(default_factory=dict)
 
+    # Terminals matched as regexes rather than literals (name -> pattern).
+    # Each pattern must start with a literal prefix; see terminal_from_regex().
+    regex_terminals: dict[str, str] = field(default_factory=dict)
+
     token_id_terminals: dict[str, str] = field(default_factory=dict)
 
     transitions: dict[tuple[ParserState, str], Transition] = field(
@@ -102,9 +106,15 @@ class ParserEngineConfig:
 
     @cached_property
     def terminal_defs(self):
-        from vllm.parser.engine.incremental_lexer import terminals_from_literals
+        from vllm.parser.engine.incremental_lexer import (
+            terminal_from_regex,
+            terminals_from_literals,
+        )
 
-        return terminals_from_literals(self.terminals)
+        return terminals_from_literals(self.terminals) + [
+            terminal_from_regex(name, pattern)
+            for name, pattern in self.regex_terminals.items()
+        ]
 
     @cached_property
     def lexer_shape(self):
