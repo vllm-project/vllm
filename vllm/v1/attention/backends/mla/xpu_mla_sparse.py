@@ -210,6 +210,7 @@ class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata]):
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
+        self._indexer = indexer
         # The indexer carries the shared buffer for normal layers and tests;
         # the explicitly-passed buffer covers backbone skip layers, whose
         # indexer is not constructed (see deepseek_v2.py).
@@ -259,8 +260,13 @@ class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata]):
 
         num_actual_toks = q.shape[0]
 
-        assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        buf = (
+            self._indexer.topk_indices_buffer
+            if self._indexer is not None
+            else self.topk_indices_buffer
+        )
+        assert buf is not None, "topk_indices_buffer required for sparse MLA"
+        topk_indices = buf[:num_actual_toks]
 
         kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
