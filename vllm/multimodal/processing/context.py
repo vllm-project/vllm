@@ -42,6 +42,46 @@ else:
 
 logger = init_logger(__name__)
 
+# HuggingFace processors accept nested ``images_kwargs`` / ``videos_kwargs`` /
+# ``audio_kwargs`` in addition to a shared flat namespace. vLLM's token-budget
+# and dummy-input code only reads the flat keys, so scoped overrides have to
+# be overlaid per modality.
+_HF_MODALITY_PROCESSOR_KWARGS = {
+    "image": "images_kwargs",
+    "video": "videos_kwargs",
+    "audio": "audio_kwargs",
+}
+
+
+def overlay_modality_mm_kwargs(
+    kwargs: Mapping[str, object],
+    modality: str | None,
+) -> dict[str, Any]:
+    """Overlay HF-style nested processor kwargs onto the flat namespace.
+
+    Overlay only the requested modality so a video ``size`` bump does not leak
+    into the image budget. Flat keys keep their current shared-namespace
+    behavior when no scoped dict is present.
+
+    Args:
+        kwargs: Merged multi-modal processor kwargs.
+        modality: Target modality (``image``, ``video``, or ``audio``).
+            When ``None``, ``kwargs`` is copied without overlay.
+
+    Returns:
+        A new dict with the modality-scoped keys overlaid when present.
+    """
+    merged = dict(kwargs)
+    if modality is None:
+        return merged
+    scoped_key = _HF_MODALITY_PROCESSOR_KWARGS.get(modality)
+    if scoped_key is None:
+        return merged
+    scoped = merged.get(scoped_key)
+    if not isinstance(scoped, Mapping):
+        return merged
+    return merged | dict(scoped)
+
 
 @dataclass
 class TimingContext:
@@ -253,9 +293,23 @@ class InputProcessingContext:
 
         return json_map_leaves(_postprocess_one, output)
 
-    def get_merged_mm_kwargs(self, kwargs: Mapping[str, object]):
+    def get_merged_mm_kwargs(
+        self,
+        kwargs: Mapping[str, object],
+        *,
+        modality: str | None = None,
+    ) -> dict[str, Any]:
+        """Merge configured and request ``mm_processor_kwargs``.
+
+        When ``modality`` is set, HF-style nested
+        ``images_kwargs`` / ``videos_kwargs`` / ``audio_kwargs`` are overlaid
+        onto the flat namespace for vLLM-side reads (token budgets, dummy
+        inputs). Processor construction and HF ``__call__`` should omit
+        ``modality`` so the nested dicts still reach the HF processor.
+        """
         mm_config = self.model_config.get_multimodal_config()
-        return mm_config.merge_mm_processor_kwargs(kwargs)
+        merged = mm_config.merge_mm_processor_kwargs(kwargs)
+        return overlay_modality_mm_kwargs(merged, modality)
 
     def call_hf_processor(
         self,

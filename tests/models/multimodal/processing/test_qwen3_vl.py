@@ -142,6 +142,50 @@ def test_processor_multi_video(
         )
 
 
+# Qwen3-VL / Qwen3.8 "Long Video Understanding" pixel budget from the
+# model card. Used to check --mm-processor-kwargs scoping (#52834).
+_LONG_VIDEO_SIZE = {"longest_edge": 469762048, "shortest_edge": 4096}
+
+
+def _probe_mm_token_budgets(
+    model_id: str, mm_processor_kwargs: dict[str, Any] | None
+) -> tuple[int, int]:
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+    )
+    info = MULTIMODAL_REGISTRY.create_processor(ctx.model_config).info
+    video = info.get_max_video_tokens(
+        seq_len=500000, mm_counts={"video": 1, "image": 1}
+    )
+    return video, info.get_max_image_tokens()
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_processor_kwargs_videos_kwargs_does_not_leak_into_image_budget(
+    model_id: str,
+) -> None:
+    """``videos_kwargs.size`` must raise only the video token budget.
+
+    A flat ``size`` override still applies to both modalities (the previous
+    shared-namespace behavior). Regression for #52834.
+    """
+    stock_video, stock_image = _probe_mm_token_budgets(model_id, None)
+    scoped_video, scoped_image = _probe_mm_token_budgets(
+        model_id, {"videos_kwargs": {"size": _LONG_VIDEO_SIZE}}
+    )
+    flat_video, flat_image = _probe_mm_token_budgets(
+        model_id, {"size": _LONG_VIDEO_SIZE}
+    )
+
+    assert scoped_video == flat_video
+    assert scoped_video > stock_video
+    assert scoped_image == stock_image
+    assert flat_image > stock_image
+
+
 @pytest.mark.parametrize("model_id", [MODEL_ID])
 @pytest.mark.parametrize(
     "hf_mm_kwargs",
