@@ -17,7 +17,7 @@ property plus backward compatibility (output index ``None`` -> in-place).
 import pytest
 import torch
 
-from vllm.model_executor.layers.fla.ops import (
+from vllm.third_party.flash_linear_attention.ops import (
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.platforms import current_platform

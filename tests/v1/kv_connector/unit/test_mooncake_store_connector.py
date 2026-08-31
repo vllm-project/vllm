@@ -5,6 +5,9 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+import torch
+
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -19,7 +22,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
+    TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
@@ -29,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -48,9 +54,40 @@ def _make_kv_cache_config() -> KVCacheConfig:
     spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     return KVCacheConfig(
         num_blocks=4,
-        kv_cache_tensors=[KVCacheTensor(size=8192, shared_by=["layer0"])],
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=8192,
+                layers=["layer0"],
+                layer_stride=8192,
+                block_stride=2048,
+            )
+        ],
         kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
     )
+
+
+def test_scheduler_requires_align_mode_for_mamba():
+    vllm_config = _make_vllm_config()
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mamba"], mamba_spec)],
+    )
+
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "scheduler.LookupKeyClient"
+        ),
+        pytest.raises(AssertionError, match="requires mamba_cache_mode='align'"),
+    ):
+        scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
 
 
 def _make_block_stored() -> BlockStored:
@@ -88,6 +125,10 @@ def test_scheduler_role_initializes_store_scheduler_only():
     mock_worker.assert_not_called()
     assert connector.connector_scheduler is mock_scheduler.return_value
     assert connector.connector_worker is None
+    block_pool = MagicMock()
+
+    connector.bind_gpu_block_pool(block_pool)
+    mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
 
 
 def test_worker_methods_delegate_to_store_worker():
@@ -114,10 +155,14 @@ def test_worker_methods_delegate_to_store_worker():
     connector.bind_connector_metadata(metadata)
 
     connector.register_kv_caches(kv_caches)
+    connector.start_load_kv(MagicMock())
+    connector.wait_for_save()
     result = connector.get_finished(finished_req_ids)
     invalid_block_ids = connector.get_block_ids_with_load_errors()
 
     worker.register_kv_caches.assert_called_once_with(kv_caches)
+    worker.start_load_kv.assert_called_once_with(metadata)
+    worker.wait_for_save.assert_called_once_with(metadata)
     worker.get_finished.assert_called_once_with(finished_req_ids, metadata)
     assert result == ({"req-1"}, {"req-2"})
     worker.get_block_ids_with_load_errors.assert_called_once_with()
@@ -210,64 +255,6 @@ def test_get_kv_connector_kv_cache_events_wraps_worker_events():
     assert kv_events.get_all_events() == [event]
 
 
-def test_prefer_cross_layer_blocks_from_config():
-    # Default: disabled
-    vllm_config = _make_vllm_config()
-    kv_cache_config = _make_kv_cache_config()
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreScheduler"
-        ),
-    ):
-        connector = mooncake_store_connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
-        )
-    assert connector.prefer_cross_layer_blocks is False
-
-    # Enabled via config
-    vllm_config_enabled = create_vllm_config(
-        kv_connector="MooncakeStoreConnector",
-        kv_role="kv_both",
-        kv_connector_extra_config={"enable_cross_layers_blocks": "true"},
-    )
-    with (
-        set_current_vllm_config(vllm_config_enabled),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreScheduler"
-        ),
-    ):
-        connector_enabled = mooncake_store_connector.MooncakeStoreConnector(
-            vllm_config_enabled, KVConnectorRole.SCHEDULER, kv_cache_config
-        )
-    assert connector_enabled.prefer_cross_layer_blocks is True
-
-
-def test_register_cross_layers_kv_cache_delegates_to_worker():
-    vllm_config = _make_vllm_config()
-    kv_cache_config = _make_kv_cache_config()
-
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreWorker"
-        ) as mock_worker_cls,
-    ):
-        connector = mooncake_store_connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.WORKER, kv_cache_config
-        )
-
-    fake_tensor = MagicMock()
-    fake_backend = MagicMock()
-    connector.register_cross_layers_kv_cache(fake_tensor, fake_backend)
-
-    worker = mock_worker_cls.return_value
-    worker.register_cross_layers_kv_caches.assert_called_once_with(fake_tensor)
-
-
 def test_update_connector_output_and_take_events():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()
@@ -286,9 +273,13 @@ def test_update_connector_output_and_take_events():
 
     kv_events = mooncake_store_connector.MooncakeStoreKVEvents(num_workers=1)
     kv_events.add_events([event])
-    connector.update_connector_output(KVConnectorOutput(kv_cache_events=kv_events))
+    output = KVConnectorOutput(kv_cache_events=kv_events)
+    connector.update_connector_output(output)
 
     assert connector._kv_cache_events is kv_events
+    connector.connector_scheduler.update_connector_output.assert_called_once_with(
+        output
+    )
     assert list(connector.take_events()) == [event]
     assert connector._kv_cache_events is None
 
@@ -410,7 +401,9 @@ def test_lookup_key_client_lookup_prepends_typed_tag():
 
     # Blocking lookup (non_block defaults to False) runs on the executor and
     # returns the resolved hit length.
-    assert client.lookup("req0", token_len=128, block_hashes=[]) == 5
+    result = client.lookup("req0", num_tokens=128, block_hashes=[])
+    assert result is not None
+    assert result.hit_length == 5
 
     sent_frames = fake_socket.send_multipart.call_args[0][0]
     assert sent_frames[0] == protocol.LOOKUP_MSG
@@ -439,13 +432,13 @@ def test_lookup_key_client_reset_uses_typed_protocol():
     assert client.reset() is False
 
 
-def _poll_lookup(client, req_id, token_len=128, block_hashes=(), timeout=5.0):
+def _poll_lookup(client, req_id, num_tokens=128, block_hashes=(), timeout=5.0):
     """Drive non-blocking lookup until the executor completes it."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        result = client.lookup(req_id, token_len, list(block_hashes), non_block=True)
+        result = client.lookup(req_id, num_tokens, list(block_hashes), non_block=True)
         if result is not None:
-            return result
+            return result.hit_length
         time.sleep(0.005)
     return None
 
@@ -553,11 +546,13 @@ def test_get_num_new_matched_tokens_async_defers_then_reports():
 
     # Lookup ready with a hit -> report need_to_allocate + async-load flag.
     hit = 3 * block_size
-    mock_client.lookup.return_value = hit
+    boundary = TailKeyBoundary(group_id=0, num_tokens=4 * block_size)
+    mock_client.lookup.return_value = MooncakeLookupResult(hit, (boundary,))
     need, load_async = sched.get_num_new_matched_tokens(request, 0)
     assert need == hit
     assert load_async == sched.load_async
     assert sched.load_specs["r1"].kvpool_cached_tokens == hit
+    assert sched.load_specs["r1"].tail_key_boundaries == (boundary,)
 
 
 def test_protocol_tags_are_distinct_and_non_empty():
@@ -568,6 +563,20 @@ def test_protocol_tags_are_distinct_and_non_empty():
         assert isinstance(tag, bytes)
         assert len(tag) > 0
     assert protocol.RESP_OK != protocol.RESP_ERR
+
+
+def test_lookup_response_round_trip_preserves_tail_keys():
+    result = MooncakeLookupResult(
+        hit_length=20,
+        tail_key_boundaries=(
+            TailKeyBoundary(group_id=0, num_tokens=24),
+            TailKeyBoundary(group_id=1, num_tokens=20),
+        ),
+    )
+
+    assert protocol.decode_lookup_response(protocol.encode_lookup_response(result)) == (
+        result
+    )
 
 
 def test_scheduler_reset_connector_cache_invokes_connector_reset():

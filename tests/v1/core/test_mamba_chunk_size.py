@@ -13,7 +13,7 @@ Qwen3-Next-80B at TP4). The FLA prefill kernel's real tile is FLA_CHUNK_SIZE
 from types import SimpleNamespace
 
 from vllm.config import ModelConfig
-from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
+from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 
 
 def _cfg(**fields):

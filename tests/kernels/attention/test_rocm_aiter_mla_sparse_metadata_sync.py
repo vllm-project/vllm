@@ -58,6 +58,7 @@ def _make_builder():
         max_num_batched_tokens + 1, dtype=torch.int32, device="cpu"
     )
     builder._num_attention_heads = 16
+    builder._num_compute_units = current_platform.num_compute_units()
     builder._mla_work_meta_data = torch.empty(1, dtype=torch.int32, device="cpu")
     builder._mla_work_indptr = torch.empty(1, dtype=torch.int32, device="cpu")
     builder._mla_work_info_set = torch.empty(1, dtype=torch.int32, device="cpu")
@@ -85,6 +86,81 @@ def _make_common_metadata():
         block_table_tensor=torch.arange(16, dtype=torch.int32, device="cpu").view(2, 8),
         slot_mapping=torch.arange(2, dtype=torch.int64, device="cpu"),
     )
+
+
+def _make_mixed_common_metadata():
+    # req0: query_len 1 (decode), req1: query_len 4 (prefill) -> decode-first
+    query_start_loc = torch.tensor([0, 1, 5], dtype=torch.int32, device="cpu")
+    seq_lens = torch.tensor([16, 10], dtype=torch.int32, device="cpu")
+    return CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=seq_lens,
+        _seq_lens_cpu=seq_lens,
+        num_reqs=2,
+        num_actual_tokens=5,
+        max_query_len=4,
+        max_seq_len=16,
+        block_table_tensor=torch.arange(16, dtype=torch.int32, device="cpu").view(2, 8),
+        slot_mapping=torch.arange(5, dtype=torch.int64, device="cpu"),
+    )
+
+
+def _patch_build_deps(monkeypatch, events=None):
+    """Stub the aiter kernel, triton helper and CUDA sync so ``build()`` runs
+    on CPU."""
+
+    def fake_generate_sparse_seqlen_triton(
+        query_lens, seq_lens, cu_query_lens, topk_token, num_tokens, max_query_len
+    ):
+        return torch.zeros(num_tokens, dtype=torch.int32, device="cpu")
+
+    fake_aiter = _FakeAiter("aiter")
+    fake_aiter.get_mla_metadata_v1 = Mock(side_effect=lambda *a, **k: None)
+    monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
+    monkeypatch.setattr(
+        sparse_mod, "generate_sparse_seqlen_triton", fake_generate_sparse_seqlen_triton
+    )
+    monkeypatch.setattr(
+        sparse_mod.torch.cuda,
+        "current_stream",
+        lambda device=None: SimpleNamespace(
+            synchronize=lambda: events.append("sync") if events is not None else None
+        ),
+    )
+
+
+def test_build_populates_decode_only_split_fields(monkeypatch):
+    """Decode-only batch: all reqs count as decodes, prefill fields default."""
+    builder = _make_builder()
+    _patch_build_deps(monkeypatch)
+
+    md = builder.build(
+        common_prefix_len=0, common_attn_metadata=_make_common_metadata()
+    )
+
+    assert md.num_decodes == 2
+    assert md.num_prefills == 0
+    assert md.num_decode_tokens == 2
+    assert md.prefill_max_seq_len == 0
+    assert md.prefill is None
+
+
+def test_build_populates_mixed_split_fields(monkeypatch):
+    """Mixed decode+prefill batch: split is reported, prefill fields stay
+    default because this impl always runs the MQA path."""
+    builder = _make_builder()
+    _patch_build_deps(monkeypatch)
+
+    md = builder.build(
+        common_prefix_len=0, common_attn_metadata=_make_mixed_common_metadata()
+    )
+
+    assert md.num_decodes == 1
+    assert md.num_prefills == 1
+    assert md.num_decode_tokens == 1
+    assert md.prefill_max_seq_len == 0
+    assert md.prefill is None
 
 
 def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
@@ -116,6 +192,7 @@ def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
 
     assert events == ["metadata", "sync"]
     assert fake_get_mla_metadata_v1_mock.call_count == 1
+    assert fake_get_mla_metadata_v1_mock.call_args.kwargs["max_split_per_batch"] == 1
 
     events.clear()
 

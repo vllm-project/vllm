@@ -5,15 +5,89 @@
 //! request/response types.
 
 use tonic::Status;
+use url::Url;
 use uuid::Uuid;
+use vllm_chat::MediaContentPart;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
-    DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, SamplingParams,
-    TextDecodeOptions, TextRequest,
+    DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
+    PromptTruncationLimit, SamplingParams, TextDecodeOptions, TextRequest, TruncationSide,
 };
 
 use super::pb;
+
+pub fn media_parts_from_request(
+    media: Vec<pb::MediaItem>,
+) -> Result<Vec<MediaContentPart>, Status> {
+    let mut parts = Vec::with_capacity(media.len());
+    for (index, item) in media.into_iter().enumerate() {
+        match item.modality() {
+            pb::Modality::Image => {}
+            pb::Modality::Unspecified => {
+                return Err(Status::invalid_argument(format!(
+                    "media[{index}].modality is required"
+                )));
+            }
+            other => {
+                return Err(Status::unimplemented(format!(
+                    "media[{index}].modality {other:?} is not supported by the gRPC service"
+                )));
+            }
+        }
+        let uuid = (!item.uuid.is_empty()).then_some(item.uuid);
+        let mime_type = (!item.mime_type.is_empty()).then_some(item.mime_type);
+        let part = match item.source {
+            Some(pb::media_item::Source::Url(url)) => {
+                validate_media_uri(index, "url", &url, &["http", "https"])?;
+                MediaContentPart::ImageUrl {
+                    url,
+                    detail: None,
+                    uuid,
+                }
+            }
+            Some(pb::media_item::Source::DataUri(uri)) => {
+                validate_media_uri(index, "data_uri", &uri, &["data"])?;
+                MediaContentPart::ImageUrl {
+                    url: uri,
+                    detail: None,
+                    uuid,
+                }
+            }
+            Some(pb::media_item::Source::RawBytes(bytes)) => MediaContentPart::ImageData {
+                data: bytes,
+                mime_type,
+                uuid,
+                detail: None,
+            },
+            None => {
+                return Err(Status::invalid_argument(format!(
+                    "media[{index}].source is required"
+                )));
+            }
+        };
+        parts.push(part);
+    }
+    Ok(parts)
+}
+
+fn validate_media_uri(
+    index: usize,
+    field: &str,
+    value: &str,
+    allowed_schemes: &[&str],
+) -> Result<(), Status> {
+    let uri = Url::parse(value).map_err(|_| {
+        Status::invalid_argument(format!("media[{index}].{field} is not a valid URI"))
+    })?;
+    if !allowed_schemes.contains(&uri.scheme()) {
+        return Err(Status::invalid_argument(format!(
+            "media[{index}].{field} must use the {} scheme",
+            allowed_schemes.join(" or ")
+        )));
+    }
+    Ok(())
+}
 
 // ========================================================================================
 // Request conversion
@@ -36,11 +110,12 @@ pub fn to_text_request(
         )));
     }
 
-    if req.truncate_prompt_tokens != 0 {
-        return Err(Status::invalid_argument(
-            "truncate_prompt_tokens is not supported",
-        ));
-    }
+    // Proto3 uses zero as unset; positive values select fixed left truncation.
+    // The -1 input-budget sentinel is outside the uint32 field domain.
+    let prompt_truncation = (req.truncate_prompt_tokens != 0).then_some(PromptTruncation {
+        limit: PromptTruncationLimit::Fixed(u64::from(req.truncate_prompt_tokens)),
+        side: TruncationSide::Left,
+    });
 
     let prompt = match req.prompt {
         Some(pb::generate_request::Prompt::Text(text)) => Prompt::Text(text),
@@ -53,6 +128,7 @@ pub fn to_text_request(
     } else {
         req.request_id
     };
+    let session_id = req.session_id.filter(|s| !s.is_empty());
 
     let sampling = req.sampling.as_ref();
     let decoding = req.decoding.as_ref();
@@ -83,7 +159,9 @@ pub fn to_text_request(
     }
 
     let decode_options = TextDecodeOptions {
-        skip_special_tokens: true,
+        skip_special_tokens: response
+            .and_then(|options| options.skip_special_tokens)
+            .unwrap_or(true),
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
         stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),
@@ -96,10 +174,12 @@ pub fn to_text_request(
         sampling_params,
         decode_options,
         intermediate: stream,
+        prompt_truncation,
         priority: req.priority,
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,
         data_parallel_rank: None,
+        session_id,
         reasoning_parser_kwargs: None,
         lora_request: None,
         arrival_time: None,

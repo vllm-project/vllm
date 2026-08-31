@@ -16,12 +16,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.fla.ops.chunk import chunk_gated_delta_rule
-from vllm.model_executor.layers.fla.ops.index import (
+from vllm.third_party.flash_linear_attention.ops.chunk import chunk_gated_delta_rule
+from vllm.third_party.flash_linear_attention.ops.index import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
 )
-from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
+from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 
 DEVICE = "cuda"
 DT = torch.bfloat16

@@ -51,6 +51,39 @@ class ncclUniqueId(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_byte * 128)]
 
 
+# Mirror of NCCL's versioned ncclCommProperties_t (nccl_device/core.h,
+# v2.31.2-1, 144 bytes). ncclCommQueryProperties fills fields gated by the
+# version the caller declares in props.version, not by props.size, so never
+# declare a version newer than this layout: clamp to
+# NCCL_COMM_PROPERTIES_LAYOUT_VERSION. To use fields added in a newer NCCL,
+# extend the layout and bump the constant.
+NCCL_COMM_PROPERTIES_LAYOUT_VERSION = 23102  # NCCL_VERSION(2, 31, 2)
+
+
+class ncclCommProperties(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_size_t),
+        ("magic", ctypes.c_uint),
+        ("version", ctypes.c_uint),
+        ("rank", ctypes.c_int),
+        ("nRanks", ctypes.c_int),
+        ("cudaDev", ctypes.c_int),
+        ("nvmlDev", ctypes.c_int),
+        ("deviceApiSupport", ctypes.c_bool),
+        ("multimemSupport", ctypes.c_bool),
+        ("ginType", ctypes.c_int),
+        ("nLsaTeams", ctypes.c_int),
+        ("hostRmaSupport", ctypes.c_bool),
+        ("railedGinType", ctypes.c_int),
+        # Filled only when the declared version is >= NCCL_VERSION(2, 31, 0).
+        ("commHash", ctypes.c_uint64),
+        ("ginMinStride", ctypes.c_int),
+        ("ginConnectionType", ctypes.c_int),
+        ("ginSupport", ctypes.c_bool * 64),
+        ("devCommRuntimeVersionSize", ctypes.c_size_t),
+    ]
+
+
 cudaStream_t = ctypes.c_void_p
 buffer_type = ctypes.c_void_p
 
@@ -317,6 +350,12 @@ class NCCLLibrary:
         # ncclResult_t ncclCommWindowDeregister(
         #   ncclComm_t comm, ncclWindow_t win);
         Function("ncclCommWindowDeregister", ncclResult_t, [ncclComm_t, ncclWindow_t]),
+        # Query runtime properties of a specific initialized communicator.
+        Function(
+            "ncclCommQueryProperties",
+            ncclResult_t,
+            [ncclComm_t, ctypes.POINTER(ncclCommProperties)],
+        ),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -375,6 +414,9 @@ class NCCLLibrary:
                             # Having an exception here on ROCm platform is
                             # not allowed during graph capturing
                             continue
+                    elif func.name == "ncclCommQueryProperties":
+                        # Optional on NCCL versions older than 2.29.
+                        continue
                     raise
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = NCCLLibrary.path_to_dict_mapping[so_file]
