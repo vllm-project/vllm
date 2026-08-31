@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Structural-tag grammar for HY3 XML-style tool calls.
+//! Structural-tag grammar for HY XML-style tool calls.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -12,31 +12,40 @@ use xgrammar_structural_tag::builders::{StructuralTagBuilder, StructuralTagConte
 use xgrammar_structural_tag::format::{Format, StructuralTag, TagFormat};
 use xgrammar_structural_tag::tool::{BuilderToolChoice, FunctionToolParam};
 
-use super::HyV3ToolMarkers;
+use super::{HyDialect, HyToolMarkers};
 
-/// HY3 structural-tag builder using tokenizer-specific structural markers.
+/// HY structural-tag builder using tokenizer-specific structural markers.
 #[derive(Debug, Clone)]
-pub(super) struct HyV3StructuralTagBuilder {
-    markers: Arc<HyV3ToolMarkers>,
+pub(super) struct HyStructuralTagBuilder {
+    markers: Arc<HyToolMarkers>,
+    dialect: HyDialect,
 }
 
-impl HyV3StructuralTagBuilder {
-    pub(super) fn new(markers: Arc<HyV3ToolMarkers>) -> Self {
-        Self { markers }
+impl HyStructuralTagBuilder {
+    pub(super) fn new(markers: Arc<HyToolMarkers>, dialect: HyDialect) -> Self {
+        Self { markers, dialect }
     }
 
     fn argument_pair(&self, key: &str) -> Format {
         let excludes = self.markers.iter().collect::<Vec<_>>();
-        Format::sequence(vec![
+        let separator = self.dialect.separator();
+        let mut elements = vec![
             Format::const_string(&self.markers.arg_key_start),
             Format::const_string(key),
             Format::const_string(&self.markers.arg_key_end),
-            Format::const_string("\n"),
+        ];
+        if !separator.is_empty() {
+            elements.push(Format::const_string(separator));
+        }
+        elements.extend([
             Format::const_string(&self.markers.arg_value_start),
             Format::any_text_excluding(&excludes),
             Format::const_string(&self.markers.arg_value_end),
-            Format::const_string("\n"),
-        ])
+        ]);
+        if !separator.is_empty() {
+            elements.push(Format::const_string(separator));
+        }
+        Format::sequence(elements)
     }
 
     fn tool_call(&self, tool: &FunctionToolParam) -> TagFormat {
@@ -56,14 +65,21 @@ impl HyV3StructuralTagBuilder {
         }
 
         let content = if elements.is_empty() {
-            Format::any_text()
+            match self.dialect {
+                HyDialect::V3 => Format::any_text(),
+                HyDialect::V4 => Format::const_string(""),
+            }
         } else {
             Format::sequence(elements)
         };
+        let tool_sep = self.markers.tool_sep.as_deref().unwrap_or_default();
         TagFormat::new(
             format!(
-                "{}{}{}\n",
-                self.markers.tool_call_start, tool.function.name, self.markers.tool_sep
+                "{}{}{}{}",
+                self.markers.tool_call_start,
+                tool.function.name,
+                tool_sep,
+                self.dialect.separator(),
             ),
             content,
             self.markers.tool_call_end.clone(),
@@ -72,15 +88,16 @@ impl HyV3StructuralTagBuilder {
 
     fn tool_calls(&self, tools: &[FunctionToolParam], choice: BuilderToolChoice) -> Format {
         let mut calls = tools.iter().map(|tool| self.tool_call(tool)).collect::<Vec<_>>();
-        let begin = format!("{}\n", self.markers.tool_calls_start);
-        let end = format!("\n{}", self.markers.tool_calls_end);
+        let separator = self.dialect.separator();
+        let begin = format!("{}{separator}", self.markers.tool_calls_start);
+        let end = format!("{separator}{}", self.markers.tool_calls_end);
 
         match choice {
             BuilderToolChoice::Auto if calls.is_empty() => Format::any_text(),
             BuilderToolChoice::Auto => {
                 let outer = TagFormat::new(
                     begin,
-                    Format::tags_with_separator(calls, "\n", true, false),
+                    Format::tags_with_separator(calls, separator, true, false),
                     end,
                 );
                 Format::triggered_tags(&[&self.markers.tool_calls_start], vec![outer])
@@ -92,14 +109,14 @@ impl HyV3StructuralTagBuilder {
             ]),
             BuilderToolChoice::Required => Format::sequence(vec![
                 Format::const_string(begin),
-                Format::tags_with_separator(calls, "\n", true, false),
+                Format::tags_with_separator(calls, separator, true, false),
                 Format::const_string(end),
             ]),
         }
     }
 }
 
-impl StructuralTagBuilder for HyV3StructuralTagBuilder {
+impl StructuralTagBuilder for HyStructuralTagBuilder {
     fn build(&self, ctx: StructuralTagContext<'_>) -> Result<StructuralTag> {
         Ok(StructuralTag::new(
             self.tool_calls(ctx.function_tools, ctx.tool_choice),
@@ -152,8 +169,8 @@ mod tests {
         FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
     };
 
-    use super::HyV3StructuralTagBuilder;
-    use crate::tool::HyV3ToolMarkers;
+    use super::HyStructuralTagBuilder;
+    use crate::tool::{HyDialect, HyToolMarkers};
 
     fn tool(name: &str, parameters: Value) -> ToolParam {
         ToolParam::Function(FunctionToolParam::new(
@@ -166,8 +183,17 @@ mod tests {
         tools: &[ToolParam],
         choice: ToolChoice,
     ) -> xgrammar_structural_tag::format::StructuralTag {
+        build_for_dialect(HyDialect::V3, suffix, tools, choice)
+    }
+
+    fn build_for_dialect(
+        dialect: HyDialect,
+        suffix: &str,
+        tools: &[ToolParam],
+        choice: ToolChoice,
+    ) -> xgrammar_structural_tag::format::StructuralTag {
         build_structural_tag(
-            HyV3StructuralTagBuilder::new(Arc::new(HyV3ToolMarkers::new(suffix))),
+            HyStructuralTagBuilder::new(Arc::new(HyToolMarkers::new(suffix, dialect)), dialect),
             tools,
             choice,
             StructuralTagOptions::default().with_reasoning(false),
@@ -194,6 +220,25 @@ mod tests {
         );
 
         expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"const_string","value":"<tool_calls:opensource>\n"},{"type":"tags_with_separator","tags":[{"begin":"<tool_call:opensource>get_weather<tool_sep:opensource>\n","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<arg_key:opensource>"},{"type":"const_string","value":"city"},{"type":"const_string","value":"</arg_key:opensource>"},{"type":"const_string","value":"\n"},{"type":"const_string","value":"<arg_value:opensource>"},{"type":"any_text","excludes":["<tool_calls:opensource>","</tool_calls:opensource>","<tool_call:opensource>","</tool_call:opensource>","<tool_sep:opensource>","<arg_key:opensource>","</arg_key:opensource>","<arg_value:opensource>","</arg_value:opensource>"]},{"type":"const_string","value":"</arg_value:opensource>"},{"type":"const_string","value":"\n"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"<arg_key:opensource>"},{"type":"const_string","value":"days"},{"type":"const_string","value":"</arg_key:opensource>"},{"type":"const_string","value":"\n"},{"type":"const_string","value":"<arg_value:opensource>"},{"type":"any_text","excludes":["<tool_calls:opensource>","</tool_calls:opensource>","<tool_call:opensource>","</tool_call:opensource>","<tool_sep:opensource>","<arg_key:opensource>","</arg_key:opensource>","<arg_value:opensource>","</arg_value:opensource>"]},{"type":"const_string","value":"</arg_value:opensource>"},{"type":"const_string","value":"\n"}]}}]},"end":"</tool_call:opensource>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</tool_calls:opensource>"}]}}"#]].assert_eq(&tag.to_json_string().unwrap());
+    }
+
+    #[test]
+    fn required_uses_suffixed_compact_hy4_skeleton_and_bounded_values() {
+        let tag = build_for_dialect(
+            HyDialect::V4,
+            ":opensource",
+            &[tool(
+                "get_weather",
+                json!({
+                    "type": "object",
+                    "properties": { "city": { "type": "string" } },
+                    "required": ["city"]
+                }),
+            )],
+            ToolChoice::required(),
+        );
+
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"const_string","value":"<tool_calls:opensource>"},{"type":"tags_with_separator","tags":[{"begin":"<tool_call:opensource>get_weather","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<arg_key:opensource>"},{"type":"const_string","value":"city"},{"type":"const_string","value":"</arg_key:opensource>"},{"type":"const_string","value":"<arg_value:opensource>"},{"type":"any_text","excludes":["<tool_calls:opensource>","</tool_calls:opensource>","<tool_call:opensource>","</tool_call:opensource>","<arg_key:opensource>","</arg_key:opensource>","<arg_value:opensource>","</arg_value:opensource>"]},{"type":"const_string","value":"</arg_value:opensource>"}]}]},"end":"</tool_call:opensource>"}],"separator":"","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"</tool_calls:opensource>"}]}}"#]].assert_eq(&tag.to_json_string().unwrap());
     }
 
     #[test]
@@ -233,6 +278,24 @@ mod tests {
 
         expect![[r#"{"type":"structural_tag","format":{"type":"triggered_tags","triggers":["<tool_calls>"],"tags":[{"begin":"<tool_calls>\n","content":{"type":"tags_with_separator","tags":[{"begin":"<tool_call>search<tool_sep>\n","content":{"type":"any_text","excludes":[]},"end":"</tool_call>"},{"begin":"<tool_call>lookup<tool_sep>\n","content":{"type":"any_text","excludes":[]},"end":"</tool_call>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},"end":"\n</tool_calls>"}],"at_least_one":false,"stop_after_first":false,"excludes":[]}}"#]].assert_eq(&auto);
         expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"const_string","value":"<tool_calls>\n"},{"type":"tag","begin":"<tool_call>lookup<tool_sep>\n","content":{"type":"any_text","excludes":[]},"end":"</tool_call>"},{"type":"const_string","value":"\n</tool_calls>"}]}}"#]].assert_eq(&forced);
+    }
+
+    #[test]
+    fn hy_v4_zero_argument_tool_has_empty_compact_body() {
+        let tag = build_for_dialect(
+            HyDialect::V4,
+            "",
+            &[tool(
+                "get_current_date",
+                json!({ "type": "object", "properties": {} }),
+            )],
+            ToolChoice::function("get_current_date"),
+        );
+        let value = serde_json::to_value(tag).unwrap();
+
+        expect![[r#"{"type":"tag","begin":"<tool_call>get_current_date","content":{"type":"const_string","value":""},"end":"</tool_call>"}"#]].assert_eq(
+            &serde_json::to_string(&value["format"]["elements"][1]).unwrap(),
+        );
     }
 
     #[test]
