@@ -34,7 +34,10 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import (
+    PAD_SLOT_ID,
+    split_decodes_and_prefills,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CircularBufferSpec,
@@ -560,6 +563,11 @@ class QSAForwardMetadata(AttentionMetadata):
     logical_positions: torch.Tensor
     k_work_metadata: torch.Tensor
     num_actual_tokens: int
+    num_decodes: int
+    num_decode_tokens: int
+    num_prefills: int
+    num_prefill_tokens: int
+    decode_query_len: int
     storage_block_size: int
     compress_ratio: int
 
@@ -577,6 +585,8 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        assert self.reorder_batch_threshold is not None
         self.is_circular_buffer = isinstance(kv_cache_spec, CircularBufferSpec)
         if isinstance(kv_cache_spec, MLAAttentionSpec):
             compress_ratio = kv_cache_spec.tokens_per_state
@@ -619,6 +629,26 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
     ) -> QSAForwardMetadata:
         del common_prefix_len, fast_build
         num_tokens = common_attn_metadata.num_actual_tokens
+        decode_threshold = self.reorder_batch_threshold
+        assert decode_threshold is not None
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=decode_threshold,
+                require_uniform=True,
+            )
+        )
+        assert num_decodes + num_prefills == common_attn_metadata.num_reqs
+        assert num_decode_tokens + num_prefill_tokens == num_tokens
+        decode_query_len = 0
+        if num_decodes > 0:
+            query_lens_cpu = torch.diff(
+                common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
+            )
+            nonzero_query_lens = query_lens_cpu[query_lens_cpu > 0]
+            if nonzero_query_lens.numel() > 0:
+                decode_query_len = int(nonzero_query_lens[0].item())
+                assert torch.all(nonzero_query_lens == decode_query_len)
         build_k_work = not self.is_circular_buffer and self.compress_ratio != 1
         k_work_metadata = self.k_work_metadata_buffer
         request_capacity = None
@@ -651,6 +681,11 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             logical_positions=logical_positions,
             k_work_metadata=k_work_metadata,
             num_actual_tokens=num_tokens,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_prefills=num_prefills,
+            num_prefill_tokens=num_prefill_tokens,
+            decode_query_len=decode_query_len,
             storage_block_size=self.storage_block_size,
             compress_ratio=self.compress_ratio,
         )
