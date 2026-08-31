@@ -98,6 +98,10 @@ def _aiter_w4a16_silu_via_a8w4(
     if unpadded_N_w1 is not None:
         raw_gate_up = raw_gate_up[:, :unpadded_N_w1]
 
+    # convert interleaved -> chunked for kernel
+    gate, up = raw_gate_up[:, ::2], raw_gate_up[:, 1::2]
+    raw_gate_up = torch.cat((gate, up), dim=1).contiguous()
+
     interim_fp8, a2_scale = fused_clamp_act_mul(
         raw_gate_up,
         swiglu_limit=swiglu_limit,
@@ -387,9 +391,6 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             expert_map=expert_map,
             quant_config=self.quant_config,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            # No unpadded dims: moe_gemm_a16w4 narrows N to the unpadded width
-            # when block_m == 16, dropping columns that hold live weight data
-            # (gpt-oss TP4 GPQA 0.6528 -> 0.4167). Compute the full padded width.
             unpadded_N_w1=None,
             unpadded_K_w1=None,
             unpadded_N_w2=None,

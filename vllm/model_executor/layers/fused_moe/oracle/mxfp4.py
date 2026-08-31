@@ -1671,6 +1671,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             if w13_bias is not None:
                 w13_bias = interleave_gate_up(w13_bias.to(torch.float32))
         elif mxfp4_backend == Mxfp4MoeBackend.TRITON:
+
             def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
                 shape = w.shape
                 n = shape[-1]
