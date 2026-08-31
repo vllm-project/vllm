@@ -1371,8 +1371,10 @@ class VllmRunner:
             shutdown_timeout = 60.0 if current_platform.is_rocm() else None
             self.llm.llm_engine.engine_core.shutdown(timeout=shutdown_timeout)
         except Exception:
-            # Ignore shutdown errors as cleanup will still proceed
-            pass
+            # Don't fail the test on shutdown errors since cleanup will still
+            # proceed, but don't hide them either: a failure here usually
+            # means the engine's GPU memory was never released.
+            logger.exception("Engine core shutdown raised; GPU memory may leak")
         del self.llm
         torch._dynamo.reset()
         cleanup_dist_env_and_memory()

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils.collection_utils import is_list_of
 from vllm.v1.outputs import ECConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -71,11 +72,15 @@ def collect_ec_item_metadata(
         metadata: dict[str, Any] = {}
         if feature.data is not None:
             wanted = resolver.fields_for(feature.modality)
-            metadata = {
-                key: value.tolist()
-                for key, value in feature.data.get_data().items()
-                if key in wanted and isinstance(value, torch.Tensor)
-            }
+            for key, value in feature.data.get_data().items():
+                if key not in wanted:
+                    continue
+                if isinstance(value, torch.Tensor):
+                    metadata[key] = value.tolist()
+                elif is_list_of(value, (int, float)):
+                    # Some metadata (e.g. Qwen3-VL video timestamps) is
+                    # produced as a plain list rather than a tensor.
+                    metadata[key] = value
         items[feature.identifier] = {"metadata": metadata}
     return items
 
