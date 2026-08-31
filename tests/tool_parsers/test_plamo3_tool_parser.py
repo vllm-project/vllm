@@ -45,6 +45,7 @@ def _tool_requests(*calls: str) -> str:
     [
         ("Regular response", "Regular response", []),
         (f"Regular response{EOT_TAG}ignored", "Regular response", []),
+        ("Answer<|plamo:begin_", "Answer", []),
         (
             "Checking the weather."
             + _tool_requests(_tool_call("get_weather", '{"city": "Tokyo"}')),
@@ -63,7 +64,6 @@ def _tool_requests(*calls: str) -> str:
             ],
         ),
     ],
-    ids=["no_tools", "no_tools_eot", "content_and_single_call", "parallel_calls"],
 )
 def test_extract_tool_calls(parser, model_output, expected_content, expected_calls):
     result = run_tool_extraction_nonstreaming(parser, model_output)
@@ -98,21 +98,12 @@ def test_extract_tool_calls_rejects_incomplete_request(parser):
         assert result.tool_calls == []
 
 
-def test_extract_tool_calls_strips_truncated_marker(parser):
-    result = run_tool_extraction_nonstreaming(parser, "Answer<|plamo:begin_")
-
-    assert result.content == "Answer"
-    assert result.tools_called is False
-    assert result.tool_calls == []
-
-
 @pytest.mark.parametrize(
     ("deltas", "expected_content"),
     [
         (["Regular response"], "Regular response"),
         ([f"Regular response{EOT_TAG}ignored", "later"], "Regular response"),
     ],
-    ids=["no_eot", "eot"],
 )
 def test_streaming_plain_content(parser, deltas, expected_content):
     reconstructor = run_tool_extraction_streaming(parser, deltas)
