@@ -14,7 +14,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
-from vllm.multimodal.paged_shm.tensor_ipc import PagedShmTensorIPC
 from vllm.multimodal.utils import (
     get_mm_features_in_window,
     group_and_batch_mm_kwargs,
@@ -60,10 +59,6 @@ class EncoderRunner:
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
-        )
-
-        self._pshm_tensor_ipc = PagedShmTensorIPC(
-            vllm_config.model_config, pin=True, connect=True
         )
 
     def has_cudagraph(self) -> bool:
@@ -158,8 +153,6 @@ class EncoderRunner:
         self, mm_kwargs: list[tuple[str, MultiModalKwargsItem]]
     ) -> list[torch.Tensor]:
         encoder_outputs: list[torch.Tensor] = []
-        self._pshm_tensor_ipc.read(mm_kwargs, device=self.device)
-
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs, device=self.device, pin_memory=PIN_MEMORY
         ):

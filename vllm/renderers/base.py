@@ -30,7 +30,6 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.gpu_ipc_memory import maybe_init_mm_gpu_ipc_pool
-from vllm.multimodal.paged_shm.tensor_ipc import PagedShmTensorIPC
 from vllm.multimodal.parse import (
     MultiModalDataItems,
     MultiModalUUIDItems,
@@ -89,8 +88,6 @@ class BaseRenderer(ABC, Generic[_T]):
         # Separate single-worker executor so tokenization never queues behind
         # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
         self._mm_executor: Executor = ThreadPoolExecutor(max_workers=1)
-
-        self._pshm_tensor_ipc = PagedShmTensorIPC(self.config.model_config)
 
         # Offload tokenization to the thread pool. The sync
         # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
@@ -245,8 +242,6 @@ class BaseRenderer(ABC, Generic[_T]):
         - Jinja2 template compilation
         """
         from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
-
-        self._pshm_tensor_ipc.connect()
 
         # prevent MM processor hangs
         with set_default_torch_num_threads(1):
@@ -764,7 +759,6 @@ class BaseRenderer(ABC, Generic[_T]):
         with set_default_torch_num_threads():
             mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
 
-        self._pshm_tensor_ipc.write(mm_inputs)
         self.update_mm_cache_stats()
 
         return mm_inputs

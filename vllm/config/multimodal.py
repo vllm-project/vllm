@@ -65,7 +65,7 @@ class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
 
 
 MMEncoderTPMode = Literal["weights", "data"]
-MMCacheType = Literal["shm", "lru"]
+MMCacheType = Literal["shm", "lru", "paged_shm"]
 VideoPruningMethod = Literal["evs", "vidcom2"]
 MMTensorIPC = Literal["direct_rpc", "torch_shm"]
 MMHasherAlgorithm = Literal["blake3", "sha256", "sha512"]

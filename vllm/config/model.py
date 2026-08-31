@@ -408,7 +408,6 @@ class ModelConfig:
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
     mm_device_do_normalize: InitVar[bool | None] = None
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
-    paged_shm_size: InitVar[int | None] = None
     paged_shm_block_size: InitVar[int | None] = None
 
     def compute_hash(self) -> str:
@@ -543,7 +542,6 @@ class ModelConfig:
         mm_ipc_gpu_memory_gb: float | None,
         mm_device_do_normalize: bool | None,
         mm_processor_device: MMProcessorDevice | None,
-        paged_shm_size: int | None,
         paged_shm_block_size: int | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
@@ -783,12 +781,8 @@ class ModelConfig:
                 mm_processor_kwargs, mm_processor_device
             )
 
-            if paged_shm_size is not None and paged_shm_size > 0:
-                mm_processor_cache_gb = 0
-                logger.warning(
-                    "paged_shm does not currently support mm cache, "
-                    "forcing mm_processor_cache_gb=0.."
-                )
+            if mm_processor_cache_type == "paged_shm":
+                paged_shm_size = mm_processor_cache_gb * 1024 * 1024 * 1024
 
             mm_config_kwargs = dict(
                 language_model_only=language_model_only,
