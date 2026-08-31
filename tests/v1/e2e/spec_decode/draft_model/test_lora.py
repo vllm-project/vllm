@@ -8,7 +8,6 @@ This script contains:
 import pytest
 import torch
 
-import vllm.envs as envs
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
 from vllm.lora.request import LoRARequest
