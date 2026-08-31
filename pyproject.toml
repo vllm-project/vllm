@@ -54,10 +54,6 @@ lora_hf_hub_resolver = "vllm.plugins.lora_resolvers.hf_hub_resolver:register_hf_
 where = ["."]
 include = ["vllm*"]
 
-[tool.uv]
-# gpt-oss depends on openai-harmony; vLLM ships oss-harmony (same module).
-exclude-dependencies = ["openai-harmony"]
-
 [tool.ruff.lint.per-file-ignores]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
@@ -197,3 +193,5 @@ CANN = "CANN"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]
+# gpt-oss depends on openai-harmony; vLLM ships oss-harmony (same module).
+exclude-dependencies = ["openai-harmony"]
