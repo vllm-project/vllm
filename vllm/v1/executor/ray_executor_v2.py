@@ -428,7 +428,13 @@ class RayExecutorV2(MultiprocExecutor):
         for i, (node_id, _) in enumerate(worker_node_and_physical_gpu_ids):
             local_rank = node_workers[node_id].index(i)
             assigned_physical_gpu_ids = sorted(node_physical_gpu_ids[node_id])
-            worker_env_vars: dict[str, str] = {}
+            worker_env_vars: dict[str, str] = {
+                "TPU_PP_WORKER_IP": bundle_assignments[i]["node_ip"]
+            }
+            if i > 0:
+                worker_env_vars["TPU_PP_PREV_WORKER_IP"] = bundle_assignments[i - 1][
+                    "node_ip"
+                ]
             self.ray_worker_handles[i].local_rank = local_rank
             init_worker_refs.append(
                 self.ray_worker_handles[i].actor.initialize_worker.remote(
