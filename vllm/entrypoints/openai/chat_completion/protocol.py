@@ -14,6 +14,7 @@ from pydantic import (
     Field,
     PrivateAttr,
     SerializeAsAny,
+    ValidationError,
     model_serializer,
     model_validator,
 )
@@ -22,6 +23,7 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    iter_message_level_tools,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
@@ -913,6 +915,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 parameter="tools",
             )
 
+        message_level_tools = list(iter_message_level_tools(data.get("messages")))
+        for tool in message_level_tools:
+            try:
+                ChatCompletionToolsParam.model_validate(tool)
+            except ValidationError as exc:
+                raise VLLMValidationError(
+                    f"Invalid tool declared on a message: {exc}",
+                    parameter="messages.tools",
+                ) from exc
+
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
         if "tool_choice" not in data and data.get("tools"):
@@ -926,10 +938,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if "tool_choice" in data and data["tool_choice"] is not None:
             # ensure that if "tool choice" is specified, tools are present
             if "tools" not in data or data["tools"] is None:
-                raise VLLMValidationError(
-                    "When using `tool_choice`, `tools` must be set.",
-                    parameter="tool_choice",
-                )
+                if not message_level_tools:
+                    raise VLLMValidationError(
+                        "When using `tool_choice`, `tools` must be set.",
+                        parameter="tool_choice",
+                    )
+                if data["tool_choice"] != "auto":
+                    raise VLLMValidationError(
+                        'Only `tool_choice` "auto" is supported when `tools` are '
+                        "declared on a message. Set `tools` at the request level "
+                        'to use "required" or a named tool.',
+                        parameter="tool_choice",
+                    )
 
             # make sure that tool choice is either a named tool
             # OR that it's set to "auto" or "required"
