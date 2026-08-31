@@ -12,6 +12,7 @@ the backend defaults to 'cpu'.
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from inspect import signature
+from functools import cache
 
 import torch
 
@@ -460,6 +461,17 @@ _mamba_ssu_backend: MambaSSUBackend | None = None
 
 
 _flashinfer_replayssm_kernel: Callable[..., torch.Tensor] | None = None
+
+
+
+@cache
+def flashinfer_replayssm_autotune_supported() -> bool:
+    """Return True when FlashInfer exposes ReplaySSM autotuning."""
+    try:
+        from flashinfer.mamba.checkpointing_ssu import CheckpointingSSURunner
+    except ImportError:
+        return False
+    return callable(CheckpointingSSURunner)
 
 
 def selective_state_update_replayssm_flashinfer(
