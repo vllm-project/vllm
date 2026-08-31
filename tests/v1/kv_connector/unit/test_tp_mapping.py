@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     TPMapping,
     compute_tp_mapping,
@@ -35,17 +36,20 @@ def _compute_mapping(
     is_mla: bool = False,
     num_kv_heads: int = 8,
     group_spec_types: tuple[type, ...] = (FullAttentionSpec,),
+    dcp_size: int = 1,
+    remote_dcp_size: int = 1,
 ) -> TPMapping:
-    transfer_topology = SimpleNamespace(
-        tp_rank=tp_rank,
-        tp_size=tp_size,
-        is_mla=is_mla,
-        total_num_kv_heads=num_kv_heads,
-    )
+    transfer_topology = object.__new__(TransferTopology)
+    transfer_topology.tp_rank = tp_rank
+    transfer_topology.tp_size = tp_size
+    transfer_topology.is_mla = is_mla
+    transfer_topology.total_num_kv_heads = num_kv_heads
+    transfer_topology.dcp_size = dcp_size
     return compute_tp_mapping(
         transfer_topology=transfer_topology,
         remote_tp_size=remote_tp_size,
         group_spec_types=group_spec_types,
+        remote_dcp_size=remote_dcp_size,
     )
 
 
@@ -68,6 +72,69 @@ class TestTPMappingStructure:
         assert m.all_source_ranks == (0, 1)
 
 
+@pytest.mark.parametrize(
+    "tp_rank,tp_size,remote_tp_size,dcp_size,remote_dcp_size,expected_ranks",
+    [
+        (0, 4, 4, 1, 4, (0, 1, 2, 3)),
+        (2, 4, 4, 4, 4, (2,)),
+        (0, 2, 4, 2, 4, (0, 2)),
+        (3, 4, 2, 4, 2, (1,)),
+    ],
+)
+def test_mla_dcp_source_ranks(
+    tp_rank,
+    tp_size,
+    remote_tp_size,
+    dcp_size,
+    remote_dcp_size,
+    expected_ranks,
+):
+    mapping = _compute_mapping(
+        tp_rank=tp_rank,
+        tp_size=tp_size,
+        remote_tp_size=remote_tp_size,
+        is_mla=True,
+        num_kv_heads=1,
+        dcp_size=dcp_size,
+        remote_dcp_size=remote_dcp_size,
+    )
+
+    assert mapping.all_source_ranks == expected_ranks
+
+
+@pytest.mark.parametrize(
+    "tp_size,remote_tp_size,dcp_size,remote_dcp_size",
+    [
+        (4, 2, 4, 2),
+        (4, 4, 4, 4),
+        (4, 1, 4, 1),
+        (4, 4, 1, 4),
+        (2, 4, 2, 4),
+    ],
+)
+def test_dcp_consumer_count_matches_readers(
+    tp_size, remote_tp_size, dcp_size, remote_dcp_size
+):
+    """Each producer waits for exactly the local ranks that read from it."""
+    mappings = [
+        _compute_mapping(
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            remote_tp_size=remote_tp_size,
+            is_mla=True,
+            num_kv_heads=1,
+            dcp_size=dcp_size,
+            remote_dcp_size=remote_dcp_size,
+        )
+        for tp_rank in range(tp_size)
+    ]
+
+    for remote_rank in range(remote_tp_size):
+        readers = [m for m in mappings if remote_rank in m.all_source_ranks]
+        for mapping in readers:
+            assert mapping.local_consumers == len(readers)
+
+
 # ======================================================================
 # Split handle tests
 # ======================================================================
@@ -87,6 +154,9 @@ def _make_mock_worker_for_splits(group_spec_types):
     worker.block_len_per_layer = []
     worker.num_regions = 0
     worker._region_is_mla = []
+    worker._conv_decomp = SimpleNamespace(local_conv_offsets=())
+    worker._ssm_region_indices = [0] if MambaSpec in group_spec_types else []
+    worker._ple_region_index = None
     return worker
 
 
@@ -215,3 +285,31 @@ class TestMambaPlanSplitHandles:
 
         with pytest.raises(AssertionError, match="Head-sharded"):
             list(worker._build_local_splits_from_plan(plan, src_blocks_data, 2, 2))
+
+
+@pytest.mark.parametrize(
+    ("total_kv_heads", "local_tp", "remote_tp", "compatible"),
+    [
+        # 2 heads: TP1 packs both heads into a page, TP >= 2 packs one.
+        (2, 1, 2, False),
+        (2, 2, 1, False),
+        (2, 1, 1, True),
+        (2, 2, 4, True),
+        (2, 4, 2, True),
+        # 4 heads: the boundary moves with the head count.
+        (4, 2, 4, False),
+        (4, 2, 2, True),
+        (4, 4, 8, True),
+    ],
+)
+def test_csa_linear_tp_layout_boundary(total_kv_heads, local_tp, remote_tp, compatible):
+    worker = object.__new__(NixlConnectorWorker)
+    worker.world_size = local_tp
+    worker._is_csa_linear = True
+    worker.transfer_topo = SimpleNamespace(total_num_kv_heads=total_kv_heads)
+
+    if compatible:
+        worker._validate_csa_linear_tp_layout(remote_tp)
+    else:
+        with pytest.raises(ValueError, match="KV-head sharding boundary"):
+            worker._validate_csa_linear_tp_layout(remote_tp)
