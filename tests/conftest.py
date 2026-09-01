@@ -284,19 +284,18 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 def workspace_init():
     """Initialize the workspace manager for tests that need it.
 
-    This fixture initializes the workspace manager with a CUDA device
-    if available, and resets it after the test completes. Tests that
-    create a full vLLM engine should NOT use this fixture as the engine
-    will initialize the workspace manager itself.
+    This fixture initializes the workspace manager with the current
+    platform's accelerator device if available, and resets it after the test
+    completes. Tests that create a full vLLM engine should NOT use this
+    fixture as the engine will initialize the workspace manager itself.
     """
     from vllm.v1.worker.workspace import (
         init_workspace_manager,
         reset_workspace_manager,
     )
 
-    if torch.cuda.is_available():
-        device = torch.device("cuda:0")
-        init_workspace_manager(device)
+    if torch.accelerator.is_available():
+        init_workspace_manager(torch.device(0))
     yield
     reset_workspace_manager()
 
@@ -935,6 +934,14 @@ def hf_runner():
     return HfRunner
 
 
+def _default_block_size() -> int:
+    if torch.xpu.is_available():
+        return 64
+    if current_platform.is_cpu():
+        return 128
+    return 16
+
+
 class VllmRunner:
     """
     The default value of some arguments have been modified from
@@ -963,7 +970,7 @@ class VllmRunner:
         dtype: str = "auto",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
-        block_size: int = 16 if not torch.xpu.is_available() else 64,
+        block_size: int = _default_block_size(),
         enable_chunked_prefill: bool | None = False,
         enforce_eager: bool | None = False,
         # Set this to avoid hanging issue
@@ -1372,8 +1379,10 @@ class VllmRunner:
             shutdown_timeout = 60.0 if current_platform.is_rocm() else None
             self.llm.llm_engine.engine_core.shutdown(timeout=shutdown_timeout)
         except Exception:
-            # Ignore shutdown errors as cleanup will still proceed
-            pass
+            # Don't fail the test on shutdown errors since cleanup will still
+            # proceed, but don't hide them either: a failure here usually
+            # means the engine's GPU memory was never released.
+            logger.exception("Engine core shutdown raised; GPU memory may leak")
         del self.llm
         torch._dynamo.reset()
         cleanup_dist_env_and_memory()

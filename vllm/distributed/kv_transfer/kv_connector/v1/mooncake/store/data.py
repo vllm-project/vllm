@@ -300,6 +300,39 @@ class ChunkedTokenDatabase:
             yield start_idx, end_idx, h
 
 
+@dataclass(frozen=True)
+class TailKeyBoundary:
+    """Hash boundary used to key a group's tail block in the store.
+
+    Attributes:
+        group_id: KV-cache group containing the tail block.
+        num_tokens: Token boundary whose prefix hash identifies the matched
+            stored block. The loader uses
+            ``block_hashes[num_tokens // hash_block_size - 1]`` instead of the
+            hash implied by ``MooncakeLookupResult.hit_length``. This changes
+            only the load key, not the reusable prefix.
+    """
+
+    group_id: int
+    num_tokens: int
+
+
+@dataclass
+class MooncakeLookupResult:
+    """Lookup result used to build the subsequent load request.
+
+    Attributes:
+        hit_length: Longest prefix that every KV-cache group can reuse after
+            their individual cache hits converge.
+        tail_key_boundaries: Hash boundary used to store each cache group's
+            tail block when ``hit_length`` does not identify its store key.
+            There is one entry per group for every nonzero hit.
+    """
+
+    hit_length: int
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
+
+
 @dataclass
 class LoadSpec:
     """Specification for loading KV cache from external store."""
@@ -308,6 +341,7 @@ class LoadSpec:
     kvpool_cached_tokens: int
     can_load: bool
     token_len: int = 0
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
 @dataclass
@@ -362,20 +396,21 @@ class ReqMeta:
 
     can_save: bool | None = None
     load_spec: LoadSpec | None = None
-    is_last_chunk: bool | None = None
     current_event: torch.cuda.Event | None = None
 
     token_ids: list[int] | None = None
+    # Absolute request offset represented by token_ids[0].
+    token_ids_start: int = 0
     num_prompt_tokens: int | None = None
     # Identifies this store job for the engine's lifetime. A request id cannot
     # serve that purpose: it is reused once a preempted request resumes, so it
     # would release the wrong job's blocks.
     store_job_id: int | None = None
-    # Core-provided per-mamba-group
-    # (group_id, cow_block_id, boundary_tokens) for this request's partial tail.
-    # Present only on the producer's CoW step; drives the connector's offload
-    # (the FA group's block is derived from block_ids and boundary_tokens).
-    partial_tail_offloads: list[tuple[int, int, int]] | None = None
+    # Core-provided (group_id, block_id, boundary_tokens) mamba "align"
+    # boundary states. A block-aligned entry is a committed boundary snapshot;
+    # a non-aligned entry is the sub-block CoW tail. The store-job reference
+    # keeps each exact block alive until every worker rank finishes the job.
+    boundary_state_offloads: list[tuple[int, int, int]] | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -384,14 +419,14 @@ class ReqMeta:
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
-        is_last_chunk: bool | None = None,
     ) -> "ReqMeta | None":
         """Create ReqMeta from a RequestTracker."""
         if block_hashes is None:
             block_hashes = []
         input_token_len = tracker.token_len
 
-        chunk_boundary = cdiv(tracker.num_saved_tokens + 1, block_size) * block_size
+        token_ids_start = tracker.num_saved_tokens
+        chunk_boundary = cdiv(token_ids_start + 1, block_size) * block_size
         num_tokens_to_save = input_token_len // block_size * block_size
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
@@ -408,8 +443,10 @@ class ReqMeta:
             tracker.num_saved_tokens = num_tokens_to_save
 
         token_ids = None
-        if tracker.token_ids:
-            token_ids = tracker.token_ids
+        if tracker.token_ids and not skip_save:
+            # Scheduler tracking continues while this job is handled by an
+            # asynchronous worker, so metadata must own a stable snapshot.
+            token_ids = tracker.token_ids[token_ids_start:num_tokens_to_save]
 
         if load_spec is not None and load_spec.can_load:
             logger.debug(
@@ -433,8 +470,8 @@ class ReqMeta:
             can_save=not skip_save,
             load_spec=load_spec,
             block_hashes=block_hashes,
-            is_last_chunk=is_last_chunk,
             token_ids=token_ids,
+            token_ids_start=token_ids_start,
             num_prompt_tokens=tracker.prefill_end_tokens,
         )
 
