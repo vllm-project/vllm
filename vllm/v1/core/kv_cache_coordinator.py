@@ -12,6 +12,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
     dcp_world_size_for_kv_cache_spec,
+    replay_boundary,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -304,26 +305,12 @@ class KVCacheCoordinator(ABC):
         )
 
     def get_replay_boundary(self, request: Request) -> int:
-        """Return the position a later request replaying this prompt resumes at.
-
-        A cache hit is the shortest hit across all groups, so this is a
-        model-level position: every group has to retain state here, whether or
-        not it is the group that drops. Groups differ only in how much they
-        keep around it -- EAGLE groups also keep the block above, which they
-        match and drop back from (see ``reachable_block_mask``).
-
-        Under EAGLE that block must exist, so the boundary sits one alignment
-        unit below the prompt's last aligned position; every group's block size
-        divides the alignment, so the block above always fits in the prompt.
-        """
-        if not self.eagle_group_ids:
-            return request.num_prompt_tokens - 1
-        aligned = (
-            request.num_prompt_tokens
-            // self.scheduler_block_size
-            * self.scheduler_block_size
+        """Bind ``replay_boundary`` to this coordinator's geometry."""
+        return replay_boundary(
+            request.num_prompt_tokens,
+            self.scheduler_block_size,
+            bool(self.eagle_group_ids),
         )
-        return max(aligned - self.scheduler_block_size, 0)
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """

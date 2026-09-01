@@ -5,6 +5,11 @@ from math import lcm
 
 import torch
 
+from tests.v1.core.test_prefix_caching import (
+    _make_hybrid_kv_cache_config,
+    make_kv_cache_manager,
+    make_request,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
@@ -12,7 +17,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     chunk_hashes_for_block_size,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import BlockHash, init_none_hash
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -414,6 +421,49 @@ def test_store_mask_retention_interval_zero_keeps_only_replay_boundary():
     # num_prompt=100 -> latest hit boundary = (100-1)//32*32 = 96 -> chunk 11.
     masks = coord.store_mask(128, num_prompt_tokens=100)
     assert masks[1] == [i == 11 for i in range(16)]
+
+
+def test_store_retention_matches_the_engine_for_the_same_request():
+    """The store is a peer of the engine, so it must retain exactly what the
+    engine retains -- no hard-coded chunk numbers, both sides asked directly.
+
+    Before this was true the store seeded `num_prompt_tokens - 1` while the
+    engine, under EAGLE, resumes a block lower: it kept state nothing reaches.
+    """
+    block, hash_block = 32, 8
+    init_none_hash(sha256)
+    config = _make_hybrid_kv_cache_config(block, 4096, ["full", "sliding_window"])
+    engine = make_kv_cache_manager(
+        kv_cache_config=config,
+        max_model_len=1 << 20,
+        enable_caching=True,
+        hash_block_size=hash_block,
+        use_eagle=True,
+    )
+    store = _make_coord(
+        list(config.kv_cache_groups),
+        hash_block_size=hash_block,
+        use_eagle=True,
+        retention_interval=0,
+    )
+    swa_spec = config.kv_cache_groups[1].kv_cache_spec
+
+    for num_prompt in range(64, 160, 4):
+        request = make_request(
+            f"r{num_prompt}", list(range(num_prompt)), hash_block, sha256
+        )
+        expected = SlidingWindowManager.reachable_block_mask(
+            start_block=0,
+            end_block=128 // swa_spec.block_size,
+            alignment_tokens=block,
+            kv_cache_spec=swa_spec,
+            use_eagle=True,
+            retention_interval=0,
+            reachable_boundaries=(engine.coordinator.get_replay_boundary(request),),
+        )
+        assert store.store_mask(128, num_prompt_tokens=num_prompt)[1] == expected, (
+            f"store and engine disagree at num_prompt={num_prompt}"
+        )
 
 
 def test_store_mask_retention_interval_keeps_segment_and_replay_tails():

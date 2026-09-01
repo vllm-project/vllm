@@ -697,6 +697,30 @@ def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> 
     return 1
 
 
+def replay_boundary(num_prompt_tokens: int, alignment: int, use_eagle: bool) -> int:
+    """Return the position a later request replaying this prompt resumes at.
+
+    Model-level, not per-group: a hit is the shortest hit across all groups, so
+    an EAGLE group's drop caps every group and all of them must retain state
+    here. Groups differ only in how much they keep around it -- EAGLE groups
+    also keep the block above, which they match and drop back from (see
+    ``SingleTypeKVCacheManager.reachable_block_mask``).
+
+    Under EAGLE that block must exist, so the boundary sits one alignment unit
+    below the prompt's last aligned position; every group's block size divides
+    the alignment, so the block above always fits in the prompt.
+
+    Args:
+        num_prompt_tokens: Length of the prompt being replayed.
+        alignment: Scheduler block size.
+        use_eagle: Whether any group takes the EAGLE drop.
+    """
+    if not use_eagle:
+        return num_prompt_tokens - 1
+    aligned = num_prompt_tokens // alignment * alignment
+    return max(aligned - alignment, 0)
+
+
 def resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,

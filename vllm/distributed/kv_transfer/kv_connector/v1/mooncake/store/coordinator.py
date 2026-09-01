@@ -14,6 +14,7 @@ from vllm.v1.core.kv_cache_coordinator import SpecGroup
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    replay_boundary,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -264,6 +265,17 @@ class MooncakeStoreCoordinator:
             f"aligned_token_len ({aligned_token_len}) must be a multiple of "
             f"{mask_alignment}"
         )
+        # Model-level, so it is computed once and shared by every group; the
+        # store's retention must name the position the engine resumes at.
+        reachable_boundaries = (
+            ()
+            if num_prompt_tokens is None
+            else (
+                replay_boundary(
+                    num_prompt_tokens, self.lcm_block_size, bool(self.eagle_group_ids)
+                ),
+            )
+        )
         masks: list[list[bool] | None] = []
         for g_idx, g in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(g.kv_cache_spec)
@@ -275,9 +287,6 @@ class MooncakeStoreCoordinator:
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None
             use_eagle = g_idx in self.eagle_group_ids
-            reachable_boundaries = (
-                () if num_prompt_tokens is None else (num_prompt_tokens - 1,)
-            )
             mask = manager_cls.reachable_block_mask(
                 start_block=start_chunk,
                 end_block=end_chunk,
