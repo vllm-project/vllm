@@ -20,6 +20,7 @@ import regex as re
 from openai.types.responses import ToolChoiceFunction
 from partial_json_parser.core.options import Allow
 
+import vllm.envs as envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -75,8 +76,16 @@ class PoolsideV1ToolParser(ToolParser):
         self.tool_calls_start_token = self.tool_call_start_token
 
         self.func_call_regex = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
+        # The function name is a run of non-`<`, non-newline characters that
+        # neither starts nor ends with whitespace. Pinning both ends matters:
+        # if the name could also match whitespace, it would overlap with the
+        # surrounding `\s*` and a long run of spaces could be split between
+        # them in O(n^3) ways, so a failing match backtracks through all of
+        # them. `\s` already covers `\n`, so no separate `\n?` is needed.
         self.func_detail_regex = re.compile(
-            r"<tool_call>\s*([^\n<]+?)\s*\n?\s*(<arg_key>.*?)?</tool_call>", re.DOTALL
+            r"<tool_call>\s*([^\s<](?:[^\n<]*[^\s<])?)\s*"
+            r"(<arg_key>.*?)?</tool_call>",
+            re.DOTALL,
         )
         self.func_arg_regex = re.compile(
             r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL
@@ -190,12 +199,15 @@ class PoolsideV1ToolParser(ToolParser):
         model_output: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
-        matched_tool_calls = self.func_call_regex.findall(model_output)
         logger.debug("model_output: %s", model_output)
+        regex_timeout = envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
         try:
+            matched_tool_calls = self.func_call_regex.findall(
+                model_output, timeout=regex_timeout
+            )
             tool_calls: list[ToolCall] = []
             for match in matched_tool_calls:
-                tc_detail = self.func_detail_regex.search(match)
+                tc_detail = self.func_detail_regex.search(match, timeout=regex_timeout)
                 if not tc_detail:
                     logger.warning(
                         "Failed to parse tool call details from: %s",
@@ -204,7 +216,11 @@ class PoolsideV1ToolParser(ToolParser):
                     continue
                 tc_name = tc_detail.group(1).strip()
                 tc_args = tc_detail.group(2)
-                pairs = self.func_arg_regex.findall(tc_args) if tc_args else []
+                pairs = (
+                    self.func_arg_regex.findall(tc_args, timeout=regex_timeout)
+                    if tc_args
+                    else []
+                )
                 arg_dct: dict[str, Any] = {}
                 for key, value in pairs:
                     arg_key = key.strip()
@@ -225,6 +241,14 @@ class PoolsideV1ToolParser(ToolParser):
                         ),
                     )
                 )
+        except TimeoutError:
+            logger.warning(
+                "Regex timeout occurred when extracting tool calls; "
+                "returning the model output as content."
+            )
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
         except Exception:
             logger.exception("Failed to extract tool call spec")
             return ExtractedToolCallInformation(
