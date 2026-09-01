@@ -108,7 +108,7 @@ class INCMxfp4LinearMethod(INCLinearScheme):
                     f"Linear input width {x.shape[-1]} is not divisible by "
                     f"AutoRound rotation block_size={self.rotation_block_size}"
                 )
-            if current_platform.is_xpu():
+            if current_platform.is_xpu() and x.is_xpu:
                 return self._apply_xpu_rotation(layer, x, bias)
             original_shape = x.shape
             x = x.unflatten(-1, (-1, self.rotation_block_size)).contiguous().clone()

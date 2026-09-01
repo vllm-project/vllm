@@ -94,6 +94,27 @@ def _inc_ark_woq_linear_fake(
     )
 
 
+def _inc_ark_mxfp4_hadamard_quant_impl(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from auto_round_kernel.mxfp4_hadamard import mxfp4_hadamard_quant
+
+    return mxfp4_hadamard_quant(x)
+
+
+def _inc_ark_mxfp4_hadamard_quant_fake(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+        torch.empty(
+            (*x.shape[:-1], x.shape[-1] // 2), dtype=torch.uint8, device=x.device
+        ),
+        torch.empty(
+            (*x.shape[:-1], x.shape[-1] // 32), dtype=torch.uint8, device=x.device
+        ),
+    )
+
+
 class ark_ops:
     @staticmethod
     def register_ops_once() -> None:
@@ -113,6 +134,12 @@ class ark_ops:
             op_name="inc_ark_woq_linear",
             op_func=_inc_ark_woq_linear_impl,
             fake_impl=_inc_ark_woq_linear_fake,
+            dispatch_key=current_platform.dispatch_key,
+        )
+        direct_register_custom_op(
+            op_name="inc_ark_mxfp4_hadamard_quant",
+            op_func=_inc_ark_mxfp4_hadamard_quant_impl,
+            fake_impl=_inc_ark_mxfp4_hadamard_quant_fake,
             dispatch_key=current_platform.dispatch_key,
         )
         _OPS_REGISTERED = True
