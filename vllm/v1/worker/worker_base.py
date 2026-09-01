@@ -39,6 +39,9 @@ _R = TypeVar("_R")
 class CompilationTimes(NamedTuple):
     language_model: float
     encoder: float
+    num_kv_blocks: int | None = None
+    """KV cache blocks that fit in the memory measured after warmup, reported
+    by workers with an extensible KV cache."""
 
 
 class WorkerBase:
@@ -117,9 +120,16 @@ class WorkerBase:
         """Prepare model for execution through compilation/warmup.
 
         Returns:
-            Compilation times (language_model, encoder) in seconds.
+            Compilation times (language_model, encoder) in seconds, and the
+            measured KV cache size for an extensible KV cache.
         """
         raise NotImplementedError
+
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        """Commit the final size of an extensible KV cache."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support the extensible KV cache."
+        )
 
     def check_health(self) -> None:
         """Basic health check (override for device-specific checks)."""

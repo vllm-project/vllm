@@ -121,7 +121,7 @@ class Executor(ABC):
         """Initialize the KV caches on the underlying workers."""
         self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> list[CompilationTimes]:
         """Compile/warm up the model and capture cudagraphs on workers."""
         compilation_times: list[CompilationTimes] = self.collective_rpc(
             "compile_or_warm_up_model"
@@ -137,6 +137,11 @@ class Executor(ABC):
             self.vllm_config.compilation_config.encoder_compilation_time = max(
                 t.encoder for t in compilation_times
             )
+        return compilation_times
+
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        """Commit the final size of an extensible KV cache on the workers."""
+        self.collective_rpc("extend_kv_cache", args=(num_blocks,))
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
         """
