@@ -598,6 +598,8 @@ class EngineCore:
     def _attach_dp_execution_contract_epoch(
         self, scheduler_output: SchedulerOutput
     ) -> None:
+        if not getattr(self, "cached_dp_execution_contract_enabled", False):
+            return
         scheduler_output.dp_execution_contract_epoch = getattr(
             self, "_dp_execution_contract_epoch", None
         )

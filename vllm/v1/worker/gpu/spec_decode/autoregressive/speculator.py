@@ -232,6 +232,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 execution_num_reqs = dp_sync.execution_num_reqs
                 if dp_sync.live_num_reqs_across_dp:
                     live_num_reqs = dp_sync.live_num_reqs_across_dp[self.dp_rank]
+                elif dummy_run and not dp_sync.live_facts_exact:
+                    # A cached target contract deliberately omits current
+                    # cross-rank occupancy. On a sentinel-only rank the input
+                    # batch has execution-capacity rows, not live requests.
+                    live_num_reqs = 0
 
         max_query_len = int(input_batch.num_scheduled_tokens.max())
         uniform_token_count = get_uniform_decode_token_count(

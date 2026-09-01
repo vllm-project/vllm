@@ -593,6 +593,60 @@ def test_propose_consumes_prestarted_decode_dp_sync(monkeypatch):
 
 @pytest.mark.cpu_test
 @pytest.mark.skip_global_cleanup
+def test_cached_target_contract_keeps_dummy_rank_logically_idle(monkeypatch):
+    speculator, input_batch, _, _ = _make_async_sync_propose_speculator(monkeypatch)
+    input_batch.num_reqs = 4
+    input_batch.num_tokens = 4
+    input_batch.num_tokens_after_padding = 4
+    input_batch.num_scheduled_tokens = torch.ones(4, dtype=torch.int32)
+    target_sync = DPSyncState(
+        torch.tensor([4, 4]),
+        1,
+        False,
+        generation=7,
+        execution_num_reqs=4,
+        live_facts_exact=False,
+        contract_epoch=10,
+    )
+
+    signature = speculator._make_dp_sync_signature(
+        input_batch,
+        target_sync,
+        dummy_run=True,
+        is_profile=False,
+    )
+
+    assert signature.live_num_reqs == 0
+    assert signature.execution_num_reqs == 4
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_cached_target_contract_uses_local_live_request_count(monkeypatch):
+    speculator, input_batch, _, _ = _make_async_sync_propose_speculator(monkeypatch)
+    target_sync = DPSyncState(
+        torch.tensor([4, 4]),
+        1,
+        False,
+        generation=7,
+        execution_num_reqs=4,
+        live_facts_exact=False,
+        contract_epoch=10,
+    )
+
+    signature = speculator._make_dp_sync_signature(
+        input_batch,
+        target_sync,
+        dummy_run=False,
+        is_profile=False,
+    )
+
+    assert signature.live_num_reqs == 1
+    assert signature.execution_num_reqs == 4
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
 def test_propose_rejects_prestart_signature_drift(monkeypatch):
     speculator, input_batch, future, order = _make_async_sync_propose_speculator(
         monkeypatch

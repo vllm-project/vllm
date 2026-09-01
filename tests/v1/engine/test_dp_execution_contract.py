@@ -120,6 +120,7 @@ def test_cached_contract_epoch_is_absent_when_disabled() -> None:
 
 def test_scheduler_output_receives_engine_owned_contract_epoch() -> None:
     core = object.__new__(DPEngineCoreProc)
+    core.cached_dp_execution_contract_enabled = True
     core._dp_execution_contract_refresh = True
     core._dp_execution_contract_epoch = 23
     output = SchedulerOutput.make_empty()
