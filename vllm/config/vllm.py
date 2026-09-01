@@ -2527,9 +2527,8 @@ class VllmConfig:
         )
 
     def _resolve_mm_video_decode_device(self) -> None:
-        """Default video decoding to NVDEC when the processor runs on the
-        accelerator (an EPD encode-only instance, see
-        `_resolve_mm_processor_device`).
+        """Default video decoding to NVDEC on an EPD encode-only instance
+        whose processor runs on the accelerator.
 
         The processor consumes the decoded frames on-device in that case, so
         keeping the frames on the GPU skips the host round-trip through the
@@ -2547,9 +2546,14 @@ class VllmConfig:
         from vllm.platforms import current_platform
 
         device_type = current_platform.device_type
-        if device_type in ("", "cpu"):
+        if device_type != "cuda":
             return
-        if mm_config.get_mm_processor_device_type() != device_type:
+
+        ec_config = self.ec_transfer_config
+        # An EC producer that is not also a consumer runs no forward pass and
+        # allocates no KV cache, so frontend accelerator work has the device to
+        # itself.
+        if ec_config is None or not ec_config.is_encode_only:
             return
 
         video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
