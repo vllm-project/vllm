@@ -76,8 +76,8 @@ steps:
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 25m "
-      pytest -x -v -s tests/models/language/generation -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-      pytest -x -v -s tests/models/language/pooling -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+      pytest -x -v -s tests/models/language/generation -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || { rc=\$$?; [ \"\$$rc\" -eq 5 ]; }
+      pytest -x -v -s tests/models/language/pooling -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || { rc=\$$?; [ \"\$$rc\" -eq 5 ]; }
       if [ \"$$BUILDKITE_PARALLEL_JOB\" = \"0\" ]; then pytest -x -v -s tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py; fi"
   # The three-way timing run left two buckets above 30 minutes. Six shards
   # refine every existing pytest hash bucket in two (modulo 6 vs. modulo 3).
