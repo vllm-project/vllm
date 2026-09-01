@@ -18,6 +18,7 @@ from vllm.compilation.breakable_cudagraph import (
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
@@ -310,6 +311,16 @@ class CudaGraphManager:
                         self._candidates.setdefault(key, []).extend(matching)
                     current_range_start = num_tokens + 1
 
+    def _drop_piecewise_cudagraphs(self) -> None:
+        """Remove PIECEWISE from the capture plan and the dispatch tables."""
+        self._capture_descs.pop(CUDAGraphMode.PIECEWISE, None)
+        for key, descs in list(self._candidates.items()):
+            kept = [d for d in descs if d.cg_mode != CUDAGraphMode.PIECEWISE]
+            if kept:
+                self._candidates[key] = kept
+            else:
+                del self._candidates[key]
+
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
 
@@ -509,6 +520,38 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
         if self.use_breakable_cg:
             self.init_breakable_cg_runner(model)
+
+        # @support_torch_compile decorates an inner module (e.g. LlamaModel
+        # inside LlamaForCausalLM), so detection must look at submodules.
+        # Decorated-but-skipped modules (do_not_compile, e.g. enable_if=False)
+        # produce no CUDAGraphWrapper and don't count.
+        has_compiled_piecewise = any(
+            isinstance(m, TorchCompileWithNoGuardsWrapper)
+            and not getattr(m, "do_not_compile", True)
+            for m in model.modules()
+        )
+        if (
+            self.cudagraph_mode.has_piecewise_cudagraphs()
+            and not self.use_breakable_cg
+            and not has_compiled_piecewise
+        ):
+            # Piecewise graphs are recorded by CUDAGraphWrappers created by a
+            # torch-compiled submodule, or by the breakable runner. With
+            # neither, the capture calls below record nothing, yet dispatch()
+            # would still hand out PIECEWISE descriptors — running padded
+            # batches raw-eager under a cudagraph runtime mode, which corrupts
+            # models that derive token counts from tensor shapes. Drop
+            # PIECEWISE from the plan so those batches run plain eager.
+            logger.warning_once(
+                "%s was not torch-compiled and breakable CUDA graph is not "
+                "enabled; piecewise CUDA graphs are unavailable, mixed/prefill "
+                "batches will run eagerly. If this model is intentionally not "
+                "torch-compiled, add its architecture to "
+                "DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES to keep piecewise "
+                "acceleration.",
+                type(model).__name__,
+            )
+            self._drop_piecewise_cudagraphs()
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
