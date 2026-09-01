@@ -93,11 +93,8 @@ class MultiModalHasher:
             obj.media, (np.ndarray, torch.Tensor)
         ):
             frames = obj.media
-            if isinstance(frames, torch.Tensor):
-                frames_nbytes = frames.numel() * frames.element_size()
-            else:
-                frames_nbytes = frames.nbytes
-            if frames_nbytes < len(obj.original_bytes):
+            # Both np.ndarray and torch.Tensor expose .nbytes.
+            if frames.nbytes < len(obj.original_bytes):
                 return cls.iter_item_to_bytes("video", frames)
             return cls.iter_item_to_bytes("video", obj.original_bytes)
 

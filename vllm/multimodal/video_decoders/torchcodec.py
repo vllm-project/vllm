@@ -77,13 +77,12 @@ class TorchCodecVideoBackendMixin:
         device: str = "cpu",
     ) -> "VideoDecoder":
         torch_device = torch.device(device)
-        if torch_device.type == "cuda":
-            if not current_platform.is_cuda():
-                raise ValueError(
-                    f"torchcodec video decoding on device {device!r} requires "
-                    "a CUDA-capable platform."
-                )
-        elif torch_device.type != "cpu":
+        if torch_device.type == "cuda" and not current_platform.is_cuda():
+            raise ValueError(
+                f"torchcodec video decoding on device {device!r} requires "
+                "a CUDA-capable platform."
+            )
+        elif torch_device.type not in ("cpu", "cuda"):
             raise ValueError(
                 f"torchcodec video decoding only supports 'cpu' and 'cuda' "
                 f"devices, got {device!r}."
@@ -115,28 +114,20 @@ class TorchCodecVideoBackendMixin:
         *,
         device: str = "cpu",
     ) -> tuple[npt.NDArray | torch.Tensor, list[int]]:
-        """Decode the requested indices in one batched, index-exact call.
-
-        With a non-CPU ``device`` the frames stay on the GPU as a torch
-        tensor (NVDEC hardware decoding), so a device-side HF processor can
-        consume them without a host round-trip.
-        """
+        """Decode the requested indices in one batched, index-exact call."""
         if not frame_indices:
             return np.empty((0,), dtype=np.uint8), []
         # Note: torchcodec releases the GIL for the entire call
         batch = decoder.get_frames_at(frame_indices)
         frames = batch.data
-        if torch.device(device).type != "cpu":
-            # The frames' device is not a reliable NVDEC signal: on
-            # NVDEC-less systems torchcodec decodes on CPU and *uploads*
-            # the frames, so they still land on the GPU. `cpu_fallback`
-            # records whether hardware decoding was actually used, and
-            # str() carries the reason (e.g. "NVCUVID not available").
-            status = getattr(decoder, "cpu_fallback", None)
-            if status is not None and bool(status):
-                logger.warning_once(
-                    "torchcodec could not use NVDEC for this video and "
-                    "decoded on CPU instead; check codec support and "
-                    "libnvcuvid."
-                )
+        if (
+            torch.device(device).type != "cpu"
+            and (status := getattr(decoder, "cpu_fallback", None)) is not None
+            and bool(status)
+        ):
+            logger.warning_once(
+                "torchcodec could not use NVDEC for this video and "
+                "decoded on CPU instead; check codec support and "
+                "libnvcuvid."
+            )
         return frames, list(frame_indices)
