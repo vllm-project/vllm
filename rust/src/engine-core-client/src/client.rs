@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::future::{join_all, try_join_all};
+use futures::future::join_all;
 use itertools::Itertools;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -15,7 +15,7 @@ use tracing::{debug, info, trace};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
 use crate::coordinator::CoordinatorHandle;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
@@ -68,9 +68,68 @@ pub enum TransportMode {
         engine_start_index: u32,
         /// Total number of engines expected to register on this transport.
         engine_count: usize,
+        /// Deployment-wide data-parallel size. This may be larger than
+        /// `engine_count` when a supervisor partitions ranks across frontends.
+        data_parallel_size: usize,
         /// Maximum time to wait for all expected engines to register.
         ready_timeout: Duration,
     },
+}
+
+impl TransportMode {
+    /// Return the deployment-wide data-parallel size for this transport.
+    pub fn data_parallel_size(&self) -> usize {
+        match self {
+            Self::HandshakeOwner { engine_count, .. } => *engine_count,
+            Self::Bootstrapped {
+                data_parallel_size, ..
+            } => *data_parallel_size,
+        }
+    }
+
+    /// Validate the transport topology before opening any sockets.
+    pub fn validate(&self) -> Result<()> {
+        let data_parallel_size = self.data_parallel_size();
+        if data_parallel_size == 0 {
+            bail_invalid_client_config!("data parallel size must be at least 1");
+        }
+        if data_parallel_size > usize::from(u16::MAX) + 1 {
+            bail_invalid_client_config!(
+                "data parallel size ({data_parallel_size}) exceeds the two-byte engine identity limit"
+            );
+        }
+
+        match self {
+            Self::HandshakeOwner { .. } => {}
+            Self::Bootstrapped {
+                engine_start_index,
+                engine_count,
+                ..
+            } => {
+                if *engine_count == 0 {
+                    bail_invalid_client_config!("engine count must be at least 1");
+                }
+                let engine_start_index = usize::try_from(*engine_start_index).map_err(|_| {
+                    Error::InvalidClientConfig {
+                        message: "engine start index does not fit usize".to_string(),
+                    }
+                })?;
+                let engine_end_index =
+                    engine_start_index.checked_add(*engine_count).ok_or_else(|| {
+                        Error::InvalidClientConfig {
+                            message: "engine start index + engine count overflows".to_string(),
+                        }
+                    })?;
+                if engine_end_index > data_parallel_size {
+                    bail_invalid_client_config!(
+                        "connected engine range [{engine_start_index}, {engine_end_index}) exceeds data parallel size ({data_parallel_size})"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Which coordinator implementation should be active when one is present for a
@@ -115,6 +174,11 @@ impl EngineCoreClientConfig {
             model_name: String::new(),
             client_index: 0,
         }
+    }
+
+    /// Validate the client topology before opening any transport sockets.
+    pub fn validate(&self) -> Result<()> {
+        self.transport_mode.validate()
     }
 
     /// Set the model name used by frontend-side metrics and diagnostics.
@@ -226,6 +290,7 @@ impl EngineCoreClient {
     /// handshake. In bootstrapped mode it binds the provided frontend
     /// sockets and waits for the expected engine registration frames.
     pub async fn connect(config: EngineCoreClientConfig) -> Result<Self> {
+        config.validate()?;
         let connected = match &config.transport_mode {
             TransportMode::HandshakeOwner {
                 handshake_address,
@@ -261,6 +326,7 @@ impl EngineCoreClient {
                 engine_start_index,
                 engine_count,
                 ready_timeout,
+                ..
             } => {
                 if let Some(CoordinatorMode::InProc) = config.coordinator_mode {
                     panic!("cannot use in-process coordinator with bootstrapped transport mode")
@@ -376,6 +442,17 @@ impl EngineCoreClient {
     /// Return the number of engines connected to this client.
     pub fn engine_count(&self) -> usize {
         self.engines.len()
+    }
+
+    /// Return the deployment-wide data-parallel size configured for this
+    /// client.
+    pub fn data_parallel_size(&self) -> usize {
+        self.config.transport_mode.data_parallel_size()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_utility_call_count(&self) -> usize {
+        self.inner.pending_utility_call_count()
     }
 
     /// Return the engine-side indices connected to this client.
@@ -524,6 +601,16 @@ impl EngineCoreClient {
         let (engine_id, rx) =
             self.inner.register_request(request_id.clone(), lora_name, data_parallel_rank)?;
 
+        // Construct the output stream first before actually sending the request to the engine.
+        // This ensures that cancelling the future will properly clean up the request registration
+        // via `Drop` of the stream.
+        let stream = EngineCoreOutputStream::new(
+            request_id.clone(),
+            engine_id.engine_index().unwrap_or(0),
+            self.abort_tx.clone(),
+            rx,
+        );
+
         let result: Result<()> = async {
             if let Some(coordinator) = self.coordinator.as_ref() {
                 let snapshot = coordinator.snapshot();
@@ -550,12 +637,7 @@ impl EngineCoreClient {
             return Err(error);
         }
 
-        Ok(EngineCoreOutputStream::new(
-            request_id,
-            engine_id.engine_index().unwrap_or(0),
-            self.abort_tx.clone(),
-            rx,
-        ))
+        Ok(stream)
     }
 
     /// Abort currently in-flight requests by request ID.
@@ -579,8 +661,9 @@ impl EngineCoreClient {
     }
 
     /// Call a typed utility method on all connected engines, returning one
-    /// decoded result per connected engine if all calls succeed or an error
-    /// if any call fails.
+    /// decoded result per connected engine if all calls succeed. The client
+    /// waits for every engine outcome before returning an error so callers can
+    /// safely compensate partially applied mutations.
     ///
     /// Callers should pass utility arguments using Rust tuple semantics so the
     /// encoded payload matches Python's `(client_index, call_id,
@@ -597,62 +680,47 @@ impl EngineCoreClient {
             "sending utility request"
         );
 
-        // Phase 1: allocate one call id per engine and build the per-engine
-        // request payloads up-front. Any failure here (registry closed, encode
-        // error) must roll back the call ids already allocated so they do not
-        // leak in the utility registry until shutdown.
-        let mut pending_calls = Vec::with_capacity(self.engines.len());
-        let mut prepared_sends = Vec::with_capacity(self.engines.len());
+        /// Removes utility waiters if a call future is cancelled before completion.
+        struct UtilityCallGuard<'a> {
+            inner: &'a ClientInner,
+            call_ids: Vec<u64>,
+        }
+
+        impl Drop for UtilityCallGuard<'_> {
+            fn drop(&mut self) {
+                self.inner.unregister_utility_calls(self.call_ids.drain(..));
+            }
+        }
+
+        let mut call_guard = UtilityCallGuard {
+            inner: self.inner.as_ref(),
+            call_ids: Vec::with_capacity(self.engines.len()),
+        };
+
+        let mut prepared_calls = Vec::with_capacity(self.engines.len());
         for engine in &self.engines {
-            let (call_id, rx) = match self.inner.allocate_and_register_utility_call() {
-                Ok(pair) => pair,
-                Err(err) => {
-                    self.inner.unregister_utility_calls(pending_calls.iter().map(|(id, _)| *id));
-                    return Err(err);
-                }
-            };
-            let request = match EngineCoreUtilityRequest::new(
-                self.config.client_index,
-                call_id,
-                method,
-                &args,
-            ) {
-                Ok(request) => request,
-                Err(err) => {
-                    self.inner.unregister_utility_calls(
-                        pending_calls.iter().map(|(id, _)| *id).chain(std::iter::once(call_id)),
-                    );
-                    return Err(err);
-                }
-            };
-            pending_calls.push((call_id, rx));
-            prepared_sends.push((&engine.engine_id, request));
+            let (call_id, rx) = self.inner.allocate_and_register_utility_call()?;
+            call_guard.call_ids.push(call_id);
+            let request =
+                EngineCoreUtilityRequest::new(self.config.client_index, call_id, method, &args)?;
+            prepared_calls.push((&engine.engine_id, call_id, rx, request));
         }
 
-        // Phase 2: dispatch every utility request concurrently. `try_join_all`
-        // fails fast on the first transport error and drops the remaining send
-        // futures; any engines that already received the request will reply,
-        // but those replies are simply dropped because we roll back the call
-        // ids below.
-        let send_futures = prepared_sends.iter().map(|(engine_id, request)| {
-            self.inner.send_to_engine(engine_id, EngineCoreRequestType::Utility, request)
-        });
-        if let Err(err) = try_join_all(send_futures).await {
-            self.inner.unregister_utility_calls(pending_calls.iter().map(|(id, _)| *id));
-            return Err(err);
-        }
-
-        // Phase 3: wait for all engines to respond and preserve the per-engine
-        // result list.
-        let futures = pending_calls.into_iter().map(|(call_id, rx)| async move {
-            rx.await
-                .map_err(|_| Error::UtilityCallClosed {
-                    method: method.to_string(),
-                    call_id,
-                })??
-                .into_typed_result(method)
-        });
-        try_join_all(futures).await
+        let outcomes = join_all(prepared_calls.into_iter().map(
+            |(engine_id, call_id, rx, request)| async move {
+                self.inner
+                    .send_to_engine(engine_id, EngineCoreRequestType::Utility, &request)
+                    .await?;
+                rx.await
+                    .map_err(|_| Error::UtilityCallClosed {
+                        method: method.to_string(),
+                        call_id,
+                    })??
+                    .into_typed_result(method)
+            },
+        ))
+        .await;
+        outcomes.into_iter().collect()
     }
 
     /// Call a utility method on all connected engines and return the shared

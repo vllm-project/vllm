@@ -17,11 +17,40 @@ COMMAND_RUN_CI_ALL = "/ci run all"
 COMMAND_RUN_CI_NIGHTLY = "/ci run nightly"
 COMMAND_RETRY_FAILED = "/ci retry"
 COMMAND_CANCEL_CI = "/ci cancel"
+COMMAND_RUN_AMD_CI = "/amd-ci run"
+COMMAND_RUN_AMD_CI_ALL = "/amd-ci run all"
+COMMAND_RUN_AMD_CI_NIGHTLY = "/amd-ci run nightly"
+COMMAND_RETRY_AMD_FAILED = "/amd-ci retry"
+COMMAND_CANCEL_AMD_CI = "/amd-ci cancel"
 RUN_CI_COMMAND_ENV = {
     COMMAND_RUN_CI: {},
     COMMAND_RUN_CI_ALL: {"RUN_ALL": "1"},
     COMMAND_RUN_CI_NIGHTLY: {"RUN_ALL": "1", "NIGHTLY": "1"},
+    COMMAND_RUN_AMD_CI: {},
+    COMMAND_RUN_AMD_CI_ALL: {"RUN_ALL": "1"},
+    COMMAND_RUN_AMD_CI_NIGHTLY: {"RUN_ALL": "1", "NIGHTLY": "1"},
 }
+UPSTREAM_CI_COMMANDS = frozenset(
+    {
+        COMMAND_RUN_CI,
+        COMMAND_RUN_CI_ALL,
+        COMMAND_RUN_CI_NIGHTLY,
+        COMMAND_RETRY_FAILED,
+        COMMAND_CANCEL_CI,
+    }
+)
+AMD_CI_COMMANDS = frozenset(
+    {
+        COMMAND_RUN_AMD_CI,
+        COMMAND_RUN_AMD_CI_ALL,
+        COMMAND_RUN_AMD_CI_NIGHTLY,
+        COMMAND_RETRY_AMD_FAILED,
+        COMMAND_CANCEL_AMD_CI,
+    }
+)
+RETRY_COMMANDS = frozenset({COMMAND_RETRY_FAILED, COMMAND_RETRY_AMD_FAILED})
+CANCEL_COMMANDS = frozenset({COMMAND_CANCEL_CI, COMMAND_CANCEL_AMD_CI})
+ALL_CI_COMMANDS = UPSTREAM_CI_COMMANDS | AMD_CI_COMMANDS
 CI_AUTHORIZED_COMMENT_MARKER = "<!-- vllm-ci-authorized -->"
 READY_LABELS = {"ready", "ready-run-all-tests"}
 TRUSTED_PERMISSIONS = {"admin", "maintain", "write"}
@@ -408,9 +437,46 @@ class BuildkiteClient:
 
 
 def parse_command(body: str) -> str | None:
-    if body in {*RUN_CI_COMMAND_ENV, COMMAND_RETRY_FAILED, COMMAND_CANCEL_CI}:
+    if body in ALL_CI_COMMANDS:
         return body
     return None
+
+
+def pipeline_for_command(
+    command: str,
+    *,
+    amd_ci_pipeline: str = "amd-ci",
+    upstream_ci_pipeline: str = "ci",
+) -> str:
+    if command in AMD_CI_COMMANDS:
+        return amd_ci_pipeline
+    if command in UPSTREAM_CI_COMMANDS:
+        return upstream_ci_pipeline
+    raise ValueError(f"Unsupported CI command: {command}")
+
+
+def ci_name_for_command(command: str) -> str:
+    if command in AMD_CI_COMMANDS:
+        return "AMD CI"
+    if command in UPSTREAM_CI_COMMANDS:
+        return "CI"
+    raise ValueError(f"Unsupported CI command: {command}")
+
+
+def run_command_for_command(command: str) -> str:
+    if command in AMD_CI_COMMANDS:
+        return COMMAND_RUN_AMD_CI
+    if command in UPSTREAM_CI_COMMANDS:
+        return COMMAND_RUN_CI
+    raise ValueError(f"Unsupported CI command: {command}")
+
+
+def retry_command_for_command(command: str) -> str:
+    if command in AMD_CI_COMMANDS:
+        return COMMAND_RETRY_AMD_FAILED
+    if command in UPSTREAM_CI_COMMANDS:
+        return COMMAND_RETRY_FAILED
+    raise ValueError(f"Unsupported CI command: {command}")
 
 
 def parse_trusted_users(value: str = "") -> set[str]:
@@ -432,6 +498,7 @@ def authorize(
     actor: str,
     permission: str,
     pr: Mapping[str, Any],
+    run_command: str = COMMAND_RUN_CI,
     trusted_approval: bool = False,
     trusted_users: set[str] | None = None,
 ) -> tuple[bool, str]:
@@ -454,7 +521,7 @@ def authorize(
         return True, "approval from a trusted reviewer"
     return (
         False,
-        "A reviewer with write access must run `/ci run`, approve the PR, "
+        f"A reviewer with write access must run `{run_command}`, approve the PR, "
         "or add the `ready` label first.",
     )
 
@@ -497,6 +564,21 @@ def is_build_for_pr(build: Mapping[str, Any], pr_number: int) -> bool:
 
 def is_active_build(build: Mapping[str, Any]) -> bool:
     return bool(build.get("blocked")) or build.get("state") in ACTIVE_BUILD_STATES
+
+
+def is_comment_triggered_build(build: Mapping[str, Any]) -> bool:
+    metadata = build.get("meta_data") or {}
+    return bool(metadata.get("github-comment-id"))
+
+
+def blocks_new_run(command: str, build: Mapping[str, Any]) -> bool:
+    if command in AMD_CI_COMMANDS:
+        return (
+            is_comment_triggered_build(build)
+            and build.get("state") in ACTIVE_BUILD_STATES
+            and build.get("state") != "blocked"
+        )
+    return is_active_build(build)
 
 
 def select_latest_build(
@@ -544,17 +626,21 @@ def create_retry_build_payload(
     *,
     actor: str,
     comment_id: int,
+    command: str = COMMAND_RETRY_FAILED,
     pr: Mapping[str, Any],
     source_build: Mapping[str, Any],
     step_keys: Sequence[str],
 ) -> dict[str, Any]:
+    if command not in RETRY_COMMANDS:
+        raise ValueError(f"Unsupported retry command: {command}")
     payload = create_build_payload(
         actor=actor,
         comment_id=comment_id,
+        command=run_command_for_command(command),
         pr=pr,
     )
     source_number = str(source_build["number"])
-    payload["message"] = f"PR #{pr['number']} {COMMAND_RETRY_FAILED} by @{actor}"
+    payload["message"] = f"PR #{pr['number']} {command} by @{actor}"
     payload["env"]["VLLM_CI_ONLY_STEP_KEYS"] = json.dumps(
         step_keys, separators=(",", ":")
     )
@@ -657,13 +743,15 @@ def notify_authorized(
         pr["number"],
         (
             f"✅ @{author}, CI is now available for this PR.\n\n"
-            "- `/ci run` starts a CI build.\n"
+            "- `/ci run` starts upstream CI; `/amd-ci run` starts AMD CI only.\n"
             "- `/ci retry` retries failed jobs in the CI build for the current "
             "PR head. If the current head has no CI build, it starts a new CI "
             "build for the current head containing only jobs that failed in "
             "the latest earlier CI build for this PR.\n"
+            "- `/amd-ci retry` retries failed jobs in AMD CI for the current PR "
+            "head. Use `/amd-ci run` when the current head has no AMD CI build.\n"
             "- `/ci cancel` cancels scheduled or running CI builds for this PR "
-            "branch.\n\n"
+            "branch; `/amd-ci cancel` does the same for AMD CI only.\n\n"
             f"{CI_AUTHORIZED_COMMENT_MARKER}"
         ),
     )
@@ -712,25 +800,30 @@ def handle_run_ci(
     github: GitHubClient,
     pr: Mapping[str, Any],
 ) -> str:
+    ci_name = ci_name_for_command(command)
     duplicate_builds = buildkite.list_builds(
         pr["head"]["sha"],
         metadata=("github-comment-id", str(comment_id)),
     )
     duplicate = select_latest_build(duplicate_builds, pr["number"])
     if duplicate:
-        return f"CI was already requested by this comment: {duplicate['web_url']}"
+        return (
+            f"{ci_name} was already requested by this comment: {duplicate['web_url']}"
+        )
 
     current_builds = buildkite.list_builds(pr["head"]["sha"])
     active_build = next(
         (
             build
             for build in current_builds
-            if is_build_for_pr(build, pr["number"]) and is_active_build(build)
+            if is_build_for_pr(build, pr["number"]) and blocks_new_run(command, build)
         ),
         None,
     )
     if active_build:
-        return f"CI is already running for this commit: {active_build['web_url']}"
+        return (
+            f"{ci_name} is already running for this commit: {active_build['web_url']}"
+        )
 
     current_pr = github.get_pr(pr["number"])
     if current_pr["state"] != "open" or current_pr["head"]["sha"] != pr["head"]["sha"]:
@@ -748,7 +841,7 @@ def handle_run_ci(
         )
     )
     return (
-        f"Triggered [Buildkite CI #{build['number']}]({build['web_url']}) "
+        f"Triggered [Buildkite {ci_name} #{build['number']}]({build['web_url']}) "
         f"for commit `{current_pr['head']['sha'][:12]}`."
     )
 
@@ -758,15 +851,21 @@ def handle_retry_failed(
     actor: str,
     buildkite: BuildkiteClient,
     comment_id: int,
+    command: str,
     github: GitHubClient,
     pr: Mapping[str, Any],
 ) -> str:
+    ci_name = ci_name_for_command(command)
+    run_command = run_command_for_command(command)
+    retry_command = retry_command_for_command(command)
     builds = buildkite.list_builds(pr["head"]["sha"])
     build = select_latest_build(builds, pr["number"])
     if build:
         metadata = build.get("meta_data") or {}
         if str(metadata.get("github-comment-id")) == str(comment_id):
-            return f"CI was already requested by this comment: {build['web_url']}"
+            return (
+                f"{ci_name} was already requested by this comment: {build['web_url']}"
+            )
 
         retried = buildkite.retry_failed_jobs(build["number"], RETRY_STATES)
         if retried["retried_jobs_count"] == 0:
@@ -776,7 +875,13 @@ def handle_retry_failed(
             )
         return (
             f"Queued {retried['retried_jobs_count']} failed job(s) for retry in "
-            f"[Buildkite CI #{build['number']}]({build['web_url']})."
+            f"[Buildkite {ci_name} #{build['number']}]({build['web_url']})."
+        )
+
+    if command == COMMAND_RETRY_AMD_FAILED:
+        return (
+            "No AMD CI build exists for the current PR head. "
+            f"Use `{run_command}` first."
         )
 
     previous_builds = buildkite.list_builds(
@@ -790,18 +895,23 @@ def handle_retry_failed(
     ]
     source_build = select_latest_build(previous_builds, pr["number"])
     if not source_build:
-        return "No earlier CI build exists for this PR. Use `/ci run` first."
+        return (
+            f"No earlier {ci_name} build exists for this PR. Use `{run_command}` first."
+        )
     if not source_build.get("finished_at") or is_active_build(source_build):
-        return f"The previous CI build is still running: {source_build['web_url']}"
+        return (
+            f"The previous {ci_name} build is still running: {source_build['web_url']}"
+        )
 
     failed_jobs = buildkite.list_failed_jobs(source_build["number"])
     failed_script_jobs = [job for job in failed_jobs if job.get("type") == "script"]
     missing_step_keys = [job for job in failed_script_jobs if not job.get("step_key")]
     if missing_step_keys:
         return (
-            f"[Buildkite CI #{source_build['number']}]"
+            f"[Buildkite {ci_name} #{source_build['number']}]"
             f"({source_build['web_url']}) has failed jobs without stable step "
-            "keys, so they cannot be retried on a new commit. Use `/ci run`."
+            "keys, so they cannot be retried on a new commit. "
+            f"Use `{run_command}`."
         )
 
     failed_step_keys = {str(job["step_key"]) for job in failed_script_jobs}
@@ -812,16 +922,16 @@ def handle_retry_failed(
     )
     if setup_failures:
         return (
-            f"[Buildkite CI #{source_build['number']}]"
+            f"[Buildkite {ci_name} #{source_build['number']}]"
             f"({source_build['web_url']}) failed during CI setup, so its test "
-            "failure set is incomplete. Use `/ci run` for the new commit."
+            f"failure set is incomplete. Use `{run_command}` for the new commit."
         )
 
     step_keys = sorted(failed_step_keys)
     if not step_keys:
         return (
             "No failed, timed-out, or expired jobs need retrying in "
-            f"[Buildkite CI #{source_build['number']}]"
+            f"[Buildkite {ci_name} #{source_build['number']}]"
             f"({source_build['web_url']})."
         )
 
@@ -829,23 +939,24 @@ def handle_retry_failed(
     if current_pr["state"] != "open" or current_pr["head"]["sha"] != pr["head"]["sha"]:
         return (
             "The PR head changed while processing the command. "
-            "Comment `/ci retry` again."
+            f"Comment `{retry_command}` again."
         )
 
     retry_build = buildkite.create_build(
         create_retry_build_payload(
             actor=actor,
             comment_id=comment_id,
+            command=command,
             pr=current_pr,
             source_build=source_build,
             step_keys=step_keys,
         )
     )
     return (
-        f"Triggered [Buildkite CI #{retry_build['number']}]"
+        f"Triggered [Buildkite {ci_name} #{retry_build['number']}]"
         f"({retry_build['web_url']}) for commit "
         f"`{current_pr['head']['sha'][:12]}`, running {len(step_keys)} failed "
-        f"step(s) from [Buildkite CI #{source_build['number']}]"
+        f"step(s) from [Buildkite {ci_name} #{source_build['number']}]"
         f"({source_build['web_url']})."
     )
 
@@ -853,23 +964,36 @@ def handle_retry_failed(
 def handle_cancel_ci(
     *,
     buildkite: BuildkiteClient,
+    command: str = COMMAND_CANCEL_CI,
     pr: Mapping[str, Any],
 ) -> str:
+    ci_name = ci_name_for_command(command)
     branch = pr["head"]["ref"]
-    builds = buildkite.list_builds(
-        None,
-        branch=branch,
-        states=CANCELABLE_BUILD_STATES,
-    )
+    branches = [branch]
+    states = CANCELABLE_BUILD_STATES
+    if command in AMD_CI_COMMANDS:
+        head_label = pr["head"].get("label")
+        if head_label and head_label not in branches:
+            branches.append(str(head_label))
+
+    builds_by_number: dict[int, dict[str, Any]] = {}
+    for candidate_branch in branches:
+        for build in buildkite.list_builds(
+            None,
+            branch=candidate_branch,
+            states=states,
+        ):
+            builds_by_number[build["number"]] = build
+
     cancelable_builds = [
         build
-        for build in builds
-        if build.get("branch") == branch
+        for build in builds_by_number.values()
+        if build.get("branch") in branches
         and is_build_for_pr(build, pr["number"])
-        and build.get("state") in CANCELABLE_BUILD_STATES
+        and build.get("state") in states
     ]
     if not cancelable_builds:
-        return f"No cancelable CI build is running for branch `{branch}`."
+        return f"No cancelable {ci_name} build is running for branch `{branch}`."
 
     for build in cancelable_builds:
         buildkite.cancel_build(build["number"])
@@ -879,7 +1003,9 @@ def handle_cancel_ci(
     )
     count = len(cancelable_builds)
     noun = "build" if count == 1 else "builds"
-    return f"Requested cancellation of {count} CI {noun} for `{branch}`: {links}."
+    return (
+        f"Requested cancellation of {count} {ci_name} {noun} for `{branch}`: {links}."
+    )
 
 
 def run(
@@ -929,6 +1055,7 @@ def run(
             actor=actor,
             permission=permission,
             pr=pr,
+            run_command=run_command_for_command(command),
             trusted_approval=trusted_approval,
             trusted_users=trusted_users,
         )
@@ -949,19 +1076,23 @@ def run(
                 github=github,
                 pr=pr,
             )
-        elif command == COMMAND_RETRY_FAILED:
+        elif command in RETRY_COMMANDS:
             message = handle_retry_failed(
                 actor=actor,
                 buildkite=buildkite,
                 comment_id=comment_id,
+                command=command,
                 github=github,
                 pr=pr,
             )
-        else:
+        elif command in CANCEL_COMMANDS:
             message = handle_cancel_ci(
                 buildkite=buildkite,
+                command=command,
                 pr=pr,
             )
+        else:
+            raise ValueError(f"Unsupported CI command: {command}")
         add_reaction_safely(github, comment_id, "rocket")
         github.add_comment(issue_number, f"✅ {message}")
     except Exception:
@@ -1002,13 +1133,19 @@ def main() -> None:
         )
         return
 
-    if not parse_command(event["comment"]["body"]):
+    command = parse_command(event["comment"]["body"])
+    if not command:
         return
 
+    pipeline = pipeline_for_command(
+        command,
+        amd_ci_pipeline=os.environ.get("BUILDKITE_AMD_PIPELINE", "amd-ci"),
+        upstream_ci_pipeline=os.environ.get("BUILDKITE_PIPELINE", "ci"),
+    )
     buildkite = BuildkiteClient(
         os.environ.get("BUILDKITE_API_TOKEN", ""),
         os.environ.get("BUILDKITE_ORGANIZATION", "vllm"),
-        os.environ.get("BUILDKITE_PIPELINE", "ci"),
+        pipeline,
     )
     run(
         event,

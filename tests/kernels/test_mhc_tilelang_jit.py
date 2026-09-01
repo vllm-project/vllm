@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import ctypes
 import importlib
 import importlib.util
+import subprocess
 import sys
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 
@@ -78,51 +79,19 @@ def test_tilelang_jit_decorator_is_lazy_only_on_rocm(
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Test requires ROCm")
-def test_deepseek_v4_import_and_jit_monitor_do_not_hijack_hip_symbols(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_deepseek_v4_import_and_jit_monitor_do_not_hijack_hip_symbols() -> None:
     if importlib.util.find_spec("tilelang") is None:
         pytest.skip("Test requires TileLang to be installed")
 
-    class DlInfo(ctypes.Structure):
-        _fields_ = [
-            ("dli_fname", ctypes.c_char_p),
-            ("dli_fbase", ctypes.c_void_p),
-            ("dli_sname", ctypes.c_char_p),
-            ("dli_saddr", ctypes.c_void_p),
-        ]
-
-    libdl = ctypes.CDLL("libdl.so.2")
-    dlsym = libdl.dlsym
-    dlsym.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-    dlsym.restype = ctypes.c_void_p
-    dladdr = libdl.dladdr
-    dladdr.argtypes = [ctypes.c_void_p, ctypes.POINTER(DlInfo)]
-    dladdr.restype = ctypes.c_int
-
-    from vllm.model_executor.layers import mhc  # noqa: F401
-    from vllm.models import deepseek_v4  # noqa: F401
-    from vllm.utils import jit_monitor
-
-    monkeypatch.setattr(jit_monitor, "_active", False)
-    monkeypatch.setattr(jit_monitor, "_setup_triton_autotuning_print", lambda: None)
-    monkeypatch.setattr(jit_monitor, "_setup_triton_jit_hook", lambda: None)
-    monkeypatch.setattr(jit_monitor, "_setup_cutedsl_jit_hook", lambda: None)
-    monkeypatch.setattr(
-        jit_monitor,
-        "_setup_tilelang_jit_hook",
-        lambda: pytest.fail("TileLang JIT monitor must not run on ROCm"),
+    # Both claims are about process-global state, `sys.modules` and the symbol
+    # table, and a sibling test legitimately imports TileLang to exercise those
+    # kernels, so the checks only mean something in an interpreter of their own.
+    script = Path(__file__).parent / "scripts" / "check_no_tilelang_hijack.py"
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        timeout=300,
     )
-    jit_monitor.activate()
-
-    assert not any(
-        name == "tilelang" or name.startswith("tilelang.") for name in sys.modules
-    )
-
-    address = dlsym(None, b"hipFree")
-    assert address is not None, "hipFree is not available in the global symbol table"
-    info = DlInfo()
-    assert dladdr(address, ctypes.byref(info))
-    source = info.dli_fname.decode() if info.dli_fname else "<unknown>"
-    assert "libhip_stub.so" not in source, source
-    assert "libamdhip64.so" in source, source
+    if result.returncode != 0:
+        pytest.fail(f"HIP symbols were hijacked:\n{result.stdout}\n{result.stderr}")

@@ -12,14 +12,7 @@ pytestmark = pytest.mark.cpu_test
 
 
 class _FakeAttentionBackend:
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-    ) -> tuple[int, int, int, int]:
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
+    pass
 
 
 def _make_topology(
