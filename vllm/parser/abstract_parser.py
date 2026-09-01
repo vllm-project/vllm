@@ -834,6 +834,9 @@ class DelegatingParser(Parser):
 
         # Reasoning extraction
         if self._in_reasoning_phase(state):
+            reasoning_parser = self._reasoning_parser
+            if reasoning_parser is not None and reasoning_parser.engine_based_streaming:
+                reasoning_parser.adjust_request(request)
             delta_message = self.extract_reasoning_streaming(
                 previous_text=state.previous_text,
                 current_text=current_text,
@@ -842,7 +845,6 @@ class DelegatingParser(Parser):
                 current_token_ids=current_token_ids,
                 delta_token_ids=delta_token_ids,
             )
-            reasoning_parser = self._reasoning_parser
             if reasoning_parser is not None and reasoning_parser.engine_based_streaming:
                 should_transition = (
                     reasoning_parser.has_engine_confirmed_reasoning_end()
