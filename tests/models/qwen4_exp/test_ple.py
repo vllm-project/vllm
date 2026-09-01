@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from functools import partial
 from itertools import accumulate
 from types import SimpleNamespace
@@ -23,11 +24,11 @@ from vllm.models.qwen4_exp.nvidia.ple_layer import (
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLELayer,
     _get_ple_embedding_quant_method,
-    _short_conv_dilated_decode_pytorch,
-    _short_conv_dilated_dispatch_pytorch,
-    _short_conv_dilated_prefill_pytorch,
-    _short_conv_dilated_spec_pytorch,
 )
+from vllm.v1.attention.backends.short_conv_attn import (
+    PleShortConvAttentionMetadata,
+)
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
 def _make_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
@@ -517,6 +518,472 @@ def test_fused_ngram_ids_correctness(
     assert torch.all((actual >= offsets) & (actual < offsets + sizes))
 
 
+def _short_conv_dilated_decode_pytorch(
+    x_d: torch.Tensor,
+    conv_state: torch.Tensor,
+    conv_weights: torch.Tensor,
+    state_indices_tensor_d: torch.Tensor,
+    has_initial_states_d: torch.Tensor | None,
+    *,
+    conv_state_len: int,
+    dilation: int,
+) -> torch.Tensor:
+    state_indices = state_indices_tensor_d.to(
+        device=conv_state.device, dtype=torch.int64
+    )
+    # FULL cudagraph padded decode rows use NULL_BLOCK_ID. Remap them to
+    # slot 0 for a safe gather, then zero output and skip write-back.
+    valid_state = state_indices != NULL_BLOCK_ID
+    state_indices = torch.where(
+        valid_state, state_indices, torch.zeros_like(state_indices)
+    )
+    if has_initial_states_d is None:
+        has_initial_state = valid_state
+    else:
+        if has_initial_states_d.numel() < state_indices_tensor_d.numel():
+            raise ValueError(
+                "has_initial_states_d size mismatch: "
+                f"got {has_initial_states_d.numel()}, "
+                f"need >= {state_indices_tensor_d.numel()}."
+            )
+        has_initial_state = has_initial_states_d[: state_indices_tensor_d.numel()].to(
+            device=conv_state.device, dtype=torch.bool
+        )
+        has_initial_state = has_initial_state & valid_state
+
+    cached_state = conv_state.index_select(0, state_indices)
+    state = cached_state[..., :conv_state_len].to(x_d.dtype)
+    if conv_state_len > 0:
+        initial_state = torch.where(
+            has_initial_state.view(-1, 1, 1),
+            state,
+            torch.zeros_like(state),
+        )
+        history = torch.cat((initial_state, x_d.unsqueeze(-1)), dim=-1)
+    else:
+        history = x_d.unsqueeze(-1)
+
+    conv_output = F.conv1d(
+        history,
+        conv_weights.unsqueeze(1).contiguous(),
+        groups=history.size(1),
+        dilation=dilation,
+    ).squeeze(-1)
+    output = F.silu(conv_output)
+    output = output * valid_state.view(-1, 1).to(output.dtype)
+
+    if conv_state_len > 0:
+        next_state = history[..., -conv_state_len:]
+        # Padded rows are remapped to the reserved null slot. Preserve its
+        # existing value while writing the new states for valid rows.
+        existing_base_state = cached_state[..., :conv_state_len]
+        safe_next_state = torch.where(
+            valid_state.view(-1, 1, 1),
+            next_state.to(conv_state.dtype),
+            existing_base_state,
+        )
+        cached_state[..., :conv_state_len] = safe_next_state
+        conv_state.index_copy_(0, state_indices, cached_state)
+
+    return output
+
+
+def _short_conv_dilated_prefill_pytorch(
+    x_p: torch.Tensor,
+    metadata: PleShortConvAttentionMetadata,
+    conv_state: torch.Tensor,
+    conv_weights: torch.Tensor,
+    state_indices_tensor_p: torch.Tensor,
+    num_prefills: int,
+    num_decode_tokens: int,
+    num_prefill_tokens: int,
+    *,
+    conv_state_len: int,
+    dilation: int,
+) -> torch.Tensor:
+    # ``non_spec_query_start_loc`` covers the non-spec (decode + prefill)
+    # requests and equals ``query_start_loc`` when spec-decode is inactive.
+    non_spec_query_start_loc = metadata.non_spec_query_start_loc
+    if non_spec_query_start_loc is None:
+        raise ValueError("query_start_loc is required for prefill short-conv")
+    query_start_loc_p = (
+        non_spec_query_start_loc[-num_prefills - 1 :] - num_decode_tokens
+    )
+    # The metadata builder guarantees that the prefill query offsets start
+    # at 0 and end at num_prefill_tokens. Avoid reading those values here,
+    # since doing so would force a device-to-host synchronization.
+    has_initial_states_p = metadata.has_initial_states_p
+    if has_initial_states_p is None:
+        raise ValueError("has_initial_states_p is required for prefill short-conv")
+
+    output = torch.empty_like(x_p)
+    q_starts = query_start_loc_p.to(torch.int64)
+    if state_indices_tensor_p.numel() < num_prefills:
+        raise ValueError(
+            "state_indices_tensor_p size mismatch: "
+            f"got {state_indices_tensor_p.numel()}, "
+            f"need >= {num_prefills}."
+        )
+    if has_initial_states_p.numel() < num_prefills:
+        raise ValueError(
+            "has_initial_states_p size mismatch: "
+            f"got {has_initial_states_p.numel()}, "
+            f"need >= {num_prefills}."
+        )
+    if num_prefills == 0 or x_p.numel() == 0:
+        return output
+    lengths = q_starts[1:] - q_starts[:-1]
+    # Use the CPU-computed packing width from the metadata builder instead
+    # of synchronizing on lengths.max().
+    max_len = metadata.max_prefill_query_len
+    if max_len <= 0:
+        return output
+
+    hidden_size = x_p.shape[1]
+    positions = torch.arange(num_prefill_tokens, device=x_p.device, dtype=torch.int64)
+    req_indices = torch.searchsorted(q_starts[1:], positions, right=True)
+    col_indices = positions - q_starts[req_indices]
+
+    packed_tokens = x_p.new_zeros((num_prefills, max_len, hidden_size))
+    packed_tokens[req_indices, col_indices] = x_p
+    packed_tokens = packed_tokens.transpose(1, 2).contiguous()
+
+    state_indices = state_indices_tensor_p[:num_prefills].to(
+        device=conv_state.device, dtype=torch.int64
+    )
+    valid_state = state_indices != NULL_BLOCK_ID
+    state_indices = torch.where(
+        valid_state, state_indices, torch.zeros_like(state_indices)
+    )
+    has_initial = has_initial_states_p[:num_prefills].to(
+        device=conv_state.device, dtype=torch.bool
+    )
+    if conv_state_len > 0:
+        if conv_state.shape[0] == 0:
+            state = conv_state.new_zeros(
+                (num_prefills, hidden_size, conv_state_len),
+                dtype=x_p.dtype,
+            )
+        else:
+            state = conv_state.index_select(0, state_indices)[..., :conv_state_len].to(
+                x_p.dtype
+            )
+        use_initial_mask = (valid_state & has_initial).view(num_prefills, 1, 1)
+        initial_state = torch.where(
+            use_initial_mask,
+            state,
+            torch.zeros_like(state),
+        )
+        history = torch.cat((initial_state, packed_tokens), dim=-1)
+    else:
+        history = packed_tokens
+
+    conv_output = F.conv1d(
+        history,
+        conv_weights.unsqueeze(1).contiguous(),
+        groups=history.size(1),
+        dilation=dilation,
+    )
+    conv_output = F.silu(conv_output).transpose(1, 2).contiguous()
+
+    token_positions = torch.arange(max_len, device=x_p.device, dtype=torch.int64)
+    valid_tokens = token_positions.view(1, max_len) < lengths.view(num_prefills, 1)
+    valid_output_mask = valid_tokens & valid_state.to(device=x_p.device).view(
+        num_prefills, 1
+    )
+    conv_output.masked_fill_(~valid_output_mask.unsqueeze(-1), 0)
+    output.copy_(conv_output[req_indices, col_indices])
+
+    if conv_state_len > 0 and conv_state.shape[0] > 0:
+        state_starts = lengths.to(device=history.device, dtype=torch.int64).view(
+            num_prefills, 1, 1
+        )
+        state_offsets = torch.arange(
+            conv_state_len, device=history.device, dtype=torch.int64
+        ).view(1, 1, conv_state_len)
+        next_state = history.gather(
+            dim=2,
+            index=(state_starts + state_offsets).expand(-1, history.size(1), -1),
+        )
+        # Write back without a host synchronization. Valid, non-empty rows
+        # receive their new state; padding and zero-length rows keep the
+        # current cache value.
+        existing_state = conv_state.index_select(0, state_indices)
+        existing_base_state = existing_state[..., :conv_state_len]
+        update_mask = valid_state & (lengths.to(device=conv_state.device) > 0)
+        safe_next_state = torch.where(
+            update_mask.view(num_prefills, 1, 1),
+            next_state.to(conv_state.dtype),
+            existing_base_state,
+        )
+        existing_state[..., :conv_state_len] = safe_next_state
+        conv_state.index_copy_(0, state_indices, existing_state)
+    return output
+
+
+def _short_conv_dilated_spec_pytorch(
+    x_spec: torch.Tensor,
+    conv_state: torch.Tensor,
+    conv_weights: torch.Tensor,
+    spec_state_indices_tensor: torch.Tensor,
+    spec_query_start_loc: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    spec_query_len: int,
+    *,
+    conv_state_len: int,
+    dilation: int,
+) -> torch.Tensor:
+    """Dilated short-conv for speculative-decode (MTP) requests.
+
+    Each spec request feeds multiple (draft + 1) query tokens. The conv
+    outputs are computed causally after rolling back the previous draft
+    state by ``num_accepted_tokens - 1``. The current candidate inputs stay
+    in the extended cache for the next forward, matching
+    ``causal_conv1d_update``.
+
+    ``spec_query_len`` (== num_speculative_tokens + 1) is the maximum query
+    length and is a Python int, so no host synchronization is needed; this
+    keeps the path safe for full CUDA-graph capture/replay where the buffers
+    are padded at the request level.
+    """
+    num_reqs = spec_state_indices_tensor.numel()
+    hidden_size = x_spec.size(-1)
+    # Use a fixed packing width instead of synchronizing on lengths.max().
+    max_len = spec_query_len
+    # Full CUDA graphs can pad these buffers. Only the first num_reqs
+    # accepted-token counts belong to actual speculative requests.
+    num_accepted_tokens = num_accepted_tokens[:num_reqs]
+    q_starts = spec_query_start_loc[: num_reqs + 1].to(torch.int64)
+    # Keep the number of real speculative tokens on the device.
+    total_real_tokens = q_starts[num_reqs]
+
+    state_indices = spec_state_indices_tensor.to(
+        device=conv_state.device, dtype=torch.int64
+    )
+    valid_state = state_indices != NULL_BLOCK_ID
+    state_indices = torch.where(
+        valid_state, state_indices, torch.zeros_like(state_indices)
+    )
+    positions = torch.arange(x_spec.size(0), device=x_spec.device, dtype=torch.int64)
+    # Route graph-padded token rows to the discarded dummy request so that
+    # they cannot overwrite real packed data.
+    req_indices = torch.searchsorted(q_starts[1:], positions, right=True)
+    valid_tokens = (positions < total_real_tokens) & (req_indices < num_reqs)
+    clamped_req_indices = req_indices.clamp_max(max(num_reqs - 1, 0))
+    col_indices = (positions - q_starts[clamped_req_indices]).clamp_(0, max_len - 1)
+    pack_req_indices = torch.where(
+        valid_tokens,
+        clamped_req_indices,
+        torch.full_like(req_indices, num_reqs),
+    )
+    pack_col_indices = torch.where(
+        valid_tokens, col_indices, torch.zeros_like(col_indices)
+    )
+
+    # The last request row is the dummy sink for graph padding.
+    packed = x_spec.new_zeros((num_reqs + 1, max_len, hidden_size))
+    packed[pack_req_indices, pack_col_indices] = x_spec
+    packed = packed.transpose(1, 2).contiguous()
+
+    if conv_state_len > 0:
+        cached_state = conv_state.index_select(0, state_indices)
+        rollback_offsets = num_accepted_tokens.to(
+            device=conv_state.device, dtype=torch.int64
+        ).sub(1)
+        rollback_offsets = torch.where(
+            valid_state,
+            rollback_offsets.clamp_(0, max_len - 1),
+            torch.zeros_like(rollback_offsets),
+        )
+        state_offsets = torch.arange(
+            conv_state_len, device=conv_state.device, dtype=torch.int64
+        ).view(1, 1, conv_state_len)
+        rollback_indices = rollback_offsets.view(-1, 1, 1) + state_offsets
+        state = cached_state.gather(2, rollback_indices.expand(-1, hidden_size, -1)).to(
+            x_spec.dtype
+        )
+        state = torch.where(
+            valid_state.view(num_reqs, 1, 1),
+            state,
+            torch.zeros_like(state),
+        )
+        # Append a zeroed dummy-row state to match the [num_reqs + 1] pack.
+        dummy_state = state.new_zeros((1, hidden_size, conv_state_len))
+        state_full = torch.cat((state, dummy_state), dim=0)
+        history = torch.cat((state_full, packed), dim=-1)
+    else:
+        history = packed
+
+    conv_output = F.conv1d(
+        history,
+        conv_weights.unsqueeze(1).contiguous(),
+        groups=history.size(1),
+        dilation=dilation,
+    )
+    conv_output = F.silu(conv_output).transpose(1, 2).contiguous()
+
+    output = conv_output[pack_req_indices, pack_col_indices]
+    output = output * valid_tokens.view(-1, 1).to(output.dtype)
+
+    # Keep all current candidate inputs in the extended state. On the next
+    # target forward, ``num_accepted_tokens - 1`` selects the rollback
+    # window before processing the newly scheduled tokens.
+    if conv_state_len > 0:
+        state_capacity = conv_state_len + max_len - 1
+        if conv_state.size(-1) < state_capacity:
+            raise RuntimeError(
+                "PLE short-conv cache cannot retain speculative tokens: "
+                f"got {conv_state.size(-1)}, need {state_capacity}."
+            )
+        candidate_state = history[:num_reqs, :, 1 : state_capacity + 1]
+        query_lengths = q_starts[1:] - q_starts[:-1]
+        state_positions = torch.arange(
+            state_capacity, device=history.device, dtype=torch.int64
+        ).view(1, 1, state_capacity)
+        update_lengths = (conv_state_len + query_lengths - 1).view(num_reqs, 1, 1)
+        update_mask = valid_state.view(num_reqs, 1, 1) & (
+            state_positions < update_lengths
+        )
+        existing_state = cached_state[..., :state_capacity]
+        next_state = torch.where(
+            update_mask,
+            candidate_state.to(conv_state.dtype),
+            existing_state,
+        )
+        cached_state[..., :state_capacity] = next_state
+        conv_state.index_copy_(0, state_indices, cached_state)
+
+    return output
+
+
+def _short_conv_dilated_dispatch_pytorch(
+    inputs: torch.Tensor,
+    residual: torch.Tensor,
+    metadata: PleShortConvAttentionMetadata,
+    conv_state: torch.Tensor,
+    conv_weights: torch.Tensor,
+    *,
+    conv_state_len: int,
+    dilation: int,
+) -> None:
+    """PyTorch reference for fused short-convolution dispatch."""
+    num_prefills = metadata.num_prefills
+    num_decodes = metadata.num_decodes
+    num_decode_tokens = metadata.num_decode_tokens
+    num_prefill_tokens = metadata.num_prefill_tokens
+    has_prefill = num_prefills > 0
+    has_decode = num_decodes > 0
+    has_spec = metadata.spec_sequence_masks is not None
+    x = inputs[: metadata.num_actual_tokens]
+    residual = residual[: metadata.num_actual_tokens]
+
+    if has_spec:
+        if has_prefill or has_decode:
+            assert metadata.spec_token_indx is not None
+            assert metadata.non_spec_token_indx is not None
+            spec_token_indices = metadata.spec_token_indx.long()
+            non_spec_token_indices = metadata.non_spec_token_indx.long()
+            x_spec = x.index_select(0, spec_token_indices)
+            x_non_spec = x.index_select(0, non_spec_token_indices)
+            residual_spec = residual.index_select(0, spec_token_indices)
+            residual_non_spec = residual.index_select(0, non_spec_token_indices)
+        else:
+            spec_token_indices = None
+            non_spec_token_indices = None
+            x_spec = x
+            x_non_spec = None
+            residual_spec = residual
+            residual_non_spec = None
+    else:
+        spec_token_indices = None
+        non_spec_token_indices = None
+        x_spec = None
+        x_non_spec = x
+        residual_spec = None
+        residual_non_spec = residual
+
+    if has_spec:
+        assert metadata.spec_state_indices_tensor is not None
+        assert metadata.spec_query_start_loc is not None
+        assert metadata.num_accepted_tokens is not None
+        assert x_spec is not None
+        assert residual_spec is not None
+        spec_state_indices = metadata.spec_state_indices_tensor[
+            : metadata.num_spec_decodes
+        ]
+        conv_output = _short_conv_dilated_spec_pytorch(
+            x_spec=x_spec,
+            conv_state=conv_state,
+            conv_weights=conv_weights,
+            spec_state_indices_tensor=spec_state_indices,
+            spec_query_start_loc=metadata.spec_query_start_loc,
+            num_accepted_tokens=metadata.num_accepted_tokens,
+            spec_query_len=metadata.spec_query_len,
+            conv_state_len=conv_state_len,
+            dilation=dilation,
+        )
+        residual_spec.add_(conv_output)
+
+    state_indices = metadata.state_indices_tensor
+    if x_non_spec is not None:
+        assert state_indices is not None
+        assert residual_non_spec is not None
+        if has_prefill:
+            state_indices_d, state_indices_p = torch.split(
+                state_indices, [num_decodes, num_prefills], dim=0
+            )
+            x_d, x_p = torch.split(
+                x_non_spec, [num_decode_tokens, num_prefill_tokens], dim=0
+            )
+            residual_d, residual_p = torch.split(
+                residual_non_spec,
+                [num_decode_tokens, num_prefill_tokens],
+                dim=0,
+            )
+            if has_decode:
+                conv_output = _short_conv_dilated_decode_pytorch(
+                    x_d=x_d,
+                    conv_state=conv_state,
+                    conv_weights=conv_weights,
+                    state_indices_tensor_d=state_indices_d,
+                    has_initial_states_d=metadata.has_initial_states_d,
+                    conv_state_len=conv_state_len,
+                    dilation=dilation,
+                )
+                residual_d.add_(conv_output)
+            conv_output = _short_conv_dilated_prefill_pytorch(
+                x_p=x_p,
+                metadata=metadata,
+                conv_state=conv_state,
+                conv_weights=conv_weights,
+                state_indices_tensor_p=state_indices_p,
+                num_prefills=num_prefills,
+                num_decode_tokens=num_decode_tokens,
+                num_prefill_tokens=num_prefill_tokens,
+                conv_state_len=conv_state_len,
+                dilation=dilation,
+            )
+            residual_p.add_(conv_output)
+        else:
+            conv_output = _short_conv_dilated_decode_pytorch(
+                x_d=x_non_spec,
+                conv_state=conv_state,
+                conv_weights=conv_weights,
+                state_indices_tensor_d=state_indices[: x_non_spec.size(0)],
+                has_initial_states_d=metadata.has_initial_states_d,
+                conv_state_len=conv_state_len,
+                dilation=dilation,
+            )
+            residual_non_spec.add_(conv_output)
+
+    if has_spec and residual_non_spec is not None:
+        assert spec_token_indices is not None
+        assert non_spec_token_indices is not None
+        assert residual_spec is not None
+        residual.index_copy_(0, spec_token_indices, residual_spec)
+        residual.index_copy_(0, non_spec_token_indices, residual_non_spec)
+
+
 _KERNEL_STATE_BLOCKS = 64
 
 
@@ -550,246 +1017,240 @@ def _make_conv_case(
     return rng, state_reference, conv_state, weights
 
 
+@dataclass(frozen=True)
+class _ConvBatchCase:
+    spec_query_lens: tuple[int, ...] = ()
+    num_accepted: tuple[int, ...] = ()
+    num_decodes: int = 0
+    prefill_query_lens: tuple[int, ...] = ()
+    channels: int = 2048
+    kernel_size: int = 4
+    dilation: int = 3
+    spec_query_len: int = 1
+    graph_padding: int = 0
+
+
+def _make_conv_metadata(
+    case: _ConvBatchCase,
+    device: torch.device,
+) -> tuple[SimpleNamespace, int]:
+    request_groups: dict[str, list[int]] = {
+        "spec": [],
+        "decode": [],
+        "prefill": [],
+    }
+    token_offset = 0
+    max_num_reqs = max(
+        len(case.spec_query_lens),
+        case.num_decodes,
+        len(case.prefill_query_lens),
+    )
+    request_kinds = []
+    for req_idx in range(max_num_reqs):
+        if req_idx < len(case.spec_query_lens):
+            request_kinds.append(("spec", case.spec_query_lens[req_idx]))
+        if req_idx < case.num_decodes:
+            request_kinds.append(("decode", 1))
+        if req_idx < len(case.prefill_query_lens):
+            request_kinds.append(("prefill", case.prefill_query_lens[req_idx]))
+    for kind, query_len in request_kinds:
+        request_groups[kind].extend(range(token_offset, token_offset + query_len))
+        token_offset += query_len
+
+    num_spec_reqs = len(case.spec_query_lens)
+    num_prefills = len(case.prefill_query_lens)
+    has_spec = num_spec_reqs > 0
+    has_non_spec = case.num_decodes > 0 or num_prefills > 0
+    mixed_batch = has_spec and has_non_spec
+
+    spec_state_indices = torch.arange(
+        1, num_spec_reqs + 1, dtype=torch.int32, device=device
+    )
+    if num_spec_reqs >= 3:
+        spec_state_indices[1] = NULL_BLOCK_ID
+    non_spec_state_indices = torch.arange(
+        num_spec_reqs + 1,
+        num_spec_reqs + case.num_decodes + num_prefills + 1,
+        dtype=torch.int32,
+        device=device,
+    )
+    if case.num_decodes > 1:
+        non_spec_state_indices[case.num_decodes - 1] = NULL_BLOCK_ID
+    if num_prefills > 1:
+        non_spec_state_indices[case.num_decodes + 1] = NULL_BLOCK_ID
+
+    spec_query_start_loc = torch.tensor(
+        [0, *accumulate(case.spec_query_lens)], dtype=torch.int32, device=device
+    )
+    non_spec_query_lens = (1,) * case.num_decodes + case.prefill_query_lens
+    non_spec_query_start_loc = torch.tensor(
+        [0, *accumulate(non_spec_query_lens)], dtype=torch.int32, device=device
+    )
+    spec_token_indices = torch.tensor(
+        request_groups["spec"], dtype=torch.int64, device=device
+    )
+    non_spec_token_indices = torch.tensor(
+        request_groups["decode"] + request_groups["prefill"],
+        dtype=torch.int64,
+        device=device,
+    )
+
+    metadata = SimpleNamespace(
+        num_prefills=num_prefills,
+        num_decodes=case.num_decodes,
+        num_decode_tokens=case.num_decodes,
+        num_prefill_tokens=sum(case.prefill_query_lens),
+        spec_sequence_masks=(
+            torch.tensor([kind == "spec" for kind, _ in request_kinds], device=device)
+            if has_spec
+            else None
+        ),
+        spec_token_indx=spec_token_indices if mixed_batch else None,
+        non_spec_token_indx=non_spec_token_indices if mixed_batch else None,
+        num_actual_tokens=token_offset + case.graph_padding,
+        spec_state_indices_tensor=spec_state_indices if has_spec else None,
+        spec_query_start_loc=spec_query_start_loc if has_spec else None,
+        num_accepted_tokens=(
+            torch.tensor(case.num_accepted, dtype=torch.int32, device=device)
+            if has_spec
+            else None
+        ),
+        spec_query_len=case.spec_query_len,
+        state_indices_tensor=non_spec_state_indices if has_non_spec else None,
+        has_initial_states_d=(
+            torch.arange(case.num_decodes, device=device) % 2 == 0
+            if case.num_decodes
+            else None
+        ),
+        non_spec_query_start_loc=(non_spec_query_start_loc if has_non_spec else None),
+        has_initial_states_p=(
+            torch.arange(num_prefills, device=device) % 2 == 0 if num_prefills else None
+        ),
+        max_prefill_query_len=max(case.prefill_query_lens, default=0),
+        num_spec_decodes=num_spec_reqs,
+    )
+    return metadata, token_offset
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
 @pytest.mark.parametrize("state_layout", ["SD", "DS"])
 @pytest.mark.parametrize(
-    ("num_tokens", "channels", "kernel_size", "dilation"),
-    [(1, 512, 4, 3), (4, 640, 3, 2), (33, 2048, 5, 1)],
-)
-def test_fused_conv_decode_correctness(
-    num_tokens: int,
-    channels: int,
-    kernel_size: int,
-    dilation: int,
-    state_layout: str,
-) -> None:
-    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv
-
-    device = torch.device("cuda")
-    conv_state_len = (kernel_size - 1) * dilation
-    rng, state_reference, conv_state, weights = _make_conv_case(
-        device, num_tokens, channels, kernel_size, dilation, state_layout
-    )
-    inputs = torch.randn(
-        num_tokens, channels, device=device, dtype=torch.bfloat16, generator=rng
-    )
-    residual = torch.randn(
-        num_tokens, channels, device=device, dtype=torch.bfloat16, generator=rng
-    )
-    state_indices = torch.arange(1, num_tokens + 1, dtype=torch.int32, device=device)
-    if num_tokens > 1:
-        state_indices[-1] = 0
-    has_initial_states = torch.arange(num_tokens, device=device) % 2 == 0
-
-    null_state = conv_state[0].clone()
-    conv_reference = _short_conv_dilated_decode_pytorch(
-        inputs,
-        state_reference,
-        weights,
-        state_indices,
-        has_initial_states,
-        conv_state_len=conv_state_len,
-        dilation=dilation,
-    )
-    output_reference = residual + conv_reference
-    residual_kernel = residual.clone()
-    ple_conv(
-        inputs,
-        residual_kernel,
-        conv_state,
-        weights,
-        state_indices,
-        mode="decode",
-        dilation=dilation,
-        has_initial_states=has_initial_states,
-    )
-    torch.testing.assert_close(
-        residual_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
-    )
-    assert torch.equal(conv_state, state_reference)
-    assert torch.equal(conv_state[0], null_state)
-    assert torch.equal(
-        residual_kernel[state_indices == 0], residual[state_indices == 0]
-    )
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
-@pytest.mark.parametrize("state_layout", ["SD", "DS"])
-@pytest.mark.parametrize(
-    (
-        "query_lens",
-        "num_accepted",
-        "spec_query_len",
-        "channels",
-        "kernel_size",
-        "dilation",
-    ),
+    "case",
     [
-        ([1], [2], 2, 640, 3, 2),
-        ([1, 4, 4], [1, 2, 4], 4, 2048, 4, 3),
-        ([5, 5, 5, 2, 1, 3], [4, 3, 1, 2, 0, 1], 5, 512, 5, 1),
+        pytest.param(
+            _ConvBatchCase(num_decodes=1, channels=512),
+            id="decode-single",
+        ),
+        pytest.param(
+            _ConvBatchCase(
+                num_decodes=33,
+                channels=2048,
+                kernel_size=5,
+                dilation=1,
+            ),
+            id="decode-padded",
+        ),
+        pytest.param(
+            _ConvBatchCase(prefill_query_lens=(37, 0, 5, 128)),
+            id="prefill",
+        ),
+        pytest.param(
+            _ConvBatchCase(
+                spec_query_lens=(1, 4, 4, 0),
+                num_accepted=(1, 2, 4, 1),
+                spec_query_len=4,
+                graph_padding=4,
+            ),
+            id="spec-graph-padded",
+        ),
+        pytest.param(
+            _ConvBatchCase(
+                spec_query_lens=(3, 4),
+                num_accepted=(2, 4),
+                num_decodes=1,
+                prefill_query_lens=(5,),
+                spec_query_len=4,
+            ),
+            id="mixed",
+        ),
+        pytest.param(
+            _ConvBatchCase(
+                spec_query_lens=(1, 2),
+                num_accepted=(0, 1),
+                num_decodes=2,
+                prefill_query_lens=(0, 8, 3),
+                channels=640,
+                kernel_size=3,
+                dilation=2,
+                spec_query_len=3,
+            ),
+            id="mixed-varied",
+        ),
     ],
 )
-def test_fused_conv_spec_correctness(
-    query_lens: list[int],
-    num_accepted: list[int],
-    spec_query_len: int,
-    channels: int,
-    kernel_size: int,
-    dilation: int,
+def test_fused_conv_correctness(
+    case: _ConvBatchCase,
     state_layout: str,
 ) -> None:
-    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv
-
     device = torch.device("cuda")
-    conv_state_len = (kernel_size - 1) * dilation
-    num_reqs = len(query_lens)
+    metadata, num_real_tokens = _make_conv_metadata(case, device)
+    module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
+    nn.Module.__init__(module)
+    module.conv_state_len = (case.kernel_size - 1) * case.dilation
+    module.short_conv_dilation = case.dilation
+
     rng, state_reference, conv_state, weights = _make_conv_case(
         device,
-        num_reqs + 100,
-        channels,
-        kernel_size,
-        dilation,
-        state_layout,
-        spec_query_len,
-    )
-    query_start_loc = torch.tensor(
-        [0, *accumulate(query_lens)], dtype=torch.int32, device=device
-    )
-    num_real_tokens = sum(query_lens)
-    num_tokens = num_real_tokens + spec_query_len
-    inputs = torch.randn(
-        num_tokens, channels, device=device, dtype=torch.bfloat16, generator=rng
-    )
-    residual = torch.randn(
-        num_tokens, channels, device=device, dtype=torch.bfloat16, generator=rng
-    )
-    state_indices = torch.arange(1, num_reqs + 1, dtype=torch.int32, device=device)
-    if num_reqs > 1:
-        state_indices[1] = 0
-    num_accepted_tensor = torch.tensor(num_accepted, dtype=torch.int32, device=device)
-
-    null_state = conv_state[0].clone()
-    conv_reference = _short_conv_dilated_spec_pytorch(
-        inputs,
-        state_reference,
-        weights,
-        state_indices,
-        query_start_loc,
-        num_accepted_tensor,
-        spec_query_len,
-        conv_state_len=conv_state_len,
-        dilation=dilation,
-    )
-    output_reference = residual + conv_reference
-    residual_kernel = residual.clone()
-    ple_conv(
-        inputs,
-        residual_kernel,
-        conv_state,
-        weights,
-        state_indices,
-        mode="spec",
-        dilation=dilation,
-        query_start_loc=query_start_loc,
-        num_accepted_tokens=num_accepted_tensor,
-        spec_query_len=spec_query_len,
-    )
-    torch.testing.assert_close(
-        residual_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
-    )
-    assert torch.equal(conv_state, state_reference)
-    assert torch.equal(conv_state[0], null_state)
-    assert torch.equal(residual_kernel[num_real_tokens:], residual[num_real_tokens:])
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
-@pytest.mark.parametrize("state_layout", ["SD", "DS"])
-@pytest.mark.parametrize(
-    ("query_lens", "channels", "kernel_size", "dilation"),
-    [([37, 0, 5, 128], 2048, 4, 3), ([1, 8, 3], 640, 3, 2)],
-)
-def test_fused_conv_prefill_correctness(
-    query_lens: list[int],
-    channels: int,
-    kernel_size: int,
-    dilation: int,
-    state_layout: str,
-) -> None:
-    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import ple_conv
-
-    device = torch.device("cuda")
-    conv_state_len = (kernel_size - 1) * dilation
-    rng, state_reference, conv_state, weights = _make_conv_case(
-        device,
-        sum(query_lens),
-        channels,
-        kernel_size,
-        dilation,
-        state_layout,
-    )
-    query_start_loc = torch.tensor(
-        [0, *accumulate(query_lens)], dtype=torch.int32, device=device
+        seed=num_real_tokens + case.channels,
+        channels=case.channels,
+        kernel_size=case.kernel_size,
+        dilation=case.dilation,
+        state_layout=state_layout,
+        spec_query_len=case.spec_query_len,
     )
     inputs = torch.randn(
-        sum(query_lens), channels, device=device, dtype=torch.bfloat16, generator=rng
+        metadata.num_actual_tokens,
+        case.channels,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=rng,
     )
     residual = torch.randn(
-        sum(query_lens), channels, device=device, dtype=torch.bfloat16, generator=rng
+        inputs.shape,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=rng,
     )
-    num_reqs = len(query_lens)
-    state_indices = torch.arange(1, num_reqs + 1, dtype=torch.int32, device=device)
-    state_indices[-2] = 0
-    has_initial_states = torch.tensor(
-        [i % 2 == 0 for i in range(num_reqs)], device=device
+    null_state = conv_state[NULL_BLOCK_ID].clone()
+    residual_kernel = residual.clone()
+    residual_reference = residual.clone()
+
+    module._short_conv_dilated_dispatch(
+        inputs=inputs,
+        residual=residual_kernel,
+        metadata=metadata,
+        conv_state=conv_state,
+        conv_weights=weights,
     )
-    metadata = SimpleNamespace(
-        non_spec_query_start_loc=query_start_loc,
-        has_initial_states_p=has_initial_states,
-        max_prefill_query_len=max(query_lens),
+    _short_conv_dilated_dispatch_pytorch(
+        inputs=inputs,
+        residual=residual_reference,
+        metadata=metadata,
+        conv_state=state_reference,
+        conv_weights=weights,
+        conv_state_len=module.conv_state_len,
+        dilation=module.short_conv_dilation,
     )
 
-    null_state = conv_state[0].clone()
-    conv_reference = _short_conv_dilated_prefill_pytorch(
-        inputs,
-        metadata,
-        state_reference,
-        weights,
-        state_indices,
-        num_reqs,
-        0,
-        inputs.shape[0],
-        conv_state_len=conv_state_len,
-        dilation=dilation,
-    )
-    output_reference = residual + conv_reference
-    residual_kernel = residual.clone()
-    ple_conv(
-        inputs,
-        residual_kernel,
-        conv_state,
-        weights,
-        state_indices,
-        mode="prefill",
-        dilation=dilation,
-        query_start_loc=query_start_loc,
-        has_initial_states=has_initial_states,
-    )
     torch.testing.assert_close(
-        residual_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
+        residual_kernel.float(), residual_reference.float(), atol=3e-2, rtol=3e-2
     )
     assert torch.equal(conv_state, state_reference)
-    assert torch.equal(conv_state[0], null_state)
-    query_start = 0
-    for state_index, query_len in zip(state_indices.tolist(), query_lens):
-        if state_index == 0:
-            output_slice = residual_kernel[query_start : query_start + query_len]
-            residual_slice = residual[query_start : query_start + query_len]
-            assert torch.equal(
-                output_slice,
-                residual_slice,
-            )
-        query_start += query_len
+    assert torch.equal(conv_state[NULL_BLOCK_ID], null_state)
+    if case.graph_padding:
+        assert torch.equal(
+            residual_kernel[num_real_tokens:], residual[num_real_tokens:]
+        )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused gate needs CUDA")
@@ -856,82 +1317,3 @@ def test_fused_gate_correctness(num_tokens: int, strided_kv: bool) -> None:
     expected_normed = grouped_norm(expected_gated, norm_conv)
     assert torch.equal(gated, expected_gated)
     torch.testing.assert_close(normed, expected_normed, atol=1e-2, rtol=1e-2)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
-@pytest.mark.parametrize("state_layout", ["SD", "DS"])
-def test_fused_conv_mixed_batch_correctness(state_layout: str) -> None:
-    from vllm.models.qwen4_exp.nvidia.ops.ple_conv import BLOCK_C
-
-    device = torch.device("cuda")
-    channels = 4 * BLOCK_C
-    module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
-    nn.Module.__init__(module)
-    module.conv_state_len = 9
-    module.short_conv_dilation = 3
-
-    rng, state_eager, conv_state, weights = _make_conv_case(
-        device,
-        17,
-        channels,
-        kernel_size=4,
-        dilation=3,
-        state_layout=state_layout,
-        spec_query_len=4,
-    )
-    inputs = torch.randn(
-        13, channels, device=device, dtype=torch.bfloat16, generator=rng
-    )
-    residual = torch.randn(
-        inputs.shape, device=device, dtype=torch.bfloat16, generator=rng
-    )
-    metadata = SimpleNamespace(
-        num_prefills=1,
-        num_decodes=1,
-        num_decode_tokens=1,
-        num_prefill_tokens=5,
-        spec_sequence_masks=torch.tensor([True, False, True, False], device=device),
-        spec_token_indx=torch.tensor(
-            [0, 1, 2, 4, 5, 6, 7], dtype=torch.int32, device=device
-        ),
-        non_spec_token_indx=torch.tensor(
-            [3, 8, 9, 10, 11, 12], dtype=torch.int32, device=device
-        ),
-        num_actual_tokens=13,
-        spec_state_indices_tensor=torch.tensor(
-            [11, 12], dtype=torch.int32, device=device
-        ),
-        spec_query_start_loc=torch.tensor([0, 3, 7], dtype=torch.int32, device=device),
-        num_accepted_tokens=torch.tensor([2, 4], dtype=torch.int32, device=device),
-        spec_query_len=4,
-        state_indices_tensor=torch.tensor([13, 14], dtype=torch.int32, device=device),
-        has_initial_states_d=torch.tensor([True], device=device),
-        non_spec_query_start_loc=torch.tensor(
-            [0, 1, 6], dtype=torch.int32, device=device
-        ),
-        has_initial_states_p=torch.tensor([True], device=device),
-        max_prefill_query_len=5,
-        num_spec_decodes=2,
-    )
-    residual_kernel = residual.clone()
-    residual_eager = residual.clone()
-    module._short_conv_dilated_dispatch(
-        inputs=inputs,
-        residual=residual_kernel,
-        metadata=metadata,
-        conv_state=conv_state,
-        conv_weights=weights,
-    )
-    _short_conv_dilated_dispatch_pytorch(
-        inputs=inputs,
-        residual=residual_eager,
-        metadata=metadata,
-        conv_state=state_eager,
-        conv_weights=weights,
-        conv_state_len=module.conv_state_len,
-        dilation=module.short_conv_dilation,
-    )
-    torch.testing.assert_close(
-        residual_kernel.float(), residual_eager.float(), atol=3e-2, rtol=3e-2
-    )
-    assert torch.equal(conv_state, state_eager)
