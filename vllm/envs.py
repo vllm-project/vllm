@@ -58,6 +58,8 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_ENABLE_FUSED_DRAFT_SPARSE_MLA: bool = False
+    VLLM_DISABLE_FUSED_DRAFT_SPARSE_MLA: bool = False
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
@@ -1087,6 +1089,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default: 512 MB
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
+    ),
+    # Fused multi-step draft decode for the sparse MLA stack (FlashMLA sparse
+    # attention + DeepSeek V3.2/V4 indexer): one draft attention metadata
+    # build per propose() with in-place per-step refresh. The feature is
+    # default-off; VLLM_ENABLE_FUSED_DRAFT_SPARSE_MLA opts in, and
+    # VLLM_DISABLE_FUSED_DRAFT_SPARSE_MLA is an emergency kill-switch that
+    # wins over the opt-in. With neither set, the sparse MLA builders report
+    # no draft-metadata-update support (pre-change behavior).
+    "VLLM_ENABLE_FUSED_DRAFT_SPARSE_MLA": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_FUSED_DRAFT_SPARSE_MLA", "0"))
+    ),
+    "VLLM_DISABLE_FUSED_DRAFT_SPARSE_MLA": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_FUSED_DRAFT_SPARSE_MLA", "0"))
     ),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.
