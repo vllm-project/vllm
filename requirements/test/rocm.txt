@@ -72,6 +72,8 @@ azure-storage-blob==12.28.0
     # via runai-model-streamer-azure
 backoff==2.2.1
     # via -r requirements/test/rocm.in
+bitsandbytes==0.50.0
+    # via -r requirements/test/rocm.in
 black==26.3.1
     # via datamodel-code-generator
 blake3==1.0.8
@@ -566,6 +568,7 @@ numpy==2.2.6
     #   -r requirements/test/../common.txt
     #   accelerate
     #   albumentations
+    #   bitsandbytes
     #   bm25s
     #   contourpy
     #   cupy-cuda12x
@@ -691,10 +694,11 @@ outlines-core==0.2.14
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-packaging==26.0
+packaging==26.2
     # via
     #   -c requirements/rocm.txt
     #   accelerate
+    #   bitsandbytes
     #   black
     #   datasets
     #   evaluate
