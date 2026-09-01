@@ -907,6 +907,157 @@ def test_concat_and_cache_ds_mla(
         torch.testing.assert_close(kv_rope, ref_rope, atol=0.001, rtol=0.1)
 
 
+# Bytes per token for the nvfp4_ds_mla cache layout (see flashmla_sparse.py).
+NVFP4_DS_MLA_ENTRY_SIZE = 352
+
+# e2m1 magnitude table; the sign lives in bit 3 of each 4-bit code.
+E2M1_VALUES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+def _unpack_e2m1(packed: torch.Tensor) -> torch.Tensor:
+    """Unpack uint8 bytes holding two e2m1 codes each into float32 values.
+
+    The low nibble holds the even element, the high nibble the odd one.
+    """
+    low = packed & 0x0F
+    high = packed >> 4
+    codes = torch.stack([low, high], dim=-1).reshape(-1).long()
+    table = torch.tensor(E2M1_VALUES, dtype=torch.float32, device=packed.device)
+    magnitude = table[codes & 0x7]
+    sign = torch.where((codes & 0x8) != 0, -1.0, 1.0)
+    return sign * magnitude
+
+
+def _ref_nvfp4_sf_bytes(vals: torch.Tensor, divisor: float) -> torch.Tensor:
+    """Reference e4m3 scale-factor bytes: e4m3(max(amax_per_16 / divisor, 2^-9)).
+
+    In element-block order (byte s scales elements [16s, 16s + 16)).
+    """
+    tiles = vals.to(torch.float32).reshape(-1, 16)
+    sf = torch.clamp(tiles.abs().amax(dim=1) / divisor, min=2.0**-9)
+    return sf.to(torch.float8_e4m3fn).view(torch.uint8)
+
+
+def _nvfp4_sf_element_order(wire_sf_bytes: torch.Tensor) -> torch.Tensor:
+    """Stored NVFP4 scale-factor byte order -> element-block order.
+
+    The 32 NoPE scale-factor bytes of an nvfp4_ds_mla entry are stored
+    permuted (an 8x4 -> 4x8 transpose): the scale for element block s lives at
+    byte 8 * (s & 3) + (s >> 2), so that the 8 scales one FlashMLA dequant
+    thread needs are contiguous. This undoes that permutation.
+    """
+    num_sf = wire_sf_bytes.shape[-1]
+    return wire_sf_bytes.unflatten(-1, (4, num_sf // 4)).transpose(-1, -2).flatten(-2)
+
+
+@pytest.mark.parametrize("kv_lora_rank", KV_LORA_RANKS)
+@pytest.mark.parametrize("qk_rope_head_dim", QK_ROPE_HEAD_DIMS)
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS_MLA)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES_MLA)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS_MLA)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_concat_and_cache_nvfp4_ds_mla(
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    num_tokens: int,
+    block_size: int,
+    num_blocks: int,
+    seed: int,
+    device: str,
+) -> None:
+    if current_platform.is_rocm():
+        pytest.skip("concat_and_cache_mla doesn't support NVFP4 DS-MLA on ROCm")
+    device_capability = current_platform.get_device_capability()
+    if device_capability is None or device_capability.major != 10:
+        pytest.skip("The NVFP4 DS-MLA kv-cache dtype requires SM 10.x")
+    if kv_lora_rank != 512:
+        pytest.skip("The NVFP4 DS-MLA layout requires kv_lora_rank == 512")
+    dtype = torch.bfloat16
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    kv_cache_dtype = "nvfp4_ds_mla"
+    entry_size = NVFP4_DS_MLA_ENTRY_SIZE
+
+    total_slots = num_blocks * block_size
+    slot_mapping_lst = random.sample(range(total_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping_lst, dtype=torch.long, device=device)
+
+    kv_c = torch.randn(num_tokens, kv_lora_rank, dtype=dtype, device=device)
+    k_pe = torch.randn(num_tokens, qk_rope_head_dim, dtype=dtype, device=device)
+
+    scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    kv_cache = _create_mla_cache(
+        num_blocks,
+        block_size,
+        entry_size,
+        dtype=torch.uint8,
+        kv_cache_dtype=kv_cache_dtype,
+        device=device,
+    )
+
+    opcheck(
+        torch.ops._C_cache_ops.concat_and_cache_mla,
+        (kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+    )
+
+    ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale)
+
+    # Byte layout of a single cache entry:
+    #   [0, 256)             512 e2m1 NoPE values packed 2/byte
+    #   [256, 320)           64 unscaled e4m3 RoPE values
+    #   [nope_sf_off, 352)   32 e4m3 NoPE SFs (one per 16 elements), stored
+    #                        permuted (see _nvfp4_sf_element_order)
+    nope_bytes = kv_lora_rank // 2
+    rope_bytes = qk_rope_head_dim
+    nope_sf_off = nope_bytes + rope_bytes
+    num_nope_sf = kv_lora_rank // 16
+    assert nope_sf_off + num_nope_sf == entry_size
+
+    for i in range(num_tokens):
+        slot = slot_mapping[i].item()
+        block_idx = slot // block_size
+        block_offset = slot % block_size
+        entry = kv_cache[block_idx, block_offset]
+
+        kv_c_ref = kv_c[i].to(torch.float32)
+        k_pe_ref = k_pe[i].to(torch.float32)
+
+        # Scale-factor bytes must match e4m3(max(amax_per_16 / divisor, 2^-9))
+        # computed in python, allowing a 1-ulp e4m3 difference (all SFs are
+        # positive, so e4m3 bit patterns are monotonic and adjacent codes
+        # differ by 1).
+        nope_sf_bytes = _nvfp4_sf_element_order(
+            entry[nope_sf_off : nope_sf_off + num_nope_sf]
+        )
+        ref_nope_sf_bytes = _ref_nvfp4_sf_bytes(kv_c_ref, 6.0)
+        assert (
+            (nope_sf_bytes.to(torch.int16) - ref_nope_sf_bytes.to(torch.int16)).abs()
+            <= 1
+        ).all()
+
+        # Dequantize with the *stored* scale factors: x = float(code) * float(sf).
+        nope_sf = nope_sf_bytes.view(torch.float8_e4m3fn).to(torch.float32)
+        nope_sf_per_elem = nope_sf.repeat_interleave(16)
+        nope_vals = _unpack_e2m1(entry[:nope_bytes]) * nope_sf_per_elem
+        # e2m1 error bound: the widest grid spacing is 2 (between codes 4 and
+        # 6), so round-to-nearest is off by at most 1.0*sf; the e4m3 rounding
+        # of the SF itself adds at most ~2^-4 relative, so 1.5*sf is safe for
+        # either encode convention (quantized or unquantized SF).
+        assert ((nope_vals - kv_c_ref).abs() <= 1.5 * nope_sf_per_elem).all()
+
+        # Plain unscaled e4m3: ~2^-4 relative rounding, with a small absolute
+        # floor for values in the subnormal range.
+        rope_payload = entry[nope_bytes:nope_sf_off]
+        rope_vals = rope_payload.view(torch.float8_e4m3fn).to(torch.float32)
+        rope_tol = k_pe_ref.abs() * 2.0**-3 + 2.0**-9
+        assert ((rope_vals - k_pe_ref).abs() <= rope_tol).all()
+
+
 @pytest.mark.parametrize("kv_lora_rank", KV_LORA_RANKS)
 @pytest.mark.parametrize("qk_rope_head_dim", QK_ROPE_HEAD_DIMS)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES_MLA)

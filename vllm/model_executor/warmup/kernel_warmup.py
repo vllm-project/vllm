@@ -8,14 +8,14 @@ happen during model execution.
 
 import sys
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 
 import vllm.envs as envs
-from vllm.config.mamba import MambaBackendEnum
+from vllm.distributed.device_communicators.flashinfer_pcie_ipc_all_reduce import (
+    warmup_flashinfer_pcie_ipc_allreduce,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     flashinfer_replayssm_autotune_supported,
@@ -41,6 +41,9 @@ from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
+from vllm.model_executor.warmup.replayssm_warmup import (
+    replayssm_autotune_warmup,
+)
 from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
     sparse_mla_triton_warmup,
 )
@@ -160,7 +163,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
         fa4_cutedsl_warmup(worker)
-        sparse_mla_triton_warmup(worker)
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
@@ -191,6 +193,10 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     b12x_warmup(worker, cudagraph_capture_sizes)
 
     minimax_m3_msa_warmup(worker)
+
+    # Allocate the exact decode-sized workspace, autotune cache misses, and
+    # resolve every CUDA Graph bucket before capture begins.
+    warmup_flashinfer_pcie_ipc_allreduce(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
@@ -279,153 +285,6 @@ def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
         )
 
 
-def _replayssm_autotune_kwargs(
-    runner: "GPUModelRunner", max_token_prefill_kwargs: dict[str, Any]
-) -> tuple[int, dict[str, Any]] | None:
-    config = runner.vllm_config
-    if not (
-        config.cache_config.use_replayssm
-        and config.mamba_config.backend == MambaBackendEnum.FLASHINFER
-    ):
-        return None
-    if not flashinfer_replayssm_autotune_supported():
-        logger.info_once(
-            "Skipping FlashInfer ReplaySSM autotuning because "
-            "flashinfer.mamba.checkpointing_ssu.CheckpointingSSURunner "
-            "is unavailable."
-        )
-        return None
-    v2_runner: Any = runner
-    query_len = (
-        v2_runner.decode_query_len
-        if config.use_v2_model_runner
-        else runner.uniform_decode_query_len
-    )
-    max_num_reqs = min(
-        runner.scheduler_config.max_num_seqs,
-        runner.max_num_tokens // query_len,
-        runner.kv_cache_config.num_blocks - 1,
-    )
-    if max_num_reqs <= 0:
-        logger.warning_once(
-            "Skipping FlashInfer ReplaySSM autotuning because no non-padding "
-            "state slot is available."
-        )
-        return None
-
-    decode_kwargs = {
-        **max_token_prefill_kwargs,
-        "num_tokens": max_num_reqs * query_len,
-        "uniform_decode": True,
-    }
-    if config.use_v2_model_runner:
-        decode_kwargs["valid_dummy_state_slots"] = True
-    else:
-        decode_kwargs.update(
-            allow_microbatching=False,
-            force_attention=True,
-            profile_seq_lens=query_len + 1,
-        )
-    return max_num_reqs, decode_kwargs
-
-
-@contextmanager
-def _temporary_replayssm_autotune_state(
-    runner: "GPUModelRunner", max_num_reqs: int
-) -> Iterator[None]:
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-    from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-        reset_replayssm_ring_trackers,
-        update_replayssm_ring_trackers,
-    )
-
-    reset_tensors: dict[int, torch.Tensor] = {}
-    tracker_specs: dict[
-        int, tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]
-    ] = {}
-    for module in runner.get_model().modules():
-        if not isinstance(module, MambaMixer2) or not module.use_replayssm:
-            continue
-        assert module.replayssm_buffer_len is not None
-        ring_start = module._replayssm_ring_start
-        prev_num_accepted = module._replayssm_prev_num_accepted
-        prev_query_len = module._replayssm_prev_query_len
-        tracker_specs.setdefault(
-            ring_start.data_ptr(),
-            (
-                ring_start,
-                prev_num_accepted,
-                prev_query_len,
-                module.replayssm_buffer_len,
-                module.kv_cache[2].size(2),
-            ),
-        )
-        tensors = (
-            *module.kv_cache,
-            ring_start,
-            prev_num_accepted,
-            prev_query_len,
-        )
-        for tensor in tensors:
-            if tensor.numel():
-                reset_tensors.setdefault(tensor.data_ptr(), tensor)
-
-    v2_runner: Any = runner
-    block_tables = saved_block_ids = None
-    if not runner.vllm_config.use_v2_model_runner:
-        block_tables = runner.input_batch.block_table.block_tables
-        saved_block_ids = tuple(
-            block_table.block_table.np[:max_num_reqs, 0].copy()
-            for block_table in block_tables
-        )
-        dummy_block_ids = range(1, max_num_reqs + 1)
-        for block_table in block_tables:
-            block_table.block_table.np[:max_num_reqs, 0] = dummy_block_ids
-        runner.input_batch.block_table.commit_block_table(max_num_reqs)
-
-    first_tracker = next(iter(tracker_specs.values()), None)
-    if first_tracker is not None and first_tracker[0].is_cuda:
-        state_slots = torch.arange(
-            1, max_num_reqs + 1, dtype=torch.int32, device=first_tracker[0].device
-        )
-        for (
-            ring_start,
-            prev_num_accepted,
-            prev_query_len,
-            logical_window,
-            ring_buffer_len,
-        ) in tracker_specs.values():
-            # Compile reset (prefill) and advance (decode) before inference.
-            # The final reset leaves the decode tuning run in a clean state.
-            reset_replayssm_ring_trackers(
-                ring_start, prev_num_accepted, prev_query_len, state_slots
-            )
-            update_replayssm_ring_trackers(
-                ring_start,
-                prev_num_accepted,
-                prev_query_len,
-                state_slots,
-                logical_window,
-                ring_buffer_len,
-            )
-            reset_replayssm_ring_trackers(
-                ring_start, prev_num_accepted, prev_query_len, state_slots
-            )
-
-    try:
-        yield
-    finally:
-        if runner.vllm_config.use_v2_model_runner:
-            v2_runner.block_tables.get_dummy_block_tables(max_num_reqs)
-        else:
-            assert block_tables is not None and saved_block_ids is not None
-            for block_table, block_ids in zip(block_tables, saved_block_ids):
-                block_table.block_table.np[:max_num_reqs, 0] = block_ids
-            runner.input_batch.block_table.commit_block_table(max_num_reqs)
-        for tensor in reset_tensors.values():
-            tensor[1 : max_num_reqs + 1].zero_()
-
-
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """
     Autotune FlashInfer operations.
@@ -467,13 +326,6 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     # which lead to some EP ranks receiving no tokens and skipping their
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
-    max_token_prefill_kwargs = dict(
-        num_tokens=runner.scheduler_config.max_num_batched_tokens,
-        skip_eplb=True,
-        is_profile=True,
-        randomize_inputs=True,
-    )
-    replayssm_autotune = _replayssm_autotune_kwargs(runner, max_token_prefill_kwargs)
     # Read cached autotune results and broadcast to all ranks.
     cached_results: bytes | None = None
     if is_leader and cache_path.exists():
@@ -493,10 +345,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             fi_utils.autotune(tune_mode=True, **autotune_kwargs),
         ):
             _run_flashinfer_autotune_dummy_runs(runner)
-            if replayssm_autotune is not None:
-                max_num_reqs, max_batch_decode_kwargs = replayssm_autotune
-                with _temporary_replayssm_autotune_state(runner, max_num_reqs):
-                    runner._dummy_run(**max_batch_decode_kwargs)
+            replayssm_autotune_warmup(runner)
     finally:
         set_autotune_process_group(None)
 

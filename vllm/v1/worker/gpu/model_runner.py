@@ -61,6 +61,7 @@ from vllm.multimodal.encoder_budget import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -381,9 +382,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model_loader = get_model_loader(self.vllm_config.load_config)
             logger.info_once("Loading model from scratch...")
 
-            self.model = model_loader.load_model(
-                vllm_config=self.vllm_config, model_config=self.vllm_config.model_config
-            )
+            # Capture warmup providers selected while constructing the model.
+            with self.jit_warmup_registry.activate():
+                self.model = model_loader.load_model(
+                    vllm_config=self.vllm_config,
+                    model_config=self.vllm_config.model_config,
+                )
             if self.lora_config:
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
@@ -669,15 +673,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         self.kv_caches: list[torch.Tensor] = []
-        kv_caches_dict = init_kv_cache(
-            self.kv_caches,
-            self.compilation_config.static_forward_context,
-            self.kv_cache_config,
-            self.device,
-            self.kernel_block_sizes,
-            self.vllm_config,
-            kv_cache_allocation_context=kv_cache_allocation_context,
-        )
+        # Capture warmup providers that depend on allocated KV-cache strides.
+        with self.jit_warmup_registry.activate():
+            kv_caches_dict = init_kv_cache(
+                self.kv_caches,
+                self.compilation_config.static_forward_context,
+                self.kv_cache_config,
+                self.device,
+                self.kernel_block_sizes,
+                self.vllm_config,
+                kv_cache_allocation_context=kv_cache_allocation_context,
+            )
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -920,44 +926,47 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
         start_time = time.perf_counter()
-        gc.collect()
-        torch.accelerator.empty_cache()
-        start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+        with freeze_gc_for_cudagraph_capture():
+            torch.accelerator.empty_cache()
+            start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
-        with self.maybe_setup_dummy_loras(self.lora_config):
-            if capture_encoder:
-                self.model_state.encoder_runner.capture()
+            with self.maybe_setup_dummy_loras(self.lora_config):
+                if capture_encoder:
+                    self.model_state.encoder_runner.capture()
 
-            if capture_decoder:
-                input_buffers = self.input_buffers
-                if self.pcp_manager is not None:
-                    input_buffers = self.pcp_manager.input_buffers
-                self.cudagraph_manager.capture(
-                    self.model,
-                    self.model_state,
-                    input_buffers,
-                    self.intermediate_tensors,
-                    self.block_tables,
-                    self.attn_groups,
-                    self.kv_cache_config,
-                    pcp_manager=self.pcp_manager,
-                    has_lora=self.lora_config is not None,
-                    use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
-                    lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
-                )
-                if self.speculator is not None:
-                    with use_workspace_lane(self._draft_workspace_lane):
-                        self.speculator.capture()
-                if self.adaptive_verification is not None:
-                    with self.step_timing.collect() as timings:
-                        for batch in self.adaptive_verification.batches_to_profile(
-                            self.cudagraph_manager.captured_token_counts()
-                        ):
-                            self._dummy_run(**batch)
-                    self.adaptive_verification.set_initial_cost_curves(timings)
+                if capture_decoder:
+                    input_buffers = self.input_buffers
+                    if self.pcp_manager is not None:
+                        input_buffers = self.pcp_manager.input_buffers
+                    self.cudagraph_manager.capture(
+                        self.model,
+                        self.model_state,
+                        input_buffers,
+                        self.intermediate_tensors,
+                        self.block_tables,
+                        self.attn_groups,
+                        self.kv_cache_config,
+                        pcp_manager=self.pcp_manager,
+                        has_lora=self.lora_config is not None,
+                        use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
+                        lora_capture_hook=create_lora_capture_hook(
+                            self.lora_config, self
+                        ),
+                    )
+                    if self.speculator is not None:
+                        with use_workspace_lane(self._draft_workspace_lane):
+                            self.speculator.capture()
+                    if self.adaptive_verification is not None:
+                        with self.step_timing.collect() as timings:
+                            for batch in self.adaptive_verification.batches_to_profile(
+                                self.cudagraph_manager.captured_token_counts()
+                            ):
+                                self._dummy_run(**batch)
+                        self.adaptive_verification.set_initial_cost_curves(timings)
+
+            end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         end_time = time.perf_counter()
-        end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes 5~20 seconds.
@@ -1315,11 +1324,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
 
-        max_seq_len_np = None
-        if self.use_pp:
-            # max_seq_len is only consumed by the PP `compute_need_sampled_mask`
-            max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
-
         prompt_lens = None
         if self.model_config.rswa_window is not None:
             # prompt_lens is only used in R-SWA case.
@@ -1348,7 +1352,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
-            max_seq_len_np=max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
