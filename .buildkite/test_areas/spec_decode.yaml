@@ -362,6 +362,6 @@ steps:
     # Each Gemma4 parametrization is an indivisible ~23m floor. Keep them in
     # separate shards and put the remaining tests in shard 0, where new tests
     # land by default.
-    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"
+    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"
     - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"
     - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"
