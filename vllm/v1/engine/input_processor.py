@@ -31,6 +31,7 @@ from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.async_utils import make_async
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.xdrope import validate_xdrope_input
 
 logger = init_logger(__name__)
 
@@ -349,6 +350,10 @@ class InputProcessor:
             prompt_embeds = None
             prompt_is_token_ids = None
 
+        prompt_len = length_from_prompt_token_ids_or_embeds(
+            prompt_token_ids, prompt_embeds
+        )
+
         sampling_params = None
         pooling_params = None
         if isinstance(params, SamplingParams):
@@ -356,10 +361,9 @@ class InputProcessor:
             sampling_params = params.clone()
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
-                seq_len = length_from_prompt_token_ids_or_embeds(
-                    prompt_token_ids, prompt_embeds
+                sampling_params.max_tokens = (
+                    self.model_config.max_model_len - prompt_len
                 )
-                sampling_params.max_tokens = self.model_config.max_model_len - seq_len
 
             sampling_params.update_from_generation_config(
                 self.generation_config_fields,
@@ -374,6 +378,8 @@ class InputProcessor:
                         prompt_token_ids, prompt_embeds
                     ),
                 )
+            sampling_params.validate_model_token_ids(self.model_config)
+            sampling_params.validate_routed_experts_prompt_start(prompt_len)
         else:
             pooling_params = params.clone()
 
@@ -414,6 +420,14 @@ class InputProcessor:
                         mm_hash=base_mm_hash,
                     )
                 )
+
+        validate_xdrope_input(
+            self.model_config,
+            prompt_token_ids,
+            mm_features or [],
+            prompt_is_token_ids,
+            allow_unresolved_features=True,
+        )
 
         return EngineCoreRequest(
             request_id=request_id,
@@ -486,10 +500,9 @@ class InputProcessor:
         prompt_type: Literal["encoder", "decoder"],
     ) -> None:
         model_config = self.model_config
-        tokenizer = self.tokenizer
 
         prompt_ids = (
-            None
+            prompt_input.get("prompt_token_ids")
             if prompt_input["type"] == "embeds"
             else prompt_input["prompt_token_ids"]
         )
@@ -515,34 +528,58 @@ class InputProcessor:
                             f"by setting --limit-mm-per-prompt at startup."
                         )
 
-        if prompt_ids and tokenizer is not None:
-            max_input_id = max(prompt_ids, default=0)
-            min_input_id = min(prompt_ids, default=0)
-
-            # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
-            # self.model_config.get_vocab_size() is the model’s vocab size.
-            # For Qwen3 models, the language model has extra tokens that do
-            # not exist in the tokenizer, and vice versa for multimodal
-            # placeholder tokens in some multimodal models.
-            # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399 # noqa: E501
-            # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421 # noqa: E501
-
-            # Here we take the max of the two to determine if a token id is
-            # truly out-of-vocabulary.
-            model_vocab_size = model_config.get_vocab_size()
-            # A negative id is out of vocabulary just like an over-large one,
-            # but is not caught by the upper-bound check below. Reject it here
-            # so it is not used as an embedding index downstream. This
-            # validation path is shared by generate, embedding and pooling
-            # requests, so the check covers all three.
+        if prompt_ids:
+            min_input_id = min(prompt_ids)
             if min_input_id < 0:
                 raise VLLMValidationError(
                     f"Token id {min_input_id} is out of vocabulary"
                 )
-            if max_input_id > max(tokenizer.max_token_id, model_vocab_size - 1):
+
+            model_vocab_size = model_config.get_vocab_size()
+            replaceable_positions = self._get_embedding_replacement_positions(
+                prompt_input, len(prompt_ids)
+            )
+            invalid_token_ids = [
+                token_id
+                for index, token_id in enumerate(prompt_ids)
+                if token_id >= model_vocab_size and not replaceable_positions[index]
+            ]
+            if invalid_token_ids:
                 raise VLLMValidationError(
-                    f"Token id {max_input_id} is out of vocabulary"
+                    f"Token id {invalid_token_ids[0]} is out of vocabulary"
                 )
+
+    @staticmethod
+    def _get_embedding_replacement_positions(
+        prompt_input: SingletonInput,
+        prompt_len: int,
+    ) -> list[bool]:
+        positions = [False] * prompt_len
+        if prompt_input["type"] == "embeds":
+            is_token_ids = prompt_input.get("is_token_ids")
+            if is_token_ids is not None and len(is_token_ids) == prompt_len:
+                return [not is_token_id for is_token_id in is_token_ids]
+            return positions
+        if prompt_input["type"] != "multimodal":
+            return positions
+
+        for ranges in prompt_input["mm_placeholders"].values():
+            for placeholder in ranges:
+                is_embed = placeholder.is_embed
+                embed_mask = (
+                    [True] * placeholder.length
+                    if is_embed is None
+                    else (
+                        is_embed.tolist()
+                        if hasattr(is_embed, "tolist")
+                        else list(is_embed)
+                    )
+                )
+                for offset, replaces_token in enumerate(embed_mask):
+                    position = placeholder.offset + offset
+                    if replaces_token and 0 <= position < prompt_len:
+                        positions[position] = True
+        return positions
 
     def _validate_model_inputs(
         self,

@@ -80,9 +80,12 @@ pub struct SamplingLimits {
     /// Model vocabulary size from the model config, used to bound generated
     /// token IDs and logits-domain sampling controls.
     pub model_vocab_size: usize,
-    /// Tokenizer vocabulary size, used to bound `allowed_token_ids` and
-    /// token-ID prompts.
+    /// Tokenizer vocabulary size exposed as frontend metadata.
     pub tokenizer_vocab_size: usize,
+    /// Maximum tokenized bad-word sequences accepted by the engine.
+    pub max_num_bad_words: usize,
+    /// Maximum flattened bad-word tokens accepted by the engine.
+    pub max_bad_words_total_tokens: usize,
 }
 
 impl SamplingLimits {
@@ -92,11 +95,20 @@ impl SamplingLimits {
     /// Original Python definition:
     /// <https://github.com/vllm-project/vllm/blob/b5adb027ad03c29b46181752ba3b1cb84eff1dd4/vllm/sampling_params.py#L30-L32>
     pub const MAX_LOGPROB_TOKEN_IDS: usize = 128;
-
-    /// Return the union bound used to validate token-ID prompts.
-    pub fn prompt_token_vocab_size(&self) -> usize {
-        self.tokenizer_vocab_size.max(self.model_vocab_size)
-    }
+    /// Fixed-width V2 GPU sampler budget for `allowed_token_ids`.
+    pub const MAX_ALLOWED_TOKEN_IDS: usize = 1024;
+    /// Fixed-width V2 GPU sampler budget for `logit_bias`.
+    pub const MAX_LOGIT_BIAS_TOKENS: usize = 1024;
+    /// Fixed-width V2 GPU sampler budget for resolved stop token IDs.
+    pub const MAX_STOP_TOKEN_IDS: usize = 128;
+    /// Pre-tokenization cap for user-supplied `bad_words` entries.
+    pub const MAX_BAD_WORDS_INPUT_COUNT: usize = 1000;
+    /// Pre-tokenization cap for one user-supplied `bad_words` entry.
+    pub const MAX_BAD_WORD_INPUT_LENGTH: usize = 1000;
+    /// Default tokenized bad-word sequence limit without an engine handshake.
+    pub const DEFAULT_MAX_NUM_BAD_WORDS: usize = 128;
+    /// Default flattened bad-word token limit without an engine handshake.
+    pub const DEFAULT_MAX_BAD_WORDS_TOTAL_TOKENS: usize = 1024;
 }
 
 /// Minimal text-processing backend needed by `vllm-text`.
@@ -127,7 +139,6 @@ pub trait TextBackend: Send + Sync {
     }
 
     /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).
-    /// Used to range-check `allowed_token_ids` and token-id prompts.
     fn tokenizer_vocab_size(&self) -> usize {
         self.tokenizer().vocab_size()
     }
