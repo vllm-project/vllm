@@ -6280,10 +6280,33 @@ def test_release_step_produces_pure_prefill():
     assert "_dec" not in output.num_scheduled_tokens, "decode must be deferred"
 
 
+def test_entry_step_pure_prefill_via_waiting_queue():
+    """On a release step with only decodes running (no in-flight chunk), the
+    optimistic _release_admitted_prefill flag causes defer_decodes=True when a
+    waiting prefill is present, producing a pure-prefill entry step."""
+    scheduler = create_scheduler(
+        max_num_seqs=16,
+        max_num_batched_tokens=8192,
+        enable_chunked_prefill=True,
+        enable_prefill_delayer=True,
+    )
+    _make_running_decode(scheduler)
+
+    (new_req,) = create_requests(num_requests=1, num_tokens=10, req_ids=["new0"])
+    scheduler.add_request(new_req)
+
+    assert not any(r.is_prefill_chunk for r in scheduler.running)
+    assert scheduler._release_admitted_prefill
+
+    output = scheduler.schedule(throttle_prefills=False)
+    assert "new0" in output.num_scheduled_tokens, "waiting prefill must be admitted"
+    assert "_dec" not in output.num_scheduled_tokens, "decode must be deferred"
+
+
 def test_no_livelock_when_no_prefill_admissible():
     """When no prefill can be admitted on a release step (KV full), decodes are
-    NOT starved: defer_decodes requires an in-flight prefill chunk, so when only
-    decode requests are running, decodes schedule normally."""
+    NOT starved: the predictor clears _release_admitted_prefill so the following
+    release step does not defer decodes again."""
     scheduler = create_scheduler(
         max_num_seqs=16,
         max_num_batched_tokens=8192,
@@ -6293,11 +6316,25 @@ def test_no_livelock_when_no_prefill_admissible():
     )
     _make_running_decode(scheduler)
 
-    assert not any(r.is_prefill_chunk for r in scheduler.running)
+    (blocked_req,) = create_requests(
+        num_requests=1, num_tokens=8192, req_ids=["blocked"]
+    )
+    scheduler.add_request(blocked_req)
 
-    output = scheduler.schedule(throttle_prefills=False)
-    assert "_dec" in output.num_scheduled_tokens, (
-        "decode must not be starved when no prefill chunk is in-flight"
+    assert not any(r.is_prefill_chunk for r in scheduler.running)
+    assert scheduler._release_admitted_prefill
+
+    # Release step 1: decodes deferred (optimistic), but blocked_req cannot be
+    # admitted (KV full). Step is empty; predictor flips to False.
+    output1 = scheduler.schedule(throttle_prefills=False)
+    assert "_dec" not in output1.num_scheduled_tokens
+    assert "blocked" not in output1.num_scheduled_tokens
+    assert not scheduler._release_admitted_prefill
+
+    # Release step 2: predictor is False, defer_decodes is False, decode runs.
+    output2 = scheduler.schedule(throttle_prefills=False)
+    assert "_dec" in output2.num_scheduled_tokens, (
+        "decode must not be starved after predictor flip"
     )
 
 

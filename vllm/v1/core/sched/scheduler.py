@@ -314,6 +314,19 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
+        # DP prefill balancing: optimistic predictor — assume a waiting prefill
+        # will be admissible on the next release step. Cleared when a release
+        # step fails to admit any new prefill (KV full), so decodes are not
+        # deferred into an empty step.
+        self._release_admitted_prefill: bool = True
+        # Step-composition counters (logged every 500 steps; temporary diagnostic).
+        self._step_comp_counts: dict[str, int] = {
+            "pure_decode": 0,
+            "pure_prefill": 0,
+            "mixed": 0,
+            "empty": 0,
+        }
+        self._step_comp_total: int = 0
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -548,13 +561,18 @@ class Scheduler(SchedulerInterface):
         ) and any(not r.is_prefill_chunk for r in self.running)
 
         # DP prefill balancing: on a release step (not throttled), defer decodes
-        # so the step is pure-prefill. Only safe when an in-flight prefill chunk
-        # in self.running guarantees a non-empty batch (its KV is pre-allocated).
-        defer_decodes = (
+        # so the step is pure-prefill.
+        prefill_preferred = (
             self.scheduler_config.enable_prefill_delayer
             and not throttle_prefills
             and not defer_prefills
-            and any(r.is_prefill_chunk for r in self.running)
+        )
+        has_inflight_prefill = any(r.is_prefill_chunk for r in self.running)
+        # Capture before the loops mutate the queues.
+        has_waiting_prefill = bool(self.waiting or self.skipped_waiting)
+        defer_decodes = prefill_preferred and (
+            has_inflight_prefill
+            or (has_waiting_prefill and self._release_admitted_prefill)
         )
 
         # First, schedule the RUNNING requests.
@@ -1230,6 +1248,13 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 self.prefill_capacity_bound = bool(self.waiting)
 
+        # DP prefill balancing: update the predictor so a release step that
+        # fails to admit any new prefill (KV full) stops deferring decodes.
+        if prefill_preferred and has_waiting_prefill:
+            self._release_admitted_prefill = bool(
+                scheduled_new_reqs or scheduled_resumed_reqs
+            )
+
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
@@ -1397,7 +1422,37 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+
+        self._log_step_composition(num_scheduled_tokens)
+
         return scheduler_output
+
+    def _log_step_composition(self, num_scheduled_tokens: dict[str, int]) -> None:
+        if not num_scheduled_tokens:
+            category = "empty"
+        else:
+            # Classify by scheduled token count rather than is_prefill_chunk:
+            # that flag is refreshed post-step for the next iteration, so a
+            # single-step prefill that finishes its prompt would misclassify as
+            # decode. A decode schedules one token; a prefill chunk schedules
+            # many. (Assumes no spec decode, where decodes schedule >1 token.)
+            has_prefill = any(n > 1 for n in num_scheduled_tokens.values())
+            has_decode = any(n == 1 for n in num_scheduled_tokens.values())
+            if has_decode and has_prefill:
+                category = "mixed"
+            elif has_prefill:
+                category = "pure_prefill"
+            else:
+                category = "pure_decode"
+        self._step_comp_counts[category] += 1
+        self._step_comp_total += 1
+        if self._step_comp_total % 500 == 0:
+            total = self._step_comp_total
+            parts = ", ".join(
+                f"{k}={v} ({100 * v / total:.1f}%)"
+                for k, v in self._step_comp_counts.items()
+            )
+            logger.info("step-composition over %d steps: %s", total, parts)
 
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
