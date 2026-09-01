@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
+
 import torch
 
 from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
@@ -110,6 +112,122 @@ def _temperature_softmax_kernel(
         tl.store(probs_row_ptr + block, tl.exp(x - max_val) * inv_sum, mask=mask)
 
 
+# One program per row leaves every SM beyond `num_tokens` idle, and the row is long
+# enough that the serial pass over it then dominates. When the batch is small, split
+# each row across several programs that reduce their slice independently; the combine
+# pass folds the per-slice (max, sum) pairs before normalizing.
+_SPLIT_BLOCK_SIZE = 1024
+# Programs to aim for once splitting, as a multiple of the SM count. Splitting trades
+# a smaller block size (and so a less efficient inner loop) for parallelism, which only
+# pays when there is idle hardware to fill.
+_SPLIT_PROGRAMS_PER_SM = 8
+
+
+@functools.cache
+def _sm_count(device_index: int) -> int:
+    return torch.cuda.get_device_properties(device_index).multi_processor_count
+
+
+@functools.cache
+def _combine_num_splits_pow2(vocab_size: int) -> int:
+    """Upper bound on `num_splits`, rounded up to a power of two.
+
+    The combine kernel takes this as a `tl.constexpr`, so deriving it from the
+    actual split count would recompile the kernel every time the running batch
+    size moves it to a new power of two -- during inference, since warmup only
+    covers one batch size. Slices are never smaller than `_SPLIT_BLOCK_SIZE`,
+    so this bound holds for every batch size and is constant per model. The
+    lanes above `num_splits` are masked off and cost nothing measurable.
+    """
+    return triton.next_power_of_2(triton.cdiv(vocab_size, _SPLIT_BLOCK_SIZE))
+
+
+@triton.jit
+def _temperature_softmax_partial_kernel(
+    logits_ptr,
+    logits_stride,
+    expanded_idx_mapping_ptr,
+    temperature_ptr,
+    partial_max_ptr,
+    partial_sum_ptr,
+    partial_stride,
+    vocab_size,
+    split_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    split_idx = tl.program_id(1)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    temperature = tl.load(temperature_ptr + req_state_idx).to(tl.float32)
+    denom = tl.where(temperature == 0.0, 1.0, temperature)
+    row_ptr = logits_ptr + token_idx * logits_stride
+
+    start = split_idx * split_size
+    end = tl.minimum(start + split_size, vocab_size)
+    max_val = float("-inf")
+    sum_exp = 0.0
+    for offset in range(start, end, BLOCK_SIZE):
+        block = offset + tl.arange(0, BLOCK_SIZE)
+        mask = block < end
+        x = tl.load(row_ptr + block, mask=mask, other=float("-inf"))
+        x = x.to(tl.float32) / denom
+        new_max = tl.maximum(max_val, tl.max(x, axis=0))
+        sum_exp = sum_exp * tl.exp(max_val - new_max) + tl.sum(
+            tl.where(mask, tl.exp(x - new_max), 0.0), axis=0
+        )
+        max_val = new_max
+    tl.store(partial_max_ptr + token_idx * partial_stride + split_idx, max_val)
+    tl.store(partial_sum_ptr + token_idx * partial_stride + split_idx, sum_exp)
+
+
+@triton.jit
+def _temperature_softmax_combine_kernel(
+    logits_ptr,
+    probs_ptr,
+    logits_stride,
+    probs_stride,
+    expanded_idx_mapping_ptr,
+    temperature_ptr,
+    partial_max_ptr,
+    partial_sum_ptr,
+    partial_stride,
+    vocab_size,
+    split_size,
+    num_splits,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_SPLITS_POW2: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    split_idx = tl.program_id(1)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    temperature = tl.load(temperature_ptr + req_state_idx).to(tl.float32)
+    denom = tl.where(temperature == 0.0, 1.0, temperature)
+
+    splits = tl.arange(0, NUM_SPLITS_POW2)
+    split_mask = splits < num_splits
+    partial_base = token_idx * partial_stride + splits
+    partial_max = tl.load(
+        partial_max_ptr + partial_base, mask=split_mask, other=float("-inf")
+    )
+    partial_sum = tl.load(partial_sum_ptr + partial_base, mask=split_mask, other=0.0)
+    max_val = tl.max(partial_max, axis=0)
+    sum_exp = tl.sum(
+        tl.where(split_mask, partial_sum * tl.exp(partial_max - max_val), 0.0), axis=0
+    )
+    inv_sum = 1.0 / sum_exp
+
+    row_ptr = logits_ptr + token_idx * logits_stride
+    probs_row_ptr = probs_ptr + token_idx * probs_stride
+    start = split_idx * split_size
+    end = tl.minimum(start + split_size, vocab_size)
+    for offset in range(start, end, BLOCK_SIZE):
+        block = offset + tl.arange(0, BLOCK_SIZE)
+        mask = block < end
+        x = tl.load(row_ptr + block, mask=mask, other=0.0)
+        x = x.to(tl.float32) / denom
+        tl.store(probs_row_ptr + block, tl.exp(x - max_val) * inv_sum, mask=mask)
+
+
 def temperature_softmax(
     logits: torch.Tensor,
     expanded_idx_mapping: torch.Tensor,
@@ -131,15 +249,66 @@ def temperature_softmax(
     """
     num_tokens, vocab_size = logits.shape
     probs = torch.empty_like(logits, dtype=torch.float32)
-    _temperature_softmax_kernel[(num_tokens,)](
+    if num_tokens == 0:
+        return probs
+
+    num_sms = _sm_count(logits.device.index)
+    num_splits = min(
+        triton.cdiv(_SPLIT_PROGRAMS_PER_SM * num_sms, num_tokens),
+        triton.cdiv(vocab_size, _SPLIT_BLOCK_SIZE),
+    )
+    if num_tokens > num_sms or num_splits <= 1:
+        # One program per row already occupies every SM, so splitting would only pay
+        # the smaller block size and a second pass over the row.
+        _temperature_softmax_kernel[(num_tokens,)](
+            logits,
+            probs,
+            logits.stride(0),
+            probs.stride(0),
+            expanded_idx_mapping,
+            temperature,
+            vocab_size,
+            BLOCK_SIZE=8192,
+        )
+        return probs
+
+    # Round the slice up to a whole number of blocks so no program straddles one.
+    split_size = _SPLIT_BLOCK_SIZE * triton.cdiv(
+        triton.cdiv(vocab_size, num_splits), _SPLIT_BLOCK_SIZE
+    )
+    num_splits = triton.cdiv(vocab_size, split_size)
+    partial_max = torch.empty(
+        (num_tokens, num_splits), device=logits.device, dtype=torch.float32
+    )
+    partial_sum = torch.empty_like(partial_max)
+    grid = (num_tokens, num_splits)
+    _temperature_softmax_partial_kernel[grid](
+        logits,
+        logits.stride(0),
+        expanded_idx_mapping,
+        temperature,
+        partial_max,
+        partial_sum,
+        partial_max.stride(0),
+        vocab_size,
+        split_size,
+        BLOCK_SIZE=_SPLIT_BLOCK_SIZE,
+    )
+    _temperature_softmax_combine_kernel[grid](
         logits,
         probs,
         logits.stride(0),
         probs.stride(0),
         expanded_idx_mapping,
         temperature,
+        partial_max,
+        partial_sum,
+        partial_max.stride(0),
         vocab_size,
-        BLOCK_SIZE=8192,
+        split_size,
+        num_splits,
+        BLOCK_SIZE=_SPLIT_BLOCK_SIZE,
+        NUM_SPLITS_POW2=_combine_num_splits_pow2(vocab_size),
     )
     return probs
 
