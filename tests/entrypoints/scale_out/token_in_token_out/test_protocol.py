@@ -9,6 +9,9 @@ fail loudly if the validator semantics ever drift.
 
 import json
 
+import pytest
+from pydantic import ValidationError
+
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 from vllm.sampling_params import SamplingParams
 
@@ -68,3 +71,14 @@ def test_internal_instance_construction_treats_all_as_provided():
     assert req.is_sampling_param_provided("temperature")
     # And keys we never touched should also count as provided in this path.
     assert req.is_sampling_param_provided("top_p")
+
+
+def test_single_token_prompt_accepts_default_routed_experts_start():
+    request = GenerateRequest.model_validate({"token_ids": [1], "sampling_params": {}})
+
+    assert request.sampling_params.routed_experts_prompt_start == 0
+
+
+def test_empty_token_ids_remain_invalid():
+    with pytest.raises(ValidationError, match="at least 1 item"):
+        GenerateRequest.model_validate({"token_ids": [], "sampling_params": {}})

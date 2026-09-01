@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (
+    MAX_NUM_ALLOWED_TOKEN_IDS,
     BeamSearchParams,
     SamplingParams,
     StructuredOutputsParams,
@@ -29,11 +30,6 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
-
-# Engine-side cap on `SamplingParams.allowed_token_ids`; keep in sync with
-# MAX_NUM_ALLOWED_TOKEN_IDS in vllm/v1/worker/gpu/sample/logit_bias.py.
-_MAX_NUM_ALLOWED_TOKEN_IDS = 1024
-
 
 _bitmask_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
@@ -447,7 +443,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 detokenize=False,
                 allowed_token_ids=(
                     allowed_ids
-                    if len(allowed_ids) <= _MAX_NUM_ALLOWED_TOKEN_IDS
+                    if len(allowed_ids) <= MAX_NUM_ALLOWED_TOKEN_IDS
                     else None
                 ),
                 skip_clone=True,
