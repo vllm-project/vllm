@@ -76,6 +76,10 @@ def test_trtllm_bf16_moe_modular_no_graph(
         a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
         w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
         w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+        # The FlashInfer conversion may rewrite unpadded input storage in place.
+        # Preserve the original layout for the independent torch reference.
+        reference_w1 = w1.clone()
+        reference_w2 = w2.clone()
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         scores = torch.softmax(score, dim=-1, dtype=torch.float32)
         topk_weights, topk_ids = torch.topk(scores, topk)
@@ -134,8 +138,8 @@ def test_trtllm_bf16_moe_modular_no_graph(
 
         torch_output = torch_moe(
             a,
-            w1,
-            w2,
+            reference_w1,
+            reference_w2,
             score,
             topk,
             activation=MoEActivation.SILU,
