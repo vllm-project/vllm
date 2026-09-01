@@ -9,6 +9,41 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 
+def get_quark_ocp_mx_group_size(
+    quant_config: "QuantizationConfig | None",
+    layer_name: str,
+) -> int | None:
+    """Return the OCP MX group size for a quantized Quark linear layer."""
+    if quant_config is None:
+        return None
+
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.model_executor.layers.quantization.quark.utils import should_ignore_layer
+
+    if not isinstance(quant_config, QuarkConfig):
+        return None
+
+    if should_ignore_layer(
+        layer_name,
+        ignore=quant_config.quant_config.get("exclude") or [],
+        fused_mapping=quant_config.packed_modules_mapping,
+    ):
+        return None
+
+    layer_quant_config = (
+        quant_config.get_layer_quant_config_from_name(layer_name)
+        or quant_config.quant_config.get("global_quant_config")
+        or {}
+    )
+    weight_quant = layer_quant_config.get("weight")
+    input_quant = layer_quant_config.get("input_tensors")
+    if not quant_config._is_w_ocp_mx_a_x(weight_quant, input_quant):
+        return None
+
+    assert weight_quant is not None
+    return int(weight_quant["group_size"])
+
+
 def is_shared_expert_quant_fse_compatible(
     quant_config: "QuantizationConfig | None",
     expert_prefix: str,
@@ -103,15 +138,27 @@ def is_shared_expert_quant_fse_compatible(
         )
 
     if isinstance(quant_config, QuarkConfig):
+        from vllm.model_executor.layers.quantization.quark.utils import (
+            should_ignore_layer,
+        )
+
         # TODO: layer_type_quant_config is not taken into account here.
         assert "exclude" in quant_config.quant_config
         assert "global_quant_config" in quant_config.quant_config
 
-        is_compatible = not any(
-            "shared_expert" in str(entry)
-            for entry in quant_config.quant_config["exclude"]
+        exclude = quant_config.quant_config["exclude"]
+
+        # should_ignore_layer raises a rightful ValueError in case different shards
+        # have a different ignore policy, as unsupported.
+        is_excluded = any(
+            should_ignore_layer(
+                f"{shared_expert_prefix}.{projection_name}",
+                ignore=exclude,
+                fused_mapping=quant_config.packed_modules_mapping,
+            )
+            for projection_name in projection_names
         )
-        if not is_compatible:
+        if is_excluded:
             return False, f"Quark excludes shared experts at {shared_expert_prefix}"
 
         global_quant_config = quant_config.quant_config["global_quant_config"]
