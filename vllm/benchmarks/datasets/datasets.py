@@ -1380,10 +1380,14 @@ class ShareGPTDataset(BenchmarkDataset):
         self,
         include_multi_turn: bool = False,
         max_turns: int | None = None,
+        max_prompt_len: int = 1024,
+        max_total_len: int = 2048,
         **kwargs,
     ) -> None:
         self.include_multi_turn = include_multi_turn
         self.max_turns = max_turns
+        self.max_prompt_len = max_prompt_len
+        self.max_total_len = max_total_len
         super().__init__(**kwargs)
         self.load_data()
 
@@ -1452,6 +1456,8 @@ class ShareGPTDataset(BenchmarkDataset):
             if not is_valid_sequence(
                 prompt_len,
                 new_output_len,
+                max_prompt_len=self.max_prompt_len,
+                max_total_len=self.max_total_len,
                 skip_min_output_len_check=output_len is not None,
             ):
                 continue
@@ -1786,6 +1792,21 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         type=int,
         default=None,
         help="Max turns per conversation when --include-multi-turn is set.",
+    )
+    sharegpt_group.add_argument(
+        "--sharegpt-max-prompt-len",
+        type=int,
+        default=1024,
+        help="Drop ShareGPT requests whose prompt exceeds this many tokens "
+        "(default 1024). Raise it so long (e.g. multi-turn) prompts are not filtered "
+        "out -- otherwise prefix reuse above the cap is never measured.",
+    )
+    sharegpt_group.add_argument(
+        "--sharegpt-max-total-len",
+        type=int,
+        default=2048,
+        help="Drop ShareGPT requests whose prompt+output exceeds this many tokens "
+        "(default 2048).",
     )
 
     timed_trace_group = parser.add_argument_group("timed-trace dataset options")
@@ -2443,6 +2464,8 @@ def get_samples(
                 disable_shuffle=args.disable_shuffle,
                 include_multi_turn=args.include_multi_turn,
                 max_turns=args.sharegpt_max_turns,
+                max_prompt_len=args.sharegpt_max_prompt_len,
+                max_total_len=args.sharegpt_max_total_len,
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
