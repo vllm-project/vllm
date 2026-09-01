@@ -3569,6 +3569,92 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
     assert [len(blocks) for blocks in computed_blocks.blocks] == [3, 12]
 
 
+def test_hybrid_mamba_retention_mtp_boundary_reachable_after_eagle_drop():
+    """Verify Mamba latest-only retention serves an MTP/EAGLE lookup.
+
+    The full-attention EAGLE lookup drops one block below what it matched, so
+    until a request decodes past the block boundary after its prompt, the only
+    candidate the coordinator can offer the Mamba group is one block below the
+    replay boundary. Mamba retention must keep that state too; keeping only the
+    boundary state leaves every retained state one block above every reachable
+    candidate, and the reconciled hit is always zero (found live on
+    GLM-5.3-Flash MTP: 0 hits across 16,897 queries).
+    """
+    block_size = 32
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+                is_eagle_group=True,
+            ),
+            KVCacheGroupSpec(
+                ["mamba_mtp"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+                is_eagle_group=True,
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+        use_eagle=True,
+    )
+
+    # 127 tokens: replay boundary floor(126 / 32) * 32 = 96, i.e. block 2's end.
+    # Prefill in block-aligned chunks the way the align-mode scheduler does:
+    # the state one block below the boundary only materializes as a chunk's
+    # running-state block, so a single-shot prefill could not retain it.
+    token_ids = [i for i in range(3) for _ in range(block_size)] + [3] * 31
+    req0 = make_request("0", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    for chunk_end in (32, 64, 96, 127):
+        blocks = manager.allocate_slots(
+            req0,
+            chunk_end - req0.num_computed_tokens,
+            num_computed_tokens,
+            computed_blocks,
+        )
+        assert blocks is not None
+        req0.num_computed_tokens = chunk_end
+
+    # Mamba keeps the boundary state (block 2) plus the state one block below
+    # (block 1) -- the only position an EAGLE-dropped lookup can reach while
+    # the request has not decoded past the next block boundary.
+    pool = manager.block_pool
+    expected_mamba_cached = {1, 2}
+    for i in range(3):
+        cached = pool.get_cached_block(req0.block_hashes[i], kv_cache_group_ids=[1])
+        if i in expected_mamba_cached:
+            assert cached is not None, f"mamba hash {i} should be cached"
+        else:
+            assert cached is None, f"mamba hash {i} should not be cached"
+    manager.free(req0)
+
+    # Identical resend: full attention matches blocks 0-2 (96 tokens) and the
+    # EAGLE drop caps the candidate at 64; the retained state at 64 serves it.
+    req1 = make_request("1", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == 2 * block_size
+    assert [len(blocks) for blocks in computed_blocks.blocks] == [2, 2]
+
+
 def test_block_lookup_cache_single_block_per_key():
     cache = BlockHashToBlockMap()
     key0 = BlockHashWithGroupId(b"hash0")

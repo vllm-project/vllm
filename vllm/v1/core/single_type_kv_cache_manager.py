@@ -1499,9 +1499,11 @@ class MambaManager(SingleTypeKVCacheManager):
         mask = [False] * (end_block - start_block)
 
         # (1) Segment-boundary states. A Mamba hit needs exactly the single
-        # state block ending on the boundary (no window, and draft models have
-        # no mamba layers, so no eagle shift). Block ``i`` ends at token
-        # ``(i + 1) * block_size``.
+        # state block ending on the boundary (no window). Segment tails get no
+        # EAGLE shift: under the EAGLE drop the fixed point settles on the next
+        # lower tail, costing at most one segment of hit length, unlike the
+        # reachable boundaries below where the unshifted state is the only one.
+        # Block ``i`` ends at token ``(i + 1) * block_size``.
         segment_tokens = None if retention_interval == 0 else retention_interval
         if segment_tokens is not None:
             per_segment = segment_tokens // block_size
@@ -1518,11 +1520,24 @@ class MambaManager(SingleTypeKVCacheManager):
         # capped by ``get_computed_blocks``) and any shared-prefix junction, both
         # of which segments would otherwise skip under sparse retention. A Mamba
         # hit needs exactly the single state block ending on the boundary.
+        #
+        # Under EAGLE/MTP the full-attention lookup drops one block below what
+        # it matched, so until the request decodes past the block boundary
+        # after ``boundary_tokens`` the only candidate the coordinator can
+        # offer this group is one block below the boundary. Keep that state
+        # too; keeping only the boundary state leaves every retained state one
+        # block above every reachable candidate, and the reconciled hit is
+        # always zero.
         for boundary_tokens in reachable_boundaries:
             aligned = boundary_tokens // alignment_tokens * alignment_tokens
             boundary_block = aligned // block_size - 1
-            if start_block <= boundary_block < end_block:
-                mask[boundary_block - start_block] = True
+            for kept in (
+                (boundary_block, boundary_block - 1)
+                if use_eagle
+                else (boundary_block,)
+            ):
+                if start_block <= kept < end_block:
+                    mask[kept - start_block] = True
 
         return mask
 
