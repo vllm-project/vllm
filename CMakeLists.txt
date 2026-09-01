@@ -430,6 +430,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/cuda_utils_kernels.cu"
     "csrc/libtorch_stable/activation_kernels.cu"
     "csrc/libtorch_stable/ngram_embedding_kernels.cu"
+    "csrc/libtorch_stable/vocab_parallel_embedding_kernels.cu"
     "csrc/libtorch_stable/quantization/activation_kernels.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu"
@@ -1041,7 +1042,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
       "csrc/libtorch_stable/quantization/fp4/mxfp4_experts_quant.cu"
       "csrc/libtorch_stable/quantization/fp4/mxfp4_blockwise_moe_kernel.cu"
-      "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
+      "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu"
+      "csrc/libtorch_stable/nvfp4_ds_mla_cache_kernels.cu")
     if(NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
       message(STATUS
         "Building mxfp4_experts_quant unsupported stubs because CUDA compiler version is not >= 12.9 (found ${CMAKE_CUDA_COMPILER_VERSION}).")
