@@ -1498,7 +1498,6 @@ class MambaManager(SingleTypeKVCacheManager):
             # Dense caching (default) or no alignment constraint imposed.
             return None
         assert isinstance(kv_cache_spec, MambaSpec)
-        # block_size = kv_cache_spec.block_size * dcp_world_size
         block_size = kv_cache_spec.block_size
         mask = [False] * (end_block - start_block)
 

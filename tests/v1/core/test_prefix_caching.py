@@ -4412,14 +4412,15 @@ def test_swa_reachable_block_mask_with_dcp_scaling():
     )
 
 
-def test_mamba_reachable_block_mask_with_dcp_scaling():
-    """Verify DCP scaling affects Mamba state-snapshot retention.
-    When block_size scales, retention segment granularity changes."""
+def test_mamba_reachable_block_mask_ignores_dcp():
+    """Mamba uses TP, not DCP: each rank holds the full recurrent state, so a
+    state block spans kv_cache_spec.block_size tokens regardless of DCP. The
+    mask must not scale by dcp_world_size, so retention granularity is
+    identical for any DCP world size."""
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
-    block_size = 16
     spec = MambaSpec(
-        block_size=block_size,
+        block_size=16,
         shapes=(1, 1),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
@@ -4438,67 +4439,46 @@ def test_mamba_reachable_block_mask_with_dcp_scaling():
         )
         return None if m is None else {i for i, v in enumerate(m) if v}
 
-    # With dcp_world_size=1: effective block_size = 16
-    # per_segment = 64 // 16 = 4 blocks per segment
+    # block_size stays 16 regardless of DCP: per_segment = 64 // 16 = 4.
     mask_no_dcp = get_mask(dcp_world_size=1)
-
-    # With dcp_world_size=2: effective block_size = 32
-    # per_segment = 64 // 32 = 2 blocks per segment
     mask_with_dcp = get_mask(dcp_world_size=2)
 
-    # Both should be non-None (sparse retention), but different granularity
     assert mask_no_dcp is not None
     assert mask_with_dcp is not None
-    assert mask_no_dcp != mask_with_dcp, "DCP scaling should change segment granularity"
+    assert mask_no_dcp == mask_with_dcp, "DCP must not change Mamba retention"
 
 
-def test_mamba_reachable_block_mask_with_dcp_exceeding_segment():
-    """
-    When DCP scales block_size beyond retention_interval, dense
-    caching can trigger.
-    """
+def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
+    """A large DCP world size must not scale the Mamba block size, so it can
+    never collapse sparse retention into dense caching."""
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
-    block_size = 8
     spec = MambaSpec(
-        block_size=block_size,
+        block_size=8,
         shapes=(1, 1),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
 
-    # Without DCP: effective block_size = 8, per_segment = 64 // 8 = 8
-    # Sparse retention with 8 blocks per segment
-    mask_no_dcp = MambaManager.reachable_block_mask(
-        start_block=0,
-        end_block=16,
-        alignment_tokens=64,
-        kv_cache_spec=spec,
-        use_eagle=False,
-        retention_interval=64,
-        reachable_boundaries=(255,),
-        dcp_world_size=1,
-    )
+    def get_mask(dcp_world_size):
+        return MambaManager.reachable_block_mask(
+            start_block=0,
+            end_block=16,
+            alignment_tokens=64,
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=64,
+            reachable_boundaries=(255,),
+            dcp_world_size=dcp_world_size,
+        )
 
-    # With DCP=16: effective block_size = 128, per_segment = 64 // 128 = 0
-    # per_segment becomes 0 (block_size > segment_size)
-    # This triggers dense caching (early return None at line 1048-1050)
-    mask_with_dcp = MambaManager.reachable_block_mask(
-        start_block=0,
-        end_block=16,
-        alignment_tokens=64,
-        kv_cache_spec=spec,
-        use_eagle=False,
-        retention_interval=64,
-        reachable_boundaries=(255,),
-        dcp_world_size=16,
-    )
+    # block_size stays 8 regardless of DCP: per_segment = 64 // 8 = 8, sparse.
+    mask_no_dcp = get_mask(dcp_world_size=1)
+    mask_large_dcp = get_mask(dcp_world_size=16)
 
-    # DCP scaling can trigger transition from sparse to dense
-    assert mask_no_dcp is not None, "Small DCP should enable sparse retention"
-    assert mask_with_dcp is None, (
-        "Large DCP can scale block_size > segment, triggering dense"
-    )
+    assert mask_no_dcp is not None, "Sparse retention expected"
+    assert mask_large_dcp is not None, "Large DCP must not force dense caching"
+    assert mask_no_dcp == mask_large_dcp, "DCP must not change Mamba retention"
 
 
 def test_swa_shared_prefix_reuse_under_zero_retention():
