@@ -2855,7 +2855,13 @@ class VllmConfig:
         if not self.cache_config.use_replayssm:
             self.cache_config.use_kda_recoverssm = False
             return self
-        self.cache_config.use_kda_recoverssm = self.num_speculative_tokens > 0
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm():
+            # ROCm Kimi-K3 KDA uses ATOM ReplaySSM via --use-replayssm, not RecoverSSM.
+            self.cache_config.use_kda_recoverssm = False
+        else:
+            self.cache_config.use_kda_recoverssm = self.num_speculative_tokens > 0
 
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
@@ -2896,14 +2902,6 @@ class VllmConfig:
             )
         if self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError("--use-replayssm requires --mamba-backend triton")
-        if (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.is_kv_transfer_instance
-        ):
-            raise ValueError(
-                "--use-replayssm is incompatible with KV connectors "
-                "(P/D disaggregation, KV cache offload)"
-            )
         return self
 
 
