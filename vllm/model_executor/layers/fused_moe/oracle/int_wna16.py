@@ -151,6 +151,8 @@ def _backend_incompatibility_reason(
             return "VLLM_CPU_INT4_W4A8=0 disables the DA8W4 path"
         if may_have_zp:
             return "zero points are not supported"
+        if isinstance(quant_config, MoeWNA16Config):
+            return "the MoeWNA16 weight layout is not supported"
         if isinstance(quant_config, AutoGPTQConfig) and quant_config.desc_act:
             return "GPTQ activation ordering is not supported"
         if (
