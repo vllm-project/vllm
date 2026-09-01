@@ -399,6 +399,47 @@ def test_sliding_window_possible_cached_prefix():
     )
 
 
+def test_sliding_window_cache_hit_with_finer_hash_alignment():
+    """Sliding-window lookup uses full blocks with finer hybrid-cache hashes."""
+    hash_block_size = 2
+    block_size = 4
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=8,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+    block_hashes = [BlockHash(str(i).encode()) for i in range(4)]
+
+    # Each physical block uses the last chained hash in its block-size view.
+    for block_hash, block in zip(
+        (block_hashes[1], block_hashes[3]), block_pool.blocks[10:12]
+    ):
+        block_pool.cached_block_hash_to_block.insert(
+            make_block_hash_with_group_id(block_hash, 0), block
+        )
+
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=8,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=sliding_window_spec,
+        drop_eagle_block=False,
+        alignment_tokens=hash_block_size,
+    )
+
+    assert hit_length == 8
+    assert computed_blocks[0] == block_pool.blocks[10:12]
+
+
 def test_chunked_local_attention_remove_skipped_blocks():
     attention_spec = ChunkedLocalAttentionSpec(
         block_size=2,

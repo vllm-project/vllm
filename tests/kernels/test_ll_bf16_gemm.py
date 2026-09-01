@@ -69,6 +69,29 @@ def _gemm(a, b):
     return ll_bf16_gemm(a, b)
 
 
+def test_c1_pdl_kernel_is_selected_automatically(monkeypatch):
+    from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
+
+    calls = []
+
+    def default_kernel(hidden_states, router_weight, output_dtype):
+        calls.append(("default", hidden_states.shape[0]))
+        return hidden_states
+
+    def c1_pdl_kernel(hidden_states, router_weight, output_dtype):
+        calls.append(("c1_pdl", hidden_states.shape[0]))
+        return hidden_states
+
+    monkeypatch.setattr(ll_bf16, "ll_bf16_gemm_kernel", default_kernel)
+    monkeypatch.setattr(ll_bf16, "ll_bf16_gemm_c1_pdl_kernel", c1_pdl_kernel)
+    weight = torch.empty(4, 8, device="cuda", dtype=torch.bfloat16)
+
+    ll_bf16.ll_bf16_gemm(torch.empty(1, 8, device="cuda", dtype=torch.bfloat16), weight)
+    ll_bf16.ll_bf16_gemm(torch.empty(2, 8, device="cuda", dtype=torch.bfloat16), weight)
+
+    assert calls == [("c1_pdl", 1), ("default", 2)]
+
+
 # ===== Shapes =====
 
 SHAPES = [
