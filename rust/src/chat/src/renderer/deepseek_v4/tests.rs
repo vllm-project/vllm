@@ -324,6 +324,92 @@ fn tool_results_are_sorted_by_previous_assistant_tool_call_order() {
 }
 
 #[test]
+fn tool_response_and_following_user_share_one_turn() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::tool_response("result", "call_1"),
+            ChatMessage::user("follow-up"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(false));
+
+    let rendered = render_request(&request);
+
+    expect![
+        "<｜begin▁of▁sentence｜><｜User｜><tool_result>result</tool_result>\n\nfollow-up<｜Assistant｜></think>"
+    ]
+    .assert_eq(&rendered);
+}
+
+#[test]
+fn consecutive_users_share_one_turn() {
+    let mut request = ChatRequest {
+        messages: vec![ChatMessage::user("part 1"), ChatMessage::user("part 2")],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(false));
+
+    let rendered = render_request(&request);
+
+    expect!["<｜begin▁of▁sentence｜><｜User｜>part 1\n\npart 2<｜Assistant｜></think>"]
+        .assert_eq(&rendered);
+}
+
+#[test]
+fn mixed_user_content_keeps_text_position_when_sorting_tool_results() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "second".to_string(),
+                    name: "second_tool".to_string(),
+                    arguments: "{}".to_string(),
+                }),
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "first".to_string(),
+                    name: "first_tool".to_string(),
+                    arguments: "{}".to_string(),
+                }),
+            ]),
+            ChatMessage::tool_response("first result", "first"),
+            ChatMessage::user("follow-up"),
+            ChatMessage::tool_response("second result", "second"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(false));
+
+    let rendered = render_request(&request);
+
+    expect![[r#"
+        <｜begin▁of▁sentence｜>
+
+        <｜DSML｜tool_calls>
+        <｜DSML｜invoke name="second_tool">
+
+        </｜DSML｜invoke>
+        <｜DSML｜invoke name="first_tool">
+
+        </｜DSML｜invoke>
+        </｜DSML｜tool_calls><｜end▁of▁sentence｜><｜User｜><tool_result>second result</tool_result>
+
+        follow-up
+
+        <tool_result>first result</tool_result><｜Assistant｜></think>"#]]
+    .assert_eq(&rendered);
+}
+
+#[test]
 fn drop_thinking_false_keeps_prior_assistant_reasoning() {
     let mut request = ChatRequest {
         messages: vec![
