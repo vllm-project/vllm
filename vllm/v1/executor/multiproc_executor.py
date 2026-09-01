@@ -670,6 +670,8 @@ class WorkerProc:
 
         # Load model
         self.worker.init_device()
+        if envs.VLLM_PLE_CPU_OFFLOAD:
+            self.worker.spawn_ple_offload()
         # Update process title now that parallel groups are initialized
         self.setup_proc_title_and_log_prefix(
             enable_ep=vllm_config.parallel_config.enable_expert_parallel
@@ -678,6 +680,8 @@ class WorkerProc:
             self.worker.elastic_ep_execute("load_model")
         else:
             self.worker.load_model()
+        if envs.VLLM_PLE_CPU_OFFLOAD:
+            self.worker.wait_ple_offload_ready()
 
         scheduler_config = vllm_config.scheduler_config
         self.use_async_scheduling = scheduler_config.async_scheduling
