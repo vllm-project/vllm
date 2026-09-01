@@ -86,7 +86,7 @@ def resolve_layer_fused_shared_expert(
     if fse_requested and not is_fused_shared_expert_enabled:
         logger.warning(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-            "cannot be enabled: %s.",
+            "cannot be enabled - skipping for this layer: %s.",
             fse_reason,
         )
     return is_fused_shared_expert_enabled
