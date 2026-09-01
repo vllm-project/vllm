@@ -982,7 +982,7 @@ async def benchmark(
             )
         # Preserve start_time as the time the request was sent. It is used by
         # throughput calculations; record client-side semaphore delay separately.
-        output.benchmark_queue_time = output.start_time - request_arrival_time
+        output.client_queue_time = output.start_time - request_arrival_time
         return output
 
     probe_outputs: list[RequestFuncOutput] = []
@@ -1294,7 +1294,7 @@ async def benchmark(
             "itls": [output.itl for output in outputs],
             "latencies": [output.latency for output in outputs],
             "start_times": [output.start_time for output in outputs],
-            "queue_times": [output.benchmark_queue_time for output in outputs],
+            "queue_times": [output.client_queue_time for output in outputs],
             "generated_texts": [output.generated_text for output in outputs],
             "errors": [output.error for output in outputs],
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
@@ -1312,7 +1312,7 @@ async def benchmark(
             "total_token_throughput": metrics.total_token_throughput,
             "input_lens": [output.prompt_len for output in outputs],
             "latencies": [output.latency for output in outputs],
-            "queue_times": [output.benchmark_queue_time for output in outputs],
+            "queue_times": [output.client_queue_time for output in outputs],
             "errors": [output.error for output in outputs],
         }
 
@@ -1320,11 +1320,11 @@ async def benchmark(
     e2els_including_queue: list[float] | None = None
     if max_concurrency is not None:
         queue_times = [
-            output.benchmark_queue_time for output in outputs if output.success
+            output.client_queue_time for output in outputs if output.success
         ]
         if not math.isinf(request_rate):
             e2els_including_queue = [
-                output.latency + output.benchmark_queue_time
+                output.latency + output.client_queue_time
                 for output in outputs
                 if output.success
             ]
