@@ -3,13 +3,13 @@
 # Run the Arm CPU test suites against the image built by cpu-arm64-image-build.
 set -euxo pipefail
 
-SHARD_ID=${1:?Usage: run-cpu-test-arm.sh SHARD_ID}
+SHARD_ID=${1:?Usage: run-cpu-test-arm.sh SHARD_ID IMAGE}
+IMAGE=${2:?Usage: run-cpu-test-arm.sh SHARD_ID IMAGE}
 if [[ ! "$SHARD_ID" =~ ^[0-2]$ ]]; then
     echo "SHARD_ID must be 0, 1, or 2" >&2
     exit 2
 fi
 
-IMAGE="${REGISTRY:?REGISTRY is required}/${REPO:?REPO is required}:${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}-arm64-cpu"
 JOB_SUFFIX=${BUILDKITE_JOB_ID:-local-$SHARD_ID}
 CONTAINER_NAME="cpu-test-${JOB_SUFFIX//[^a-zA-Z0-9_.-]/-}"
 

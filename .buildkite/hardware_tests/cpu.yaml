@@ -171,5 +171,8 @@ steps:
   device: arm_cpu
   no_plugin: true
   commands:
-  - bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh "$$BUILDKITE_PARALLEL_JOB"
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh
+    "$$BUILDKITE_PARALLEL_JOB"
+    "$REGISTRY/$REPO:$BUILDKITE_COMMIT-arm64-cpu"
   parallelism: 3
