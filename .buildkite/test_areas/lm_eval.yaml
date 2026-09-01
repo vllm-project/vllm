@@ -123,6 +123,45 @@ steps:
   - vllm/v1/worker/gpu/spec_decode/speculator.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval Spec Decode"
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 120
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - tests/evals/gsm8k/configs/Kimi-K3-pruned75-DSpark-AITER-TP4.yaml
+      - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-AITER-TEP4.yaml
+      - tests/evals/gsm8k/configs/models-spec-decode-rocm.txt
+      - tests/evals/gsm8k/test_gsm8k_correctness.py
+      - tests/evals/gsm8k/gsm8k_eval.py
+      - tests/evals/gsm8k/conftest.py
+      - vllm/config/
+      - vllm/envs.py
+      - vllm/models/kimi_k3/
+      - vllm/models/deepseek_v4/
+      - vllm/model_executor/kernels/mhc/
+      - vllm/model_executor/layers/mhc.py
+      - vllm/model_executor/layers/quantization/
+      - vllm/model_executor/layers/sparse_attn_indexer.py
+      - vllm/model_executor/models/config.py
+      - vllm/model_executor/models/registry.py
+      - vllm/model_executor/models/qwen3_dspark.py
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/warmup/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/tokenizers/
+      - vllm/v1/attention/
+      - vllm/v1/core/kv_cache_utils.py
+      - vllm/v1/spec_decode/metrics.py
+      - vllm/v1/worker/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode-rocm.txt
 
 - label: ":nvidia: (B200) LM Eval Large Models EP"
   key: lm-eval-large-models-ep-2xb200
