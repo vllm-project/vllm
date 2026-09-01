@@ -159,10 +159,11 @@ def test_dcp_fine_hit_retention_uses_hash_alignment_without_eagle():
 
 @pytest.mark.parametrize("dcp_world_size", [1, 4])
 def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
-    """Chunk ends with partial hits on: block-aligned chunks, one extra stop
-    at the prompt's last hash boundary (registering the partial tail), then
-    the remaining tokens. block=512, hash=32, prompt=10000, budget=8192:
-    0 -> 8192 -> 9728 -> 9984 -> 10000."""
+    """Chunk ends with partial hits on: one block per step (a reusable state
+    materializes at every crossed boundary), one extra stop at the prompt's
+    last hash boundary (registering the partial tail), then the remaining
+    tokens. block=512, hash=32, prompt=10000, budget=8192:
+    0 -> 512 -> 1024 -> ... -> 9728 -> 9984 -> 10000."""
     block_size = 512
     scheduler_block_size = block_size * dcp_world_size
     hash_block_size = 32
@@ -176,16 +177,20 @@ def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
         scheduler_block_size=scheduler_block_size,
         mamba_partial_cache_hit=True,
         mamba_has_prefill_checkpoint_blocks=False,
+        mamba_retention_interval=None,
+        mamba_eagle_reach_margin=0,
     )
     split = Scheduler._mamba_block_aligned_split
 
     req = make_request("0", [0] * 10000, hash_block_size, sha256)
     req.num_computed_tokens = 0
-    assert split(self=mock, request=req, num_new_tokens=8192) == 8192
-    req.num_computed_tokens = 8192
-    # Stop at the last block boundary (9728).
-    assert split(self=mock, request=req, num_new_tokens=1808) == 1536
-    req.num_computed_tokens = 9728
+    # One block per step up to the last block boundary (9728).
+    for boundary in range(block_size, 9728 + 1, block_size):
+        remaining = 10000 - req.num_computed_tokens
+        assert split(self=mock, request=req, num_new_tokens=min(8192, remaining)) == (
+            block_size
+        )
+        req.num_computed_tokens = boundary
     # Extra stop at the prompt's last hash boundary (9984).
     assert split(self=mock, request=req, num_new_tokens=272) == 256
     req.num_computed_tokens = 9984
@@ -222,6 +227,8 @@ def test_mamba_align_split_when_block_exceeds_scheduling_budget():
         hash_block_size=32,
         mamba_partial_cache_hit=False,
         mamba_has_prefill_checkpoint_blocks=False,
+        mamba_retention_interval=None,
+        mamba_eagle_reach_margin=0,
     )
     req = make_request("0", [0] * prompt_length, 32, sha256)
     split = Scheduler._mamba_block_aligned_split
@@ -261,6 +268,8 @@ def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
         hash_block_size=32,
         mamba_partial_cache_hit=False,
         mamba_has_prefill_checkpoint_blocks=False,
+        mamba_retention_interval=None,
+        mamba_eagle_reach_margin=0,
     )
     req = make_request("0", [0] * prompt_length, 32, sha256)
     split = Scheduler._mamba_block_aligned_split

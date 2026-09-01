@@ -42,6 +42,10 @@ class SingleTypeKVCacheManager(ABC):
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
+    # Tokens an EAGLE/MTP lookup drops below the deepest cached position;
+    # set by the hybrid coordinator, used by sparse Mamba retention.
+    eagle_reach_margin: int = 0
+
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
@@ -429,6 +433,15 @@ class SingleTypeKVCacheManager(ABC):
         self._pending_cow_copies.append((source_block, cow_block))
         cow_block.ref_cnt += 1
 
+    def _reachable_boundaries(self, request: Request) -> list[int]:
+        """Token boundaries whose reachable tail must be retained under
+        sparse retention: the replay boundary (``num_prompt - 1``, capped by
+        ``get_computed_blocks``) and any detected shared-prefix junction."""
+        reachable_boundaries = [request.num_prompt_tokens - 1]
+        if request.shared_prefix_boundary:
+            reachable_boundaries.append(request.shared_prefix_boundary)
+        return reachable_boundaries
+
     def cache_blocks(
         self,
         request: Request,
@@ -453,12 +466,7 @@ class SingleTypeKVCacheManager(ABC):
         if num_cached_blocks >= num_full_blocks:
             return
 
-        # Token boundaries whose reachable tail must be retained under sparse
-        # retention: the replay boundary (``num_prompt - 1``, capped by
-        # ``get_computed_blocks``) and any detected shared-prefix junction.
-        reachable_boundaries = [request.num_prompt_tokens - 1]
-        if request.shared_prefix_boundary:
-            reachable_boundaries.append(request.shared_prefix_boundary)
+        reachable_boundaries = self._reachable_boundaries(request)
 
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,
@@ -1362,6 +1370,20 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
 class MambaManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
+
+    def _reachable_boundaries(self, request: Request) -> list[int]:
+        boundaries = super()._reachable_boundaries(request)
+        # Under EAGLE/MTP the attention lookup drops its last matched block
+        # (`eagle_reach_margin` tokens), so the deepest state a replay can
+        # actually use lies that far below the replay boundary. Without it
+        # sparse retention keeps a state one block beyond any speculative
+        # lookup's reach and an identical prompt only hits once a junction
+        # forms (#53479).
+        if self.eagle_reach_margin > 0:
+            eagle_reach = request.num_prompt_tokens - 1 - self.eagle_reach_margin
+            if eagle_reach >= 0:
+                boundaries.append(eagle_reach)
+        return boundaries
 
     def __init__(
         self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs

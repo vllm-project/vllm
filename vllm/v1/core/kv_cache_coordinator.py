@@ -160,6 +160,13 @@ class KVCacheCoordinator(ABC):
             self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
 
+    @property
+    def eagle_reach_margin(self) -> int:
+        """Tokens an EAGLE/MTP lookup drops below the deepest cached
+        position (the attention groups' pruned block). 0 without speculative
+        decoding or without a pruned attention group."""
+        return 0
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -661,6 +668,33 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         for manager in self.single_type_managers:
             manager.cache_hit_alignment_tokens = cache_hit_alignment_tokens
         self.verify_and_split_kv_cache_groups()
+        # Sparse retention (`MambaManager._reachable_boundaries`) must keep a
+        # state where a pruned speculative lookup can reach, not only at the
+        # replay boundary.
+        for manager in self.single_type_managers:
+            manager.eagle_reach_margin = self.eagle_reach_margin
+
+    def _eagle_margin(
+        self, manager_cls: type[SingleTypeKVCacheManager], group_block_size: int
+    ) -> int:
+        """Tokens the EAGLE/MTP lookup drops from a group's hit: one hash
+        block under fine-grained partial hits, otherwise one group block."""
+        return (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            and manager_cls.supports_fine_grained_hash_lookup
+            and group_block_size > self.hash_block_size
+            else group_block_size
+        )
+
+    @property
+    def eagle_reach_margin(self) -> int:
+        for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
+            if use_eagle and not isinstance(spec, MambaSpec):
+                return self._eagle_margin(
+                    manager_cls, self.single_type_managers[group_ids[0]].block_size
+                )
+        return 0
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:
@@ -838,13 +872,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 # mamba: its finder never drops (draft models have no mamba
                 # layers), so the hit would grow past the candidate.
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
-                    eagle_margin = (
-                        self.hash_block_size
-                        if self.enable_partial_hash_hits
-                        and manager_cls.supports_fine_grained_hash_lookup
-                        and group_block_size > self.hash_block_size
-                        else group_block_size
-                    )
+                    eagle_margin = self._eagle_margin(manager_cls, group_block_size)
                     _max_length = min(
                         curr_hit_length + eagle_margin, max_cache_hit_length
                     )

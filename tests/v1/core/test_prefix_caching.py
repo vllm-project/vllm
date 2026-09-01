@@ -1167,6 +1167,8 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,
         mamba_has_prefill_checkpoint_blocks=False,
+        mamba_retention_interval=None,
+        mamba_eagle_reach_margin=0,
     )
     req_2.shared_prefix_boundary = shared_prefix_boundary
     num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
@@ -1174,7 +1176,9 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         request=req_2,
         num_new_tokens=3 * block_size,
     )
-    assert num_new_tokens_adjusted == 2 * block_size  # adjust to the common prefix
+    # Dense boundary stops subsume the junction stop: every boundary becomes
+    # a chunk end, so the junction's state is still cached one step later.
+    assert num_new_tokens_adjusted == block_size
 
     manager.allocate_slots(req_2, 3 * block_size, 0, computed_blocks)
     # Cleanup
