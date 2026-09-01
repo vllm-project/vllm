@@ -413,7 +413,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor | QuantizedActivation,
+        x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # if batch invariant mode is enabled dequant
