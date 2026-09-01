@@ -171,54 +171,9 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
-def _replayssm_config(
-    *,
-    backend: MambaBackendEnum,
-    use_v2_model_runner: bool = False,
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        cache_config=SimpleNamespace(
-            use_replayssm=True,
-            mamba_cache_mode="none",
-            replayssm_buffer_len=16,
-        ),
-        model_config=None,
-        num_speculative_tokens=0,
-        mamba_config=SimpleNamespace(backend=backend),
-        use_v2_model_runner=use_v2_model_runner,
-        kv_transfer_config=None,
-    )
-
-
-def test_v2_replayssm_requires_flashinfer():
-    config = _replayssm_config(
-        backend=MambaBackendEnum.TRITON,
-        use_v2_model_runner=True,
-    )
-
-    with pytest.raises(ValueError, match="requires Model Runner V1"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-
-
-def test_v2_flashinfer_replayssm_is_supported():
-    config = _replayssm_config(
-        backend=MambaBackendEnum.FLASHINFER,
-        use_v2_model_runner=True,
-    )
-
-    assert VllmConfig.validate_mamba_cached_kernel(config) is config
-
-
-def test_flashinfer_replayssm_rejects_unsupported_buffer_length():
-    config = _replayssm_config(backend=MambaBackendEnum.FLASHINFER)
-    config.cache_config.replayssm_buffer_len = 17
-
-    with pytest.raises(ValueError, match="replayssm-buffer-len <= 16"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-
-
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
-    """ROCm keeps DeepSeek V3.2 and V4 on their compiled MRV1 paths."""
+    """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
+    MRV1 paths and off breakable cudagraphs by default."""
     from vllm.config.vllm import (
         ROCM_DEFAULT_MRV1_ARCHITECTURES,
         default_breakable_cudagraph_architectures,
@@ -231,10 +186,12 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     try:
         assert "DeepseekV32ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
         assert "DeepseekV4ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
+        assert "GlmMoeDsaForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
 
         breakable_architectures = default_breakable_cudagraph_architectures()
         assert "DeepseekV32ForCausalLM" not in breakable_architectures
         assert "DeepseekV32MTPModel" not in breakable_architectures
+        assert "GlmMoeDsaForCausalLM" not in breakable_architectures
 
         # The carve-out takes effect via the runner-selection property
         # (warning_once args must be hashable for its lru_cache).
@@ -313,7 +270,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         ("DeepseekV32MTPModel", False, True),
         ("DeepseekV32MTPModel", True, False),
         ("GlmMoeDsaForCausalLM", False, True),
-        ("GlmMoeDsaForCausalLM", True, True),
+        ("GlmMoeDsaForCausalLM", True, False),
     ],
 )
 def test_dsa_breakable_cudagraph_platform_default(

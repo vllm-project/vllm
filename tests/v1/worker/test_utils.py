@@ -11,21 +11,10 @@ from vllm.v1.worker.utils import bind_kv_cache
 
 
 class _TestReplaySSMMixer(MambaMixer2):
-    _state_shapes = ((2,), (3,), (4,), (5,), (6,))
-    _state_dtypes = (
-        torch.float32,
-        torch.float32,
-        torch.float32,
-        torch.float32,
-        torch.float32,
-    )
-
     def __init__(self):
         torch.nn.Module.__init__(self)
         self.use_replayssm = True
         self.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
-        self.cache_config = SimpleNamespace(mamba_cache_mode="none")
-        self.replayssm_buffer_len = 16
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_query_len = torch.empty(0, dtype=torch.int32)
@@ -33,14 +22,14 @@ class _TestReplaySSMMixer(MambaMixer2):
         self._updates_replayssm_trackers = True
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
-        return self._state_shapes
+        return ((2,), (3,), (4,), (5,), (6,))
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
-        return self._state_dtypes
+        return (torch.float32,) * 5
 
 
-def _packed_replayssm_cache(num_blocks: int, fill_value: int = 0) -> torch.Tensor:
-    return torch.full((num_blocks, 1, 1, 80), fill_value, dtype=torch.int8)
+def _packed_replayssm_cache(num_blocks: int) -> torch.Tensor:
+    return torch.full((num_blocks, 1, 1, 80), 0, dtype=torch.int8)
 
 
 def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
