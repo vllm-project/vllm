@@ -441,7 +441,6 @@ def test_fusion_add_rmsnorm_nvfp4_quant(
             mode=CompilationMode.VLLM_COMPILE,
             pass_config=PassConfig(
                 fuse_norm_quant=True,
-                fuse_add_rms_norm_nvfp4=True,
                 eliminate_noops=True,
             ),
         ),
