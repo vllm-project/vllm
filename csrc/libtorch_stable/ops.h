@@ -530,20 +530,25 @@ void fatrelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                      double threshold);
 void swigluoai_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                        double alpha = 1.702, double limit = 7.0);
-void situ_and_mul(
-    torch::stable::Tensor& out, torch::stable::Tensor& input, double beta = 1.0,
-    double linear_beta = -1.0,
-    std::optional<torch::stable::Tensor> valid_rows = std::nullopt);
+void situ_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
+                  double beta = 1.0, double linear_beta = -1.0);
 void situ_and_mul_quant(
     torch::stable::Tensor& out, torch::stable::Tensor& scale,
     torch::stable::Tensor& input, double beta = 1.0, double linear_beta = -1.0,
     int64_t group_size = 0,
-    std::optional<torch::stable::Tensor> valid_rows = std::nullopt,
+    std::optional<torch::stable::Tensor> num_valid_tokens = std::nullopt,
     int64_t topk = 1);
 void masked_situ_and_mul(torch::stable::Tensor& out,
                          torch::stable::Tensor& input,
                          const torch::stable::Tensor& expert_num_tokens,
                          double beta = 1.0, double linear_beta = -1.0);
+void masked_moe_activation(torch::stable::Tensor& out,
+                           torch::stable::Tensor& input,
+                           const torch::stable::Tensor& valid_token_counts,
+                           const std::string& activation,
+                           double clamp_limit = 0.0, double alpha = 1.0,
+                           double beta = 0.0, double situ_beta = 1.0,
+                           double situ_linear_beta = -1.0);
 void gelu_new(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_fast(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_quick(torch::stable::Tensor& out, torch::stable::Tensor& input);
@@ -671,6 +676,15 @@ void cp_gather_and_upconvert_fp8_kv_cache(
     torch::stable::Tensor const& workspace_starts,  // [BATCH]
     int64_t batch_size,
     std::optional<torch::stable::Tensor> seq_starts = std::nullopt);
+
+// Gather and upconvert an nvfp4_ds_mla KV cache to a BF16 workspace
+void cp_gather_and_upconvert_nvfp4_kv_cache(
+    torch::stable::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE,
+                                                    // 352]
+    torch::stable::Tensor const& dst,               // [TOT_TOKENS, 576]
+    torch::stable::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
+    torch::stable::Tensor const& workspace_starts,  // [BATCH]
+    int64_t batch_size);
 
 // Indexer K quantization and cache function
 void indexer_k_quant_and_cache(
