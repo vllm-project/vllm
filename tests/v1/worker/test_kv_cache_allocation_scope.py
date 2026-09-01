@@ -48,7 +48,7 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
     result = attn_utils.init_kv_cache(
         [],
         {},
-        SimpleNamespace(kv_cache_groups=[]),
+        object(),
         torch.device("cpu"),
         [],
         config,
@@ -83,7 +83,7 @@ def test_mrv1_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
     )
     result = gpu_model_runner.GPUModelRunner.initialize_kv_cache_tensors(
         runner,
-        SimpleNamespace(kv_cache_groups=[]),
+        object(),
         [],
         kv_cache_allocation_context=scope,
     )

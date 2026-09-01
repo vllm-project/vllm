@@ -50,6 +50,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
             use_replayssm=True,
             use_kda_recoverssm=False,
             mamba_cache_mode="none",
+            replayssm_buffer_len=16,
         ),
         num_speculative_tokens=3,
         model_config=SimpleNamespace(
@@ -66,28 +67,12 @@ def test_kda_recoverssm_derivation_is_revalidated():
     )
 
     VllmConfig.validate_mamba_cached_kernel(config)
-    assert config.cache_config.use_replayssm
     assert config.cache_config.use_kda_recoverssm
 
-    config.cache_config.mamba_cache_mode = "align"
-    VllmConfig.validate_mamba_cached_kernel(config)
-    config.use_v2_model_runner = False
-    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-    config.use_v2_model_runner = True
-    config.cache_config.mamba_cache_mode = "all"
-    with pytest.raises(ValueError, match="only none and align"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-    config.cache_config.mamba_cache_mode = "none"
-
     config.model_config.architecture = "NemotronHForCausalLM"
-    with pytest.raises(ValueError, match="only supported for Kimi-K3 KDA"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-
-    config.model_config.architecture = "KimiLinearForCausalLM"
-    config.parallel_config.pipeline_parallel_size = 2
-    with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
-        VllmConfig.validate_mamba_cached_kernel(config)
+    config.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    VllmConfig.validate_mamba_cached_kernel(config)
+    assert not config.cache_config.use_kda_recoverssm
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():
@@ -2150,23 +2135,6 @@ def test_draft_sample_method_probabilistic_is_accepted():
         draft_sample_method="probabilistic",
     )
     assert speculative_config.draft_sample_method == "probabilistic"
-
-
-@pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
-def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
-    disable_eagle_block_drop: bool,
-):
-    # Start from an ngram config to avoid loading model metadata: these predicates
-    # depend only on the speculative method and the new switch.
-    speculative_config = SpeculativeConfig(
-        method="ngram",
-        num_speculative_tokens=3,
-        disable_eagle_block_drop=disable_eagle_block_drop,
-    )
-    speculative_config.method = "eagle3"
-
-    assert speculative_config.use_eagle()
-    assert speculative_config.use_eagle_block_drop() is not disable_eagle_block_drop
 
 
 def test_draft_sample_method_gumbel_is_rejected():

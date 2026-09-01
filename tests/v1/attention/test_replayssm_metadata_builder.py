@@ -16,6 +16,8 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
+from vllm.config import SpeculativeConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -191,9 +193,12 @@ REPLAYSSM_BUILD_CASES = {
 def _make_mamba_spec(
     buffer_len: int,
     mamba_backend: MambaBackendEnum,
+    num_speculative_tokens: int = 0,
 ) -> MambaSpec:
     ring_buffer_len = buffer_len + (
-        1 if mamba_backend == MambaBackendEnum.FLASHINFER else 0
+        1 + num_speculative_tokens
+        if mamba_backend == MambaBackendEnum.FLASHINFER
+        else 0
     )
     shapes = (
         (1, 1),
@@ -214,6 +219,7 @@ def _create_replayssm_builder(
     mamba_cache_mode: str = "none",
     *,
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON,
+    num_speculative_tokens: int = 0,
 ) -> MockMambaBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B", block_size=BLOCK_SIZE
@@ -224,21 +230,30 @@ def _create_replayssm_builder(
     vllm_config.cache_config.replayssm_buffer_len = buffer_len
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.mamba_config.backend = mamba_backend
+    if num_speculative_tokens > 0:
+        vllm_config.speculative_config = SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=num_speculative_tokens,
+        )
     return MockMambaBuilder(
-        _make_mamba_spec(buffer_len, mamba_backend),
+        _make_mamba_spec(buffer_len, mamba_backend, num_speculative_tokens),
         ["layer0"],
         vllm_config,
         DEVICE,
     )
 
 
-def _build(builder: MockMambaBuilder, case: ReplaySSMBuildCase):
+def _build(
+    builder: MockMambaBuilder,
+    case: ReplaySSMBuildCase,
+    num_accepted_tokens: torch.Tensor | None = None,
+):
     batch = BatchSpec(seq_lens=case.seq_lens, query_lens=case.query_lens)
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
         is_prefilling=torch.tensor(case.is_prefilling, dtype=torch.bool),
         replayssm_decode_base_cpu=torch.tensor(case.decode_base, dtype=torch.int32),
     )
-    return builder.build(0, common)
+    return builder.build(0, common, num_accepted_tokens=num_accepted_tokens)
 
 
 @pytest.mark.parametrize(
@@ -270,21 +285,56 @@ def test_resumed_request_differs_from_fresh():
     assert meta.is_flush_d.tolist()[:2] == [0, 0]
 
 
-def test_flashinfer_replayssm_scratch_metadata_fresh_decode():
-    checkpointing_ssu = pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
-    if not hasattr(checkpointing_ssu, "allocate_checkpointing_ssu_scratch"):
-        pytest.skip("FlashInfer does not expose ReplaySSM scratch allocation")
+def test_spec_decode_single_token_chunk_synthesizes_acceptance_metadata():
+    builder = _create_replayssm_builder(16, num_speculative_tokens=3)
+    case = REPLAYSSM_BUILD_CASES["leftover_prompt_one_token_flush"]
 
-    builder = _create_replayssm_builder(16, mamba_backend=MambaBackendEnum.FLASHINFER)
-    case = REPLAYSSM_BUILD_CASES["fresh_decode"]
     meta = _build(builder, case)
 
-    assert meta.write_pos_d is None
-    assert meta.is_flush_d is None
-    assert meta.bc_pre_scratch is None
-    assert meta.replayssm_scratch is not None
-    assert [tensor.shape for tensor in meta.replayssm_scratch] == [
-        (1, 1, 32, 8),
-        (1, 1, 16),
-        (1, 1, 32, 8),
-    ]
+    assert meta.query_start_loc_d is not None
+    assert meta.query_start_loc_d.tolist() == [0, 1]
+    assert meta.num_accepted_tokens is not None
+    assert meta.num_accepted_tokens.tolist() == [1]
+
+
+def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
+    builder = _create_replayssm_builder(
+        16,
+        mamba_backend=MambaBackendEnum.FLASHINFER,
+        num_speculative_tokens=3,
+    )
+    builder.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+
+    first = _build(
+        builder,
+        ReplaySSMBuildCase(
+            seq_lens=[106, 106],
+            query_lens=[1, 1],
+            is_prefilling=[False, False],
+            decode_base=[100, 100],
+            buffer_len=16,
+            expected_write_pos=[],
+            expected_is_flush=[],
+        ),
+    )
+    first_indices = first.replayssm_state_indices_d
+    assert first_indices is not None
+    assert first_indices.is_contiguous()
+    first_ptr = first_indices.data_ptr()
+
+    second = _build(
+        builder,
+        ReplaySSMBuildCase(
+            seq_lens=[122, 122],
+            query_lens=[1, 1],
+            is_prefilling=[False, False],
+            decode_base=[116, 116],
+            buffer_len=16,
+            expected_write_pos=[],
+            expected_is_flush=[],
+        ),
+    )
+    second_indices = second.replayssm_state_indices_d
+    assert second_indices is not None
+    assert second_indices.data_ptr() == first_ptr
+    assert torch.equal(second_indices, second.state_indices_tensor_d[:, 0])
