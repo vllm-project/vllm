@@ -18,33 +18,44 @@ import pybase64
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.media import AudioEmbeddingMediaIO, ImageEmbeddingMediaIO
 from vllm.multimodal.media.video import VideoEmbeddingMediaIO
 from vllm.utils.sparse_utils import safe_to_dense
 
-# 4 TiB of float32 once densified, but only a handful of stored elements.
-#
-# The shape is deliberately far larger than any host: `safe_to_dense` rejects
-# it before `to_dense()` is reached, and if the guard were ever removed the
-# allocation is refused outright rather than filled. Measured on a 252 GiB host
-# with `vm.overcommit_memory=0`, calling `to_dense()` on this tensor raises
-# `RuntimeError: DefaultCPUAllocator: can't allocate memory: you tried to
-# allocate 4398046511104 bytes` and peak RSS moves 498 -> 504 MiB, so the test
-# cannot exhaust the machine it runs on. Picking a shape that *fits* would be
-# the unsafe choice: a 30000x30000 payload really does materialize 3.4 GiB.
+# The real attack payload: 4 TiB of float32 once densified, from a handful of
+# stored elements. Only ever measured, never decoded -- see
+# `test_bomb_payload_is_tiny`.
 BOMB_SHAPE = (2**20, 2**20)
 
+# What the rejection tests actually build. Every such test also lowers
+# `VLLM_MAX_EMBED_DECODE_BYTES` to `TEST_LIMIT_BYTES`, so the guard still has
+# something to reject while nothing here can allocate more than 4 MiB even if
+# the guard regressed. Keeping the 4 TiB shape in these tests would make the
+# outcome depend on the runner: with `vm.overcommit_memory=0` the allocator
+# refuses it (measured: `RuntimeError: DefaultCPUAllocator: can't allocate
+# memory: you tried to allocate 4398046511104 bytes`, peak RSS 498 -> 504 MiB),
+# but with `vm.overcommit_memory=1` the `malloc` succeeds and the zero-fill is
+# what fails, which would OOM the test process instead of raising.
+OVERSIZED_SHAPE = (1024, 1024)  # 4 MiB dense
+TEST_LIMIT_BYTES = 4096
 
-def _oversized_sparse_tensor() -> torch.Tensor:
-    """A *valid* sparse tensor whose declared shape is enormous.
+
+def _sparse_tensor(shape: tuple[int, int]) -> torch.Tensor:
+    """A *valid* sparse tensor with one stored element and a declared `shape`.
 
     Indices are in bounds, so `check_sparse_tensor_invariants()` accepts it.
     That is the point: the invariant checks are not what stops this.
     """
     indices = torch.tensor([[0], [0]])
     values = torch.tensor([1.0])
-    return torch.sparse_coo_tensor(indices, values, BOMB_SHAPE, dtype=torch.float32)
+    return torch.sparse_coo_tensor(indices, values, shape, dtype=torch.float32)
+
+
+@pytest.fixture
+def small_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLLM_MAX_EMBED_DECODE_BYTES", str(TEST_LIMIT_BYTES))
 
 
 def _encode_base64(tensor: torch.Tensor) -> str:
@@ -54,16 +65,23 @@ def _encode_base64(tensor: torch.Tensor) -> str:
 
 
 class TestSafeToDense:
-    def test_oversized_sparse_tensor_rejected(self):
+    def test_oversized_sparse_tensor_rejected(self, small_limit):
         with pytest.raises(VLLMValidationError) as exc_info:
-            safe_to_dense(_oversized_sparse_tensor(), parameter="prompt_embeds")
+            safe_to_dense(_sparse_tensor(OVERSIZED_SHAPE), parameter="prompt_embeds")
 
         assert "VLLM_MAX_EMBED_DECODE_BYTES" in str(exc_info.value)
         assert "prompt_embeds" in str(exc_info.value)
 
+    def test_default_limit_would_reject_the_real_payload(self):
+        """The shipped default has to bound the actual attack, not just the
+        shrunken shape the other tests use. Checked arithmetically so no test
+        ever asks the allocator for 4 TiB."""
+        dense_bytes = BOMB_SHAPE[0] * BOMB_SHAPE[1] * 4
+        assert dense_bytes > envs.VLLM_MAX_EMBED_DECODE_BYTES > 0
+
     def test_bomb_payload_is_tiny(self):
         """The payload really is small — this is amplification, not a big upload."""
-        assert len(_encode_base64(_oversized_sparse_tensor())) < 4096
+        assert len(_encode_base64(_sparse_tensor(BOMB_SHAPE))) < 4096
 
     def test_dense_tensor_accepted(self):
         tensor = torch.randn(10, 768, dtype=torch.float32)
@@ -117,8 +135,8 @@ class TestSafeToDense:
 class TestEmbeddingMediaIO:
     """These are the objects reached from `/v1/chat/completions` content parts."""
 
-    def test_oversized_sparse_tensor_rejected(self, io_cls, parameter):
-        encoded = _encode_base64(_oversized_sparse_tensor())
+    def test_oversized_sparse_tensor_rejected(self, io_cls, parameter, small_limit):
+        encoded = _encode_base64(_sparse_tensor(OVERSIZED_SHAPE))
 
         with pytest.raises(VLLMValidationError) as exc_info:
             io_cls().load_base64("", encoded)
@@ -132,9 +150,9 @@ class TestEmbeddingMediaIO:
         loaded = io_cls().load_base64("", encoded)
         assert torch.equal(loaded, tensor)
 
-    def test_oversized_file_rejected(self, io_cls, parameter, tmp_path):
+    def test_oversized_file_rejected(self, io_cls, parameter, tmp_path, small_limit):
         path = tmp_path / "embeds.pt"
-        torch.save(_oversized_sparse_tensor(), path)
+        torch.save(_sparse_tensor(OVERSIZED_SHAPE), path)
 
         with pytest.raises(VLLMValidationError):
             io_cls().load_file(path)

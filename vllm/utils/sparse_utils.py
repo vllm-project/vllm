@@ -40,10 +40,12 @@ def safe_to_dense(tensor: object, *, parameter: str) -> torch.Tensor:
 
     `torch.load(..., weights_only=True)` prevents arbitrary code execution but
     not memory amplification: a sparse COO tensor carries its own declared
-    shape, so a payload of a few hundred bytes can densify into hundreds of
-    GiB and OOM-kill the server. The invariant checks only reject *invalid*
-    tensors (indices outside the declared shape); a single non-zero element
-    inside a `(2**20, 2**20)` shape is perfectly valid and passes them.
+    shape, so the dense allocation is bounded by that shape rather than by the
+    request. A 2.6 KB payload declaring `(30000, 30000)` materializes 3.4 GiB,
+    and the shape can be picked to fit whatever host is being targeted. The
+    invariant checks only reject *invalid* tensors (indices outside the
+    declared shape); a single non-zero element inside a `(2**20, 2**20)` shape
+    is perfectly valid and passes them.
 
     So reject oversized payloads based on the dense size they declare, before
     `to_dense()` allocates anything.
