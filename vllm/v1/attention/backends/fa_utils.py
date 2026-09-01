@@ -3,6 +3,8 @@
 
 from typing import Any
 
+import torch
+
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -91,7 +93,16 @@ def get_flash_attn_version(
             is_fa_version_supported,
         )
 
-        device_capability = current_platform.get_device_capability()
+        # Heterogeneous rigs: the FA version must not be derived globally
+        # from device 0. Each worker holds its own GPU, and in a TPxPP grid
+        # the stages can be different compute classes — deriving from device
+        # 0 lets the weakest card dictate the kernel for every worker. On a
+        # rig with a Volta card in position 0 and Turing cards behind it,
+        # the Turing workers die with "FlashAttention version not detected"
+        # although FA2 is available to them.
+        device_capability = current_platform.get_device_capability(
+            torch.cuda.current_device() if torch.cuda.is_available() else 0
+        )
 
         assert device_capability is not None
 
@@ -229,7 +240,11 @@ def uses_fa4_hd256_kernel(
         return False
     if head_size_v is not None and head_size_v != 256:
         return False
-    capability = current_platform.get_device_capability()
+    # Same reasoning as in get_flash_attn_version(): ask the worker's own
+    # device, not device 0.
+    capability = current_platform.get_device_capability(
+        torch.cuda.current_device() if torch.cuda.is_available() else 0
+    )
     return capability is not None and capability.major in (10, 11)
 
 
