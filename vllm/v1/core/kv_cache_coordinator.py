@@ -264,8 +264,10 @@ class KVCacheCoordinator(ABC):
             ):
                 num_blocks = manager.get_num_host_import_blocks_to_allocate(
                     request_id,
+                    num_tokens,
                     num_local_computed_tokens,
                     num_external_computed_tokens,
+                    self.hisparse_coordinator.external_import_populates_resident_cache,
                 )
             elif hisparse_host_import and isinstance(manager, HiSparseHotManager):
                 num_blocks = manager.get_num_host_import_blocks_to_allocate(request_id)
@@ -346,6 +348,7 @@ class KVCacheCoordinator(ABC):
                         request_id,
                         num_local_computed_tokens,
                         num_external_computed_tokens,
+                        self.hisparse_coordinator.external_import_populates_resident_cache,
                     )
                 else:
                     manager.allocate_external_computed_blocks(

@@ -49,6 +49,8 @@ from vllm.v1.request import Request
 
 
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
+    populates_hisparse_resident_cache = False
+
     @cached_property
     def prefix_completion_group_ids(self) -> frozenset[int]:
         if self._kv_cache_config.hisparse_host_num_blocks is None:

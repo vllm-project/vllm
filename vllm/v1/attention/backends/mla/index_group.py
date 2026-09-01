@@ -241,9 +241,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 block_stride_rows=leader.view.attention_block_stride,
                 return_valid_counts=return_valid_counts,
             )
+        source_block_table = cache.source_block_table
+        assert source_block_table is not None
         return cache.swap_in(
             req_id_per_token,
-            block_table=attn_metadata.block_table,
+            block_table=source_block_table,
             logical_topk_indices=logical_topk_indices,
             block_size=attn_metadata.block_size,
             return_valid_counts=return_valid_counts,
@@ -282,9 +284,12 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         )
         request_ids = self.request_ids[:num_decodes]
         for step in range(max_query_len):
-            self.cache(layer_index).swap_in(
+            cache = self.cache(layer_index)
+            source_block_table = cache.source_block_table
+            assert source_block_table is not None
+            cache.swap_in(
                 request_ids,
-                block_table=attn_metadata.block_table,
+                block_table=source_block_table,
                 logical_topk_indices=logical_topk_by_request[:, step],
                 block_size=attn_metadata.block_size,
                 return_valid_counts=return_valid_counts,

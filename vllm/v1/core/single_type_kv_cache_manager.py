@@ -996,31 +996,41 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     def get_num_host_import_blocks_to_allocate(
         self,
         request_id: str,
+        num_tokens: int,
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        external_import_populates_resident_cache: bool,
     ) -> int:
         """Return the hard resident footprint of a host-backed import."""
         if num_external_computed_tokens <= 0:
             return 0
-        num_tokens = num_local_computed_tokens + num_external_computed_tokens
-        tail_page = cdiv(num_tokens, self.block_size) - 1
-        blocks = self.req_to_blocks.get(request_id, ())
-        return int(tail_page >= len(blocks) or blocks[tail_page].is_null)
+        num_imported_tokens = num_local_computed_tokens + num_external_computed_tokens
+        if external_import_populates_resident_cache:
+            tail_page = cdiv(num_imported_tokens, self.block_size) - 1
+            blocks = self.req_to_blocks.get(request_id, ())
+            return int(tail_page >= len(blocks) or blocks[tail_page].is_null)
+        if num_imported_tokens % self.block_size != 0:
+            raise ValueError(
+                "A host-only HiSparse import must end on a cache-block boundary."
+            )
+        imported_pages = num_imported_tokens // self.block_size
+        return max(cdiv(num_tokens, self.block_size) - imported_pages, 0)
 
     def allocate_host_import_blocks(
         self,
         request_id: str,
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        external_import_populates_resident_cache: bool,
     ) -> None:
-        """Represent CPU history with null pages and retain its writable tail."""
+        """Represent imported CPU history and allocate any transferred tail."""
         assert num_external_computed_tokens > 0
         num_tokens = num_local_computed_tokens + num_external_computed_tokens
-        tail_page = cdiv(num_tokens, self.block_size) - 1
         blocks = self.req_to_blocks[request_id]
+        tail_page = cdiv(num_tokens, self.block_size) - 1
         if len(blocks) <= tail_page:
             blocks.extend([self._null_block] * (tail_page + 1 - len(blocks)))
-        if blocks[tail_page].is_null:
+        if external_import_populates_resident_cache and blocks[tail_page].is_null:
             blocks[tail_page] = self.block_pool.get_new_blocks(1)[0]
 
     def add_local_computed_blocks(

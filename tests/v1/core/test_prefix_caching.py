@@ -291,7 +291,11 @@ def test_hisparse_reports_when_context_is_fully_resident():
     assert not coordinator.all_context_pages_resident(scheduled)
 
 
-def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
+@pytest.mark.parametrize("populates_resident_cache", [True, False])
+def test_hisparse_host_prefix_can_be_completed_by_indexer_offload(
+    populates_resident_cache: bool,
+):
+    """Keep indexer-only imports host-backed in the resident block table."""
     manager = make_hisparse_kv_cache_manager(
         32,
         16,
@@ -324,6 +328,9 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
         num_local + max_completion,
         frozenset({1}),
     )
+    manager.hisparse_coordinator.external_import_populates_resident_cache = (
+        populates_resident_cache
+    )
     resumed.hisparse_host_import = True
     allocated = manager.allocate_slots(
         resumed,
@@ -340,6 +347,8 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     # The local prefix is adopted from shadow pages (GPU-resident), while the
     # externally imported page stays host-backed until its tail allocation.
     assert not any(block.is_null for block in resident[:2])
+    assert resident[2].is_null is not populates_resident_cache
+    assert not resident[3].is_null
 
 
 def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():

@@ -865,6 +865,7 @@ class HiSparseCacheHandle:
     def __init__(self, runtime: HiSparseRuntime) -> None:
         self.view: PagedCacheView | None = None
         self.block_table: torch.Tensor | None = None
+        self.source_block_table: torch.Tensor | None = None
         self.slot_mapping: torch.Tensor | None = None
         self.runtime = runtime
         self.dummy_batch = False
