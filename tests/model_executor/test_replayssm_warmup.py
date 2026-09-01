@@ -11,6 +11,13 @@ import torch
 from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup import replayssm_warmup as warmup
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_flashinfer(),
+    reason="FlashInfer ReplaySSM warmup tests require CUDA and FlashInfer",
+)
 
 PREFILL_KWARGS = {
     "num_tokens": 128,
@@ -67,15 +74,20 @@ def test_replayssm_autotune_decode_kwargs(runner_kwargs, expected_num_reqs):
     assert result is not None
     max_num_reqs, decode_kwargs = result
     assert max_num_reqs == expected_num_reqs
-    assert decode_kwargs["num_tokens"] == expected_num_reqs * query_len
-    assert decode_kwargs["uniform_decode"] is True
-    assert decode_kwargs["is_profile"] is True
+    expected_kwargs = {
+        **PREFILL_KWARGS,
+        "num_tokens": expected_num_reqs * query_len,
+        "uniform_decode": True,
+    }
     if runner_kwargs.get("use_v2_model_runner"):
-        assert decode_kwargs["valid_dummy_state_slots"] is True
-        assert "profile_seq_lens" not in decode_kwargs
+        expected_kwargs["valid_dummy_state_slots"] = True
     else:
-        assert decode_kwargs["profile_seq_lens"] == query_len + 1
-        assert decode_kwargs["force_attention"] is True
+        expected_kwargs.update(
+            allow_microbatching=False,
+            force_attention=True,
+            profile_seq_lens=query_len + 1,
+        )
+    assert decode_kwargs == expected_kwargs
 
 
 @pytest.mark.parametrize(
