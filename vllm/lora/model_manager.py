@@ -128,7 +128,10 @@ class LoRAModelManager:
         self._is_moe = is_moe
 
         self.supported_modules_to_save = (
-            {"score", "classifier"} if self.is_pooling_model else set()
+            {"score", "classifier"}
+            if self.is_pooling_model
+            and vllm_config.model_config.score_type == "cross-encoder"
+            else set()
         )
 
         # When the engine is started with enable_mixed_moe_lora_format=True
@@ -487,7 +490,11 @@ class LoRAModelManager:
                 continue
 
             existing_wrapper = wrapped_by_id.get(id(module))
-            if existing_wrapper is not None and "lm_head" not in module_name:
+            if (
+                existing_wrapper is not None
+                and "lm_head" not in module_name
+                and module_name not in self.supported_modules_to_save
+            ):
                 # Same underlying module was already wrapped under another
                 # path (e.g. a MoE gate held both directly on the block and
                 # inside the MoE runner). The adapter targets the canonical
