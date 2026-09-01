@@ -1,10 +1,11 @@
-group: Benchmarks XPU
+group: CRCR Report XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: ':nvidia: (H200 MIG 18GB) Benchmarks CLI'
+- label: ':satellite: Report nightly results to CRCR'
   device: intel_gpu
-  timeout_in_minutes: 45
+  timeout_in_minutes: 15
+  soft_fail: true
   working_dir: .
   no_plugin: true
   env:
@@ -14,15 +15,11 @@ steps:
   agent_tags:
     label: debug
     gpu: 1+
+  allow_dependency_failure: true
   _raw_old_commands:
-  - pytest -v -s benchmarks/
-  source_file_dependencies:
-  - vllm/
-  - '!vllm/distributed/kv_transfer/'
-  - rust/src/bench/tests/python_serve_flags.txt
-  - tests/benchmarks/
+  - bash /vllm-workspace/.buildkite/scripts/crcr-report.sh
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s benchmarks/ || true'
+    bash /workspace/vllm/.buildkite/scripts/crcr-report.sh || true'
