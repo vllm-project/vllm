@@ -738,13 +738,17 @@ ARG NCCL_VERSION
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
-# No public nvidia/cuda:13.4 image exists yet, so FINAL_BASE_IMAGE for a
-# Rubin/CUDA-13.4 build is plain ubuntu (no CUDA apt repo preconfigured).
-# Set these to register NVIDIA's public developer-preview apt repo before the
+# No public nvidia/cuda:13.4 image exists yet, so for a public CUDA-13.4
+# Rubin build FINAL_BASE_IMAGE is set to plain ubuntu:24.04 (no CUDA apt
+# repo preconfigured, unlike a real nvidia/cuda:*-base-* image). Set these
+# to register NVIDIA's public developer-preview apt repo before the
 # "Install CUDA development tools" step below, so its normal
-# cuda-nvcc-${CUDA_VERSION_DASH} etc. package names resolve. Same mechanism
-# sglang's docker/Dockerfile.cu134 uses. Empty by default (no-op) for a
-# normal FINAL_BASE_IMAGE that already has a CUDA apt repo.
+# cuda-nvcc-${CUDA_VERSION_DASH} etc. package names resolve:
+#   --build-arg FINAL_BASE_IMAGE=ubuntu:24.04
+#   --build-arg CUDA_PREVIEW_APT_REPO=https://packages.nvidia.com/noble
+#   --build-arg CUDA_PREVIEW_APT_SUITE=prerelease/cuda/13.4.0
+# Same mechanism sglang's docker/Dockerfile.cu134 uses. Empty by default
+# (no-op) for a normal FINAL_BASE_IMAGE that already has a CUDA apt repo.
 ARG CUDA_PREVIEW_APT_REPO=""
 ARG CUDA_PREVIEW_APT_SUITE=""
 
