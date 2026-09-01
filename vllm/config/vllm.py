@@ -2527,8 +2527,8 @@ class VllmConfig:
         )
 
     def _resolve_mm_video_decode_device(self) -> None:
-        """Default video decoding to NVDEC on an EPD encode-only instance
-        whose processor runs on the accelerator.
+        """Default video decoding to torchcodec GPU backend for EPD encoder-only
+        instance if the mm processor runs on CUDA.
 
         The processor consumes the decoded frames on-device in that case, so
         keeping the frames on the GPU skips the host round-trip through the
@@ -2536,18 +2536,9 @@ class VllmConfig:
         `--media-io-kwargs` is left alone, and the default is skipped where
         torchcodec (or its FFmpeg runtime) is unavailable.
         """
-        model_config = self.model_config
-        if model_config is None:
+        if self.model_config is None or self.model_config.multimodal_config is None:
             return
-        mm_config = model_config.multimodal_config
-        if mm_config is None:
-            return
-
-        from vllm.platforms import current_platform
-
-        device_type = current_platform.device_type
-        if device_type != "cuda":
-            return
+        mm_config = self.model_config.multimodal_config
 
         ec_config = self.ec_transfer_config
         # An EC producer that is not also a consumer runs no forward pass and
@@ -2556,6 +2547,16 @@ class VllmConfig:
         if ec_config is None or not ec_config.is_encode_only:
             return
 
+        from vllm.platforms import current_platform
+
+        device_type = current_platform.device_type
+        if (
+            device_type != "cuda"
+            or mm_config.get_mm_processor_device_type() != device_type
+        ):
+            return
+
+        # User set video backend or device explicitly
         video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
         if "backend" in video_kwargs or "device" in video_kwargs:
             return
@@ -2576,9 +2577,7 @@ class VllmConfig:
         video_kwargs["backend"] = "torchcodec"
         video_kwargs["device"] = device_type
         logger.info_once(
-            "EPD encoder instance: decoding video with NVDEC (torchcodec "
-            'device=%s). Override with --media-io-kwargs \'{"video": '
-            '{"backend": "opencv"}}\'.',
+            "EPD encoder instance: decoding video with NVDEC (torchcodec device=%s).",
             device_type,
         )
 
