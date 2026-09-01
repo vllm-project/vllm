@@ -102,14 +102,15 @@ def test_no_sync_with_spec_decode(
     spec_model: str,
     method: str,
     num_spec_tokens: int,
+    vllm_runner,
 ):
     """
     Test that no implicit GPU-CPU sync occurs during speculative decoding
     generation.
     """
     # Import vLLM AFTER sync_tracker fixture has applied the patch
-    from vllm import LLM, SamplingParams
-    from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm import SamplingParams
+    from vllm.config import CompilationConfig
 
     # Qwen3.5 is a VLM; without this, profile_run runs the ViT warmup
     # and peaks well above the 18GB MIG slice used by one of the CI lanes.
@@ -119,8 +120,10 @@ def test_no_sync_with_spec_decode(
     if "Qwen3.5" in model:
         extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
 
-    llm = LLM(
-        model=model,
+    with vllm_runner(
+        model,
+        block_size=None,
+        trust_remote_code=False,
         max_model_len=256,
         speculative_config={
             "method": method,
@@ -129,24 +132,31 @@ def test_no_sync_with_spec_decode(
         },
         enforce_eager=True,
         async_scheduling=True,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
         **extra_kwargs,
-    )
+    ) as runner:
+        llm = runner.llm
 
-    # Assert async scheduling is actually active before running inference.
-    assert llm.llm_engine.vllm_config.scheduler_config.async_scheduling, (
-        f"Expected async_scheduling=True for spec decode, got False. method={method}"
-    )
+        # Assert async scheduling is actually active before running inference.
+        assert llm.llm_engine.vllm_config.scheduler_config.async_scheduling, (
+            f"Expected async_scheduling=True for spec decode, got False. "
+            f"method={method}, target={model}, draft={spec_model}"
+        )
 
-    outputs = llm.generate(
-        ["Hello, my name is"],
-        SamplingParams(temperature=0, max_tokens=10),
-    )
+        outputs = llm.generate(
+            ["Hello, my name is"],
+            SamplingParams(temperature=0, max_tokens=10),
+        )
 
-    assert len(outputs) == 1
-    assert len(outputs[0].outputs[0].text) > 0
-
-    del llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+        assert len(outputs) == 1, (
+            f"{method} target={model}: expected one request output, got {len(outputs)}"
+        )
+        assert outputs[0].outputs, (
+            f"{method} target={model}: request output has no completion candidates"
+        )
+        assert outputs[0].outputs[0].text, (
+            f"{method} target={model}: generated completion text is empty"
+        )
 
     sync_tracker.assert_no_sync()

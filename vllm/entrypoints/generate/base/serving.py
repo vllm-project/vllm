@@ -11,20 +11,22 @@ from fastapi import Request
 from pydantic import ConfigDict
 from starlette.datastructures import Headers
 
+from vllm import RequestOutput
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    SpeculativeDecodingMetrics,
+)
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    GenerationError,
-    PerRequestTimingMetrics,
-)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
@@ -48,7 +50,7 @@ PRIORITY_HEADER = "X-Vllm-Priority"
 def build_per_request_timing_metrics(
     metrics: RequestStateStats | None,
     num_generation_tokens: int,
-) -> PerRequestTimingMetrics:
+) -> PerRequestMetrics:
     """Build per-request timing metrics from ``RequestStateStats``.
 
     ``generation_time_ms`` is the decode interval only (first output token to
@@ -60,7 +62,7 @@ def build_per_request_timing_metrics(
     unavailable.
     """
     if metrics is None:
-        return PerRequestTimingMetrics()
+        return PerRequestMetrics()
 
     queued_ts = metrics.queued_ts
     scheduled_ts = metrics.scheduled_ts
@@ -91,13 +93,30 @@ def build_per_request_timing_metrics(
         if inference_time_ms > 0:
             tokens_per_second = num_generation_tokens / inference_time_ms * 1000
 
-    return PerRequestTimingMetrics(
+    return PerRequestMetrics(
         time_to_first_token_ms=time_to_first_token_ms,
         generation_time_ms=generation_time_ms,
         queue_time_ms=queue_time_ms,
         mean_itl_ms=mean_itl_ms,
         tokens_per_second=tokens_per_second,
     )
+
+
+def build_spec_decoding_metrics(
+    final_res: "RequestOutput | None",
+) -> SpeculativeDecodingMetrics | None:
+    """Build per-request spec-decode acceptance metrics from the single output
+    sequence, or ``None`` when unavailable (metrics disabled, or no sequence
+    yet).
+
+    Only meaningful for single-sequence requests; callers suppress it for n>1.
+    """
+    if final_res is None or not final_res.outputs:
+        return None
+    metrics = final_res.outputs[0].spec_decode_metrics
+    if metrics is None:
+        return None
+    return SpeculativeDecodingMetrics(**metrics.to_dict())
 
 
 @dataclass(kw_only=True)
@@ -151,6 +170,19 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         except Exception:
             # Never fail server startup over the fingerprint.
             self.system_fingerprint = None
+
+    def _preflight(self, n: int = 1) -> None:
+        """Engine checks that must run before a response is started.
+
+        This is required for the streaming case, where we return a success
+        status before we actually start generating text :).
+
+        Args:
+            n: Number of sequences the request will occupy.
+        """
+        if self.engine_client.errored:
+            raise self.engine_client.dead_error
+        self.engine_client.check_admission(n)
 
     def create_streaming_error_response(
         self,
