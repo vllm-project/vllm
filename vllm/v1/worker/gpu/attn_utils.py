@@ -426,6 +426,19 @@ def init_kv_cache(
                 kernel_block_sizes,
                 allocate=allocate,
             )
+    return bind_kv_caches(
+        kv_caches, forward_context, kv_cache_config, vllm_config, attn_groups
+    )
+
+
+def bind_kv_caches(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    attn_groups: Iterable[AttentionGroup] = (),
+) -> dict[str, Any]:
+    """Bind per-layer KV cache views to the attention layers."""
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
