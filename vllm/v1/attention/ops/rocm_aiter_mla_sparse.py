@@ -1211,9 +1211,7 @@ def _get_cached_wo_a_bf16(
             torch.float32
         )
         wo_a_scale = _expand_2d_block_scales(
-            wo_a_scale_param.view(
-                n_local_groups, -1, wo_a_scale_param.shape[-1]
-            ),
+            wo_a_scale_param.view(n_local_groups, -1, wo_a_scale_param.shape[-1]),
             o_lora_rank,
             hidden_dim,
         )
