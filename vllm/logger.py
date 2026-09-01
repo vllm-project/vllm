@@ -38,6 +38,13 @@ def _use_color() -> bool:
     return False
 
 
+def _formatter_name() -> str:
+    """Select the default formatter. JSON is opt-in to keep TTY text logs."""
+    if envs.VLLM_LOGGING_FORMAT == "json":
+        return "vllm_json"
+    return "vllm_color" if _use_color() else "vllm"
+
+
 DEFAULT_LOGGING_CONFIG: dict[str, dict[str, Any] | Any] = {
     "formatters": {
         "vllm": {
@@ -50,12 +57,15 @@ DEFAULT_LOGGING_CONFIG: dict[str, dict[str, Any] | Any] = {
             "datefmt": _DATE_FORMAT,
             "format": _FORMAT,
         },
+        "vllm_json": {
+            "class": "vllm.logging_utils.OTelJSONFormatter",
+        },
     },
     "handlers": {
         "vllm": {
             "class": "logging.StreamHandler",
-            # Choose formatter based on color setting.
-            "formatter": "vllm_color" if _use_color() else "vllm",
+            # Choose formatter based on format/color setting.
+            "formatter": _formatter_name(),
             "level": envs.VLLM_LOGGING_LEVEL,
             "stream": envs.VLLM_LOGGING_STREAM,
         },
@@ -171,7 +181,7 @@ def _configure_vllm_root_logger() -> None:
         # Refresh these values in case env vars have changed.
         vllm_handler["level"] = envs.VLLM_LOGGING_LEVEL
         vllm_handler["stream"] = envs.VLLM_LOGGING_STREAM
-        vllm_handler["formatter"] = "vllm_color" if _use_color() else "vllm"
+        vllm_handler["formatter"] = _formatter_name()
 
         vllm_loggers = logging_config["loggers"]["vllm"]
         vllm_loggers["level"] = envs.VLLM_LOGGING_LEVEL

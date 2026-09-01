@@ -3,7 +3,7 @@
 vLLM leverages Python's `logging.config.dictConfig` functionality to enable
 robust and flexible configuration of the various loggers used by vLLM.
 
-vLLM offers two environment variables that can be used to accommodate a range
+vLLM offers environment variables that can be used to accommodate a range
 of logging configurations that range from simple-and-inflexible to
 more-complex-and-more-flexible.
 
@@ -11,6 +11,8 @@ more-complex-and-more-flexible.
     - Set `VLLM_CONFIGURE_LOGGING=0` (leaving `VLLM_LOGGING_CONFIG_PATH` unset)
 - vLLM's default logging configuration (simple and inflexible)
     - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1`
+- OpenTelemetry JSON logs on stdout
+    - Set `VLLM_LOGGING_FORMAT=json` (optional `OTEL_SERVICE_NAME` override)
 - Fine-grained custom logging configuration (more complex, more flexible)
     - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1` and
     set `VLLM_LOGGING_CONFIG_PATH=<path-to-logging-config.json>`
@@ -43,6 +45,19 @@ schema](https://docs.python.org/3/library/logging.config.html#dictionary-schema-
 
 If `VLLM_LOGGING_CONFIG_PATH` is specified, but `VLLM_CONFIGURE_LOGGING` is
 disabled, an error will occur while starting vLLM.
+
+### `VLLM_LOGGING_FORMAT`
+
+`VLLM_LOGGING_FORMAT` selects the encoding of the default vLLM root logger.
+
+- `text` (default): human-readable formatter, with color when the stream is a TTY
+- `json`: one OpenTelemetry Logs Data Model JSON object per line, including
+  `trace_id` and `span_id` when a span is active on the current context.
+  `OTEL_SERVICE_NAME` overrides the `service.name` field (default `vllm`).
+
+```bash
+VLLM_LOGGING_FORMAT=json vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
+```
 
 ## Examples
 

@@ -22,7 +22,7 @@ from vllm.logger import (
     enable_trace_function_call,
     init_logger,
 )
-from vllm.logging_utils import NewLineFormatter
+from vllm.logging_utils import NewLineFormatter, OTelJSONFormatter
 from vllm.logging_utils.dump_input import prepare_object_to_dump
 
 
@@ -232,6 +232,88 @@ def test_custom_logging_config_causes_an_error_if_configure_logging_is_off(monke
         assert other_logger.handlers != root_logger.handlers
         assert other_logger.level != root_logger.level
         assert other_logger.propagate
+
+
+def test_json_logging_format_uses_otel_formatter(monkeypatch):
+    monkeypatch.setenv("VLLM_LOGGING_FORMAT", "json")
+    monkeypatch.setenv("VLLM_LOGGING_COLOR", "0")
+    _configure_vllm_root_logger()
+
+    formatter = logging.getLogger("vllm").handlers[0].formatter
+    assert isinstance(formatter, OTelJSONFormatter)
+
+
+@pytest.mark.parametrize(
+    ("level", "severity_text", "severity_number"),
+    [
+        (logging.DEBUG, "DEBUG", 5),
+        (logging.INFO, "INFO", 9),
+        (logging.WARNING, "WARN", 13),
+        (logging.ERROR, "ERROR", 17),
+        (logging.CRITICAL, "FATAL", 21),
+    ],
+)
+def test_otel_json_formatter_schema_and_severity(
+    level: int, severity_text: str, severity_number: int, monkeypatch
+):
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    formatter = OTelJSONFormatter()
+    record = logging.LogRecord(
+        name="vllm.engine",
+        level=level,
+        pathname="engine.py",
+        lineno=10,
+        msg="kv cache full",
+        args=(),
+        exc_info=None,
+    )
+    payload = json.loads(formatter.format(record))
+    assert payload["body"] == "kv cache full"
+    assert payload["severity_text"] == severity_text
+    assert payload["severity_number"] == severity_number
+    assert payload["logger"] == "vllm.engine"
+    assert payload["service.name"] == "vllm"
+    assert "timestamp" in payload
+    assert "trace_id" not in payload
+    assert "span_id" not in payload
+
+
+def test_otel_json_formatter_service_name_override(monkeypatch):
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "rhoai-vllm")
+    formatter = OTelJSONFormatter()
+    record = logging.LogRecord(
+        name="vllm",
+        level=logging.INFO,
+        pathname="logger.py",
+        lineno=1,
+        msg="hello",
+        args=(),
+        exc_info=None,
+    )
+    payload = json.loads(formatter.format(record))
+    assert payload["service.name"] == "rhoai-vllm"
+
+
+def test_otel_json_formatter_injects_active_span():
+    pytest.importorskip("opentelemetry.sdk")
+    from opentelemetry.sdk.trace import TracerProvider
+
+    tracer = TracerProvider().get_tracer("vllm-test")
+    formatter = OTelJSONFormatter()
+    record = logging.LogRecord(
+        name="vllm",
+        level=logging.INFO,
+        pathname="logger.py",
+        lineno=1,
+        msg="hello",
+        args=(),
+        exc_info=None,
+    )
+    with tracer.start_as_current_span("unit") as span:
+        payload = json.loads(formatter.format(record))
+        ctx = span.get_span_context()
+    assert payload["trace_id"] == format(ctx.trace_id, "032x")
+    assert payload["span_id"] == format(ctx.span_id, "016x")
 
 
 def test_prepare_object_to_dump():
