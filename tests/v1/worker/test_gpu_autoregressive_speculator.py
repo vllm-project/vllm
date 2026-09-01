@@ -393,7 +393,14 @@ def _make_async_sync_propose_speculator(monkeypatch):
         num_reqs=1,
         uniform_token_count=1,
     )
-    prefill_sync = DPSyncState(torch.tensor([2, 2]), 2, False)
+    prefill_sync = DPSyncState(
+        torch.tensor([2, 2]),
+        2,
+        False,
+        generation=7,
+        live_num_reqs_across_dp=(0, 1),
+        execution_num_reqs=1,
+    )
     decode_sync = DPSyncState(torch.tensor([2, 2]), 1, False)
 
     monkeypatch.setattr(spec_module, "prepare_prefill_inputs", Mock())
@@ -492,6 +499,8 @@ def test_propose_overlaps_decode_dp_sync_with_draft_prefill(monkeypatch):
     )
 
     assert torch.equal(output, speculator.draft_tokens)
+    assert speculator._decode_dp_sync.start.call_args.kwargs["parent_generation"] == 7
+    assert speculator._decode_dp_sync.start.call_args.args[1:3] == (0, 0)
     assert order == [
         "start",
         "prefill",

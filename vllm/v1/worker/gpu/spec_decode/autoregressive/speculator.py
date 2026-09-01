@@ -51,7 +51,16 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.use_fused_multi_step_decode = False
         self._decode_dp_sync = (
-            DPSyncCoordinator(self.dp_size, self.dp_rank) if self.dp_size > 1 else None
+            DPSyncCoordinator(
+                self.dp_size,
+                self.dp_rank,
+                lane="speculator",
+                execution_contract=(
+                    vllm_config.parallel_config.enable_dp_execution_contract
+                ),
+            )
+            if self.dp_size > 1
+            else None
         )
 
     def load_model(self, target_model: nn.Module) -> None:
@@ -310,12 +319,24 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             # The continuation shape depends only on num_reqs, so its CPU
             # collective can overlap draft prefill and decode input preparation.
             # It is resolved below before any continuation work is launched.
+            live_num_reqs = num_reqs
+            if (
+                prefill_batch_sync is not None
+                and prefill_batch_sync.execution_num_reqs is not None
+                and prefill_batch_sync.live_num_reqs_across_dp
+            ):
+                live_num_reqs = prefill_batch_sync.live_num_reqs_across_dp[self.dp_rank]
             decode_dp_future = self._decode_dp_sync.start(
                 self.decode_cudagraph_manager,
-                num_reqs,
-                num_reqs,
+                live_num_reqs,
+                live_num_reqs,
                 uniform_token_count=1,
                 need_eager=is_profile,
+                parent_generation=(
+                    prefill_batch_sync.generation
+                    if prefill_batch_sync is not None
+                    else None
+                ),
             )
         try:
             self._prepare_eplb_forward(num_tokens)

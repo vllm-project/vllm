@@ -2021,6 +2021,9 @@ class DPEngineCoreProc(EngineCoreProc):
 
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
+        self.dp_execution_contract_enabled = (
+            vllm_config.parallel_config.enable_dp_execution_contract
+        )
 
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
@@ -2184,6 +2187,17 @@ class DPEngineCoreProc(EngineCoreProc):
             and self.step_counter % self.prefill_schedule_interval != 0
         )
 
+    def _scheduler_owns_target_generation(
+        self, scheduler_will_call_worker: bool
+    ) -> bool:
+        """Whether ``step()`` owns this rank's target worker call.
+
+        The execution-contract path currently rejects async scheduling, so a
+        non-empty scheduler always calls ``execute_model`` exactly once from
+        ``step()``, including when the resulting schedule contains zero tokens.
+        """
+        return self.dp_execution_contract_enabled and scheduler_will_call_worker
+
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
@@ -2208,6 +2222,11 @@ class DPEngineCoreProc(EngineCoreProc):
                 elif not state.commit_requested and state.is_ready_for_switch():
                     self.process_input_queue_block = True
 
+            # A scheduler-owned worker call participates in this rank's target
+            # execution generation even when it schedules zero local tokens.
+            # Record ownership before stepping so that call is never followed
+            # by a second dummy worker RPC for the same generation.
+            scheduler_will_call_worker = self.scheduler.has_requests()
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
 
@@ -2217,9 +2236,15 @@ class DPEngineCoreProc(EngineCoreProc):
                     # All engines are idle.
                     continue
 
-                # Execute a dummy pass when no ready requests ran, unless the
-                # engine is sleeping.
-                elif not self.model_executor.is_sleeping:
+                scheduler_owns_generation = self._scheduler_owns_target_generation(
+                    scheduler_will_call_worker
+                )
+                # A rank without a scheduler-owned worker call must still issue
+                # exactly one dummy call while a peer rank may be active.
+                if (
+                    not scheduler_owns_generation
+                    and not self.model_executor.is_sleeping
+                ):
                     with self.capture_iteration_details(None) as iteration_details:
                         self.execute_dummy_batch()
                     if iteration_details is not None and not self.has_coordinator:

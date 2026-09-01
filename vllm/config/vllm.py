@@ -1072,6 +1072,60 @@ class VllmConfig:
         if not self.use_v2_model_runner:
             raise ValueError("trace replay requires Model Runner V2")
 
+    def _verify_dp_execution_contract(self) -> None:
+        parallel_config = self.parallel_config
+        if not parallel_config.enable_dp_execution_contract:
+            return
+
+        unsupported = []
+        if not self.use_v2_model_runner:
+            unsupported.append("Model Runner V1")
+        if self.model_config is None or not self.model_config.is_moe:
+            unsupported.append("a non-MoE model")
+        else:
+            if self.model_config.runner_type != "generate":
+                unsupported.append(f"runner_type={self.model_config.runner_type!r}")
+            if self.model_config.architecture not in {
+                "MiniMaxM3SparseForCausalLM",
+                "MiniMaxM3SparseForConditionalGeneration",
+            }:
+                unsupported.append(f"architecture={self.model_config.architecture!r}")
+        if parallel_config.data_parallel_size <= 1:
+            unsupported.append("data_parallel_size <= 1")
+        if not parallel_config.enable_expert_parallel:
+            unsupported.append("expert parallelism disabled")
+        if not envs.VLLM_MOE_SKIP_PADDING:
+            unsupported.append("VLLM_MOE_SKIP_PADDING=0")
+        if parallel_config.all2all_backend != "flashinfer_nvlink_one_sided":
+            unsupported.append(f"all2all_backend={parallel_config.all2all_backend!r}")
+        if parallel_config.pipeline_parallel_size > 1:
+            unsupported.append("pipeline parallelism")
+        if parallel_config.prefill_context_parallel_size > 1:
+            unsupported.append("prefill context parallelism")
+        if parallel_config.decode_context_parallel_size > 1:
+            unsupported.append("decode context parallelism")
+        if parallel_config.enable_dbo:
+            unsupported.append("dual batch overlap")
+        if parallel_config.enable_eplb:
+            unsupported.append("EPLB")
+        if parallel_config.enable_elastic_ep:
+            unsupported.append("elastic expert parallelism")
+        if self.scheduler_config.async_scheduling:
+            unsupported.append("async scheduling")
+        if self.lora_config is not None:
+            unsupported.append("LoRA")
+        if (
+            self.speculative_config is not None
+            and not self.speculative_config.use_eagle()
+        ):
+            unsupported.append(f"speculative method {self.speculative_config.method!r}")
+
+        if unsupported:
+            raise ValueError(
+                "enable_dp_execution_contract does not yet support "
+                + ", ".join(unsupported)
+            )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1094,6 +1148,8 @@ class VllmConfig:
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
+
+        self._verify_dp_execution_contract()
 
         if (
             self.model_config is not None
