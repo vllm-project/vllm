@@ -38,7 +38,7 @@ Or via the CLI:
 
 ```bash
 VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-1.7B \
-    --attention-config '{"backend": "TRITON_ATTN"}'
+    --attention-config.backend TRITON_ATTN
 ```
 
 ## Enabling Batch Invariance
