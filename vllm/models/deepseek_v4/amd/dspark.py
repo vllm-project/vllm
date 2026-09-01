@@ -38,10 +38,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mhc import HCHeadOp
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3_dspark import (
     DSparkMarkovHead,
@@ -74,12 +70,9 @@ class DSparkDeepseekV4Model(nn.Module):
 
         self.num_dspark_layers = getattr(config, "n_mtp_layers", None) or 3
 
-        # Shared with the target (aliased by the speculator's loading utility).
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-            prefix=maybe_prefix(prefix, "embed_tokens"),
-        )
+        # Assigned by load_dspark_model from the target. Avoiding a placeholder
+        # here reduces transient startup memory for DSpark bring-up.
+        self.embed_tokens: nn.Module | None = None
 
         self.main_proj = ReplicatedLinear(
             config.hidden_size * len(self.target_layer_ids),
@@ -131,6 +124,7 @@ class DSparkDeepseekV4Model(nn.Module):
         self.hc_head_op = HCHeadOp()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        assert self.embed_tokens is not None
         return self.embed_tokens(input_ids)
 
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
@@ -301,12 +295,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         self.model = DSparkDeepseekV4Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        # Shared with the target (aliased by the speculator's load utility).
-        self.lm_head = ParallelLMHead(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        # Assigned by load_dspark_model from the target. Avoid a transient
+        # full-vocabulary allocation during DSpark startup.
+        self.lm_head: nn.Module | None = None
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
 
     # --- Hooks used by the speculator -------------------------------------
@@ -343,6 +334,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Base logits U_k = lm_head(norm(head_hidden))."""
+        assert self.lm_head is not None
         return self.logits_processor(self.lm_head, self.model.norm(hidden_states))
 
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
