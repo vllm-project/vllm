@@ -1269,10 +1269,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             head_size=self.head_size,
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
-            # Stamp the quant mode so runners don't take the unquantized
-            # ("auto") shape path for quantized layouts like fp8_ds_mla,
-            # whose kernel page layout (656 B/token) differs from
-            # head_size * dtype_size.
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             # ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token
             # blob, so the size is not derivable from head_size.

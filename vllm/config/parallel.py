@@ -375,8 +375,8 @@ class ParallelConfig:
 
     With DCP the KV cache is sharded across the group, so the standard MLA decode path
     all-gathers the query every step. Replicating the (small) query projection at load
-    time lets each rank materialize the full group-local head set and skip that
-    collective, at the cost of computing the projection redundantly on every rank
+    time lets each rank materialize the full group-local head set and skip that 
+    collective, at the cost of computing the projection redundantly on every rank 
     in the group.
     """
 
