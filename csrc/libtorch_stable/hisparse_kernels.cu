@@ -203,25 +203,30 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     int32_t* __restrict__ miss_mask,  // [num_rows, top_k] or nullptr
     int32_t* __restrict__ device_global_indices,  // [max_rows, region_stride]
     int16_t* __restrict__ lru_slots,              // [max_rows, hot_size]
-    const int32_t* __restrict__ request_state_indices,  // [num_rows] or nullptr
-    const int64_t host_rows, const int64_t hot_table_stride,
-    const int32_t hot_block_size, const int32_t top_k, const int32_t hot_size,
-    const int32_t hash_size, const int64_t region_stride,
-    const int64_t attention_block_stride, const int64_t source_bt_stride,
-    const int32_t source_num_reqs, const int32_t source_num_blocks,
-    const int32_t source_block_size, const int64_t resident_bt_stride,
-    const int32_t resident_num_reqs, const int32_t resident_num_blocks,
-    const int32_t resident_block_size, const int32_t resident_null_block,
-    const int64_t input_row_stride, const int64_t attention_row_stride,
-    const int64_t valid_count_stride) {
+    const int32_t* __restrict__ request_state_indices,  // [num_requests] or
+                                                        // nullptr
+    const int32_t request_state_count, const int64_t host_rows,
+    const int64_t hot_table_stride, const int32_t hot_block_size,
+    const int32_t top_k, const int32_t hot_size, const int32_t hash_size,
+    const int64_t region_stride, const int64_t attention_block_stride,
+    const int64_t source_bt_stride, const int32_t source_num_reqs,
+    const int32_t source_num_blocks, const int32_t source_block_size,
+    const int64_t resident_bt_stride, const int32_t resident_num_reqs,
+    const int32_t resident_num_blocks, const int32_t resident_block_size,
+    const int32_t resident_null_block, const int64_t input_row_stride,
+    const int64_t attention_row_stride, const int64_t valid_count_stride) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const int num_token_chunks = (top_k + kWarpSize - 1) / kWarpSize;
 
   const int batch_row = blockIdx.x;
-  const int state_row = request_state_indices != nullptr
-                            ? request_state_indices[batch_row]
-                            : batch_row;
+  const int request_row =
+      request_ids != nullptr ? request_ids[batch_row] : batch_row;
+  const int state_row =
+      request_state_indices != nullptr && request_row >= 0 &&
+              request_row < request_state_count
+          ? request_state_indices[request_row]
+          : (request_state_indices == nullptr ? request_row : -1);
   // V2 publishes -1 for CUDA-graph padding rows.
   if (state_row < 0) {
     for (int i = threadIdx.x; i < top_k; i += blockDim.x) {
@@ -416,7 +421,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       s_topk[found_topk_idx] = kTokenDone;
       store_hot_index(row_out, row_attention, found_topk_idx,
                       static_cast<int32_t>(get_physical_hot_row(
-                          hot_block_table, batch_row, hot_table_stride,
+                          hot_block_table, request_row, hot_table_stride,
                           hot_block_size, slot)),
                       hot_block_size, attention_block_stride);
     }
@@ -525,7 +530,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
         // entries are skipped), so writes never overrun pending reads.
         s_topk[m] = g;
         const int32_t physical_row = static_cast<int32_t>(
-            get_physical_hot_row(hot_block_table, batch_row, hot_table_stride,
+            get_physical_hot_row(hot_block_table, request_row, hot_table_stride,
                                  hot_block_size, evict_slot));
         store_hot_index(row_out, row_attention, i, physical_row, hot_block_size,
                         attention_block_stride);
@@ -845,12 +850,9 @@ void hisparse_resolve_residency(
                   "region_stride must match the LRU size");
   STD_TORCH_CHECK(device_global_indices.size(1) == region_stride,
                   "device_global_indices must cover the full hot region");
-  STD_TORCH_CHECK(device_global_indices.size(0) >= launch_rows,
-                  "device_global_indices has too few rows");
-  STD_TORCH_CHECK(hot_block_table.size(0) >= launch_rows &&
-                      hot_block_table.size(1) >=
-                          (region_stride + hot_block_size - 1) / hot_block_size,
-                  "hot_block_table has too few entries");
+  STD_TORCH_CHECK(hot_block_table.size(1) >=
+                      (region_stride + hot_block_size - 1) / hot_block_size,
+                  "hot_block_table has too few columns");
   STD_TORCH_CHECK(hot_rows < INT32_MAX, "hot indices must fit int32");
 
   const int32_t* request_ids_ptr = nullptr;
@@ -882,6 +884,10 @@ void hisparse_resolve_residency(
     source_num_reqs = static_cast<int32_t>(table.size(0));
     source_num_blocks = static_cast<int32_t>(table.size(1));
   }
+  const int32_t required_hot_rows =
+      request_ids_ptr != nullptr ? source_num_reqs : launch_rows;
+  STD_TORCH_CHECK(hot_block_table.size(0) >= required_hot_rows,
+                  "hot_block_table has too few rows");
 
   const int32_t* resident_block_table_ptr = nullptr;
   int64_t resident_bt_stride = 0;
@@ -961,14 +967,20 @@ void hisparse_resolve_residency(
   }
 
   const int32_t* request_state_ptr = nullptr;
+  int32_t request_state_count = 0;
   if (request_state_indices.has_value()) {
     auto const& state_indices = request_state_indices.value();
     STD_TORCH_CHECK(
         state_indices.is_cuda() &&
             state_indices.scalar_type() == torch::headeronly::ScalarType::Int &&
-            state_indices.numel() >= launch_rows,
-        "request_state_indices must be int32 on CUDA with one entry per row");
+            state_indices.dim() == 1 && state_indices.is_contiguous() &&
+            state_indices.numel() <= INT32_MAX,
+        "request_state_indices must be contiguous 1D int32 on CUDA");
     request_state_ptr = state_indices.const_data_ptr<int32_t>();
+    request_state_count = static_cast<int32_t>(state_indices.numel());
+  } else {
+    STD_TORCH_CHECK(device_global_indices.size(0) >= launch_rows,
+                    "device_global_indices has too few rows");
   }
 
   // Optional output: 1 at columns requiring a host-to-device swap, 0 elsewhere.
@@ -1034,11 +1046,12 @@ void hisparse_resolve_residency(
       swap_counts_ptr, hot_indices.mutable_data_ptr<int32_t>(),
       attention_indices_ptr, miss_mask_ptr,
       device_global_indices.mutable_data_ptr<int32_t>(),
-      lru_slots.mutable_data_ptr<int16_t>(), request_state_ptr, host_rows,
-      hot_block_table.stride(0), hot_block_size, top_k, hot_size, hash_size,
-      region_stride, attention_block_stride, source_bt_stride, source_num_reqs,
-      source_num_blocks, static_cast<int32_t>(source_block_size),
-      resident_bt_stride, resident_num_reqs, resident_num_blocks,
+      lru_slots.mutable_data_ptr<int16_t>(), request_state_ptr,
+      request_state_count, host_rows, hot_block_table.stride(0), hot_block_size,
+      top_k, hot_size, hash_size, region_stride, attention_block_stride,
+      source_bt_stride, source_num_reqs, source_num_blocks,
+      static_cast<int32_t>(source_block_size), resident_bt_stride,
+      resident_num_reqs, resident_num_blocks,
       static_cast<int32_t>(resident_block_size),
       static_cast<int32_t>(resident_null_block), global_indices.stride(0),
       attention_row_stride, valid_count_stride);
