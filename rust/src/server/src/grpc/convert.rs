@@ -527,6 +527,9 @@ fn proto_value_to_json(v: &prost_types::Value) -> serde_json::Value {
     match v.kind.as_ref() {
         None | Some(Kind::NullValue(_)) => serde_json::Value::Null,
         Some(Kind::BoolValue(b)) => serde_json::Value::Bool(*b),
+        Some(Kind::NumberValue(n)) if n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_991.0 => {
+            serde_json::Value::Number(serde_json::Number::from(*n as i64))
+        }
         Some(Kind::NumberValue(n)) => serde_json::json!(*n),
         Some(Kind::StringValue(s)) => serde_json::Value::String(s.clone()),
         Some(Kind::ListValue(list)) => {

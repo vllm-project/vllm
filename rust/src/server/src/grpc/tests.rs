@@ -143,6 +143,88 @@ fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason
     ]
 }
 
+fn ec_proto_struct() -> prost_types::Struct {
+    use prost_types::value::Kind;
+
+    prost_types::Struct {
+        fields: std::collections::BTreeMap::from([(
+            "ec_items".to_string(),
+            prost_types::Value {
+                kind: Some(Kind::ListValue(prost_types::ListValue {
+                    values: vec![prost_types::Value {
+                        kind: Some(Kind::StructValue(prost_types::Struct {
+                            fields: std::collections::BTreeMap::from([
+                                (
+                                    "image_grid_thw".to_string(),
+                                    prost_types::Value {
+                                        kind: Some(Kind::ListValue(prost_types::ListValue {
+                                            values: vec![prost_types::Value {
+                                                kind: Some(Kind::ListValue(
+                                                    prost_types::ListValue {
+                                                        values: vec![1.0, 16.0, 16.0]
+                                                            .into_iter()
+                                                            .map(|value| prost_types::Value {
+                                                                kind: Some(Kind::NumberValue(
+                                                                    value,
+                                                                )),
+                                                            })
+                                                            .collect(),
+                                                    },
+                                                )),
+                                            }],
+                                        })),
+                                    },
+                                ),
+                                (
+                                    "mm_hash".to_string(),
+                                    prost_types::Value {
+                                        kind: Some(Kind::StringValue("image-1".to_string())),
+                                    },
+                                ),
+                            ]),
+                        })),
+                    }],
+                })),
+            },
+        )]),
+    }
+}
+
+fn decode_kv_proto_struct() -> prost_types::Struct {
+    use prost_types::value::Kind;
+
+    prost_types::Struct {
+        fields: std::collections::BTreeMap::from([
+            (
+                "do_remote_prefill".to_string(),
+                prost_types::Value {
+                    kind: Some(Kind::BoolValue(true)),
+                },
+            ),
+            (
+                "pp_size".to_string(),
+                prost_types::Value {
+                    kind: Some(Kind::NumberValue(1.0)),
+                },
+            ),
+            (
+                "remote_block_ids".to_string(),
+                prost_types::Value {
+                    kind: Some(Kind::ListValue(prost_types::ListValue {
+                        values: vec![prost_types::Value {
+                            kind: Some(Kind::ListValue(prost_types::ListValue {
+                                values: vec![prost_types::Value {
+                                    kind: Some(Kind::NumberValue(7.0)),
+                                }],
+                            })),
+                        }],
+                    })),
+                },
+            ),
+        ]),
+    }
+}
+
 async fn send_outputs(push: &mut PushSocket, outputs: EngineCoreOutputs) {
     push.send(ZmqMessage::from(
         rmp_serde::to_vec_named(&outputs).expect("encode outputs"),
@@ -708,6 +790,29 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 assert_eq!(feature.identifier, "image-1");
                 assert_eq!(feature.mm_position.offset, 1);
                 assert!(feature.mm_position.length > 1);
+                assert_eq!(
+                    feature
+                        .data
+                        .as_ref()
+                        .expect("multimodal feature data")
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                    vec!["image_grid_thw"]
+                );
+                let xargs = request
+                    .sampling_params
+                    .as_ref()
+                    .and_then(|params| params.extra_args.as_ref())
+                    .expect("KV transfer args");
+                let kv_transfer_params =
+                    xargs.get("kv_transfer_params").expect("KV transfer params");
+                assert_eq!(kv_transfer_params["pp_size"].as_i64(), Some(1));
+                assert_eq!(
+                    kv_transfer_params["remote_block_ids"][0][0].as_i64(),
+                    Some(7)
+                );
+                assert!(!xargs.contains_key("ec_transfer_params"));
                 assert_eq!(token_ids.len(), feature.mm_position.length + 2);
                 assert_eq!(token_ids[0], 11);
                 assert_eq!(token_ids.last(), Some(&12));
@@ -744,6 +849,11 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 mime_type: String::new(),
                 uuid: "image-1".to_string(),
             }],
+            kv: Some(pb::KvCacheParameters {
+                kv_transfer_params: Some(decode_kv_proto_struct()),
+                ec_transfer_params: Some(ec_proto_struct()),
+                ..Default::default()
+            }),
             stopping: Some(pb::StoppingCriteria {
                 max_new_tokens: 10,
                 ..Default::default()
