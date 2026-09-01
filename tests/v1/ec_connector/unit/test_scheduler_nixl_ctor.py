@@ -20,16 +20,18 @@ def _region() -> ECSharedRegion:
     )
 
 
-def test_ec_enable_nixl_defaults_false():
+def test_ec_enable_nixl_absent_from_extra_config_by_default():
     cfg = ECTransferConfig()
-    assert cfg.ec_enable_nixl is False
+    assert cfg.get_from_extra_config("ec_enable_nixl", False) is False
 
 
-def test_ec_enable_nixl_settable():
+def test_ec_enable_nixl_read_from_extra_config():
     cfg = ECTransferConfig(
-        ec_connector="ECCPUConnector", ec_role="ec_both", ec_enable_nixl=True
+        ec_connector="ECCPUConnector",
+        ec_role="ec_both",
+        ec_connector_extra_config={"ec_enable_nixl": True},
     )
-    assert cfg.ec_enable_nixl is True
+    assert cfg.get_from_extra_config("ec_enable_nixl", False) is True
 
 
 def test_gate_off_builds_no_nixl(monkeypatch):
@@ -42,6 +44,16 @@ def test_gate_off_builds_no_nixl(monkeypatch):
     s.shutdown()
 
 
+def test_string_false_in_extra_config_leaves_nixl_off(monkeypatch):
+    """Extra config is not type coerced, and bool("false") is True."""
+    monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: _region())
+    cfg = create_ec_vllm_config(ec_role="ec_both")
+    cfg.ec_transfer_config.ec_connector_extra_config["ec_enable_nixl"] = "false"
+    s = ECCPUScheduler(cfg)
+    assert s._nixl_enabled is False
+    s.shutdown()
+
+
 def test_gate_on_wires_data_transport_and_producer_session(monkeypatch):
     # Port 0 lets the OS pick an ephemeral port so the real ZMQ ROUTER bind
     # in ProducerSession.start() cannot collide with another test/process.
@@ -49,7 +61,7 @@ def test_gate_on_wires_data_transport_and_producer_session(monkeypatch):
     monkeypatch.setenv("VLLM_EC_SIDE_CHANNEL_PORT", "0")
     monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: _region())
     cfg = create_ec_vllm_config(ec_role="ec_both")
-    cfg.ec_transfer_config.ec_enable_nixl = True
+    cfg.ec_transfer_config.ec_connector_extra_config["ec_enable_nixl"] = True
     s = ECCPUScheduler(cfg)
     try:
         assert s._nixl_enabled is True

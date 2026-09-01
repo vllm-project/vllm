@@ -63,6 +63,26 @@ def test_nixl_data_transport_registers_memory_on_init():
     nixl.register_memory.assert_called_once()
 
 
+def test_nixl_data_transport_unwinds_registration_if_init_fails():
+    """A failure after register_memory must not leave the region pinned.
+
+    __init__ propagates, so the caller never gets a transport to deregister.
+    """
+    nixl = _make_nixl_mock(prep_side_effect=RuntimeError("no dlist"))
+    from vllm.distributed.ec_transfer.ec_connector.cpu.data.nixl import (
+        NixlDataTransport,
+    )
+
+    with (
+        patch(f"{_NIXL_PATH}.NixlWrapper", return_value=nixl),
+        patch(f"{_NIXL_PATH}.nixl_agent_config", return_value=MagicMock()),
+        pytest.raises(RuntimeError, match="no dlist"),
+    ):
+        NixlDataTransport("agent", 0, 4, 64, 256)
+
+    nixl.deregister_memory.assert_called_once_with(nixl.get_reg_descs.return_value)
+
+
 def test_nixl_data_transport_raises_if_nixl_unavailable():
     from vllm.distributed.ec_transfer.ec_connector.cpu.data.nixl import (
         NixlDataTransport,

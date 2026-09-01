@@ -72,7 +72,15 @@ class ECCPUScheduler:
         )
 
         self._ec_config = ec_config
-        self._nixl_enabled = bool(getattr(ec_config, "ec_enable_nixl", False))
+        # NIXL p2p is an option of this connector, not engine-wide behavior, so
+        # it lives in extra config. Extra config is not type coerced, so a value
+        # that arrived as a JSON/CLI string is parsed, not truth-tested.
+        raw_nixl = ec_config.get_from_extra_config("ec_enable_nixl", False)
+        self._nixl_enabled = (
+            raw_nixl
+            if isinstance(raw_nixl, bool)
+            else str(raw_nixl).strip().lower() in ("true", "1", "yes")
+        )
         # NIXL fields default to None/empty so the gate-off path is untouched.
         self._data: Any = None
         self._compat_hash: str | None = None
@@ -114,21 +122,14 @@ class ECCPUScheduler:
 
         if NixlWrapper is None or nixl_agent_config is None:
             raise RuntimeError(
-                "ec_enable_nixl=True requires NIXL; install the `nixl` package "
-                "or set ec_enable_nixl=False."
+                "ec_enable_nixl requires NIXL; install the `nixl` package or "
+                "remove ec_enable_nixl from ec_connector_extra_config."
             )
+        engine_id = self._ec_config.engine_id
+        assert engine_id is not None
         self._dtype = vllm_config.model_config.dtype
         self._hidden_dim = _get_encoder_cache_hidden_dim(vllm_config)
         self._element_size = torch.empty(0, dtype=self._dtype).element_size()
-        engine_id = self._ec_config.engine_id
-        assert engine_id is not None
-        self._data = NixlDataTransport(
-            agent_name=engine_id,
-            base_ptr=self._region.blocks.data_ptr(),
-            num_blocks=self._region.num_blocks,
-            block_size_bytes=self._region.block_size_bytes,
-            total_size_bytes=self._region.num_blocks * self._region.block_size_bytes,
-        )
         self._compat_hash = compute_ec_compatibility_hash(
             vllm_version=VLLM_VERSION,
             model=str(vllm_config.model_config.model),
@@ -138,16 +139,36 @@ class ECCPUScheduler:
         if self._is_producer:
             self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST
             self._peer_port = envs.VLLM_EC_SIDE_CHANNEL_PORT
-            self._producer_session = ProducerSession(
-                transport=ZmqServerTransport(
-                    host=self._peer_host, port=self._peer_port
-                ),
-                data=self._data,
-                cache=self._cache,
-                compat_hash=self._compat_hash,
+
+        # Registering the region with NIXL and binding the control sockets are
+        # the first side effects here. __init__ propagates a failure, so the
+        # caller never receives a scheduler it could shut down: unwind through
+        # the same teardown shutdown() uses.
+        try:
+            self._data = NixlDataTransport(
+                agent_name=engine_id,
+                base_ptr=self._region.blocks.data_ptr(),
+                num_blocks=self._region.num_blocks,
+                block_size_bytes=self._region.block_size_bytes,
+                total_size_bytes=self._region.num_blocks
+                * self._region.block_size_bytes,
             )
-        if self._is_consumer:
-            self._transport = ZmqClientTransport()
+            if self._is_producer:
+                assert self._peer_host is not None
+                assert self._peer_port is not None
+                self._producer_session = ProducerSession(
+                    transport=ZmqServerTransport(
+                        host=self._peer_host, port=self._peer_port
+                    ),
+                    data=self._data,
+                    cache=self._cache,
+                    compat_hash=self._compat_hash,
+                )
+            if self._is_consumer:
+                self._transport = ZmqClientTransport()
+        except Exception:
+            self._teardown_nixl()
+            raise
 
     def has_cache_item(self, identifier: str) -> bool:
         if not self._is_consumer:
@@ -478,23 +499,44 @@ class ECCPUScheduler:
         self._is_consumer = False
 
         if self._nixl_enabled:
-            if self._producer_session is not None:
-                self._producer_session.close()
-            self._shutdown_nixl_consumer()
-            if self._data is not None:
-                try:
-                    self._data.deregister()
-                except Exception:
-                    logger.debug("ec: deregister failed", exc_info=True)
+            self._teardown_nixl()
 
         try:
             self._region.cleanup()
         except Exception:
             logger.debug("ec: region cleanup failed", exc_info=True)
 
-    def _shutdown_nixl_consumer(self) -> None:
+    def _teardown_nixl(self) -> None:
+        """Close the control sockets and release the NIXL agent.
+
+        Guards each step and clears what it releases, so it is safe on a
+        scheduler whose NIXL setup failed part-way and safe to call twice.
+        The shared region is not touched — shutdown() owns that.
+        """
+        if self._producer_session is not None:
+            try:
+                self._producer_session.close()
+            except Exception:
+                logger.debug("ec: producer session close failed", exc_info=True)
+            self._producer_session = None
+
         for session in list(self._sessions.values()):
-            session.close()
+            try:
+                session.close()
+            except Exception:
+                logger.debug("ec: consumer session close failed", exc_info=True)
         self._sessions.clear()
+
         if self._transport is not None:
-            self._transport.close()
+            try:
+                self._transport.close()
+            except Exception:
+                logger.debug("ec: client transport close failed", exc_info=True)
+            self._transport = None
+
+        if self._data is not None:
+            try:
+                self._data.deregister()
+            except Exception:
+                logger.debug("ec: deregister failed", exc_info=True)
+            self._data = None
