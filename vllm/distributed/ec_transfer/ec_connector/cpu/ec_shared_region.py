@@ -20,6 +20,8 @@ from vllm.utils.shm_utils import open_region_file, reap_orphaned_region_files
 
 logger = init_logger(__name__)
 
+_REGION_GLOB = "/dev/shm/vllm_ec_*.mmap*"
+
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
 
@@ -84,26 +86,33 @@ class ECSharedRegion:
         # True after successful cudaHostRegister (cleanup must unregister).
         self._is_pinned = False
 
-        reap_orphaned_region_files("/dev/shm/vllm_ec_*.mmap")
+        reap_orphaned_region_files(_REGION_GLOB)
         self._fd: int | None = None
-        self._fd, self._is_creator = open_region_file(self._mmap_path, total_size_bytes)
-
-        # MAP_SHARED mmap over _fd; all processes see the same pages.
-        self._mmap_obj: mmap.mmap | None = mmap.mmap(
-            self._fd,
-            total_size_bytes,
-            flags=mmap.MAP_SHARED,
-            prot=mmap.PROT_READ | mmap.PROT_WRITE,
-        )
-
-        if self._is_creator:
-            populate_write_fn = _get_populate_write_fn(self._mmap_obj)
-            populate_write_fn(self._mmap_obj, 0, total_size_bytes)
-
-        # (num_blocks, block_size_bytes) int8 tensor over the mmap buffer.
-        self.blocks: torch.Tensor = torch.frombuffer(
-            memoryview(self._mmap_obj), dtype=torch.int8
-        ).view(num_blocks, block_size_bytes)
+        self._mmap_obj: mmap.mmap | None = None
+        try:
+            self._fd, self._is_creator = open_region_file(
+                self._mmap_path, total_size_bytes
+            )
+            # MAP_SHARED mmap over _fd; all processes see the same pages.
+            self._mmap_obj = mmap.mmap(
+                self._fd,
+                total_size_bytes,
+                flags=mmap.MAP_SHARED,
+                prot=mmap.PROT_READ | mmap.PROT_WRITE,
+            )
+            if self._is_creator:
+                populate_write_fn = _get_populate_write_fn(self._mmap_obj)
+                populate_write_fn(self._mmap_obj, 0, total_size_bytes)
+            # (num_blocks, block_size_bytes) int8 tensor over the mmap buffer.
+            self.blocks: torch.Tensor = torch.frombuffer(
+                memoryview(self._mmap_obj), dtype=torch.int8
+            ).view(num_blocks, block_size_bytes)
+        except Exception:
+            # The fd holds the shared flock that marks the region live, so
+            # leaving it open would make the file unreclaimable for the life
+            # of this process.
+            self.cleanup()
+            raise
         # Cached for cudaHostRegister/Unregister and pointer math.
         self._blocks_ptr: int = self.blocks.data_ptr()
         self._blocks_nbytes: int = self.blocks.nbytes
