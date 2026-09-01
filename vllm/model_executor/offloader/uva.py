@@ -98,8 +98,14 @@ class UVAOffloader(BaseOffloader):
         """Wrap modules with UVA offloading."""
         if prefix:
             prefix = f"{prefix}."
-        modules = list(modules_generator)
-        self._offload_modules(modules, prefix)
+        modules: list[nn.Module] = []
+        for module in modules_generator:
+            self._offload_modules([module], prefix, only_priority=0)
+            modules.append(module)
+
+        if self.cpu_offload_bytes < self.cpu_offload_max_bytes:
+            self._offload_modules(modules, prefix, only_priority=1)
+
         if self.cpu_offload_bytes > 0:
             logger.info(
                 "Total CPU offloaded parameters: %s",
@@ -116,6 +122,7 @@ class UVAOffloader(BaseOffloader):
         self,
         modules: list[nn.Module],
         prefix: str = "",
+        only_priority: int | None = None,
     ) -> None:
         """Offload parameters from modules to CPU using UVA if budget allows."""
         if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
@@ -146,6 +153,9 @@ class UVAOffloader(BaseOffloader):
                 else:
                     # Sparse expert weights are prioritized over dense weights
                     priority = 0 if _is_sparse_expert_param(full_name) else 1
+
+                if only_priority is not None and priority != only_priority:
+                    continue
 
                 candidates.append((priority, module, name, p, full_name))
 
@@ -187,6 +197,10 @@ class UVAOffloader(BaseOffloader):
 
     def _wrap_non_uva_forward(self, module: nn.Module) -> None:
         """Wrap module with functional_call for non-UVA CPU offloading."""
+        if getattr(module, "_vllm_non_uva_wrapped", False):
+            return
+        module._vllm_non_uva_wrapped = True
+
         original_forward = module.forward
         device = next(module.parameters()).device
 
