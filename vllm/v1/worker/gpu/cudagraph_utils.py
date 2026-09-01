@@ -14,13 +14,13 @@ from tqdm import tqdm
 
 from vllm.compilation.breakable_cudagraph import (
     BreakableCUDAGraphWrapper,
-    is_breakable_cudagraph_enabled,
+    uses_breakable_cudagraph,
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
     get_pp_group,
@@ -161,12 +161,8 @@ class CudaGraphManager:
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile).
-        # Only when the config resolved to no compilation -- breakable
-        # yields to an explicitly requested compilation mode (see
-        # VllmConfig._maybe_enable_breakable_cudagraph).
         self.use_breakable_cg = (
-            is_breakable_cudagraph_enabled()
-            and self.compilation_config.mode == CompilationMode.NONE
+            uses_breakable_cudagraph(self.compilation_config)
             and self.cudagraph_mode.has_piecewise_cudagraphs()
         )
         self.breakable_cg_runner: BreakableCUDAGraphWrapper | None = None

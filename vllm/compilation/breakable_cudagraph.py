@@ -34,7 +34,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, VllmConfig
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
     BatchDescriptor,
@@ -54,6 +54,17 @@ def is_breakable_cudagraph_enabled() -> bool:
     # Per-config yielding to an explicit compilation mode is resolved in
     # VllmConfig._maybe_enable_breakable_cudagraph.
     return envs.VLLM_USE_BREAKABLE_CUDAGRAPH is not False
+
+
+def uses_breakable_cudagraph(compilation_config: CompilationConfig) -> bool:
+    """Whether breakable cudagraphs are active for this engine's config: the
+    env flag is not disabled and compilation resolved to mode NONE (breakable
+    yields to an explicitly requested compilation mode; see
+    VllmConfig._maybe_enable_breakable_cudagraph)."""
+    return (
+        is_breakable_cudagraph_enabled()
+        and compilation_config.mode == CompilationMode.NONE
+    )
 
 
 F = TypeVar("F", bound=Callable[..., Any])

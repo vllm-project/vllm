@@ -23,7 +23,7 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import (
     BreakableCUDAGraphWrapper,
-    is_breakable_cudagraph_enabled,
+    uses_breakable_cudagraph,
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
@@ -5516,12 +5516,9 @@ class GPUModelRunner(
         assert cudagraph_mode is not None
         # Breakable cudagraphs replace only the torch.compile-based
         # PIECEWISE path; FULL cudagraphs (if any) are still applied on top
-        # via CUDAGraphWrapper below. Breakable applies only when the
-        # config resolved to no compilation -- it yields to an explicitly
-        # requested compilation mode (see _maybe_enable_breakable_cudagraph).
+        # via CUDAGraphWrapper below.
         use_breakable = (
-            is_breakable_cudagraph_enabled()
-            and self.compilation_config.mode == CompilationMode.NONE
+            uses_breakable_cudagraph(self.compilation_config)
             and cudagraph_mode.has_piecewise_cudagraphs()
             and not self.parallel_config.use_ubatching
         )

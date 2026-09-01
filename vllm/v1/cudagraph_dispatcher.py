@@ -42,14 +42,12 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
-        from vllm.compilation.breakable_cudagraph import (
-            is_breakable_cudagraph_enabled,
-        )
+        from vllm.compilation.breakable_cudagraph import uses_breakable_cudagraph
 
         assert (
             not self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             or self.compilation_config.is_attention_compiled_piecewise()
-            or is_breakable_cudagraph_enabled()
+            or uses_breakable_cudagraph(self.compilation_config)
         ), (
             "Compilation mode should be CompilationMode.VLLM_COMPILE when "
             "cudagraph_mode piecewise cudagraphs is used, "
