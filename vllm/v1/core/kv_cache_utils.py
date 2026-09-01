@@ -1120,7 +1120,6 @@ def unify_kv_cache_spec_page_size(
                 )
             assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
-
     return new_kv_cache_spec
 
 
@@ -1845,6 +1844,30 @@ def _largest_divisor_at_most(value: int, limit: int) -> int:
     return 1
 
 
+def block_size_hack(vllm_config, filtered_spec):
+    # When backend_per_kind overrides the sliding-window backend to one
+    # that supports large (non-power-of-2) kernel block sizes (e.g.
+    # FLASH_ATTN which supports MultipleOf(16)), we can reduce the LCM
+    # by switching outlier SWA groups to page_size_padded with the
+    # majority block size. Without the override, the default backend
+    # (e.g. FlashInfer TRTLLM) requires power-of-2 kernel blocks and
+    # sub-block splitting + padded pages would crash.
+    #
+    # To enable, add to config:
+    #   attention:
+    #     backend_per_kind:
+    #       sliding_window: FLASH_ATTN
+    attention_config = getattr(vllm_config, "attention_config", None)
+    if attention_config is not None:
+        logger.info("backend_per_kind=%s", attention_config.backend_per_kind)
+        if attention_config.backend_per_kind.get("sliding_window"):
+            page_sizes = {s.page_size_bytes for s in filtered_spec.values()}
+            if len(page_sizes) == 1:
+                max_page_size = page_sizes.pop()
+                filtered_spec = _reduce_block_size_lcm(filtered_spec, max_page_size)
+    return filtered_spec
+
+
 def get_kv_cache_groups(
     vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
 ) -> list[KVCacheGroupSpec]:
@@ -1906,26 +1929,8 @@ def get_kv_cache_groups(
             raise
         return fallback_groups
 
-    # When backend_per_kind overrides the sliding-window backend to one
-    # that supports large (non-power-of-2) kernel block sizes (e.g.
-    # FLASH_ATTN which supports MultipleOf(16)), we can reduce the LCM
-    # by switching outlier SWA groups to page_size_padded with the
-    # majority block size. Without the override, the default backend
-    # (e.g. FlashInfer TRTLLM) requires power-of-2 kernel blocks and
-    # sub-block splitting + padded pages would crash.
-    #
-    # To enable, add to config:
-    #   attention:
-    #     backend_per_kind:
-    #       sliding_window: FLASH_ATTN
-    attention_config = getattr(vllm_config, "attention_config", None)
-    if attention_config is not None:
-        logger.info("backend_per_kind=%s", attention_config.backend_per_kind)
-        if attention_config.backend_per_kind.get("sliding_window"):
-            page_sizes = {s.page_size_bytes for s in filtered_spec.values()}
-            if len(page_sizes) == 1:
-                max_page_size = page_sizes.pop()
-                filtered_spec = _reduce_block_size_lcm(filtered_spec, max_page_size)
+    # Hack
+    # filtered_spec = block_size_hack(vllm_config, filtered_spec)
 
     groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
 
