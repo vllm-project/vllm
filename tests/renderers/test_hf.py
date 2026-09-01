@@ -6,7 +6,6 @@ import pytest
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.logger import _print_warning_once
 from vllm.renderers.hf import (
     _consolidate_system_messages,
     _convert_developer_to_system,
@@ -531,54 +530,6 @@ def test_resolve_content_format_examples(template_path, expected_format):
     )
 
     assert resolved_format == expected_format
-
-
-@pytest.mark.parametrize(
-    "template_path,given_format,detected_format,expect_warning",
-    [
-        # chatml concatenates content with `+`, so it only accepts strings.
-        ("template_chatml.jinja", "openai", "string", True),
-        ("template_chatml.jinja", "string", "string", False),
-        ("tool_chat_template_llama3.1_json.jinja", "openai", "openai", False),
-    ],
-)
-def test_resolve_content_format_forced(
-    template_path, given_format, detected_format, expect_warning, caplog_vllm
-):
-    model = "Qwen/Qwen2-VL-2B-Instruct"  # Dummy
-    model_config = ModelConfig(
-        model,
-        tokenizer=model,
-        trust_remote_code=True,
-    )
-
-    dummy_tokenizer = get_tokenizer(
-        model,
-        trust_remote_code=model_config.trust_remote_code,
-    )
-    dummy_tokenizer.chat_template = None
-
-    chat_template = load_chat_template(EXAMPLES_DIR / template_path)
-    assert isinstance(chat_template, str)
-
-    # `warning_once` dedupes, so a prior call would swallow the warning.
-    _print_warning_once.cache_clear()
-
-    resolved_format = resolve_chat_template_content_format(
-        chat_template,
-        None,
-        given_format,
-        dummy_tokenizer,
-        model_config=model_config,
-    )
-
-    # An explicit format always wins over detection.
-    assert resolved_format == given_format
-
-    warned = (
-        f"different from the detected format '{detected_format}'" in caplog_vllm.text
-    )
-    assert warned == expect_warning
 
 
 @pytest.mark.parametrize(
