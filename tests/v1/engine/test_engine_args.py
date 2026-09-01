@@ -176,3 +176,27 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     )
     Executor.resolve_extensible_kv_cache(fake, specs)
     assert vllm_config.cache_config.enable_extensible_kv_cache
+
+    # No KV cache at all: nothing to size, so the feature is turned off.
+    Executor.resolve_extensible_kv_cache(fake, [{}])
+    assert not vllm_config.cache_config.enable_extensible_kv_cache
+
+
+def test_extensible_kv_cache_connector_needs_block_compact_layout():
+    from vllm.config.kv_transfer import KVTransferConfig
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    def make_config():
+        engine_args = EngineArgs(
+            model="facebook/opt-125m",
+            enable_extensible_kv_cache=True,
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="ExampleConnector", kv_role="kv_both"
+            ),
+        )
+        return engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+    layout = resolve_kv_cache_layout(make_config(), [["LHBNC", "LBNHC"]])
+    assert layout.name == "LBNHC"
+    with pytest.raises(ValueError, match="block-compact"):
+        resolve_kv_cache_layout(make_config(), [["LHBNC"]])
