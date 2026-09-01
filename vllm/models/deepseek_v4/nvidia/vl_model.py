@@ -187,6 +187,20 @@ class DeepseekV4ForConditionalGeneration(
             "perm": perm,
         }
 
+    def _encode_image(
+        self,
+        patches: torch.Tensor,
+        n_vit_h: int,
+        n_vit_w: int,
+        perm: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.vision is not None and self.aligner is not None
+        image_embeds = self.aligner(
+            self.vision(patches, n_vit_h, n_vit_w), n_vit_h, n_vit_w
+        )
+        # Reorder into the N-layout block order used in the prompt.
+        return image_embeds[perm.to(image_embeds.device)]
+
     def _process_image_input(
         self,
         patches: torch.Tensor,
@@ -205,14 +219,14 @@ class DeepseekV4ForConditionalGeneration(
         ):
             n_vit = n_vit_h * n_vit_w
             n_llm = n_llm_h * n_llm_w
-            image_embeds = self.aligner(
-                self.vision(patches[vit_offset : vit_offset + n_vit], n_vit_h, n_vit_w),
-                n_vit_h,
-                n_vit_w,
+            embeds.append(
+                self._encode_image(
+                    patches[vit_offset : vit_offset + n_vit],
+                    n_vit_h,
+                    n_vit_w,
+                    perm[llm_offset : llm_offset + n_llm],
+                )
             )
-            # Reorder into the N-layout block order used in the prompt.
-            item_perm = perm[llm_offset : llm_offset + n_llm].to(image_embeds.device)
-            embeds.append(image_embeds[item_perm])
             vit_offset += n_vit
             llm_offset += n_llm
         return tuple(embeds)
