@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     biased_moe_quant_config,
 )
@@ -33,6 +34,7 @@ from vllm.model_executor.utils import (
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
@@ -68,20 +70,32 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        unpadded_intermediate = self.moe.intermediate_size_per_partition_unpadded
+        assert unpadded_intermediate is not None
+        has_intermediate_padding = (
+            intermediate_size_per_partition > unpadded_intermediate
+        )
         if self.moe.is_act_and_mul:
             w13_up_dim = 2 * intermediate_size_per_partition
         else:
             w13_up_dim = intermediate_size_per_partition
         # Fused gate_up_proj (column parallel)
-        w13_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                w13_up_dim,
-                hidden_size,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
+        w13_data = torch.empty(
+            num_experts,
+            w13_up_dim,
+            hidden_size,
+            dtype=params_dtype,
         )
+        if has_intermediate_padding:
+            # The checkpoint loader only writes the unpadded slices. Zero the
+            # tails now so no full-size padding copy is needed after loading.
+            w13_data[:, unpadded_intermediate:intermediate_size_per_partition].zero_()
+            if self.moe.is_act_and_mul:
+                w13_data[
+                    :,
+                    intermediate_size_per_partition + unpadded_intermediate :,
+                ].zero_()
+        w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
         if self.moe.has_bias:
@@ -92,15 +106,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.register_parameter("w13_bias", w13_bias)
             set_weight_attrs(w13_bias, extra_weight_attrs)
         # down_proj (row parallel)
-        w2_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
+        w2_data = torch.empty(
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            dtype=params_dtype,
         )
+        if has_intermediate_padding:
+            w2_data[:, :, unpadded_intermediate:].zero_()
+        w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
         if self.moe.has_bias:
@@ -110,6 +124,25 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
+
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size,
+            intermediate_size_per_partition,
+            act_dtype,
+            moe_parallel_config,
+        )
+        if self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
+            intermediate_size_per_partition = round_up(
+                intermediate_size_per_partition, 128
+            )
+        return hidden_size, intermediate_size_per_partition
 
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
