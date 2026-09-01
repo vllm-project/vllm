@@ -172,6 +172,10 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
             kv_role="kv_both",
         ),
         KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+        ),
+        KVTransferConfig(
             kv_connector="MultiConnector",
             kv_role="kv_both",
             kv_connector_extra_config={
@@ -179,12 +183,16 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
                     {
                         "kv_connector": "SimpleCPUOffloadConnector",
                         "kv_role": "kv_both",
-                    }
+                    },
+                    {
+                        "kv_connector": "OffloadingConnector",
+                        "kv_role": "kv_both",
+                    },
                 ]
             },
         ),
     ],
-    ids=["direct", "multi"],
+    ids=["simple", "offloading", "multi-local"],
 )
 def test_local_offload_keeps_dcp_interleave_size(
     kv_transfer_config: KVTransferConfig,
@@ -268,6 +276,31 @@ def test_multi_connector_with_pd_uses_block_aligned_dcp_interleave():
                     },
                 ]
             },
+        ),
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+    )
+
+    config.adjust_dcp_kv_cache_interleave_size(kv_cache_config)
+
+    assert config.parallel_config.cp_kv_cache_interleave_size == 16
+
+
+def test_empty_multi_connector_uses_block_aligned_dcp_interleave():
+    config = VllmConfig(
+        cache_config=CacheConfig(block_size=16),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            decode_context_parallel_size=2,
+            cp_kv_cache_interleave_size=1,
+            distributed_executor_backend="mp",
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"connectors": []},
         ),
     )
     kv_cache_config = SimpleNamespace(

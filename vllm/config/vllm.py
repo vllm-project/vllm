@@ -2774,8 +2774,8 @@ class VllmConfig:
             g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
         )
         if (
-            self._requires_dcp_block_aligned_interleave()
-            and self.parallel_config.cp_kv_cache_interleave_size != local_block_size
+            self.parallel_config.cp_kv_cache_interleave_size != local_block_size
+            and self._requires_dcp_block_aligned_interleave()
         ):
             interleave = self.parallel_config.cp_kv_cache_interleave_size
             self.parallel_config.cp_kv_cache_interleave_size = local_block_size

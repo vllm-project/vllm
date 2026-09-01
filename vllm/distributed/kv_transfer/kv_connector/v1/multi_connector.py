@@ -166,6 +166,25 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 return False
         return True
 
+    @classmethod
+    def requires_dcp_block_aligned_interleave_config(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Return True if any configured child requires block alignment."""
+        connectors_config = kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
+        )
+        if not connectors_config:
+            return True
+        return any(
+            KVConnectorFactory.requires_dcp_block_aligned_interleave(
+                KVTransferConfig(
+                    **{"engine_id": kv_transfer_config.engine_id, **conn_config}
+                )
+            )
+            for conn_config in connectors_config
+        )
+
     def __init__(
         self,
         vllm_config: "VllmConfig",

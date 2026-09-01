@@ -153,14 +153,12 @@ class KVConnectorFactory:
             connector_cls = cls.get_connector_class(kv_transfer_config)
             return connector_cls.requires_dcp_block_aligned_interleave
 
-        connectors = kv_transfer_config.kv_connector_extra_config.get("connectors", [])
-        if not connectors:
-            return True
-        return any(
-            cls.requires_dcp_block_aligned_interleave(
-                KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **child})
-            )
-            for child in connectors
+        from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+            MultiConnector,
+        )
+
+        return MultiConnector.requires_dcp_block_aligned_interleave_config(
+            kv_transfer_config
         )
 
 
