@@ -77,8 +77,12 @@ def test_auto_fit_max_model_len_rejects_oversized_input(
 
     # Use a small KV cache budget to force auto-fit to a small
     # max_model_len. Pin block_size=16 so the budget is independent
-    # of the platform's default block size.
-    kv_cache_bytes = 1_000_000  # 1 MB
+    # of the platform's default block size. One block for this model is
+    # 2 (K/V) * 16 (block) * 12 (heads) * 64 (head_dim) * 2 (fp16)
+    # * 12 (layers) = 589,824 bytes, and the pool must cover at least
+    # two: one is reserved as the null block, so a 1 MB single-block
+    # pool cannot serve any tokens at all.
+    kv_cache_bytes = 2_000_000  # 2 MB = 3 blocks -> 2 usable
 
     with vllm_runner(
         model_name=model,

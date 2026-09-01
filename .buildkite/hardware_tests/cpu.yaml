@@ -2,6 +2,7 @@ group: CPU
 depends_on: []
 steps:
 - label: CPU-Kernel Tests
+  key: cpu-kernel-tests
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -11,8 +12,14 @@ steps:
   - CMakeLists.txt
   - vllm/_custom_ops.py
   - tests/kernels/attention/test_cpu_attn.py
+  - tests/v1/attention/test_group_head_counts.py
+  - tests/kernels/attention/test_amx_mla.py
+  - vllm/v1/attention/backends/mla/amx_mla.py
+  - vllm/model_executor/layers/attention/mla_attention.py
   - tests/kernels/moe/test_cpu_fused_moe.py
   - tests/kernels/moe/test_cpu_quant_fused_moe.py
+  - tests/kernels/moe/test_zen_cpu_int8_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/cpu_moe.py
   - tests/kernels/test_onednn.py
   - tests/kernels/test_awq_int4_to_int8.py
   - tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
@@ -27,8 +34,11 @@ steps:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
       pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
+      pytest -x -v -s tests/v1/attention/test_group_head_counts.py
+      pytest -x -v -s tests/kernels/attention/test_amx_mla.py
       pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
       pytest -x -v -s tests/kernels/moe/test_cpu_quant_fused_moe.py
+      pytest -x -v -s tests/kernels/moe/test_zen_cpu_int8_moe.py
       pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
       pytest -x -v -s tests/kernels/test_onednn.py
       pytest -x -v -s tests/kernels/test_awq_int4_to_int8.py
@@ -53,6 +63,7 @@ steps:
 #       bash .buildkite/scripts/hardware_ci/run-cpu-compatibility-test.sh"
 
 - label: CPU-Language Generation and Pooling Model Tests
+  key: cpu-language-generation-and-pooling-model-tests
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -70,6 +81,7 @@ steps:
       pytest -x -v -s tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py"
 
 - label: CPU-Quantization Model Tests
+  key: cpu-quantization-model-tests
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -91,6 +103,7 @@ steps:
       pytest -x -v -s tests/quantization/test_cpu_w8a8.py"
       
 - label: CPU-Distributed Tests (PP+TP)
+  key: cpu-distributed-tests-pp-tp
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -110,6 +123,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-cpu-distributed-smoke-test.sh tp_pp"
 
 - label: CPU-Distributed Tests (DP+TP)
+  key: cpu-distributed-tests-dp-tp
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -120,6 +134,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-cpu-distributed-smoke-test.sh dp_tp"
 
 - label: CPU-Multi-Modal Model Tests %N
+  key: cpu-multi-modal-model-tests-n
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -134,6 +149,7 @@ steps:
   parallelism: 4
 
 - label: CPU-Qwen2.5-VL Multimodal Tests
+  key: cpu-qwen2-5-vl-multimodal-tests
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -147,6 +163,7 @@ steps:
       VLLM_CI_ENV=0 pytest -x -v -s tests/models/multimodal/generation/test_qwen2_5_vl.py"
 
 - label: "Arm CPU Test"
+  key: arm-cpu-test
   depends_on: []
   soft_fail: false
   device: arm_cpu

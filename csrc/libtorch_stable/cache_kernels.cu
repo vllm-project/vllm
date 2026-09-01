@@ -7,6 +7,10 @@
 #include "quantization/vectorization_utils.cuh"
 #include "concat_mla_q.cuh"
 
+#if !defined(USE_ROCM) && defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
+  #include "nvfp4_ds_mla_cache.h"
+#endif
+
 #ifdef USE_ROCM
   #include "../quantization/w8a8/fp8/amd/quant_utils.cuh"
 #else
@@ -16,6 +20,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cfloat>
+#include <cstdlib>
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -75,6 +80,31 @@ void swap_blocks(torch::stable::Tensor& src, torch::stable::Tensor& dst,
                     block_size_in_bytes, memcpy_type, stream);
   }
 }
+
+namespace {
+// ROCm hipMemcpyBatchAsync faults for count > 8192 (MI350X/gfx950), so chunk
+// at that ceiling.
+constexpr int64_t kRocmDefaultMaxBatchDescriptors = 8192;
+
+constexpr const char* kMaxBatchDescriptorsEnv =
+    "VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS";
+
+// Max copy descriptors per batch-memcpy call (0 = unlimited). ROCm caps and
+// chunks; CUDA is uncapped. The env var (>0) overrides on any platform.
+int64_t resolve_max_batch_descriptors() {
+  static const int64_t cached = []() -> int64_t {
+    const char* val = std::getenv(kMaxBatchDescriptorsEnv);
+    const int64_t override_val = val ? std::atoll(val) : 0;
+    if (override_val > 0) return override_val;
+#if defined(USE_ROCM)
+    return kRocmDefaultMaxBatchDescriptors;
+#else
+    return 0;
+#endif
+  }();
+  return cached;
+}
+}  // namespace
 
 void swap_blocks_batch(const torch::stable::Tensor& src_ptrs,
                        const torch::stable::Tensor& dst_ptrs,
@@ -142,32 +172,63 @@ void swap_blocks_batch(const torch::stable::Tensor& src_ptrs,
                               : CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
     size_t attrs_idx = 0;
     size_t fail_idx = 0;
-    CUresult result = batch_fn(reinterpret_cast<CUdeviceptr*>(dst_data),
-                               reinterpret_cast<CUdeviceptr*>(src_data),
-                               reinterpret_cast<size_t*>(size_data),
-                               static_cast<size_t>(n), &attr, &attrs_idx, 1,
-                               &fail_idx, static_cast<CUstream>(stream));
-    STD_TORCH_CHECK(result == CUDA_SUCCESS,
-                    "cuMemcpyBatchAsync failed at index ", fail_idx,
-                    " with error ", result);
+    // Uncapped on CUDA (max_desc == 0 -> single call) unless overridden by
+    // VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS; chunk to honor the override.
+    const int64_t max_desc = resolve_max_batch_descriptors();
+    const int64_t step = max_desc <= 0 ? n : max_desc;
+    for (int64_t off = 0; off < n; off += step) {
+      const int64_t cnt = std::min(step, n - off);
+      CUresult result = batch_fn(reinterpret_cast<CUdeviceptr*>(dst_data + off),
+                                 reinterpret_cast<CUdeviceptr*>(src_data + off),
+                                 reinterpret_cast<size_t*>(size_data + off),
+                                 static_cast<size_t>(cnt), &attr, &attrs_idx, 1,
+                                 &fail_idx, static_cast<CUstream>(stream));
+      STD_TORCH_CHECK(result == CUDA_SUCCESS,
+                      "cuMemcpyBatchAsync failed at index ", fail_idx,
+                      " with error ", result);
+    }
     return;
   }
 #elif defined(USE_ROCM) && defined(HIP_VERSION) && HIP_VERSION >= 70100000
-  // ROCm 7.1+ exposes hipMemcpyBatchAsync. The 7.2.1 implementation early-
-  // returns hipErrorNotSupported whenever numAttrs > 0 (see ROCm/clr @
-  // rocm-7.2.1 hipamd/src/hip_memory.cpp:2819-2822), so call with
-  // numAttrs=0.
+  // ROCm 7.1+ exposes hipMemcpyBatchAsync. ROCm 7.2.1-7.2.3 early-return
+  // hipErrorNotSupported whenever numAttrs > 0 (see ROCm/clr @ rocm-7.2.1
+  // hipamd/src/hip_memory.cpp:2819-2822), so those releases must call with
+  // numAttrs=0. ROCm 7.13+ accepts numAttrs > 0.
+  // rocm-7.14+ has better performance.
   {
     hipMemcpyAttributes attr = {};
     size_t attrs_idx = 0;
     size_t fail_idx = 0;
-    hipError_t result = hipMemcpyBatchAsync(
-        reinterpret_cast<void**>(dst_data), reinterpret_cast<void**>(src_data),
-        reinterpret_cast<size_t*>(size_data), static_cast<size_t>(n), &attr,
-        &attrs_idx, 0, &fail_idx, static_cast<hipStream_t>(stream));
-    STD_TORCH_CHECK(result == hipSuccess,
-                    "hipMemcpyBatchAsync failed at index ", fail_idx,
-                    " with error ", result);
+    size_t num_attrs = 0;
+  #if HIP_VERSION >= 71300000
+    static const bool runtime_accepts_attrs = []() {
+      int runtime_version = 0;
+      return hipRuntimeGetVersion(&runtime_version) == hipSuccess &&
+             runtime_version >= 71300000;
+    }();
+    if (runtime_accepts_attrs) {
+      attr.srcAccessOrder = is_src_access_order_any
+                                ? hipMemcpySrcAccessOrderAny
+                                : hipMemcpySrcAccessOrderStream;
+      num_attrs = 1;
+    }
+  #endif
+    // hipMemcpyBatchAsync faults (GPU memory access fault) above 8192
+    // descriptors/call on ROCm 7.15, so chunk the batch at the resolved cap.
+    const int64_t max_desc = resolve_max_batch_descriptors();
+    const int64_t step = max_desc <= 0 ? n : max_desc;
+    for (int64_t off = 0; off < n; off += step) {
+      const int64_t cnt = std::min(step, n - off);
+      hipError_t result = hipMemcpyBatchAsync(
+          reinterpret_cast<void**>(dst_data + off),
+          reinterpret_cast<void**>(src_data + off),
+          reinterpret_cast<size_t*>(size_data + off), static_cast<size_t>(cnt),
+          &attr, &attrs_idx, num_attrs, &fail_idx,
+          static_cast<hipStream_t>(stream));
+      STD_TORCH_CHECK(result == hipSuccess,
+                      "hipMemcpyBatchAsync failed at index ", fail_idx,
+                      " with error ", result);
+    }
     return;
   }
 #endif
@@ -860,6 +921,7 @@ void concat_and_cache_mla(
   int pe_dim = k_pe.size(1);
   int block_size = kv_cache.size(1);
 
+  const bool is_nvfp4_ds_mla = kv_cache_dtype == "nvfp4_ds_mla";
   if (kv_cache_dtype == "fp8_ds_mla") {
     STD_TORCH_CHECK(kv_lora_rank == 512,
                     "kv_lora_rank must be 512 for fp8_ds_mla");
@@ -870,6 +932,21 @@ void concat_and_cache_mla(
                     "kv_c.element_size() must be 2 for fp8_ds_mla");
     STD_TORCH_CHECK(k_pe.element_size() == 2,
                     "k_pe.element_size() must be 2 for fp8_ds_mla");
+  } else if (is_nvfp4_ds_mla) {
+    constexpr int bytes_per_token = 352;
+    STD_TORCH_CHECK(kv_lora_rank == 512, "kv_lora_rank must be 512 for ",
+                    kv_cache_dtype);
+    STD_TORCH_CHECK(pe_dim == 64, "pe_dim must be 64 for ", kv_cache_dtype);
+    STD_TORCH_CHECK(
+        kv_cache.size(2) == bytes_per_token / kv_cache.element_size(),
+        "kv_cache.size(2) must be ", bytes_per_token, " bytes for ",
+        kv_cache_dtype);
+    STD_TORCH_CHECK(
+        kv_c.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+        "kv_c must be bfloat16 for ", kv_cache_dtype);
+    STD_TORCH_CHECK(
+        k_pe.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+        "k_pe must be bfloat16 for ", kv_cache_dtype);
   } else {
     STD_TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
   }
@@ -893,6 +970,24 @@ void concat_and_cache_mla(
     dim3 block(96);
     DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype,
                                CALL_CONCAT_AND_CACHE_DS_MLA);
+  } else if (is_nvfp4_ds_mla) {
+    // The kernels live in nvfp4_ds_mla_cache_kernels.cu, which is only built
+    // when the target list contains an SM100 arch.
+#if !defined(USE_ROCM) && defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
+    const cudaDeviceProp* props = get_device_prop();
+    STD_TORCH_CHECK(props->major == 10,
+                    "nvfp4_ds_mla KV cache requires SM100 (Blackwell); "
+                    "got SM",
+                    props->major, props->minor);
+    vllm::launch_concat_and_cache_nvfp4_ds_mla(
+        kv_c.data_ptr(), k_pe.data_ptr(), kv_cache.data_ptr(),
+        slot_mapping.const_data_ptr<int64_t>(), block_stride, entry_stride,
+        kv_c_stride, k_pe_stride, block_size, num_tokens, stream);
+#else
+    STD_TORCH_CHECK(false,
+                    "the nvfp4 ds_mla kv-cache format requires a CUDA build "
+                    "targeting SM100 (Blackwell)");
+#endif
   } else {
     dim3 grid(num_tokens);
     dim3 block(std::min(kv_lora_rank, 512));
@@ -1600,6 +1695,72 @@ void cp_gather_and_upconvert_fp8_kv_cache(
       static_cast<int32_t>(batch_size), block_size, total_tokens,
       block_table_stride, cache_block_stride, cache_entry_stride,
       dst_entry_stride, seq_starts_ptr);
+}
+
+void cp_gather_and_upconvert_nvfp4_kv_cache(
+    torch::stable::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE,
+                                                    // 352]
+    torch::stable::Tensor const& dst,               // [TOT_TOKENS, 576]
+    torch::stable::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
+    torch::stable::Tensor const& workspace_starts,  // [BATCH]
+    int64_t batch_size) {
+  // The kernel lives in nvfp4_ds_mla_cache_kernels.cu, which is only built when
+  // the target list contains an SM100 arch.
+#if !defined(USE_ROCM) && defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
+  torch::stable::accelerator::DeviceGuard device_guard(
+      src_cache.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+
+  const cudaDeviceProp* props = get_device_prop();
+  STD_TORCH_CHECK(props->major == 10,
+                  "nvfp4_ds_mla KV cache requires SM100 (Blackwell); "
+                  "got SM",
+                  props->major, props->minor);
+
+  int32_t block_size = src_cache.size(1);
+  int32_t head_dim = dst.size(1);
+
+  STD_TORCH_CHECK(
+      block_table.scalar_type() == torch::headeronly::ScalarType::Int,
+      "block_table must be int32");
+  STD_TORCH_CHECK(
+      workspace_starts.scalar_type() == torch::headeronly::ScalarType::Int,
+      "workspace_starts must be int32");
+  STD_TORCH_CHECK(src_cache.device() == dst.device(),
+                  "src_cache and dst must be on the same device");
+  STD_TORCH_CHECK(src_cache.device() == block_table.device(),
+                  "src_cache and block_table must be on the same device");
+  STD_TORCH_CHECK(src_cache.device() == workspace_starts.device(),
+                  "src_cache and workspace_starts must be on the same device");
+  STD_TORCH_CHECK(
+      src_cache.scalar_type() == torch::headeronly::ScalarType::Byte,
+      "src_cache must be uint8 for the nvfp4 ds_mla format, but got ",
+      src_cache.scalar_type());
+  STD_TORCH_CHECK(dst.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+                  "dst must be bfloat16");
+  STD_TORCH_CHECK(head_dim == 576, "head_dim must be 576 for MLA");
+  STD_TORCH_CHECK(src_cache.size(2) == 352,
+                  "src_cache.size(2) must be 352 for the nvfp4 ds_mla format");
+
+  int64_t block_table_stride = block_table.stride(0);
+  int64_t cache_block_stride = src_cache.stride(0);
+  int64_t cache_entry_stride = src_cache.stride(1);
+  int64_t dst_entry_stride = dst.stride(0);
+
+  const int total_tokens = dst.size(0);
+
+  vllm::launch_cp_gather_and_upconvert_nvfp4_kv_cache(
+      src_cache.const_data_ptr<uint8_t>(), dst.data_ptr(),
+      block_table.const_data_ptr<int32_t>(),
+      workspace_starts.const_data_ptr<int32_t>(),
+      static_cast<int32_t>(batch_size), block_size, total_tokens,
+      block_table_stride, cache_block_stride, cache_entry_stride,
+      dst_entry_stride, stream);
+#else
+  STD_TORCH_CHECK(false,
+                  "the nvfp4 ds_mla kv-cache format requires a CUDA build "
+                  "targeting SM100 (Blackwell)");
+#endif
 }
 
 // Macro to dispatch the kernel based on the data type.
