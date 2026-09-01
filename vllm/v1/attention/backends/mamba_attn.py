@@ -94,13 +94,17 @@ def compute_mamba_prefix_caching_block_indices(
     block_idx_last_scheduled_token).
     """
     # Block index of the last computed token
-    block_idx_last_computed_token = cdiv(num_computed_tokens, mamba_block_size) - 1
+    block_idx_last_computed_token = (
+        (num_computed_tokens + mamba_block_size - 1) // mamba_block_size - 1
+    )
     # which is <= block index for the first scheduled token
     block_idx_first_scheduled_token = (
-        cdiv(num_computed_tokens + 1, mamba_block_size) - 1
+        (num_computed_tokens + mamba_block_size) // mamba_block_size - 1
     )
     # which is <= block index of the last scheduled token
-    block_idx_last_scheduled_token = cdiv(seq_lens, mamba_block_size) - 1
+    block_idx_last_scheduled_token = (
+        (seq_lens + mamba_block_size - 1) // mamba_block_size - 1
+    )
     # -1 in case it's non-computed and causes later issues with indexing
     block_idx_last_computed_token = torch.clamp(block_idx_last_computed_token, min=0)
     # -1 in the case we have a padded request (0 seq-len)
