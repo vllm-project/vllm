@@ -11,8 +11,8 @@ the backend defaults to 'cpu'.
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from inspect import signature
 from functools import cache
+from inspect import signature
 
 import torch
 
@@ -616,7 +616,10 @@ def initialize_mamba_ssu_backend(
     _flashinfer_replayssm_kernel = None
     if use_replayssm and backend == MambaBackendEnum.FLASHINFER:
         try:
-            from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
+            from flashinfer.mamba.checkpointing_ssu import (
+                CheckpointingSSURunner,
+                checkpointing_ssu,
+            )
         except ImportError as e:
             raise ImportError(
                 "FlashInfer ReplaySSM requires a compatible flashinfer-python package"
