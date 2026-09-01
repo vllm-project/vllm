@@ -7,18 +7,20 @@ decode is memory bound, so quantising activations buys little while costing an
 extra quantise pass. At large M the FP4 tensor cores win. The crossover is a
 property of the *kernel pair*, not of the hardware, so it is a tunable.
 
-The blocker is weight layout, not dispatch. Every W4A16 backend available today
-rewrites the checkpoint weights during ``process_weights_after_loading``
-(Marlin shuffles; the FlashInfer CuTe-DSL path pads, swizzles and runs a
-prepare step). Pairing such a kernel with a W4A4 kernel that wants a different
-layout would require keeping both resident, which costs more memory than the
-dispatch saves and defeats the purpose.
+The blocker is weight layout, not dispatch. Kernels prepare weights into
+backend-specific forms during ``process_weights_after_loading``: Marlin applies
+its own shuffle, and the FlashInfer CuTe-DSL W4A16 path runs
+``prepare_bf16_fp4_weights``, which returns int32 rather than the packed uint8
+of the checkpoint. Pairing two kernels that disagree would mean keeping both
+layouts resident, which costs more memory than the dispatch saves.
 
-A kernel therefore opts in by declaring ``preserves_checkpoint_layout = True``,
-meaning its ``process_weights_after_loading`` leaves the quantised weight and
-scales in checkpoint-native form. No in-tree kernel declares that yet, so this
-dispatch stays disabled by default and fails loudly rather than silently
-producing wrong numbers or double-allocating.
+A kernel therefore declares ``nvfp4_weight_layout``, naming the layout it
+consumes. Two kernels may be paired only if the names match. This deliberately
+does *not* require checkpoint-native weights: a shared prepared layout works
+just as well, and is the likelier route, since it only needs one backend to
+consume the layout another already produces. Kernels that declare nothing are
+never paired, because a silent mismatch yields wrong numerics rather than an
+error.
 """
 
 import torch
@@ -74,14 +76,24 @@ class DynamicNvFp4LinearKernel(NvFp4LinearKernel):
     def check_pairable(
         a16_kernel: NvFp4LinearKernel, a4_kernel: NvFp4LinearKernel
     ) -> tuple[bool, str | None]:
-        """Both kernels must consume the checkpoint-native layout."""
+        """Both kernels must declare the same on-device weight layout."""
+        declared: dict[str, str] = {}
         for kernel in (a16_kernel, a4_kernel):
-            if not getattr(type(kernel), "preserves_checkpoint_layout", False):
+            layout = getattr(type(kernel), "nvfp4_weight_layout", None)
+            if layout is None:
                 return False, (
-                    f"{type(kernel).__name__} rewrites weights in "
-                    "process_weights_after_loading, so it cannot share one "
-                    "weight layout with its dispatch partner"
+                    f"{type(kernel).__name__} does not declare "
+                    "nvfp4_weight_layout, so it cannot be paired: a kernel "
+                    "must name the layout it consumes before the dispatcher "
+                    "can know one set of weights serves both"
                 )
+            declared[type(kernel).__name__] = layout
+        if len(set(declared.values())) > 1:
+            pairs = ", ".join(f"{k}={v}" for k, v in sorted(declared.items()))
+            return False, (
+                f"paired kernels consume different weight layouts ({pairs}); "
+                "one set of weights cannot serve both"
+            )
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -97,14 +109,14 @@ class DynamicNvFp4LinearKernel(NvFp4LinearKernel):
             # here rather than let the partner kernel read rewritten weights.
             raise LayoutMismatchError(
                 f"{type(self.a16_kernel).__name__} declares "
-                f"preserves_checkpoint_layout but changed the layout "
+                f"nvfp4_weight_layout but changed the layout "
                 f"{before} -> {after}"
             )
         self.a4_kernel.process_weights_after_loading(layer)
         if _layout_signature(layer) != before:
             raise LayoutMismatchError(
                 f"{type(self.a4_kernel).__name__} declares "
-                "preserves_checkpoint_layout but changed the layout"
+                "nvfp4_weight_layout but changed the layout"
             )
 
     def apply_weights(

@@ -30,11 +30,18 @@ class NvFp4LinearKernel(ABC):
     match for the current hardware.
     """
 
-    preserves_checkpoint_layout: bool = False
-    """Whether process_weights_after_loading leaves the quantised weight and
-    scales in checkpoint-native form. Kernels that shuffle, swizzle, pad or
-    otherwise rewrite the weight must leave this False: they cannot share one
-    weight layout with a dispatch partner (see nvfp4/dynamic.py).
+    nvfp4_weight_layout: str | None = None
+    """Name of the on-device weight layout this kernel consumes after
+    ``process_weights_after_loading``.
+
+    Two kernels can serve one set of weights, and therefore be paired for
+    per-forward dispatch, only if they declare the *same* layout. They do not
+    have to leave the weights checkpoint-native: a shared prepared layout is
+    equally valid, and is the likelier way this gets satisfied.
+
+    ``None`` means unspecified, and such a kernel is never paired. A silent
+    layout mismatch produces wrong numerics rather than an error, so the
+    default has to fail closed. See nvfp4/dynamic.py.
     """
 
     def __init__(self, config: NvFp4LinearLayerConfig) -> None:

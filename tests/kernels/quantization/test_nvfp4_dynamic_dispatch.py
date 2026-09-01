@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NVFP4 W4A16/W4A4 per-forward dispatch.
 
-The dispatch is only sound when both kernels consume the checkpoint-native
-weight layout. These tests pin that contract, because the failure mode of
-getting it wrong is either silently wrong numerics (the second kernel reads
-weights the first rewrote) or double-allocated weights.
+The dispatch is only sound when both kernels consume the SAME on-device
+weight layout, whether or not that layout is checkpoint-native. These tests
+pin that contract, because the failure mode of getting it wrong is either
+silently wrong numerics (the second kernel reads weights the first rewrote)
+or double-allocated weights.
 """
 
 import pytest
@@ -20,7 +21,7 @@ from vllm.model_executor.kernels.linear.nvfp4.dynamic import (
 class _Kernel:
     """Minimal stand-in; records which M values reached it."""
 
-    preserves_checkpoint_layout = True
+    nvfp4_weight_layout = "nvfp4_packed_uint8"
 
     def __init__(self, tag, rewrites=False):
         self.tag, self.rewrites, self.seen = tag, rewrites, []
@@ -38,8 +39,16 @@ class _Kernel:
         return torch.zeros((*x.shape[:-1], 4))
 
 
-class _Rewriting(_Kernel):
-    preserves_checkpoint_layout = False
+class _Undeclared(_Kernel):
+    """Declares no layout, so it must never be paired."""
+
+    nvfp4_weight_layout = None
+
+
+class _OtherLayout(_Kernel):
+    """Declares a different layout, so it cannot share one set of weights."""
+
+    nvfp4_weight_layout = "flashinfer_cutedsl_int32"
 
 
 def _layer():
@@ -68,16 +77,27 @@ def test_dispatches_on_m(m, expect):
     assert (a16.seen, a4.seen) == (([m], []) if expect == "a16" else ([], [m]))
 
 
-def test_rejects_kernel_that_rewrites_weights():
-    """A kernel not declaring the contract must be refused, not run."""
-    k = _build(_Rewriting("a16"), _Kernel("a4"))
-    with pytest.raises(LayoutMismatchError, match="cannot share one weight layout"):
+def test_rejects_kernel_that_declares_no_layout():
+    """A kernel that names no layout must be refused, not run."""
+    k = _build(_Undeclared("a16"), _Kernel("a4"))
+    with pytest.raises(LayoutMismatchError, match="does not declare"):
+        k.process_weights_after_loading(_layer())
+
+
+def test_rejects_kernels_with_different_layouts():
+    """Two kernels may each declare a layout and still be unpairable.
+
+    This is the case a boolean "preserves checkpoint layout" flag cannot
+    express: a shared *prepared* layout is valid, two different ones are not.
+    """
+    k = _build(_Kernel("a16"), _OtherLayout("a4"))
+    with pytest.raises(LayoutMismatchError, match="different weight layouts"):
         k.process_weights_after_loading(_layer())
 
 
 def test_catches_kernel_that_lies_about_the_contract():
-    """Declaring the contract but rewriting anyway is caught, not trusted."""
-    liar = _Kernel("a16", rewrites=True)  # declares True, still rewrites
+    """Declaring a layout but rewriting anyway is caught, not trusted."""
+    liar = _Kernel("a16", rewrites=True)  # declares a layout, still rewrites
     k = _build(liar, _Kernel("a4"))
     with pytest.raises(LayoutMismatchError, match="changed the layout"):
         k.process_weights_after_loading(_layer())
@@ -91,8 +111,8 @@ def test_compatible_pair_prepares_once_and_keeps_layout():
     assert (tuple(layer.weight.shape), str(layer.weight.dtype)) == before
 
 
-def test_no_in_tree_kernel_declares_the_contract_yet():
-    """Guard: if a kernel starts declaring it, this must be re-reviewed."""
+def test_no_in_tree_kernel_declares_a_layout_yet():
+    """Guard: if a kernel starts declaring one, the pairing must be reviewed."""
     from vllm.model_executor.kernels.linear.nvfp4 import (
         cutlass,
         flashinfer,
@@ -103,10 +123,10 @@ def test_no_in_tree_kernel_declares_the_contract_yet():
         c.__name__
         for mod in (marlin, cutlass, flashinfer)
         for c in vars(mod).values()
-        if isinstance(c, type) and getattr(c, "preserves_checkpoint_layout", False)
+        if isinstance(c, type) and getattr(c, "nvfp4_weight_layout", None)
     ]
     assert declaring == [], (
-        f"{declaring} now declare preserves_checkpoint_layout; verify the "
+        f"{declaring} now declare nvfp4_weight_layout; verify the "
         "dispatch pairing and update this guard"
     )
 
