@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Generator
+
 import pytest
 import torch
 import torch.nn as nn
@@ -170,6 +172,53 @@ def test_moe_expert_priority_multi_layer_global_ordering():
     assert not _is_offloaded(layer1.self_attn.qkv_proj.weight)
     assert not _is_offloaded(layer0.input_layernorm.weight)
     assert not _is_offloaded(layer1.input_layernorm.weight)
+
+
+def test_lazy_generator_incremental_offload():
+    """Verify that wrap_modules offloads sparse experts incrementally as layers
+    are yielded by the generator, rather than eagerly materializing all layers.
+    """
+    events: list[str] = []
+
+    class TrackedMoELayer(MockMoELayer):
+        def __init__(self, idx: int, dim: int = 128):
+            super().__init__(dim=dim)
+            self.idx = idx
+            events.append(f"construct_layer_{idx}")
+
+    def layer_generator(count: int) -> Generator[nn.Module, None, None]:
+        for i in range(count):
+            layer = TrackedMoELayer(i)
+            yield layer
+
+    layer_sample = MockMoELayer(dim=128)
+    expert_bytes = (
+        layer_sample.mlp.experts.numel() * layer_sample.mlp.experts.element_size()
+    )
+
+    # Budget covers 2 layers of experts
+    offloader = UVAOffloader(cpu_offload_max_bytes=expert_bytes * 2)
+
+    created_layers: list[TrackedMoELayer] = []
+
+    def wrapped_gen() -> Generator[nn.Module, None, None]:
+        for layer in layer_generator(3):
+            created_layers.append(layer)
+            yield layer
+
+    # Subclass to record offload timing
+    modules = offloader.wrap_modules(wrapped_gen(), prefix="model.layers")
+
+    # Layer 0 experts offloaded immediately during pass 1
+    assert _is_offloaded(modules[0].mlp.experts)
+    # Layer 1 experts offloaded during pass 1
+    assert _is_offloaded(modules[1].mlp.experts)
+    # Layer 2 experts untouched (budget exhausted)
+    assert not _is_offloaded(modules[2].mlp.experts)
+    # None of the dense layers offloaded
+    assert not _is_offloaded(modules[0].self_attn.qkv_proj.weight)
+    assert not _is_offloaded(modules[1].self_attn.qkv_proj.weight)
+    assert not _is_offloaded(modules[2].self_attn.qkv_proj.weight)
 
 
 def test_budget_spillover_to_dense():
