@@ -7,7 +7,7 @@ Tests the functionality of the DecodeBenchConnector which fills KV cache
 with dummy values for decode performance benchmarking.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
@@ -22,7 +22,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import 
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlock,
+    get_request_block_hasher,
+    init_none_hash,
+)
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -36,6 +42,7 @@ from .utils import (
     create_model_runner_output,
     create_scheduler,
     create_vllm_config,
+    make_kv_cache_config,
 )
 
 
@@ -274,6 +281,32 @@ def test_decode_bench_connector_uses_per_group_block_sizes():
     block_ids_per_group, num_tokens = metadata.reqs_to_fill["request"]
     assert block_ids_per_group == ([0, 1], [2])
     assert num_tokens == 17
+
+
+def test_decode_bench_connector_dcp_uses_virtual_block_size():
+    """DCP must not fill the decode token's block at a prefix boundary."""
+    block_size = 16
+    dcp_world_size = 2
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        kv_connector="DecodeBenchConnector",
+    )
+    vllm_config.parallel_config.tensor_parallel_size = dcp_world_size
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_world_size
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        make_kv_cache_config(block_size=block_size, num_blocks=3),
+    )
+    request = Mock(request_id="dcp-boundary")
+    num_external_tokens = block_size * dcp_world_size
+    blocks = KVCacheBlocks(([KVCacheBlock(block_id=1), KVCacheBlock(block_id=2)],))
+
+    connector.update_state_after_alloc(request, blocks, num_external_tokens)
+    metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+
+    assert isinstance(metadata, DecodeBenchConnectorMetadata)
+    assert metadata.reqs_to_fill[request.request_id] == (([1],), num_external_tokens)
 
 
 def test_decode_bench_connector_no_refill():
