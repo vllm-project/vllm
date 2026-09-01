@@ -542,9 +542,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
   ops.def(
       "kimi_k3_attn_res("
-      "Tensor! prefix, Tensor delta, Tensor blocks, Tensor norm_weight, "
-      "Tensor qk_weight, Tensor output_norm_weight, Tensor! output, "
-      "int num_blocks, float eps, float output_norm_eps) -> ()");
+      "Tensor! prefix, Tensor? delta, Tensor! blocks, Tensor norm_weight, "
+      "Tensor qk_weight, Tensor? output_norm_weight, Tensor! output, "
+      "int num_blocks, "
+      "int block_write_idx, float eps, "
+      "float output_norm_eps) -> ()");
 #endif
 
   // Apply repetition penalties to logits in-place.
@@ -700,6 +702,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // LongCat n-gram embedding index kernel. All tensor args are marked mutable
   // to match the (non-const) stable-Tensor& C++ signature; only ne_token_table
   // and n_gram_ids are actually written in place.
+  // Fused vocab-parallel embedding: gather the rows this rank owns and write
+  // zeros for the rest, so the following all-reduce reconstructs the full
+  // embedding.
+  ops.def(
+      "vocab_parallel_embedding(Tensor! out, Tensor input_ids, Tensor weight, "
+      "int org_vocab_start_index, int org_vocab_end_index, "
+      "int num_org_vocab_padding, int added_vocab_start_index, "
+      "int added_vocab_end_index) -> ()");
   ops.def(
       "ngram_compute_n_gram_ids(int ne_n, int ne_k, Tensor(a!) ne_weights, "
       "Tensor(b!) ne_mods, Tensor(c!) exclusive_ne_embedder_size_sums, "
@@ -711,6 +721,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // LongCat n-gram embedding index kernel.
   ops.impl("ngram_compute_n_gram_ids", TORCH_BOX(&ngram_compute_n_gram_ids));
+  ops.impl("vocab_parallel_embedding", TORCH_BOX(&vocab_parallel_embedding));
 
   // Per-token group quantization
   ops.impl("per_token_group_fp8_quant", TORCH_BOX(&per_token_group_quant_fp8));
@@ -986,6 +997,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "seq_starts) -> ()");
 
   ops.def(
+      "cp_gather_and_upconvert_nvfp4_kv_cache(Tensor src_cache, Tensor! dst, "
+      "Tensor block_table, Tensor workspace_starts, int batch_size) -> ()");
+
+  ops.def(
       "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "
       "slot_mapping, "
       "int quant_block_size, str kv_cache_dtype) -> ()");
@@ -1055,6 +1070,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("cp_gather_cache", TORCH_BOX(&cp_gather_cache));
   ops.impl("cp_gather_and_upconvert_fp8_kv_cache",
            TORCH_BOX(&cp_gather_and_upconvert_fp8_kv_cache));
+  ops.impl("cp_gather_and_upconvert_nvfp4_kv_cache",
+           TORCH_BOX(&cp_gather_and_upconvert_nvfp4_kv_cache));
   ops.impl("indexer_k_quant_and_cache", TORCH_BOX(&indexer_k_quant_and_cache));
   ops.impl("concat_mla_q", TORCH_BOX(&concat_mla_q));
   ops.impl("cp_gather_indexer_k_quant_cache",
