@@ -12,11 +12,11 @@ from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculat
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
     TritonSSUBackend,
-    commit_replayssm_ring_trackers,
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
     reset_replayssm_ring_trackers,
     selective_state_update,
+    selective_state_update_replayssm_flashinfer,
     update_replayssm_ring_trackers,
 )
 from vllm.utils.torch_utils import set_random_seed
@@ -33,6 +33,16 @@ try:
     HAS_FLASHINFER = True
 except ImportError:
     HAS_FLASHINFER = False
+
+try:
+    from flashinfer.mamba.checkpointing_ssu import CheckpointingSSURunner
+    from flashinfer.mamba.checkpointing_ssu import (
+        checkpointing_ssu as checkpointing_ssu_kernel,
+    )
+
+    HAS_FLASHINFER_CHECKPOINTING_SSU = callable(CheckpointingSSURunner)
+except ImportError:
+    HAS_FLASHINFER_CHECKPOINTING_SSU = False
 
 
 @pytest.fixture(autouse=True)
