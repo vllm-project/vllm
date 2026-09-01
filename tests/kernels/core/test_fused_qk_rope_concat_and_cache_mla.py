@@ -24,6 +24,7 @@ ROCm-only; skipped on other platforms.
 
 import random
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -287,7 +288,7 @@ def test_impl_handles_noncontiguous_qnope(
     layer = SimpleNamespace(_k_scale=c.k_scale, _q_scale=c.q_scale)
 
     q_out = ROCMAiterMLASparseImpl.fused_qk_rope_concat_and_cache(
-        impl,
+        cast(ROCMAiterMLASparseImpl, impl),
         layer,
         c.ql_nope,  # non-contiguous
         c.q_pe,
