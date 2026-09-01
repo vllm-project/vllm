@@ -452,6 +452,7 @@ class KVTransferThread(threading.Thread):
         self._layerwise_enabled = False
         self._layer_save_finished_events: dict[int, threading.Event] = {}
         self._layer_load_finished_events: dict[int, threading.Event] = {}
+        self._layer_sync_save_events: dict[int, torch.cuda.Event] = {}
 
     def enable_layerwise(self, num_layers: int) -> None:
         """Enable layerwise mode with specified number of layers."""
@@ -1069,6 +1070,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             return
 
         req_id = task.req_id
+        layer_id = task.physical_layer_id
         start_time = time.perf_counter()
 
         try:
@@ -1079,6 +1081,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             actual_sizes = [s for s, e in zip(sizes, exist_mask) if not e]
 
             if actual_keys:
+                sync_event = self._layer_sync_save_events.get(layer_id)
+                if sync_event is not None:
+                    sync_event.synchronize()
+
                 batch_put_start = time.perf_counter()
                 res = self.store.batch_put_from_multi_buffers(
                     actual_keys, actual_addrs, actual_sizes
@@ -1100,7 +1106,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
 
             if self._layerwise_enabled:
-                layer_id = task.physical_layer_id
                 event = self._layer_save_finished_events.get(layer_id)
                 if event:
                     event.set()
@@ -1163,6 +1168,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             active_keys = [keys[i] for i in active_indices]
 
             if active_keys:
+                sync_event = self._layer_sync_save_events.get(layer_id)
+                if sync_event is not None:
+                    sync_event.synchronize()
+
                 results = self.store.batch_put_from_multi_buffer_ranges(
                     active_keys,
                     [task.addr_list[i] for i in active_indices],
@@ -2323,12 +2332,14 @@ class MooncakeStoreWorker:
 
         self._layer_save_finished_events = {}
         self._layer_load_finished_events = {}
+        self._layer_sync_save_events: dict[int, torch.cuda.Event] = {}
         self._layer_save_tasks = {}
         self._layer_load_tasks = {}
 
         for layer_id in range(self._num_layers):
             self._layer_save_finished_events[layer_id] = threading.Event()
             self._layer_load_finished_events[layer_id] = threading.Event()
+            self._layer_sync_save_events[layer_id] = torch.cuda.Event()
             self._layer_save_tasks[layer_id] = []
             self._layer_load_tasks[layer_id] = []
 
@@ -2664,6 +2675,7 @@ class MooncakeStoreWorker:
                     self.kv_send_thread._put_started_keys = self._put_started_keys
                     self.kv_send_thread._put_started_keys_lock = self._put_started_keys_lock
                     self.kv_send_thread._session_tracker = self._session_tracker
+                self.kv_send_thread._layer_sync_save_events = self._layer_sync_save_events
                 for layer_id in range(self._num_layers):
                     self.kv_send_thread.set_layer_finished_event(
                         layer_id, True, self._layer_save_finished_events[layer_id]
@@ -3023,6 +3035,11 @@ class MooncakeStoreWorker:
 
         # Submit this layer's save tasks to the send thread.
         tasks = self._layer_save_tasks.get(layer_id, [])
+
+        sync_event = self._layer_sync_save_events.get(layer_id)
+        if sync_event is not None:
+            sync_event.record()
+
         if tasks and self.kv_send_thread:
             if layer_id == 0:
                 seen_req_ids: set[str] = set()
