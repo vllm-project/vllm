@@ -281,7 +281,13 @@ class Scheduler(SchedulerInterface):
                     else 1
                 )
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
-            if self.use_eagle and not self.use_eagle_block_drop:
+            if (
+                self.use_eagle
+                and not self.use_eagle_block_drop
+                # dflash/dspark disable the drop by default (they never cache
+                # lookahead-polluted KV); only warn on an explicit opt-out.
+                and speculative_config.disable_eagle_block_drop
+            ):
                 logger.warning(
                     "EAGLE trailing prefix-cache block dropping is disabled. "
                     "This is experimental and may affect speculative-token "
