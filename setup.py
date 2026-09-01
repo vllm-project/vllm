@@ -1415,7 +1415,6 @@ if _build_custom_ops():
         ext_modules.append(CMakeExtension(name="vllm._moe_C_stable_libtorch"))
 
 package_data = {
-    "vllm_cli": ["_help.json"],
     "vllm": [
         "py.typed",
         "libs/*.so*",
@@ -1443,6 +1442,7 @@ package_data = {
         "third_party/fmha_sm100/cutlass/tools/util/include/**/*.hpp",
     ]
 }
+package_data["vllm_cli"] = ["_help.json"]
 
 
 def add_vllm_package_data(filename: str) -> None:
