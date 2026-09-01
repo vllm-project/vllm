@@ -1798,8 +1798,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         type=int,
         default=1024,
         help="Drop ShareGPT requests whose prompt exceeds this many tokens "
-        "(default 1024). Raise it so long (e.g. multi-turn) prompts are not filtered "
-        "out -- otherwise prefix reuse above the cap is never measured.",
+        "(default 1024). Raise it so long (e.g. multi-turn) prompts are not filtered",
     )
     sharegpt_group.add_argument(
         "--sharegpt-max-total-len",
