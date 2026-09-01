@@ -26,6 +26,7 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+    from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
@@ -33,6 +34,50 @@ EngineId = str
 # block ids as returned by the hybrid KV cache manager. list[list[int]] are allow
 # mutability and are for connector internal use only.
 BlockIds = tuple[list[int], ...] | list[list[int]]
+
+
+def remote_prefill_token_count(num_prompt_tokens: int, has_mamba: bool) -> int:
+    """D-side half of the Mamba P/D handoff: how many tokens P computed.
+
+    Returns N-1 for Mamba models because the decoder always recomputes the last
+    token and must start from h(N-1); see ``truncate_mamba_request_for_prefill``
+    for the P-side half that makes it so.
+
+    This offset is a protocol constant, not a cache position, and in particular
+    it is *not* ``KVCacheCoordinator.get_replay_boundary``. It is hard-coded on
+    both nodes and never sent on the wire, so P and D must move together or not
+    at all -- moving one desynchronises the handoff.
+    """
+    if has_mamba and num_prompt_tokens > 1:
+        return num_prompt_tokens - 1
+    return num_prompt_tokens
+
+
+def truncate_mamba_request_for_prefill(request: "Request") -> None:
+    """P-side half: drop the last prompt token so the prefiller computes
+    h(N-1) instead of h(N). The decoder recomputes the last token to derive
+    h(N) correctly.
+
+    Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
+    request is preempted and rescheduled.
+    """
+    params = request.kv_transfer_params
+    if (
+        params is not None
+        and not params.get("_p_side_truncated")
+        and request.num_prompt_tokens > 1
+    ):
+        if request.prompt_token_ids is not None:
+            request.prompt_token_ids.pop()
+        elif request.prompt_embeds is not None:
+            request.prompt_embeds = request.prompt_embeds[:-1]
+        else:
+            return
+
+        request._all_token_ids.pop()
+        request.num_prompt_tokens -= 1
+        request.max_tokens = 1
+        params["_p_side_truncated"] = True
 
 
 def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):

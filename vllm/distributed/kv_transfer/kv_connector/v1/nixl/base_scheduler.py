@@ -13,6 +13,8 @@ from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
+    remote_prefill_token_count,
+    truncate_mamba_request_for_prefill,
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -380,37 +382,10 @@ class NixlBaseConnectorScheduler:
                 )
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
-        """D-side only. Returns N-1 for Mamba models since the decoder
-        always recomputes the last token and must start from h(N-1)."""
-        if self._has_mamba and num_prompt_tokens > 1:
-            return num_prompt_tokens - 1
-        return num_prompt_tokens
+        return remote_prefill_token_count(num_prompt_tokens, self._has_mamba)
 
     def _truncate_mamba_request_for_prefill(self, request: "Request") -> None:
-        """P-side only: drop the last prompt token so the prefiller computes
-        h(N-1) instead of h(N). The decoder recomputes the last token to
-        derive h(N) correctly.
-
-        Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
-        request is preempted and rescheduled."""
-        params = request.kv_transfer_params
-        if (
-            params is not None
-            # Guard against repeated truncation after preemption/reschedule.
-            and not params.get("_p_side_truncated")
-            and request.num_prompt_tokens > 1
-        ):
-            if request.prompt_token_ids is not None:
-                request.prompt_token_ids.pop()
-            elif request.prompt_embeds is not None:
-                request.prompt_embeds = request.prompt_embeds[:-1]
-            else:
-                return
-
-            request._all_token_ids.pop()
-            request.num_prompt_tokens -= 1
-            request.max_tokens = 1
-            params["_p_side_truncated"] = True
+        truncate_mamba_request_for_prefill(request)
 
     def _build_save_meta(
         self,
