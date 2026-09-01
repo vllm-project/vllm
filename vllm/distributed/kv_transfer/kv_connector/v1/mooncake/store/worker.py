@@ -3083,7 +3083,9 @@ class MooncakeStoreWorker:
             event = self._layer_load_finished_events.get(layer_id)
             if event is not None and not event.is_set():
                 if not event.wait(timeout=10.0):
-                    logger.warning("Timeout waiting for layer %d to load", layer_id)
+                    raise RuntimeError(
+                        f"Timeout waiting for layer {layer_id} KV cache load"
+                    )
             if event is not None:
                 event.clear()
 
