@@ -2290,7 +2290,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llm-multimodal"
 version = "1.7.1"
-source = "git+https://github.com/smg-project/llm-multimodal?rev=15adba5e025d8636ba4a334fb379b1371f6196a1#15adba5e025d8636ba4a334fb379b1371f6196a1"
+source = "git+https://github.com/smg-project/llm-multimodal?rev=74f64753e040ade87c9d7f4bb0ad2f4dd7764652#74f64753e040ade87c9d7f4bb0ad2f4dd7764652"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
