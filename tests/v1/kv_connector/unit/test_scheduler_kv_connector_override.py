@@ -15,9 +15,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import RequestBlockIds, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 
 
@@ -75,11 +76,12 @@ class DummyKVConnector(KVConnectorBase_V1):
 
 def _my_plugin():
     """Registers the dummy KV connector and overrides _build_kv_connector_meta"""
-    KVConnectorFactory.register_connector(
-        "DummyKVConnector",
-        __name__,
-        DummyKVConnector.__name__,
-    )
+    if "DummyKVConnector" not in KVConnectorFactory._registry:
+        KVConnectorFactory.register_connector(
+            "DummyKVConnector",
+            __name__,
+            DummyKVConnector.__name__,
+        )
 
     def _custom_build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
@@ -144,3 +146,54 @@ def test_connector_receives_block_hashes(_load_plugin):
     }
     assert meta.block_ids_by_req == expected_block_ids
     assert output.kv_connector_block_state is None
+
+
+def _make_model_runner_output(scheduler: Scheduler) -> ModelRunnerOutput:
+    return ModelRunnerOutput(
+        req_ids=[req.request_id for req in scheduler.running],
+        req_id_to_index={req.request_id: i for i, req in enumerate(scheduler.running)},
+        sampled_token_ids=[[1000]] * len(scheduler.running),
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+
+def test_connector_block_state_covers_steps_without_new_blocks(_load_plugin):
+    """A store save lands on the step that fills a block, which allocates none.
+
+    The connector must still be able to look up that request's current table.
+    """
+    block_size = 16
+    scheduler = create_scheduler(
+        use_kv_connector="DummyKVConnector", block_size=block_size
+    )
+    (request,) = create_requests(
+        num_requests=1, num_tokens=3 * block_size - 1, block_size=block_size
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, _make_model_runner_output(scheduler))
+
+    # The first decode token fills the third block: no allocation this step.
+    output = scheduler.schedule()
+    assert output.scheduled_cached_reqs.req_ids == [request.request_id]
+    [new_block_ids] = output.scheduled_cached_reqs.new_block_ids
+    assert not new_block_ids
+
+    meta = output.kv_connector_metadata
+    assert isinstance(meta, DummyConnectorMetadata)
+    block_ids = meta.block_ids_by_req.get(request.request_id)
+    assert block_ids == scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    assert len(block_ids[0]) == 3
+
+
+def test_request_block_ids_resolves_only_offered_requests():
+    tables = {"a": ([1, 2],), "b": ([3],)}
+    block_ids = RequestBlockIds({"a"}, tables.__getitem__)
+
+    assert block_ids["a"] == ([1, 2],)
+    assert block_ids.get("b") is None
+    assert dict(block_ids) == {"a": ([1, 2],)}
+    assert block_ids == {"a": ([1, 2],)}
