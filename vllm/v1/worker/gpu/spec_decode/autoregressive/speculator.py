@@ -103,10 +103,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.use_fused_multi_step_decode = False
             return
 
-        if not self.advance_draft_positions:
-            self.use_fused_multi_step_decode = True
-            return
-
+        # Fused mode requires declared in-place update support from every
+        # draft-path group regardless of whether positions advance: the
+        # hook contract must exist even if a non-advancing configuration
+        # (e.g. Gemma4 MTP) never exercises it.
         unsupported_backends = sorted(
             {
                 attn_group.backend.get_name()
@@ -122,6 +122,27 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 "backend(s) %s; falling back to rebuilding attention metadata "
                 "between draft steps.",
                 ", ".join(unsupported_backends),
+            )
+        if self.use_fused_multi_step_decode:
+            self._validate_fused_draft_topk_sharing()
+
+    def _validate_fused_draft_topk_sharing(self) -> None:
+        # With index sharing (index_share_for_mtp_iteration), draft steps
+        # reuse the step-0 topk indices from a shared per-layer buffer.
+        # Draft step -> MTP layer selection cycles through the predictor
+        # layers, so more than one layer would read rows another layer
+        # never wrote. Reject at startup until layer identity is tracked
+        # in the cache validity state.
+        if not getattr(self, "share_mtp_topk_indices", False):
+            return
+        num_mtp_layers = getattr(
+            self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
+        )
+        if num_mtp_layers != 1:
+            raise ValueError(
+                "Fused multi-step draft decode with MTP index sharing "
+                "(index_share_for_mtp_iteration) requires a single MTP "
+                f"layer, but the draft model has {num_mtp_layers}."
             )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -605,6 +626,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 and attn_metadata is not None
                 and self.advance_draft_positions
             ):
+                # Refresh only between forwards that actually execute: the
+                # terminal step's output feeds sampling, not another draft
+                # forward, so no metadata update runs after it.
                 self.block_tables.compute_slot_mappings(
                     idx_mapping,
                     query_start_loc,
