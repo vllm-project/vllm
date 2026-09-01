@@ -492,6 +492,45 @@ CUDA 13.5 compiled-mode qualification passed with NVIDIA driver versions
 615.62.03 and 620.05. Driver 610.47.04 failed the tested compiled CUDA 13.5
 kernel. Validate the exact driver version on the target system.
 
+##### Public alternative (no NVIDIA-internal access required)
+
+NVIDIA also publishes a CUDA 13.4 developer-preview apt repo publicly
+(`packages.nvidia.com`), and `pytorch/manylinux2_28-builder` has a public
+`cuda13.4`-tagged image on Docker Hub. Set `CUDA_PREVIEW_APT_REPO` and
+`CUDA_PREVIEW_APT_SUITE` to register that apt repo for `FINAL_BASE_IMAGE`
+(no public `nvidia/cuda:13.4` image exists yet, so `FINAL_BASE_IMAGE` stays a
+plain `ubuntu:24.04`), and use the public `manylinux2_28-builder:cuda13.4`
+image for `BUILD_BASE_IMAGE` instead of an internal one:
+
+??? console "CUDA 13.4 public build command"
+
+    ```bash
+    ARCH=arm64
+    docker buildx build --progress=plain --load \
+      --file docker/Dockerfile \
+      --target vllm-openai \
+      --platform "linux/${ARCH}" \
+      --tag "vllm/vllm-rubin-openai:prerelease-cu134-public-${ARCH}" \
+      --build-arg max_jobs="$(nproc)" \
+      --build-arg nvcc_threads=2 \
+      --build-arg RUN_WHEEL_CHECK=false \
+      --build-arg INSTALL_RUBIN_PRERELEASE=true \
+      --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
+      --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
+      --build-arg CUDA_VERSION=13.4 \
+      --build-arg CUDA_PREVIEW_APT_REPO=https://packages.nvidia.com/noble \
+      --build-arg CUDA_PREVIEW_APT_SUITE=prerelease/cuda/13.4.0 \
+      --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.4" \
+      --build-arg FINAL_BASE_IMAGE="ubuntu:24.04" \
+      .
+    ```
+
+Use `pytorch/manylinux2_28-builder:cuda13.4` for `BUILD_BASE_IMAGE` on
+`ARCH=amd64`. `requirements/rubin-prerelease.txt` in this repo already
+carries a public pin set (public PyTorch nightly, `nvidia-cutlass-dsl[cu13]`,
+`flashinfer-python`) for this path, so no internal prerelease requirements
+file is needed.
+
 !!! note
     Keep the default explicit `torch_cuda_arch_list`. GPU-less BuildKit builds
     cannot inspect the host GPU. R100 and VR200 report compute capability 10.7,

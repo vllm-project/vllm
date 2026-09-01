@@ -743,12 +743,11 @@ ARG GET_PIP_URL
 # repo preconfigured, unlike a real nvidia/cuda:*-base-* image). Set these
 # to register NVIDIA's public developer-preview apt repo before the
 # "Install CUDA development tools" step below, so its normal
-# cuda-nvcc-${CUDA_VERSION_DASH} etc. package names resolve:
-#   --build-arg FINAL_BASE_IMAGE=ubuntu:24.04
-#   --build-arg CUDA_PREVIEW_APT_REPO=https://packages.nvidia.com/noble
-#   --build-arg CUDA_PREVIEW_APT_SUITE=prerelease/cuda/13.4.0
-# Same mechanism sglang's docker/Dockerfile.cu134 uses. Empty by default
-# (no-op) for a normal FINAL_BASE_IMAGE that already has a CUDA apt repo.
+# cuda-nvcc-${CUDA_VERSION_DASH} etc. package names resolve. Same mechanism
+# sglang's docker/Dockerfile.cu134 uses. Empty by default (no-op) for a
+# normal FINAL_BASE_IMAGE that already has a CUDA apt repo. See
+# docs/getting_started/installation/gpu.cuda.inc.md ("Public alternative")
+# for the full build command and example values.
 ARG CUDA_PREVIEW_APT_REPO=""
 ARG CUDA_PREVIEW_APT_SUITE=""
 
