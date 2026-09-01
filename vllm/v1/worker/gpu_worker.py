@@ -92,6 +92,11 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.extensible_kv_cache import (
+    EXTENSIBLE_KV_CACHE_MARGIN_BYTES,
+    extend_kv_cache,
+    measure_kv_cache_blocks,
+)
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -659,10 +664,13 @@ class Worker(WorkerBase):
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
+        # The extensible KV cache measures the capture footprint after warmup.
         cudagraph_memory_estimate = 0
         if (
-            current_platform.is_cuda_alike() or current_platform.is_xpu()
-        ) and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            (current_platform.is_cuda_alike() or current_platform.is_xpu())
+            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and not self.cache_config.enable_extensible_kv_cache
+        ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.
@@ -833,13 +841,13 @@ class Worker(WorkerBase):
         # If the connector provides a custom memory pool (e.g. Mooncake
         # NVLink/BAREX), use it for KV cache allocation; otherwise fall
         # back to the standard CuMem pool.
-        mem_pool_context = (
+        allocation_context = (
             get_kv_transfer_group().get_mem_pool_context()
             if has_kv_transfer_group()
             else None
         )
-        if mem_pool_context is None:
-            mem_pool_context = self._maybe_get_memory_pool_context(tag="kv_cache")
+        if allocation_context is None:
+            allocation_context = self._maybe_get_memory_pool_context(tag="kv_cache")
 
         # Offload KV-init state, except on XPU, whose outermost pool would win.
         runtime_pool = (
@@ -848,10 +856,16 @@ class Worker(WorkerBase):
             else self._maybe_get_memory_pool_context(tag="runtime")
         )
         with runtime_pool:
-            self.model_runner.initialize_kv_cache(
-                kv_cache_config,
-                kv_cache_allocation_context=mem_pool_context,
-            )
+            if self.cache_config.enable_extensible_kv_cache:
+                self._v2_model_runner().initialize_kv_cache(
+                    kv_cache_config,
+                    kv_cache_allocation_context=allocation_context,
+                    extensible=True,
+                )
+            else:
+                self.model_runner.initialize_kv_cache(
+                    kv_cache_config, kv_cache_allocation_context=allocation_context
+                )
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
@@ -860,6 +874,54 @@ class Worker(WorkerBase):
             self.model_runner, "_init_kv_zero_meta"
         ):
             self.model_runner._init_kv_zero_meta()
+
+    def _v2_model_runner(self) -> "GPUModelRunnerV2":
+        assert self.use_v2_model_runner
+        return cast("GPUModelRunnerV2", self.model_runner)
+
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        """Commit the final size of an extensible KV cache."""
+        extend_kv_cache(self._v2_model_runner(), num_blocks)
+        self.cache_config.num_gpu_blocks = num_blocks
+
+    def _measure_kv_cache_blocks(self) -> int:
+        """Size an extensible KV cache from the memory free after warmup.
+
+        Torch's cached-but-unused pool is left in place: it is memory the engine
+        needed at the warmup peak.
+        """
+        torch.accelerator.synchronize()
+        gc.collect()
+        free_memory, _ = torch.accelerator.get_memory_info(self.device)
+        kv_cache = self._v2_model_runner().extensible_kv_cache
+        assert kv_cache is not None
+        num_blocks = measure_kv_cache_blocks(
+            init_free_memory=self.init_snapshot.free_memory,
+            free_memory=free_memory,
+            committed_bytes=kv_cache.physical_bytes,
+            requested_memory=int(self.requested_memory),
+            bytes_per_block=kv_cache.bytes_per_block,
+            margin_bytes=EXTENSIBLE_KV_CACHE_MARGIN_BYTES
+            + kv_cache.commit_rounding_overhead,
+        )
+        num_blocks = (
+            reserve_mm_ipc_gpu_memory(
+                num_blocks * kv_cache.bytes_per_block,
+                self.model_config.multimodal_config,
+                getattr(self.parallel_config, "_api_process_count", 1),
+            )
+            // kv_cache.bytes_per_block
+        )
+        logger.info(
+            "Memory after warmup: %s GiB free, %s GiB committed to the KV cache; "
+            "%d KV cache blocks (%s GiB) fit within the requested %s GiB.",
+            format_gib(free_memory),
+            format_gib(kv_cache.physical_bytes),
+            num_blocks,
+            format_gib(num_blocks * kv_cache.bytes_per_block),
+            format_gib(self.requested_memory),
+        )
+        return num_blocks
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
@@ -1041,9 +1103,14 @@ class Worker(WorkerBase):
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
 
+        num_kv_blocks = None
+        if self.cache_config.enable_extensible_kv_cache:
+            num_kv_blocks = self._measure_kv_cache_blocks()
+
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
+            num_kv_blocks=num_kv_blocks,
         )
 
     def _maybe_activate_jit_monitor(self) -> None:
