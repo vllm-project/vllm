@@ -39,6 +39,19 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
+    if speculative_config.moe_backend is not None:
+        # The draft is loaded with the target's config, so without this it
+        # inherits the target's --moe-backend. That fails outright when the
+        # draft is unquantized and the target's backend only supports
+        # quantized MoE (e.g. flashinfer_b12x), which is the common case for
+        # an MTP head on a quantized target.
+        vllm_config = replace(
+            vllm_config,
+            kernel_config=replace(
+                vllm_config.kernel_config,
+                moe_backend=speculative_config.moe_backend,
+            ),
+        )
     if speculative_config.kv_cache_dtype is not None:
         vllm_config = replace(
             vllm_config,
