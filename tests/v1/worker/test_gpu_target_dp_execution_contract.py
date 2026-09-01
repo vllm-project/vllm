@@ -27,6 +27,7 @@ def _runner(monkeypatch, order):
     runner.execute_model_state = None
     runner.dp_execution_contract_enabled = True
     runner.input_buffers = InputBuffers(4, 16, torch.device("cpu"))
+    runner.max_num_reqs = 4
     runner.device = torch.device("cpu")
     runner.dp_size = 2
     runner.dp_rank = 0
@@ -85,6 +86,8 @@ def _scheduler_output(num_tokens, num_reqs):
         num_scheduled_tokens={f"req-{i}": num_tokens for i in range(num_reqs)},
         scheduled_encoder_inputs={},
         finished_req_ids=set(),
+        dp_execution_contract_refresh=False,
+        dp_execution_contract_epoch=None,
     )
 
 
@@ -135,6 +138,7 @@ def test_target_dp_sync_overlaps_local_input_preparation(monkeypatch):
         num_tokens=2,
         num_scheduled_tokens=np.array([2], dtype=np.int32),
         is_prefilling_np=np.array([False]),
+        has_prefill=False,
     )
     runner.gather_batch_req_state = Mock(return_value=(batch_state, 2))
     input_batch = InputBatch.make_dummy(1, 2, runner.input_buffers)
@@ -146,7 +150,10 @@ def test_target_dp_sync_overlaps_local_input_preparation(monkeypatch):
 
     runner.prepare_inputs = Mock(side_effect=prepare_inputs)
 
-    output = runner.execute_model(_scheduler_output(2, 1))
+    scheduler_output = _scheduler_output(2, 1)
+    scheduler_output.dp_execution_contract_refresh = True
+    scheduler_output.dp_execution_contract_epoch = 12
+    output = runner.execute_model(scheduler_output)
 
     assert output is None
     assert order == ["start", "prepare_local", "finish", "forward"]
@@ -154,6 +161,9 @@ def test_target_dp_sync_overlaps_local_input_preparation(monkeypatch):
     assert runner.execute_model_state.target_dp_future is future
     assert runner.execute_model_state.dp_sync is sync
     assert runner._pending_target_dp_sync is None
+    assert coordinator.start.call_args.kwargs["force_refresh"]
+    assert coordinator.start.call_args.kwargs["contract_epoch"] == 12
+    assert coordinator.start.call_args.kwargs["contract_capacity_num_reqs"] == 4
     future.release.assert_not_called()
 
 
@@ -200,6 +210,7 @@ def test_speculator_dp_sync_prestarts_before_target_forward(monkeypatch):
         num_tokens=2,
         num_scheduled_tokens=np.array([2], dtype=np.int32),
         is_prefilling_np=np.array([False]),
+        has_prefill=False,
     )
     runner.gather_batch_req_state = Mock(return_value=(batch_state, 2))
     input_batch = InputBatch.make_dummy(1, 2, runner.input_buffers)
@@ -391,10 +402,36 @@ def test_worker_marks_execution_contract_dummy_as_idle(enabled):
 
     worker.execute_dummy_batch()
 
-    expected_kwargs = {"uniform_decode": True}
+    expected_kwargs: dict[str, object] = {"uniform_decode": True}
     if enabled:
-        expected_kwargs["dp_idle"] = True
+        expected_kwargs.update(
+            dp_idle=True,
+            dp_execution_contract_refresh=False,
+            dp_execution_contract_epoch=None,
+        )
     worker.model_runner._dummy_run.assert_called_once_with(4, **expected_kwargs)
+
+
+def test_worker_forwards_cached_contract_epoch_to_idle_dummy():
+    worker = object.__new__(Worker)
+    worker.model_runner = SimpleNamespace(
+        uniform_decode_query_len=4,
+        dp_execution_contract_enabled=True,
+        _dummy_run=Mock(),
+    )
+
+    worker.execute_dummy_batch(
+        dp_execution_contract_refresh=True,
+        dp_execution_contract_epoch=17,
+    )
+
+    worker.model_runner._dummy_run.assert_called_once_with(
+        4,
+        uniform_decode=True,
+        dp_idle=True,
+        dp_execution_contract_refresh=True,
+        dp_execution_contract_epoch=17,
+    )
 
 
 def test_target_dp_sync_releases_when_forward_fails(monkeypatch):
@@ -428,6 +465,7 @@ def test_target_dp_sync_releases_when_forward_fails(monkeypatch):
         num_tokens=2,
         num_scheduled_tokens=np.array([2], dtype=np.int32),
         is_prefilling_np=np.array([False]),
+        has_prefill=False,
     )
     runner.gather_batch_req_state = Mock(return_value=(batch_state, 2))
     input_batch = InputBatch.make_dummy(1, 2, runner.input_buffers)
@@ -495,6 +533,7 @@ def test_prestarted_speculator_sync_releases_when_target_forward_fails(monkeypat
         num_tokens=2,
         num_scheduled_tokens=np.array([2], dtype=np.int32),
         is_prefilling_np=np.array([False]),
+        has_prefill=False,
     )
     runner.gather_batch_req_state = Mock(return_value=(batch_state, 2))
     input_batch = InputBatch.make_dummy(1, 2, runner.input_buffers)
@@ -562,6 +601,7 @@ def test_speculator_dp_pipeline_keeps_capture_and_profile_at_safe_issue_point(
         num_tokens=2,
         num_scheduled_tokens=np.array([2], dtype=np.int32),
         is_prefilling_np=np.array([False]),
+        has_prefill=False,
     )
     runner.gather_batch_req_state = Mock(return_value=(batch_state, 2))
     input_batch = InputBatch.make_dummy(1, 2, runner.input_buffers)
@@ -655,6 +695,7 @@ def test_target_dp_sync_releases_when_local_preparation_fails(monkeypatch):
         num_tokens=2,
         num_scheduled_tokens=np.array([2], dtype=np.int32),
         is_prefilling_np=np.array([False]),
+        has_prefill=False,
     )
     runner.gather_batch_req_state = Mock(return_value=(batch_state, 2))
     runner.prepare_inputs = Mock(side_effect=RuntimeError("prepare failed"))

@@ -92,6 +92,9 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
+        self.cached_dp_execution_contract_enabled = (
+            self.parallel_config.enable_cached_dp_execution_contract
+        )
         self.log_stats = log_stats
         self.observability_config = vllm_config.observability_config
         self.spec_decode_metrics_level = (
@@ -551,9 +554,15 @@ class Scheduler(SchedulerInterface):
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
-        defer_prefills = (
-            throttle_prefills and not self.prefill_capacity_bound
-        ) and any(not r.is_prefill_chunk for r in self.running)
+        if self.cached_dp_execution_contract_enabled:
+            # Cache hits are valid only for steady FULL-graph decode. Every
+            # source of prompt work must remain behind the rank-identical
+            # refresh boundary, including an otherwise idle rank.
+            defer_prefills = throttle_prefills
+        else:
+            defer_prefills = (
+                throttle_prefills and not self.prefill_capacity_bound
+            ) and any(not r.is_prefill_chunk for r in self.running)
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -954,9 +963,25 @@ class Scheduler(SchedulerInterface):
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
-                elif defer_prefills and num_computed_tokens < request.num_tokens - 1:
+                elif defer_prefills and (
+                    (
+                        self.cached_dp_execution_contract_enabled
+                        and (
+                            request.is_prefill_chunk
+                            or num_computed_tokens < request.num_prompt_tokens
+                        )
+                    )
+                    or (
+                        not self.cached_dp_execution_contract_enabled
+                        and num_computed_tokens < request.num_tokens - 1
+                    )
+                ):
                     # DP prefill balancing: defer this step's local prefill
-                    # compute to a cadence-aligned step.
+                    # compute to a cadence-aligned step. Connector-backed and
+                    # local-prefix-cache requests may expose only the final
+                    # prompt token here. ``num_tokens - 1`` also describes a
+                    # normal decode position after output is appended, so the
+                    # prompt boundary is the unambiguous invariant.
                     break
                 else:
                     request_token_budget = min(token_budget, input_budget - draft_slots)

@@ -88,3 +88,43 @@ def test_async_engine_step_does_not_count_result_retirement_as_worker_launch() -
     assert not worker_call_issued
     assert not core.batch_queue
     core.model_executor.execute_model.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("step", "expected_refresh", "expected_bucket"),
+    [(0, True, 0), (31, False, 0), (32, True, 1), (63, False, 1)],
+)
+def test_cached_contract_epoch_is_wave_and_cadence_owned(
+    step: int,
+    expected_refresh: bool,
+    expected_bucket: int,
+) -> None:
+    core = object.__new__(DPEngineCoreProc)
+    core.cached_dp_execution_contract_enabled = True
+    core.dp_execution_contract_refresh_interval = 32
+    core.current_wave = 7
+    core.step_counter = step
+
+    refresh, epoch = core._get_dp_execution_contract_epoch()
+
+    assert refresh is expected_refresh
+    assert epoch == (7 << 32) | expected_bucket
+
+
+def test_cached_contract_epoch_is_absent_when_disabled() -> None:
+    core = object.__new__(DPEngineCoreProc)
+    core.cached_dp_execution_contract_enabled = False
+
+    assert core._get_dp_execution_contract_epoch() == (False, None)
+
+
+def test_scheduler_output_receives_engine_owned_contract_epoch() -> None:
+    core = object.__new__(DPEngineCoreProc)
+    core._dp_execution_contract_refresh = True
+    core._dp_execution_contract_epoch = 23
+    output = SchedulerOutput.make_empty()
+
+    core._attach_dp_execution_contract_epoch(output)
+
+    assert output.dp_execution_contract_refresh
+    assert output.dp_execution_contract_epoch == 23

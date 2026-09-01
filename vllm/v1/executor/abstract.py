@@ -256,8 +256,18 @@ class Executor(ABC):
         )
         return output[0]
 
-    def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch")
+    def execute_dummy_batch(
+        self,
+        dp_execution_contract_refresh: bool = False,
+        dp_execution_contract_epoch: int | None = None,
+    ) -> None:
+        self.collective_rpc(
+            "execute_dummy_batch",
+            args=(
+                dp_execution_contract_refresh,
+                dp_execution_contract_epoch,
+            ),
+        )
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
