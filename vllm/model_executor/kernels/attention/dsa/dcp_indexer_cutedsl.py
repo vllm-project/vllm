@@ -12,11 +12,17 @@ from cutlass import Float32, Int32, Uint32, Uint64
 from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import recast_val
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
+from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
+    CuTeDSLLaunchSpec,
+    VllmCuTeDSLJitKernel,
+    cutedsl_kernel_launcher,
 )
-from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
 from vllm.triton_utils import tl, triton
 
 
@@ -69,7 +75,7 @@ def pack_dcp_topk_candidates_cutedsl(
 
 
 class PackDCPTopkCandidatesKernel(
-    VllmJitKernel["PackDCPTopkCandidatesKernel.CompileKey"]
+    VllmTritonJitKernel["PackDCPTopkCandidatesKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -185,34 +191,31 @@ class PackDCPTopkCandidatesKernel(
             block_size=512,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         fp32_ptr = TritonWarmupTensor(torch.float32)
         int32_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            fp32_ptr,
-            int32_ptr,
-            fp32_ptr,
-            int32_ptr,
-            1,  # do not specialize logits_stride0
-            1,  # do not specialize logits_stride1
-            1,  # do not specialize topk_stride0
-            1,  # do not specialize topk_stride1
-            1,  # do not specialize packed_stride0
-            1,  # do not specialize packed_stride1
-            1,  # do not specialize packed_stride2
-            1,  # do not specialize num_cols
-            DCP_RANK=compile_key.dcp_rank,
-            DCP_WORLD_SIZE=compile_key.dcp_world_size,
-            CP_INTERLEAVE=compile_key.cp_interleave,
-            HAS_ROW_STARTS=compile_key.has_row_starts,
-            TOPK=compile_key.topk,
-            BLOCK_SIZE=compile_key.block_size,
-            grid=(1, 1),
-            num_warps=8,
+        return dict(
+            logits=fp32_ptr,
+            topk_indices=TritonWarmupTensor(torch.int32, shape=(1, compile_key.topk)),
+            packed=fp32_ptr,
+            row_starts_arg=int32_ptr,
+            logits_stride0=1,
+            logits_stride1=1,
+            topk_stride0=1,
+            topk_stride1=1,
+            packed_stride0=1,
+            packed_stride1=1,
+            packed_stride2=1,
+            num_cols=1,
+            dcp_rank=compile_key.dcp_rank,
+            dcp_world_size=compile_key.dcp_world_size,
+            cp_interleave=compile_key.cp_interleave,
+            has_row_starts=compile_key.has_row_starts,
+            topk=compile_key.topk,
+            block_size=compile_key.block_size,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         logits: torch.Tensor,
@@ -234,21 +237,10 @@ class PackDCPTopkCandidatesKernel(
         has_row_starts: bool,
         topk: int,
         block_size: int,
-    ) -> None:
+    ) -> LaunchSpec:
         grid = (topk_indices.shape[0], triton.cdiv(topk, block_size))
-        self.kernel[grid](
-            logits,
-            topk_indices,
-            packed,
-            row_starts_arg,
-            logits_stride0,
-            logits_stride1,
-            topk_stride0,
-            topk_stride1,
-            packed_stride0,
-            packed_stride1,
-            packed_stride2,
-            num_cols,
+        return grid, dict(
+            row_starts=row_starts_arg,
             DCP_RANK=dcp_rank,
             DCP_WORLD_SIZE=dcp_world_size,
             CP_INTERLEAVE=cp_interleave,
@@ -260,7 +252,7 @@ class PackDCPTopkCandidatesKernel(
 
 
 class StableTopKFromGatheredCandidatesKernel(
-    VllmJitKernel["StableTopKFromGatheredCandidatesKernel.CompileKey"]
+    VllmCuTeDSLJitKernel["StableTopKFromGatheredCandidatesKernel.CompileKey"]
 ):
     tb_size = 512
     hist_bins = 2048
@@ -560,10 +552,7 @@ class StableTopKFromGatheredCandidatesKernel(
             num_candidates=topk * dcp_world_size,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
-            return
-
+    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         num_rows = cute.sym_int()
         gathered = cute.runtime.make_fake_tensor(
             Float32,
@@ -576,23 +565,26 @@ class StableTopKFromGatheredCandidatesKernel(
             (num_rows, compile_key.topk),
             divisibility=1,
         )
-        self._compiled_cache[compile_key] = compile_cutedsl(
-            self.kernel(compile_key),
-            gathered,
-            out,
-        )
+        return gathered, out
 
-    def __call__(self, gathered: torch.Tensor, out: torch.Tensor, *, topk: int) -> Any:
+    @cutedsl_kernel_launcher
+    def __call__(
+        self,
+        gathered: torch.Tensor,
+        out: torch.Tensor,
+        *,
+        topk: int,
+    ) -> CuTeDSLLaunchSpec[CompileKey]:
         compile_key = self.dispatch(topk=topk, num_candidates=gathered.shape[1])
-        compiled = self._get_or_compile(
+        return (
             compile_key,
-            runtime_context={
+            (gathered, out),
+            {
                 "gathered_shape": tuple(gathered.shape),
                 "out_shape": tuple(out.shape),
                 "topk": topk,
             },
         )
-        return compiled(gathered, out)
 
 
 _PACK_DCP_TOPK_CANDIDATES_KERNEL = PackDCPTopkCandidatesKernel()

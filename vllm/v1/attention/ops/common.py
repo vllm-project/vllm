@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.triton_utils import tl, triton
 
 
-class PackSeqTritonKernel(VllmJitKernel["PackSeqTritonKernel.CompileKey"]):
+class PackSeqTritonKernel(VllmTritonJitKernel["PackSeqTritonKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
@@ -106,27 +107,21 @@ class PackSeqTritonKernel(VllmJitKernel["PackSeqTritonKernel.CompileKey"]):
             ),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        data_ptr = TritonWarmupTensor(compile_key.dtype)
-        lengths_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            data_ptr,
-            data_ptr,
-            lengths_ptr,
-            1,  # do not specialize N
-            1,  # do not specialize D
-            1,  # do not specialize Lmax
-            PAD_VALUE=compile_key.pad_value,
-            PAD_IS_UINT8=compile_key.pad_is_uint8,
-            BLOCK_T=compile_key.block_t,
-            BLOCK_D=compile_key.block_d,
-            grid=(1, 1, 1),
-            num_warps=4,
-            num_stages=2,
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            x_reshaped=TritonWarmupTensor(compile_key.dtype),
+            out=TritonWarmupTensor(compile_key.dtype),
+            lengths=TritonWarmupTensor(torch.int32),
+            N=1,
+            D=1,
+            Lmax=1,
+            pad_value=compile_key.pad_value,
+            pad_is_uint8=compile_key.pad_is_uint8,
+            block_t=compile_key.block_t,
+            block_d=compile_key.block_d,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         x_reshaped: torch.Tensor,
@@ -140,15 +135,11 @@ class PackSeqTritonKernel(VllmJitKernel["PackSeqTritonKernel.CompileKey"]):
         pad_is_uint8: bool,
         block_t: int,
         block_d: int,
-    ) -> None:
+    ) -> LaunchSpec:
         grid = (lengths.numel(), triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
-        self.kernel[grid](
-            x_reshaped,
-            out,
-            lengths.int(),
-            N,
-            D,
-            Lmax,
+        return grid, dict(
+            x_ptr=x_reshaped,
+            lengths_ptr=lengths.int(),
             PAD_VALUE=pad_value,
             PAD_IS_UINT8=pad_is_uint8,
             BLOCK_T=block_t,
@@ -226,7 +217,7 @@ def pack_seq_triton(
     return out
 
 
-class UnpackSeqTritonKernel(VllmJitKernel["UnpackSeqTritonKernel.CompileKey"]):
+class UnpackSeqTritonKernel(VllmTritonJitKernel["UnpackSeqTritonKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
@@ -293,25 +284,19 @@ class UnpackSeqTritonKernel(VllmJitKernel["UnpackSeqTritonKernel.CompileKey"]):
             block_d=64,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        data_ptr = TritonWarmupTensor(compile_key.dtype)
-        lengths_ptr = TritonWarmupTensor(torch.int32)
-        warmup(
-            data_ptr,
-            data_ptr,
-            lengths_ptr,
-            1,  # do not specialize B
-            1,  # do not specialize Lmax
-            1,  # do not specialize D
-            BLOCK_T=compile_key.block_t,
-            BLOCK_D=compile_key.block_d,
-            grid=(1, 1, 1),
-            num_warps=4,
-            num_stages=2,
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            packed_reshaped=TritonWarmupTensor(compile_key.dtype),
+            out=TritonWarmupTensor(compile_key.dtype),
+            lengths=TritonWarmupTensor(torch.int32),
+            B=1,
+            Lmax=1,
+            D=1,
+            block_t=compile_key.block_t,
+            block_d=compile_key.block_d,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         packed_reshaped: torch.Tensor,
@@ -323,15 +308,11 @@ class UnpackSeqTritonKernel(VllmJitKernel["UnpackSeqTritonKernel.CompileKey"]):
         D: int,
         block_t: int,
         block_d: int,
-    ) -> None:
+    ) -> LaunchSpec:
         grid = (B, triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
-        self.kernel[grid](
-            packed_reshaped,
-            out,
-            lengths.int(),
-            B,
-            Lmax,
-            D,
+        return grid, dict(
+            packed_ptr=packed_reshaped,
+            lengths_ptr=lengths.int(),
             BLOCK_T=block_t,
             BLOCK_D=block_d,
             num_warps=4,
