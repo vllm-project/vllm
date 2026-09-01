@@ -27,6 +27,8 @@ logger = init_logger(__name__)
 
 _NCCL_SYMM_OPS_REGISTERED = False
 
+_NCCL_SUSPEND_MEM = 0x01
+
 
 def register_nccl_symmetric_ops(pynccl_comm):
     from vllm.distributed.device_communicators.pynccl_allocator import (
@@ -105,6 +107,7 @@ class PyNcclCommunicator:
 
         self.available = True
         self.disabled = False
+        self._suspended = False
 
         self.nccl_version = self.nccl.ncclGetRawVersion()
         if self.rank == 0:
@@ -319,6 +322,66 @@ class PyNcclCommunicator:
             split_offset += split_size
         self.nccl.ncclGroupEnd()
 
+    def reduce(
+        self,
+        output_tensor: torch.Tensor,
+        input_tensor: torch.Tensor,
+        root: int,
+        op: ReduceOp = ReduceOp.SUM,
+        stream=None,
+    ):
+        if self.disabled:
+            return
+        assert input_tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {input_tensor.device}"
+        )
+        if stream is None:
+            stream = current_stream()
+        self.nccl.ncclReduce(
+            buffer_type(input_tensor.data_ptr()),
+            buffer_type(output_tensor.data_ptr()),
+            input_tensor.numel(),
+            ncclDataTypeEnum.from_torch(input_tensor.dtype),
+            ncclRedOpTypeEnum.from_torch(op),
+            root,
+            self.comm,
+            cudaStream_t(stream.cuda_stream),
+        )
+
+    def scatter(
+        self,
+        output_tensor: torch.Tensor,
+        input_tensor: torch.Tensor,
+        sizes: list[int],
+        root: int = 0,
+        stream=None,
+    ):
+        if self.disabled:
+            return
+        assert output_tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the output tensor is on {output_tensor.device}"
+        )
+        if stream is None:
+            stream = current_stream()
+        self.nccl.ncclGroupStart()
+        if self.rank == root:
+            split_offset = 0
+            for dst, split_size in enumerate(sizes):
+                if split_size == 0:
+                    continue
+
+                chunk = input_tensor[split_offset : split_offset + split_size, ...]
+                if dst == root:
+                    output_tensor.copy_(chunk)
+                else:
+                    self.send(chunk, dst, stream)
+                split_offset += split_size
+        elif sizes[self.rank] > 0:
+            self.recv(output_tensor, root, stream)
+        self.nccl.ncclGroupEnd()
+
     def send(self, tensor: torch.Tensor, dst: int, stream=None):
         if self.disabled:
             return
@@ -418,6 +481,27 @@ class PyNcclCommunicator:
 
     def deregister_comm_window(self, window):
         return self.nccl.ncclCommWindowDeregister(self.comm, window)
+
+    def suspend(self):
+        """Release comm GPU memory (collective, idempotent); keeps topology."""
+        if self.disabled or self._suspended:
+            return
+        if not self.nccl.has_symbol("ncclCommSuspend"):
+            logger.warning_once(
+                "ncclCommSuspend is not available in the loaded NCCL/RCCL "
+                "library (requires NCCL >= 2.29.7); skipping communicator "
+                "memory suspension."
+            )
+            return
+        self.nccl.ncclCommSuspend(self.comm, _NCCL_SUSPEND_MEM)
+        self._suspended = True
+
+    def resume(self):
+        """Restore a suspended comm (collective); no-op unless suspended."""
+        if self.disabled or not self._suspended:
+            return
+        self.nccl.ncclCommResume(self.comm)
+        self._suspended = False
 
     def batch_isend_irecv(self, p2p_ops: list, stream=None):
         if self.disabled:

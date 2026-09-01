@@ -160,6 +160,42 @@ class LoggingStatLogger(StatLoggerBase):
     def log_prefix(self):
         return "Engine {:03d}: ".format(self.engine_index)
 
+    def _log_prefix_for_engine(self, engine_idx: int) -> str:
+        if self.engine_index == engine_idx:
+            return self.log_prefix
+        return "Engine {:03d}: ".format(engine_idx)
+
+    def _log_iteration_details(
+        self, scheduler_stats: SchedulerStats, engine_idx: int
+    ) -> None:
+        details = scheduler_stats.iteration_details
+        if details is None:
+            return
+
+        encoder_msg = ""
+        if details.num_encoder_inputs:
+            encoder_msg = (
+                f", encoder inputs: {details.num_encoder_inputs}, "
+                f"encoder output embeddings: {details.num_encoder_output_tokens}"
+            )
+
+        logger.info(
+            "%sIteration(%d): %d context requests, %d context tokens, "
+            "%d generation requests, %d generation tokens, "
+            "iteration elapsed time: %.2f ms%s, "
+            "GPU KV cache usage: %.1f%%%s",
+            self._log_prefix_for_engine(engine_idx),
+            details.iteration_index,
+            details.num_ctx_requests,
+            details.num_ctx_tokens,
+            details.num_generation_requests,
+            details.num_generation_tokens,
+            details.elapsed_ms,
+            " (dummy)" if details.is_dummy else "",
+            scheduler_stats.kv_cache_usage * 100,
+            encoder_msg,
+        )
+
     def record(
         self,
         scheduler_stats: SchedulerStats | None,
@@ -172,6 +208,7 @@ class LoggingStatLogger(StatLoggerBase):
             self._track_iteration_stats(iteration_stats)
 
         if scheduler_stats is not None:
+            self._log_iteration_details(scheduler_stats, engine_idx)
             self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
             if scheduler_stats.connector_prefix_cache_stats is not None:
@@ -922,6 +959,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_decode_time_request, per_engine_labelvalues
         )
 
+        histogram_request_num_preemptions = self._histogram_cls(
+            name="vllm:request_num_preemptions",
+            documentation="Histogram of the number of times a request was preempted.",
+            buckets=[1, 2, 3, 4, 5, 10, 20],
+            labelnames=labelnames,
+        )
+        self.histogram_request_num_preemptions = create_metric_per_engine(
+            histogram_request_num_preemptions, per_engine_labelvalues
+        )
+
         histogram_prefill_kv_computed_request = self._histogram_cls(
             name="vllm:request_prefill_kv_computed_tokens",
             documentation=(
@@ -1199,6 +1246,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.histogram_decode_time_request[engine_idx].observe(
                 finished_request.decode_time
+            )
+            self.histogram_request_num_preemptions[engine_idx].observe(
+                finished_request.num_preemptions
             )
             # Calculate prefill KV compute (excludes cached tokens)
             prefill_kv_computed = finished_request.num_prompt_tokens - max(

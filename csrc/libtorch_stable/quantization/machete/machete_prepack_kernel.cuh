@@ -2,7 +2,7 @@
 
 #include "machete_mm_kernel.cuh"
 #include "cutlass_extensions/cute_utils.cuh"
-#include "cutlass_extensions/torch_utils.hpp"
+#include "libtorch_stable/cutlass_extensions/torch_utils.hpp"
 #include <torch/headeronly/util/Exception.h>
 
 namespace machete {

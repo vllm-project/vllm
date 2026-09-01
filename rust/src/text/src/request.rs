@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 
 use enum_as_inner::EnumAsInner;
@@ -5,10 +8,31 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
-use vllm_engine_core_client::protocol::{ReasoningParserKwargs, StructuredOutputsParams};
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 
 use crate::error::{Error, Result};
 use crate::output::TextDecodeOptions;
+use crate::truncation::PromptTruncation;
+
+/// Normalize vLLM's signed `top_k` domain into [`SamplingParams::top_k`].
+///
+/// vLLM uses both `-1` and `0` to disable top-k sampling. The text sampling
+/// model represents that state as `None` and preserves positive limits as
+/// `Some(k)`. Values below `-1` and values above `u32::MAX` are rejected.
+///
+/// Callers that need to distinguish an omitted value from an explicit disable
+/// should preserve that request-level distinction around this normalization.
+pub fn normalize_top_k(value: i64) -> std::result::Result<Option<u32>, String> {
+    match value {
+        -1 | 0 => Ok(None),
+        value if value > 0 => u32::try_from(value).map(Some).map_err(|error| error.to_string()),
+        value => Err(format!(
+            "top_k must be -1, 0, or a positive integer, got {value}"
+        )),
+    }
+}
 
 /// One raw text-generation prompt.
 ///
@@ -82,6 +106,9 @@ pub struct SamplingParams {
     /// Repetition penalty applied by the sampler. `None` means no explicit user
     /// override.
     pub repetition_penalty: Option<f32>,
+    /// Parameters for detecting repetitive N-gram patterns. `None` means no
+    /// explicit user override.
+    pub repetition_detection: Option<RepetitionDetectionParams>,
     /// Explicit stop token IDs provided by the caller. `None` means no explicit
     /// user override.
     pub stop_token_ids: Option<Vec<u32>>,
@@ -129,6 +156,7 @@ impl Default for SamplingParams {
             frequency_penalty: None,
             presence_penalty: None,
             repetition_penalty: None,
+            repetition_detection: None,
             stop_token_ids: None,
             ignore_eos: false,
             logit_bias: None,
@@ -169,11 +197,17 @@ pub struct TextRequest {
     pub priority: i32,
     /// Salt for prefix cache isolation in multi-user environments.
     pub cache_salt: Option<String>,
+    /// Prompt-truncation policy resolved by the caller.
+    #[serde(default)]
+    pub prompt_truncation: Option<PromptTruncation>,
     /// Whether to add special tokens (e.g. BOS) during prompt tokenization.
     pub add_special_tokens: bool,
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
+    /// Stable session identity shared by related requests.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// Optional reasoning-parser kwargs forwarded to engine-side structured
     /// output logic.
     #[serde(default)]
@@ -181,6 +215,12 @@ pub struct TextRequest {
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
+    /// Wall-clock unix timestamp (seconds) when this request arrived at the
+    /// frontend, stamped before render/tokenize to match Python's
+    /// renderer-entry arrival_time. When unset, it is stamped before
+    /// tokenization.
+    #[serde(default)]
+    pub arrival_time: Option<f64>,
 }
 
 impl TextRequest {
@@ -195,10 +235,13 @@ impl TextRequest {
             intermediate: true,
             priority: 0,
             cache_salt: None,
+            prompt_truncation: None,
             add_special_tokens: false,
             data_parallel_rank: None,
+            session_id: None,
             reasoning_parser_kwargs: None,
             lora_request: None,
+            arrival_time: None,
         }
     }
 
@@ -209,6 +252,37 @@ impl TextRequest {
                 request_id: self.request_id.clone(),
             });
         }
+        if self
+            .decode_options
+            .stop_strings
+            .as_ref()
+            .is_some_and(|stops| stops.iter().any(String::is_empty))
+        {
+            return Err(Error::EmptyStopString {
+                request_id: self.request_id.clone(),
+            });
+        }
+        if self.mm_features.is_some() && self.prompt_truncation.is_some() {
+            return Err(Error::TruncateUnsupportedWithMultimodal);
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_empty_stop_string_at_shared_chokepoint() {
+        let mut request = TextRequest::for_test();
+        request.request_id = "req-empty-stop".to_string();
+        request.decode_options.stop_strings = Some(vec!["valid".to_string(), String::new()]);
+
+        let err = request.validate().expect_err("empty stop strings should be rejected");
+
+        assert!(err.is_request_validation_error());
+        assert!(err.to_string().contains("stop strings cannot be empty"));
+        assert!(err.to_string().contains("req-empty-stop"));
     }
 }

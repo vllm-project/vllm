@@ -10,7 +10,9 @@ from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import nvfp4_kv_cache_split_views, set_random_seed
+from vllm.utils.torch_utils import nvfp4_split_data_scale, set_random_seed
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 COPYING_DIRECTION = [("cuda", "cpu"), ("cuda", "cuda"), ("cpu", "cuda")]
 DTYPES = [torch.bfloat16, torch.float]
@@ -255,10 +257,8 @@ def test_reshape_and_cache_flash(
     nvfp4_key_data = None
     nvfp4_value_data = None
     if kv_cache_dtype == "nvfp4":
-        (nvfp4_key_data,), (key_scale_cache,) = nvfp4_kv_cache_split_views(key_cache)
-        (nvfp4_value_data,), (value_scale_cache,) = nvfp4_kv_cache_split_views(
-            value_cache
-        )
+        nvfp4_key_data, key_scale_cache = nvfp4_split_data_scale(key_cache)
+        nvfp4_value_data, value_scale_cache = nvfp4_split_data_scale(value_cache)
 
     if kv_cache_dtype == "nvfp4":
         # Global scale = amax / 448 (per-tensor)
@@ -356,21 +356,21 @@ def test_reshape_and_cache_flash(
             dequant_nvfp4_kv_cache,
         )
 
-        def dequant_nvfp4_cache_nhd(data_cache, scale_cache, global_scale):
-            # data_cache:  [N, T, H, data_dim]  NHD (contiguous inner dims)
-            # scale_cache: [N, T, H, scale_dim] NHD (contiguous inner dims)
-            # Permute to HND layout for the dequant utility.
+        def dequant_nvfp4_cache(data_cache, scale_cache, global_scale):
+            # data_cache:  [B, N, H, data_dim]  logical view (layout in strides)
+            # scale_cache: [B, N, H, scale_dim] logical view (layout in strides)
+            # Permute to [B, H, N, dim] for the dequant utility.
             data_hnd = data_cache.permute(0, 2, 1, 3)
             scale_hnd = scale_cache.permute(0, 2, 1, 3)
             result_hnd = dequant_nvfp4_kv_cache(
                 data_hnd, scale_hnd, global_scale, head_size, block_size
             )
-            return result_hnd.permute(0, 2, 1, 3)  # back to [N, T, H, D]
+            return result_hnd.permute(0, 2, 1, 3)  # back to [B, N, H, dim]
 
-        result_key_cache = dequant_nvfp4_cache_nhd(
+        result_key_cache = dequant_nvfp4_cache(
             nvfp4_key_data, key_scale_cache, k_scale.item()
         )
-        result_value_cache = dequant_nvfp4_cache_nhd(
+        result_value_cache = dequant_nvfp4_cache(
             nvfp4_value_data, value_scale_cache, v_scale.item()
         )
 
@@ -426,6 +426,73 @@ def test_reshape_and_cache_flash(
     else:
         torch.testing.assert_close(key_cache_compact, cloned_key_cache)
         torch.testing.assert_close(value_cache_compact, cloned_value_cache)
+
+
+@torch.inference_mode()
+def test_nvfp4_4over6_selects_lower_error_scale(
+    kv_cache_factory_flashinfer,
+) -> None:
+    if not current_platform.has_device_capability(100):
+        pytest.skip("NVFP4 requires compute capability >= 10.0 (Blackwell).")
+
+    device = CUDA_DEVICES[0]
+    block_size = 16
+    head_size = 64
+    source = torch.tensor(
+        [6.0] + [4.5] * 15,
+        dtype=torch.bfloat16,
+        device=device,
+    ).repeat(1, 1, head_size // 16)
+    slot_mapping = torch.zeros(1, dtype=torch.long, device=device)
+    scale = torch.ones(1, dtype=torch.float32, device=device)
+
+    def quantize_and_dequantize(cache_dtype: str) -> torch.Tensor:
+        key_caches, value_caches = kv_cache_factory_flashinfer(
+            1,
+            block_size,
+            1,
+            1,
+            head_size,
+            cache_dtype,
+            source.dtype,
+            device=device,
+            cache_layout="NHD",
+        )
+        key_cache, value_cache = key_caches[0], value_caches[0]
+        key_cache.zero_()
+        value_cache.zero_()
+
+        ops.reshape_and_cache_flash(
+            source,
+            source,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            cache_dtype,
+            scale,
+            scale,
+        )
+
+        from tests.kernels.quantization.nvfp4_utils import (
+            dequant_nvfp4_kv_cache,
+        )
+
+        data, block_scales = nvfp4_split_data_scale(key_cache)
+        return dequant_nvfp4_kv_cache(
+            data.permute(0, 2, 1, 3),
+            block_scales.permute(0, 2, 1, 3),
+            scale.item(),
+            head_size,
+            block_size,
+        )[0, 0, 0]
+
+    default = quantize_and_dequantize("nvfp4")
+    four_over_six = quantize_and_dequantize("nvfp4_4over6")
+    source_f32 = source[0, 0].float()
+
+    default_mse = (default - source_f32).square().mean()
+    four_over_six_mse = (four_over_six - source_f32).square().mean()
+    assert four_over_six_mse < default_mse
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -840,6 +907,157 @@ def test_concat_and_cache_ds_mla(
         torch.testing.assert_close(kv_rope, ref_rope, atol=0.001, rtol=0.1)
 
 
+# Bytes per token for the nvfp4_ds_mla cache layout (see flashmla_sparse.py).
+NVFP4_DS_MLA_ENTRY_SIZE = 352
+
+# e2m1 magnitude table; the sign lives in bit 3 of each 4-bit code.
+E2M1_VALUES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+def _unpack_e2m1(packed: torch.Tensor) -> torch.Tensor:
+    """Unpack uint8 bytes holding two e2m1 codes each into float32 values.
+
+    The low nibble holds the even element, the high nibble the odd one.
+    """
+    low = packed & 0x0F
+    high = packed >> 4
+    codes = torch.stack([low, high], dim=-1).reshape(-1).long()
+    table = torch.tensor(E2M1_VALUES, dtype=torch.float32, device=packed.device)
+    magnitude = table[codes & 0x7]
+    sign = torch.where((codes & 0x8) != 0, -1.0, 1.0)
+    return sign * magnitude
+
+
+def _ref_nvfp4_sf_bytes(vals: torch.Tensor, divisor: float) -> torch.Tensor:
+    """Reference e4m3 scale-factor bytes: e4m3(max(amax_per_16 / divisor, 2^-9)).
+
+    In element-block order (byte s scales elements [16s, 16s + 16)).
+    """
+    tiles = vals.to(torch.float32).reshape(-1, 16)
+    sf = torch.clamp(tiles.abs().amax(dim=1) / divisor, min=2.0**-9)
+    return sf.to(torch.float8_e4m3fn).view(torch.uint8)
+
+
+def _nvfp4_sf_element_order(wire_sf_bytes: torch.Tensor) -> torch.Tensor:
+    """Stored NVFP4 scale-factor byte order -> element-block order.
+
+    The 32 NoPE scale-factor bytes of an nvfp4_ds_mla entry are stored
+    permuted (an 8x4 -> 4x8 transpose): the scale for element block s lives at
+    byte 8 * (s & 3) + (s >> 2), so that the 8 scales one FlashMLA dequant
+    thread needs are contiguous. This undoes that permutation.
+    """
+    num_sf = wire_sf_bytes.shape[-1]
+    return wire_sf_bytes.unflatten(-1, (4, num_sf // 4)).transpose(-1, -2).flatten(-2)
+
+
+@pytest.mark.parametrize("kv_lora_rank", KV_LORA_RANKS)
+@pytest.mark.parametrize("qk_rope_head_dim", QK_ROPE_HEAD_DIMS)
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS_MLA)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES_MLA)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS_MLA)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_concat_and_cache_nvfp4_ds_mla(
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    num_tokens: int,
+    block_size: int,
+    num_blocks: int,
+    seed: int,
+    device: str,
+) -> None:
+    if current_platform.is_rocm():
+        pytest.skip("concat_and_cache_mla doesn't support NVFP4 DS-MLA on ROCm")
+    device_capability = current_platform.get_device_capability()
+    if device_capability is None or device_capability.major != 10:
+        pytest.skip("The NVFP4 DS-MLA kv-cache dtype requires SM 10.x")
+    if kv_lora_rank != 512:
+        pytest.skip("The NVFP4 DS-MLA layout requires kv_lora_rank == 512")
+    dtype = torch.bfloat16
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    kv_cache_dtype = "nvfp4_ds_mla"
+    entry_size = NVFP4_DS_MLA_ENTRY_SIZE
+
+    total_slots = num_blocks * block_size
+    slot_mapping_lst = random.sample(range(total_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping_lst, dtype=torch.long, device=device)
+
+    kv_c = torch.randn(num_tokens, kv_lora_rank, dtype=dtype, device=device)
+    k_pe = torch.randn(num_tokens, qk_rope_head_dim, dtype=dtype, device=device)
+
+    scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    kv_cache = _create_mla_cache(
+        num_blocks,
+        block_size,
+        entry_size,
+        dtype=torch.uint8,
+        kv_cache_dtype=kv_cache_dtype,
+        device=device,
+    )
+
+    opcheck(
+        torch.ops._C_cache_ops.concat_and_cache_mla,
+        (kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+    )
+
+    ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale)
+
+    # Byte layout of a single cache entry:
+    #   [0, 256)             512 e2m1 NoPE values packed 2/byte
+    #   [256, 320)           64 unscaled e4m3 RoPE values
+    #   [nope_sf_off, 352)   32 e4m3 NoPE SFs (one per 16 elements), stored
+    #                        permuted (see _nvfp4_sf_element_order)
+    nope_bytes = kv_lora_rank // 2
+    rope_bytes = qk_rope_head_dim
+    nope_sf_off = nope_bytes + rope_bytes
+    num_nope_sf = kv_lora_rank // 16
+    assert nope_sf_off + num_nope_sf == entry_size
+
+    for i in range(num_tokens):
+        slot = slot_mapping[i].item()
+        block_idx = slot // block_size
+        block_offset = slot % block_size
+        entry = kv_cache[block_idx, block_offset]
+
+        kv_c_ref = kv_c[i].to(torch.float32)
+        k_pe_ref = k_pe[i].to(torch.float32)
+
+        # Scale-factor bytes must match e4m3(max(amax_per_16 / divisor, 2^-9))
+        # computed in python, allowing a 1-ulp e4m3 difference (all SFs are
+        # positive, so e4m3 bit patterns are monotonic and adjacent codes
+        # differ by 1).
+        nope_sf_bytes = _nvfp4_sf_element_order(
+            entry[nope_sf_off : nope_sf_off + num_nope_sf]
+        )
+        ref_nope_sf_bytes = _ref_nvfp4_sf_bytes(kv_c_ref, 6.0)
+        assert (
+            (nope_sf_bytes.to(torch.int16) - ref_nope_sf_bytes.to(torch.int16)).abs()
+            <= 1
+        ).all()
+
+        # Dequantize with the *stored* scale factors: x = float(code) * float(sf).
+        nope_sf = nope_sf_bytes.view(torch.float8_e4m3fn).to(torch.float32)
+        nope_sf_per_elem = nope_sf.repeat_interleave(16)
+        nope_vals = _unpack_e2m1(entry[:nope_bytes]) * nope_sf_per_elem
+        # e2m1 error bound: the widest grid spacing is 2 (between codes 4 and
+        # 6), so round-to-nearest is off by at most 1.0*sf; the e4m3 rounding
+        # of the SF itself adds at most ~2^-4 relative, so 1.5*sf is safe for
+        # either encode convention (quantized or unquantized SF).
+        assert ((nope_vals - kv_c_ref).abs() <= 1.5 * nope_sf_per_elem).all()
+
+        # Plain unscaled e4m3: ~2^-4 relative rounding, with a small absolute
+        # floor for values in the subnormal range.
+        rope_payload = entry[nope_bytes:nope_sf_off]
+        rope_vals = rope_payload.view(torch.float8_e4m3fn).to(torch.float32)
+        rope_tol = k_pe_ref.abs() * 2.0**-3 + 2.0**-9
+        assert ((rope_vals - k_pe_ref).abs() <= rope_tol).all()
+
+
 @pytest.mark.parametrize("kv_lora_rank", KV_LORA_RANKS)
 @pytest.mark.parametrize("qk_rope_head_dim", QK_ROPE_HEAD_DIMS)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES_MLA)
@@ -1087,6 +1305,71 @@ def test_gather_and_maybe_dequant_cache_mla_with_seq_starts(
     torch.testing.assert_close(dst, expected)
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("use_seq_starts", [False, True])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_gather_and_maybe_dequant_cache_mla_large_uneven_sequences(
+    kv_cache_dtype,
+    use_seq_starts,
+    device,
+):
+    block_size = 64
+    entry_size = 576
+    num_blocks = 1024
+    dtype = torch.bfloat16
+    scale = torch.tensor(0.1, dtype=torch.float32, device=device)
+    src_cache = _create_mla_cache(
+        num_blocks, block_size, entry_size, dtype, kv_cache_dtype, device
+    )
+    _fill_mla_cache(src_cache, kv_cache_dtype=kv_cache_dtype)
+
+    starts = torch.tensor([3, 17, 5], dtype=torch.int32, device=device)
+    seq_starts = starts if use_seq_starts else None
+    seq_lens = torch.tensor([17, 32_768, 71], dtype=torch.int32, device=device)
+    batch_size = seq_lens.shape[0]
+    total_tokens = seq_lens.sum().item()
+    cu_seq_lens = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    cu_seq_lens[1:] = seq_lens.cumsum(dim=0)
+    token_to_seq = torch.repeat_interleave(
+        torch.arange(batch_size, dtype=torch.int32, device=device), seq_lens
+    )
+    block_table = torch.stack(
+        [torch.randperm(num_blocks, device=device) for _ in range(batch_size)]
+    ).to(torch.int32)
+
+    if kv_cache_dtype == "fp8":
+        dequant_src_cache = torch.empty_like(src_cache, dtype=dtype)
+        ops.convert_fp8(dequant_src_cache, src_cache, scale.item())
+    else:
+        dequant_src_cache = src_cache
+    expected_batches = []
+    for req_id in range(batch_size):
+        start = starts[req_id].item() if use_seq_starts else 0
+        source_tokens = torch.arange(
+            start, start + seq_lens[req_id].item(), device=device
+        )
+        physical_blocks = block_table[req_id, source_tokens // block_size].long()
+        expected_batches.append(
+            dequant_src_cache[physical_blocks, source_tokens % block_size]
+        )
+    expected = torch.cat(expected_batches)
+    dst = torch.empty_like(expected)
+
+    ops.gather_and_maybe_dequant_cache(
+        src_cache,
+        dst,
+        block_table,
+        cu_seq_lens,
+        token_to_seq,
+        total_tokens,
+        kv_cache_dtype,
+        scale,
+        seq_starts,
+    )
+    torch.testing.assert_close(dst, expected)
+
+
 @pytest.mark.parametrize("kv_lora_rank", [512])
 @pytest.mark.parametrize("qk_rope_head_dim", [64])
 @pytest.mark.parametrize("block_size", [16])
@@ -1160,6 +1443,120 @@ def test_cp_gather_cache_mla(
     )
 
     ops.cp_gather_cache(src_cache, dst, block_table, cu_seq_lens, batch_size)
+    torch.testing.assert_close(dst, expected)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("unaligned", [False, True])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_cp_gather_cache_mla_with_seq_starts(
+    kv_cache_dtype,
+    unaligned,
+    device,
+):
+    block_size = 16
+    entry_size = 576
+    num_blocks = 128
+    src_storage = _create_mla_cache(
+        num_blocks,
+        block_size,
+        entry_size + int(unaligned),
+        torch.bfloat16,
+        kv_cache_dtype,
+        device,
+    )
+    src_cache = src_storage[..., 1:] if unaligned else src_storage
+    _fill_mla_cache(src_cache, kv_cache_dtype=kv_cache_dtype)
+
+    seq_starts = torch.tensor([3, 17, 5, 31], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([0, 1, 63, 4], dtype=torch.int32, device=device)
+    batch_size = seq_lens.shape[0]
+    cu_seq_lens = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    cu_seq_lens[1:] = seq_lens.cumsum(dim=0)
+    block_table = torch.stack(
+        [torch.randperm(num_blocks, device=device) for _ in range(batch_size)]
+    ).to(torch.int32)
+
+    expected_rows = []
+    for req_id in range(batch_size):
+        start = seq_starts[req_id].item()
+        for source_token in range(start, start + seq_lens[req_id].item()):
+            block_id = block_table[req_id, source_token // block_size]
+            expected_rows.append(src_cache[block_id, source_token % block_size])
+    expected = torch.stack(expected_rows)
+    if unaligned:
+        dst_storage = torch.empty(
+            (expected.shape[0], entry_size + 1),
+            dtype=expected.dtype,
+            device=device,
+        )
+        dst = dst_storage[:, 1:]
+    else:
+        dst = torch.empty_like(expected)
+
+    ops.cp_gather_cache(
+        src_cache,
+        dst,
+        block_table,
+        cu_seq_lens,
+        batch_size,
+        seq_starts,
+    )
+    torch.testing.assert_close(dst, expected)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("use_seq_starts", [False, True])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_cp_gather_cache_mla_large_uneven_sequences(
+    kv_cache_dtype,
+    use_seq_starts,
+    device,
+):
+    block_size = 64
+    entry_size = 576
+    num_blocks = 1024
+    src_cache = _create_mla_cache(
+        num_blocks,
+        block_size,
+        entry_size,
+        torch.bfloat16,
+        kv_cache_dtype,
+        device,
+    )
+    _fill_mla_cache(src_cache, kv_cache_dtype=kv_cache_dtype)
+
+    starts = torch.tensor([3, 17, 5], dtype=torch.int32, device=device)
+    seq_starts = starts if use_seq_starts else None
+    seq_lens = torch.tensor([17, 32_768, 71], dtype=torch.int32, device=device)
+    batch_size = seq_lens.shape[0]
+    cu_seq_lens = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    cu_seq_lens[1:] = seq_lens.cumsum(dim=0)
+    block_table = torch.stack(
+        [torch.randperm(num_blocks, device=device) for _ in range(batch_size)]
+    ).to(torch.int32)
+
+    expected_batches = []
+    for req_id in range(batch_size):
+        start = starts[req_id].item() if use_seq_starts else 0
+        source_tokens = torch.arange(
+            start, start + seq_lens[req_id].item(), device=device
+        )
+        physical_blocks = block_table[req_id, source_tokens // block_size].long()
+        expected_batches.append(src_cache[physical_blocks, source_tokens % block_size])
+    expected = torch.cat(expected_batches)
+    dst = torch.empty_like(expected)
+
+    ops.cp_gather_cache(
+        src_cache,
+        dst,
+        block_table,
+        cu_seq_lens,
+        batch_size,
+        seq_starts,
+    )
     torch.testing.assert_close(dst, expected)
 
 

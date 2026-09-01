@@ -75,7 +75,7 @@ class Hf3fsClient:
             return torch.frombuffer(buffer_data, dtype=dtype)
 
     def batch_write(
-        self, offsets: list[int], tensors: list[torch.Tensor], event: torch.Event
+        self, offsets: list[int], tensors: list[torch.Tensor], event: torch.cuda.Event
     ) -> list[int]:
         """Write data from tensors to file at specified offsets."""
         results = []

@@ -1,7 +1,7 @@
 
 #include "scaled_mm_kernels.hpp"
 #include "scaled_mm_blockwise_sm90_fp8_dispatch.cuh"
-#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
+#include "libtorch_stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
 namespace vllm {
 

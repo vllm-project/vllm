@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use vllm_tokenizer::DynTokenizer;
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
@@ -49,10 +52,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::SeedOssReasoningParser;
-    use crate::reasoning::{
-        ReasoningParser,
-        tests::{SEED_THINK_END_ID, SEED_THINK_START_ID, fake_tokenizer},
-    };
+    use crate::reasoning::ReasoningParser;
+    use crate::reasoning::tests::{SEED_THINK_END_ID, SEED_THINK_START_ID, fake_tokenizer};
 
     #[test]
     fn without_prompt_markers_expects_start_token() {

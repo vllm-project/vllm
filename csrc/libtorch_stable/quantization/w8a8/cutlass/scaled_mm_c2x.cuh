@@ -156,6 +156,7 @@ inline void cutlass_gemm_caller(torch::stable::Tensor& out,
       torch::stable::empty(workspace_size, torch::headeronly::ScalarType::Byte,
                            std::nullopt, device);
 
+  const torch::stable::accelerator::DeviceGuard device_guard(device.index());
   auto stream = get_current_cuda_stream(device.index());
 
   CUTLASS_CHECK(gemm_op.can_implement(args));

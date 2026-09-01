@@ -2,16 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 from vllm.tokenizers import TokenizerLike
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 logger = init_logger(__name__)
 
@@ -26,6 +27,8 @@ class HYV3ReasoningParser(BaseThinkingReasoningParser):
     """
 
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
+        init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
+        self.suffix: str = init_kwargs.get("token_suffix") or ""
         super().__init__(tokenizer, *args, **kwargs)
 
         # First, If there is reasoning_effort in chat_kwargs,
@@ -52,12 +55,12 @@ class HYV3ReasoningParser(BaseThinkingReasoningParser):
     @property
     def start_token(self) -> str:
         """The token that starts reasoning content."""
-        return "<think>"
+        return f"<think{self.suffix}>"
 
     @property
     def end_token(self) -> str:
         """The token that ends reasoning content."""
-        return "</think>"
+        return f"</think{self.suffix}>"
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         if self._identity_parser is not None:

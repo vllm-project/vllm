@@ -163,11 +163,15 @@ class PrefetchOffloader(BaseOffloader):
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
+        prefix: str = "",
     ) -> list[nn.Module]:
         """Wrap modules with prefetch offloading logic."""
         assert len(self.module_offloaders) == 0, (
             "wrap_modules should only be called once"
         )
+
+        if prefix:
+            prefix = f"{prefix}."
 
         all_modules = []
         offload_modules = []
@@ -182,7 +186,9 @@ class PrefetchOffloader(BaseOffloader):
                     whitelist = [
                         name
                         for name, _ in module.named_parameters()
-                        if any(f".{p}." in f".{name}." for p in self.offload_params)
+                        if any(
+                            f".{p}." in f".{prefix}{name}." for p in self.offload_params
+                        )
                     ]
                 else:
                     whitelist = [name for name, _ in module.named_parameters()]
@@ -388,7 +394,7 @@ class _ModuleOffloader:
 
         # Event to signal when H2D copy to static buffer is complete.
         # Used for per-layer synchronization (both eager and capture modes).
-        self._copy_done_event = torch.Event()
+        self._copy_done_event = torch.cuda.Event()
 
         # Track whether _copy_done_event is valid for eager-mode wait_event.
         # False when: (1) never recorded, or (2) last recorded during a
@@ -518,7 +524,7 @@ class _ModuleOffloader:
 
         # Fork: record event on compute stream, copy_stream waits on it
         # This joins copy_stream to any active CUDA graph capture
-        fork_event = torch.Event()
+        fork_event = torch.cuda.Event()
         torch.cuda.current_stream().record_event(fork_event)
         self.copy_stream.wait_event(fork_event)
 

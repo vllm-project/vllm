@@ -60,7 +60,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
             self.self_attn.total_num_kv_heads,
             bias=qkv_bias,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "qkv_proj"),
+            prefix=maybe_prefix(prefix, "self_attn.qkv_proj"),
         )
 
         self.hidden_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -233,7 +233,10 @@ class LlamaModel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if input_embeds is None:
             input_embeds = self.embed_input_ids(input_ids)
-        assert hidden_states.shape[-1] == input_embeds.shape[-1]
+        torch._assert(
+            hidden_states.shape[-1] == input_embeds.shape[-1],
+            "hidden_states and input_embeds must have the same last dimension",
+        )
 
         residual = None
         for layer in self.layers:
@@ -412,18 +415,17 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
                 "Please provide mask_hidden in the weights."
             )
 
-        skip_substrs = ["mask_hidden"]
+        orig_to_new_substr = {"mask_hidden": None}
         if not includes_draft_id_mapping:
-            skip_substrs.append("draft_id_to_target_id")
+            orig_to_new_substr["draft_id_to_target_id"] = None
         if not includes_embed_tokens:
-            skip_substrs.append("embed_tokens")
+            orig_to_new_substr["embed_tokens"] = None
         if not self.model.use_aux_hidden_state:
-            skip_substrs.append("fc.")
+            orig_to_new_substr["fc."] = None
         if not self.model.norm_before_fc:
-            skip_substrs.append("input_norm.")
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=None,
-            skip_substrs=skip_substrs,
+            orig_to_new_substr["input_norm."] = None
+        loader = AutoWeightsLoader(self)
+        loader.load_weights(
+            model_weights.items(),
+            mapper=WeightsMapper(orig_to_new_substr=orig_to_new_substr),
         )
-        loader.load_weights(model_weights.items())

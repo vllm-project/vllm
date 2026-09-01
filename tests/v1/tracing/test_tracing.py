@@ -25,11 +25,10 @@ def test_traces(
 ):
     with monkeypatch.context() as m:
         m.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
-        if current_platform.is_rocm():
-            # The fake OTLP server starts gRPC worker threads before the engine
-            # core is launched. On ROCm CI, forking while those threads are
-            # active can segfault in gRPC during engine startup or teardown.
-            m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        # The fake OTLP server starts gRPC worker threads before the engine
+        # core is launched. gRPC's C-core is not fork-safe and can segfault
+        # if forked.
+        m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
         sampling_params = SamplingParams(
             temperature=0.01,

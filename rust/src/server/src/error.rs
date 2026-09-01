@@ -1,8 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use thiserror_ext::AsReport as _;
-use thiserror_ext::{Construct, Macro};
+use thiserror_ext::{AsReport as _, Construct, Macro};
 
 use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
 
@@ -140,6 +142,22 @@ mod tests {
     }
 
     #[test]
+    fn sampling_params_validation_maps_to_invalid_request() {
+        let api_error = text_submit_error(
+            "failed to submit completion request",
+            vllm_text::Error::SamplingParams(vllm_text::SamplingParamsError::OutOfRange {
+                parameter: "top_p",
+                value: 0.0,
+                expected: "(0, 1]",
+            }),
+        );
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("top_p"));
+    }
+
+    #[test]
     fn chat_wrapped_prompt_too_long_maps_to_invalid_request() {
         let error = vllm_chat::Error::Text(vllm_text::Error::PromptTooLong {
             max_model_len: 8192,
@@ -204,6 +222,31 @@ mod tests {
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "invalid_request_error");
         assert!(response.error.message.contains("allowed_token_ids"));
+    }
+
+    #[test]
+    fn truncate_exceeds_budget_maps_to_invalid_request() {
+        let error = vllm_text::Error::TruncatePromptTokensExceedsBudget {
+            value: 8000,
+            budget: 4000,
+        };
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("truncate_prompt_tokens=8000"));
+        assert!(response.error.message.contains("max_tokens = 4000"));
+    }
+
+    #[test]
+    fn invalid_truncate_prompt_tokens_maps_to_invalid_request() {
+        let error = vllm_text::Error::InvalidTruncatePromptTokens { value: -2 };
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("-2"));
+        assert!(response.error.message.contains("must be >= -1"));
     }
 
     #[test]

@@ -15,8 +15,8 @@ from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+    from vllm.entrypoints.generate.base.protocol import DeltaMessage
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.engine.protocol import DeltaMessage
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
 
@@ -41,7 +41,7 @@ class ReasoningParser:
 
     @cached_property
     def vocab(self) -> dict[str, int]:
-        # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
+        # NOTE: Only TokenizersBackend is guaranteed to have .vocab
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 

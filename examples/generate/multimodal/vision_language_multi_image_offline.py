@@ -17,6 +17,7 @@ from transformers import AutoProcessor, AutoTokenizer
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.utils import fetch_image
+from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 QUESTION = "What is the content of each image?"
@@ -70,39 +71,6 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
-        image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
-def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "CohereLabs/aya-vision-8b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_num_seqs=2,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = [{"type": "image", "image": url} for url in image_urls]
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
-    ]
-
-    processor = AutoProcessor.from_pretrained(model_name)
-
-    prompt = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
         image_data=[fetch_image(url) for url in image_urls],
     )
 
@@ -393,53 +361,6 @@ def load_hunyuan_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
-def load_hyperclovax_seed_vision(
-    question: str, image_urls: list[str]
-) -> ModelRequestData:
-    model_name = "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=16384,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    message = {"role": "user", "content": list()}
-    for _image_url in image_urls:
-        message["content"].append(
-            {
-                "type": "image",
-                "image": _image_url,
-                "ocr": "",
-                "lens_keywords": "",
-                "lens_local_keywords": "",
-            }
-        )
-    message["content"].append(
-        {
-            "type": "text",
-            "text": question,
-        }
-    )
-
-    prompt = tokenizer.apply_chat_template(
-        [
-            message,
-        ],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        stop_token_ids=None,
         image_data=[fetch_image(url) for url in image_urls],
     )
 
@@ -1420,7 +1341,6 @@ def load_molmo2(question: str, image_urls: list[str]) -> ModelRequestData:
 
 model_example_map = {
     "aria": load_aria,
-    "aya_vision": load_aya_vision,
     "bee": load_bee,
     "command_a_vision": load_command_a_vision,
     "deepseek_vl_v2": load_deepseek_vl2,
@@ -1430,7 +1350,6 @@ model_example_map = {
     "granite4_vision": load_granite4_vision,
     "h2ovl_chat": load_h2ovl,
     "hunyuan_vl": load_hunyuan_vl,
-    "hyperclovax_seed_vision": load_hyperclovax_seed_vision,
     "idefics3": load_idefics3,
     "interns1": load_interns1,
     "internvl_chat": load_internvl,
@@ -1477,6 +1396,8 @@ def run_generate(
     engine_args.seed = seed
     if tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = tensor_parallel_size
+    if current_platform.is_rocm():
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
     sampling_params = SamplingParams(
@@ -1518,6 +1439,8 @@ def run_chat(
     engine_args.seed = seed
     if tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = tensor_parallel_size
+    if current_platform.is_rocm():
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
     sampling_params = (

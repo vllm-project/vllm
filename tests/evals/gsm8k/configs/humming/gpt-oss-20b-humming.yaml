@@ -5,5 +5,4 @@ num_fewshot: 5
 server_args: >-
   --enforce-eager
   --max-model-len 8192
-  --tensor-parallel-size 1
   --moe-backend humming

@@ -21,6 +21,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode
+from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -65,28 +66,6 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
         engine_args=engine_args,
         prompts=prompts,
         stop_token_ids=stop_token_ids,
-    )
-
-
-# Aya Vision
-def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-    model_name = "CohereLabs/aya-vision-8b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=2048,
-        max_num_seqs=2,
-        mm_processor_kwargs={"crop_to_patches": True},
-        limit_mm_per_prompt={modality: 1},
-    )
-    prompts = [
-        f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|><image>{question}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
-        for question in questions
-    ]
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
     )
 
 
@@ -154,51 +133,6 @@ def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
         model="Salesforce/blip2-opt-2.7b",
         limit_mm_per_prompt={modality: 1},
     )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
-# Chameleon
-def run_chameleon(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    prompts = [f"{question}<image>" for question in questions]
-    engine_args = EngineArgs(
-        model="facebook/chameleon-7b",
-        max_model_len=4096,
-        max_num_seqs=2,
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
-# Cheers
-def run_cheers(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-    model_name = "ai9stars/Cheers"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=4096,
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    prompts = [
-        (
-            f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-            f"<|im_start|>user\n<|image_pad|>{question}<|im_end|>\n"
-            f"<|im_start|>assistant\n"
-        )
-        for question in questions
-    ]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -470,24 +404,6 @@ def run_exaone4_5(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Fuyu
-def run_fuyu(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    prompts = [f"{question}\n" for question in questions]
-    engine_args = EngineArgs(
-        model="adept/fuyu-8b",
-        max_model_len=2048,
-        max_num_seqs=2,
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Gemma 3
 def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -536,6 +452,45 @@ def run_gemma3n(questions: list[str], modality: str) -> ModelRequestData:
         )
         for question in questions
     ]
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Gemma 4
+def run_gemma4(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality in ("image", "video")
+    model_name = "google/gemma-4-31B-it"
+
+    # NOTE: Gemma-4-31B is a large model. Users running into Out-Of-Memory (OOM)
+    # errors might need to set `tensor_parallel_size` to > 1.
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        prompts = [
+            (
+                "<bos><start_of_turn>user\n"
+                f"<|image|>\n{question}<end_of_turn>\n"
+                "<start_of_turn>model\n"
+            )
+            for question in questions
+        ]
+    else:  # video
+        prompts = [
+            (
+                "<bos><start_of_turn>user\n"
+                f"<|video|>\n{question}<end_of_turn>\n"
+                "<start_of_turn>model\n"
+            )
+            for question in questions
+        ]
+
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
@@ -793,109 +748,6 @@ def run_hunyuan_vl(questions: list[str], modality: str) -> ModelRequestData:
         f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>"
         for question in questions
     ]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=None,
-    )
-
-
-# naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B
-def run_hyperclovax_seed_vision(
-    questions: list[str], modality: str
-) -> ModelRequestData:
-    model_name = "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-    mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=16384 if modality in ("video", "image+video") else 8192,
-        limit_mm_per_prompt=mm_limit,
-    )
-
-    messages = list()
-    for question in questions:
-        if modality == "image":
-            """
-            ocr: List the words in the image in raster order.
-                Even if the word order feels unnatural for reading,
-                the model will handle it as long as it follows raster order.
-                e.g. "Naver, CLOVA, bigshane"
-            lens_keywords: List the entity names in the image.
-                e.g. "iPhone"
-            lens_local_keywords: List the entity names with quads in the image.
-                e.g. "[0.07, 0.21, 0.92, 0.90] iPhone"
-            """
-            messages.append(
-                [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "ocr": "",
-                                "lens_keywords": "",
-                                "lens_local_keywords": "",
-                            },
-                            {
-                                "type": "text",
-                                "text": question,
-                            },
-                        ],
-                    }
-                ]
-            )
-        elif modality == "video":
-            messages.append(
-                [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "video",
-                            },
-                            {
-                                "type": "text",
-                                "text": question,
-                            },
-                        ],
-                    }
-                ]
-            )
-        elif modality == "image+video":
-            messages.append(
-                [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "ocr": "",
-                                "lens_keywords": "",
-                                "lens_local_keywords": "",
-                            },
-                            {
-                                "type": "video",
-                            },
-                            {
-                                "type": "text",
-                                "text": question,
-                            },
-                        ],
-                    }
-                ]
-            )
-        else:
-            raise ValueError(f"Unsupported modality: {modality}")
-
-    prompts = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -2327,12 +2179,9 @@ def run_step_vl(questions: list[str], modality: str) -> ModelRequestData:
 
 model_example_map = {
     "aria": run_aria,
-    "aya_vision": run_aya_vision,
     "bagel": run_bagel,
-    "cheers": run_cheers,
     "bee": run_bee,
     "blip-2": run_blip2,
-    "chameleon": run_chameleon,
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
     "deepseek_ocr": run_deepseek_ocr,
@@ -2341,9 +2190,9 @@ model_example_map = {
     "eagle2_5": run_eagle2_5,
     "ernie45_vl": run_ernie45_vl,
     "exaone4_5": run_exaone4_5,
-    "fuyu": run_fuyu,
     "gemma3": run_gemma3,
     "gemma3n": run_gemma3n,
+    "gemma4": run_gemma4,
     "glm4v": run_glm4v,
     "glm4_1v": run_glm4_1v,
     "glm4_5v": run_glm4_5v,
@@ -2351,7 +2200,6 @@ model_example_map = {
     "glm_ocr": run_glm_ocr,
     "h2ovl_chat": run_h2ovl,
     "hunyuan_vl": run_hunyuan_vl,
-    "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
     "idefics3": run_idefics3,
     "interns1": run_interns1,
     "interns1_pro": run_interns1_pro,
@@ -2415,6 +2263,7 @@ MODELS_NEED_VIDEO_METADATA = [
 
 MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "llama4",
+    "gemma4",
     "qwen2_vl",
     "qwen2_5_vl",
     "qwen3_vl",
@@ -2426,6 +2275,7 @@ MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "stepvl",
     "glm4_1v",
     "deepseek_ocr",
+    "ernie45_vl",
 ]
 
 
@@ -2688,6 +2538,8 @@ def main(args):
     if args.tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = args.tensor_parallel_size
     engine_args = maybe_add_vit_cuda_graph_compilation_config(args, engine_args)
+    if current_platform.is_rocm():
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
     # Don't want to check the flag multiple times, so just hijack `prompts`.

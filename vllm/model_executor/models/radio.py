@@ -331,54 +331,6 @@ class ViTPatchGenerator(nn.Module):
     def num_skip(self):
         return self.num_cls_tokens + self.num_registers
 
-    def _load_embed(self, src_embed: torch.Tensor, targ_embed: nn.Parameter):
-        if src_embed.shape != targ_embed.shape:
-            src_size = int(math.sqrt(src_embed.shape[1]))
-
-            assert src_size**2 == src_embed.shape[1], (
-                "Unable to interpolate non-square embedding"
-            )
-
-            src_embed = rearrange(
-                src_embed, "b (h w) c -> b c h w", h=src_size, w=src_size
-            )
-            src_embed = F.interpolate(
-                src_embed,
-                size=(self.num_rows, self.num_cols),
-                mode="bicubic",
-                align_corners=True,
-                antialias=False,
-            )
-            src_embed = rearrange(src_embed, "b c h w -> b (h w) c")
-        targ_embed.data.copy_(src_embed)
-
-    def _load_projection(
-        self, src_proj_weight: torch.Tensor, targ_proj_weight: torch.Tensor
-    ):
-        if src_proj_weight.shape != targ_proj_weight.shape:
-            src_patch_size = int(math.sqrt(src_proj_weight.shape[1] // 3))
-
-            assert (src_patch_size**2) * 3 == src_proj_weight.shape[1], (
-                "Unable to interpolate non-square patch size"
-            )
-
-            src_proj_weight = rearrange(
-                src_proj_weight,
-                "b (c h w) -> b c h w",
-                c=3,
-                h=src_patch_size,
-                w=src_patch_size,
-            )
-            src_proj_weight = F.interpolate(
-                src_proj_weight,
-                size=(self.patch_size, self.patch_size),
-                mode="bicubic",
-                align_corners=True,
-                antialias=False,
-            )
-            src_proj_weight = rearrange(src_proj_weight, "b c h w -> b (c h w)")
-        targ_proj_weight.data.copy_(src_proj_weight)
-
     def embed_patches(self, x: torch.Tensor) -> torch.Tensor:
         patches = self.im_to_patches(x)
         patches = self.embedder(patches)

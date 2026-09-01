@@ -38,8 +38,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
 
         # Only next_token_ids and mask tokens are query tokens, all other context is K/V
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
+        self.max_padded_query_tokens = max(
+            self.max_query_tokens,
+            vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+        )
         # Positions covers both context states + query states
-        self.max_positions = self.max_num_tokens + self.max_query_tokens
+        self.max_positions = self.max_num_tokens + self.max_padded_query_tokens
 
         # Separate context buffers to keep query buffer addresses stable for CUDA graphs
         self._context_slot_mapping_buffer = torch.zeros(
@@ -48,7 +52,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             device=device,
         )
         self._slot_mapping_buffer = torch.zeros(
-            self.max_query_tokens,
+            self.max_padded_query_tokens,
             dtype=torch.int64,
             device=device,
         )
@@ -58,7 +62,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             device=device,
         )
         self.positions = torch.zeros(
-            self.max_query_tokens,
+            self.max_padded_query_tokens,
             dtype=torch.int64,
             device=device,
         )
@@ -70,7 +74,11 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # For DFlash we use the input embeddings to embed the mask token
         self.parallel_drafting_hidden_state_tensor = None
 
-        self.dflash_causal = self.dflash_config.get("causal", False)
+        from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
+
+        self.dflash_causal = not dflash_has_any_non_causal(
+            self.draft_model_config.hf_config
+        )
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:

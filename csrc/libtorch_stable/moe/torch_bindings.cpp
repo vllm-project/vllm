@@ -8,23 +8,28 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
   m.def(
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
-      "bias) -> ()");
+      "bias, Tensor? is_padding) -> ()");
 
   // Apply topk sigmoid to the gating outputs.
   m.def(
       "topk_sigmoid(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
-      "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
-      "bias) -> ()");
+      "token_expert_indices, Tensor gating_output, bool renormalize, "
+      "Tensor? bias, float routed_scaling_factor, Tensor? is_padding) -> ()");
 
   m.def(
       "topk_softplus_sqrt(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, float "
       "routed_scaling_factor, Tensor? "
-      "bias, Tensor? input_ids, Tensor? tid2eid) -> ()");
+      "bias, Tensor? input_ids, Tensor? tid2eid, Tensor? is_padding) -> ()");
 
   // Calculate the result of moe by summing up the partial results
-  // from all selected experts.
-  m.def("moe_sum(Tensor input, Tensor! output) -> ()");
+  // from all selected experts. topk_ids/expert_map are optional and, when
+  // both given, enable pad-aware reduce that skips (token, expert)
+  // slots that were never actually computed (unrouted, or routed to an
+  // expert not owned by this rank under expert parallelism).
+  m.def(
+      "moe_sum(Tensor input, Tensor! output, Tensor? topk_ids=None, "
+      "Tensor? expert_map=None) -> ()");
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size.
@@ -121,10 +126,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "topk_group, int topk, bool renormalize, float "
       "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
       "Tensor)");
-
-  // DeepSeek V3 optimized router GEMM for SM90+
-  m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-  // conditionally compiled so impl registration is in source file
 #endif
 }
 

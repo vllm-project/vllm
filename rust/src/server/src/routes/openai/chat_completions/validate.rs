@@ -1,14 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::routes::openai::utils::types::{ChatMessage, Tool};
+use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
     request: &ChatCompletionRequest,
     served_model_names: &[String],
 ) -> Result<(), ApiError> {
-    if !served_model_names.iter().any(|n| n == &request.model) {
-        return Err(ApiError::model_not_found(request.model.clone()));
+    if let Some(model) = request.model.as_ref().filter(|model| !model.is_empty())
+        && !served_model_names.iter().any(|name| name == model)
+    {
+        return Err(ApiError::model_not_found(model.clone()));
     }
 
     if request.stream_options.is_some() && !request.stream {
@@ -79,11 +85,7 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    reject_non_default(
-        request.truncate_prompt_tokens.as_ref(),
-        "truncate_prompt_tokens",
-        "truncate_prompt_tokens is not supported.",
-    )?;
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
     reject_non_default(
         request.media_io_kwargs.as_ref(),
         "media_io_kwargs",
@@ -93,11 +95,6 @@ pub(super) fn validate_request_compat(
         request.mm_processor_kwargs.as_ref(),
         "mm_processor_kwargs",
         "mm_processor_kwargs is not supported.",
-    )?;
-    reject_non_default(
-        request.repetition_detection.as_ref(),
-        "repetition_detection",
-        "repetition_detection is not supported.",
     )?;
 
     Ok(())
@@ -144,7 +141,7 @@ mod tests {
 
     fn base_request() -> ChatCompletionRequest {
         ChatCompletionRequest {
-            model: "Qwen/Qwen1.5-0.5B-Chat".to_string(),
+            model: Some("Qwen/Qwen1.5-0.5B-Chat".to_string()),
             messages: vec![ChatMessage::User {
                 content: MessageContent::Text("hello".to_string()),
                 name: None,
@@ -163,6 +160,18 @@ mod tests {
 
         validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("stop strings should be accepted");
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_default_model_inputs() {
+        for model in [None, Some(String::new())] {
+            let request = ChatCompletionRequest {
+                model,
+                ..base_request()
+            };
+            validate_request_compat(&request, &served(&["served-model"]))
+                .expect("default model input should select the primary served model");
+        }
     }
 
     #[test]
