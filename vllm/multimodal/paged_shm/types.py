@@ -3,7 +3,6 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TypedDict
 
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.processing.processor import ResolvedPromptUpdate
@@ -45,15 +44,7 @@ class ShmSlot:
         return len(self.blocks)
 
 
-class PagedShmTensorShmSlot(TypedDict):
-    token: str
-    meta_size: int
-    meta_block: int
-    data_size: int
-    data_blocks: list[int]
-
-
 @dataclass
-class ShmItem:
+class PagedShmCacheOutItem:
     kwargs_item: MultiModalKwargsItem
     prompt_updates: Sequence["ResolvedPromptUpdate"]

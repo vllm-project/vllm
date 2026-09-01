@@ -9,6 +9,7 @@ that use a shared memory server managed by PagedShmServer.
 """
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 
 import torch
 
@@ -28,8 +29,7 @@ from vllm.multimodal.paged_shm.serial_utils import (
     read_decoded_from_blocks,
     write_encoded_to_blocks,
 )
-from vllm.multimodal.paged_shm.types import ShmItem, ShmWriteRequest
-from vllm.multimodal.processing.processor import ResolvedPromptUpdate
+from vllm.multimodal.paged_shm.types import PagedShmCacheOutItem, ShmWriteRequest
 from vllm.utils.cache import CacheInfo
 from vllm.utils.torch_utils import DeviceLikeType
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -68,7 +68,8 @@ class PagedShmCache:
         self._encoder = MsgpackEncoder(
             size_threshold=self.block_size, save_raw_tensor=True
         )
-        self._decoder = MsgpackDecoder(ShmItem)
+        self._decoder = MsgpackDecoder(PagedShmCacheOutItem)
+        self.stream: torch.Stream = nullcontext() if not pin else torch.cuda.Stream()
 
     def is_cached_item(self, mm_hash: str) -> bool:
         """Check if an item exists in the shared memory cache."""
@@ -85,37 +86,17 @@ class PagedShmCache:
         except Exception as e:
             logger.debug("Failed to invalidate %s: %s", mm_hash, e)
 
-    def get_item(self, mm_hash: str):
-        try:
-            alloc = self._client.open_read(mm_hash, timeout=self.open_write_timeout)
-            try:
-                kwargs_item, prompt_updates = read_decoded_from_blocks(
-                    self._storage,
-                    alloc.blocks,
-                    self.block_size,
-                    self._decoder,
-                    self.device,
-                )
-                return kwargs_item, prompt_updates
-            finally:
-                assert alloc.read_token is not None
-                self._client.close_read(alloc.read_token)
-        except Exception:
-            # Any error (item missing, timeout, etc.) is treated as a miss.
-            raise MultiModalCacheMissError([mm_hash]) from None
-
     def create_item(
         self,
-        kwargs_item: MultiModalKwargsItem,
-        prompt_updates: Sequence[ResolvedPromptUpdate],
+        mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
-        encoded = encode_item(kwargs_item, prompt_updates, self._encoder)
+        encoded = encode_item(mm_item, self._encoder)
 
         if encoded is None:
             # No tensor larger than block_size, so no SHM transfer needed.
             # Return the original item directly.
-            return kwargs_item, prompt_updates
+            return mm_item
 
         chunks, lengths = encoded
 
@@ -128,18 +109,17 @@ class PagedShmCache:
             uuid=mm_hash,
             size=total_blocks * self.block_size,
             use_cache=True,
-            generate_read_token=True,
         )
 
         try:
             alloc = self._client.open_write([req], timeout=self.open_write_timeout)[0]
         except RuntimeError as e:
             logger.error("PagedShm `open_write` failed: %s", e)
-            return kwargs_item, prompt_updates
+            return mm_item
 
         self._executor.submit(self._async_write_task, alloc.uuid, chunks, alloc.blocks)
         # Signal that the item is stored in SHM (cache hit for future reads)
-        return None, prompt_updates
+        return None, mm_item[1]
 
     def _async_write_task(
         self,
@@ -159,6 +139,28 @@ class PagedShmCache:
                     "Failed to clean up blocks for async write uuid %s: %s", uuid, e
                 )
             raise  # re-raise original exception
+
+    def get_item(self, mm_hash: str) -> MultiModalProcessorCacheInItem:
+        try:
+            alloc = self._client.open_read(mm_hash, timeout=self.open_write_timeout)
+            try:
+                with self.stream:
+                    mm_item = read_decoded_from_blocks(
+                        self._storage,
+                        alloc.blocks,
+                        self.block_size,
+                        self._decoder,
+                        self.device,
+                    )
+                if isinstance(self.stream, torch.cuda.Stream):
+                    self.stream.synchronize()
+                return mm_item
+            finally:
+                assert alloc.read_token is not None
+                self._client.close_read(alloc.read_token)
+        except Exception:
+            # Any error (item missing, timeout, etc.) is treated as a miss.
+            raise MultiModalCacheMissError([mm_hash]) from None
 
     def close(self) -> None:
         self._client.close()
@@ -201,7 +203,7 @@ class PagedShmSenderCache(PagedShmCache, BaseMultiModalProcessorCache):
         self._total += 1
         if mm_item is not None:
             self._hits += 1
-            return self.create_item(mm_item[0], mm_item[1], mm_hash)
+            return self.create_item(mm_item, mm_hash)
         return self.get_item(mm_hash)
 
     def touch_sender_cache_item(self, mm_hash: str) -> None:
