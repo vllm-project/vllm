@@ -144,6 +144,25 @@ class KVConnectorFactory:
 
         return MultiConnector.all_children_support_hma(kv_transfer_config)
 
+    @classmethod
+    def requires_dcp_block_aligned_interleave(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Return whether this connector composition requires block alignment."""
+        if kv_transfer_config.kv_connector != "MultiConnector":
+            connector_cls = cls.get_connector_class(kv_transfer_config)
+            return connector_cls.requires_dcp_block_aligned_interleave
+
+        connectors = kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        if not connectors:
+            return True
+        return any(
+            cls.requires_dcp_block_aligned_interleave(
+                KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **child})
+            )
+            for child in connectors
+        )
+
 
 # Register various connectors here.
 # The registration should not be done in each individual file, as we want to
