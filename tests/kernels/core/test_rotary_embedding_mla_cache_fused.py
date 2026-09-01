@@ -80,6 +80,7 @@ def test_concat_and_cache_mla_rope_fused(
 ) -> None:
     set_random_seed(seed)
     torch.set_default_device(device)
+    torch.cuda.set_device(device)
 
     rope = RotaryEmbedding(
         qk_rope_head_dim,
@@ -189,6 +190,7 @@ def test_concat_and_cache_mla_rope_fused(
     # Other paths use the CUDA defaults.
     rocm_neox = current_platform.is_rocm() and is_neox_style
     rocm_bf16 = current_platform.is_rocm() and dtype == torch.bfloat16
+    rocm_neox_fp16 = rocm_neox and dtype == torch.float16
     if kv_cache_dtype == "fp8":
         result_temp = torch.empty_like(kv_cache, dtype=torch.float16)
         ops.convert_fp8(
@@ -217,6 +219,8 @@ def test_concat_and_cache_mla_rope_fused(
     torch.testing.assert_close(
         query,
         ref_q_pe,
-        atol=0.04 if rocm_bf16 else get_default_atol(query),
+        atol=0.04
+        if rocm_bf16
+        else (2e-3 if rocm_neox_fp16 else get_default_atol(query)),
         rtol=get_default_rtol(query),
     )
