@@ -38,6 +38,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLAPrefillMetadata,
     _masked_mha_workspace_fits,
     _topk_mask_shape,
+    _use_dense_mha_prefill,
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
@@ -179,6 +180,16 @@ def test_hisparse_routes_prefill_to_sparse_mqa():
     layer = SimpleNamespace(hisparse_cache=object())
 
     assert not mla_attention.MLAAttention._use_sparse_mha(layer, SimpleNamespace())
+
+
+def test_hisparse_metadata_keeps_short_prefill_indexer_enabled():
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(
+            hisparse_config=object(), sparse_mla_force_mqa=False
+        )
+    )
+
+    assert not _use_dense_mha_prefill(config, prefill_max_seq_len=512, topk_tokens=2048)
 
 
 def test_unified_mla_prepares_batch_without_slot_mapping(monkeypatch):

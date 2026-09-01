@@ -124,6 +124,17 @@ def _is_masked_mha_available(
     return fa_version == 4 and not is_quantized_kv_cache(kv_cache_dtype)
 
 
+def _use_dense_mha_prefill(
+    vllm_config: "VllmConfig", prefill_max_seq_len: int, topk_tokens: int
+) -> bool:
+    attention_config = vllm_config.attention_config
+    return (
+        attention_config.hisparse_config is None
+        and not attention_config.sparse_mla_force_mqa
+        and prefill_max_seq_len <= topk_tokens
+    )
+
+
 @dataclass
 class SparseMLAPrefillMetadata(MLACommonPrefillMetadata):
     host_staging_plan: HiSparsePrefillStagingPlan | None = None
@@ -389,9 +400,8 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 q_data_type=self.model_config.dtype,
                 output_dtype=self.model_config.dtype,
                 prefill_backend=self._prefill_backend,
-                use_dense_mha=(
-                    prefill_max_seq_len <= self.topk_tokens
-                    and not self.vllm_config.attention_config.sparse_mla_force_mqa
+                use_dense_mha=_use_dense_mha_prefill(
+                    self.vllm_config, prefill_max_seq_len, self.topk_tokens
                 ),
                 topk_mask_workspace=self.topk_mask_workspace,
                 host_staging_plan=staging_plan,
