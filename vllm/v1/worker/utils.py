@@ -392,7 +392,11 @@ def allocate_kv_cache(
         return {}
 
     sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
-    assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
+    if len(sizes) != 1:
+        raise ValueError(
+            "KV cache tensors must share one backing allocation, "
+            f"got {len(sizes)} distinct sizes: {sizes}"
+        )
     raw_size = sizes.pop()
     # wvSplitKrc's process-lifetime static workspaces (csrc/rocm/skinny_gemms.cu)
     # are created lazily on the first qualifying GEMM. Force that now, before

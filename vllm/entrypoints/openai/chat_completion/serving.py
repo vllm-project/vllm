@@ -386,7 +386,10 @@ class OpenAIServingChat(GenerateBaseServing):
 
             generators.append(generator)
 
-        assert len(generators) == 1
+        if len(generators) != 1:
+            raise RuntimeError(
+                f"Expected exactly 1 generator, got {len(generators)}"
+            )
         (result_generator,) = generators
 
         if request.stream:
