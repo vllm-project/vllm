@@ -35,6 +35,173 @@ class DPSyncState:
     eager: bool
 
 
+class DPSyncFuture:
+    """An in-flight DP shape agreement backed by a reusable CPU buffer."""
+
+    def __init__(
+        self,
+        coordinator: DPSyncCoordinator,
+        local_batch_desc: BatchExecutionDescriptor,
+        num_tokens: int,
+        num_reqs: int,
+        num_active_loras: int,
+        work: dist.Work | None,
+    ) -> None:
+        self._coordinator = coordinator
+        self._local_batch_desc = local_batch_desc
+        self._num_tokens = num_tokens
+        self._num_reqs = num_reqs
+        self._num_active_loras = num_active_loras
+        self._work = work
+        self._waited = work is None
+        self._result: tuple[BatchExecutionDescriptor, DPSyncState | None] | None = None
+        self._released = False
+
+    def result(
+        self, cudagraph_manager: CudaGraphManager | None
+    ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
+        """Wait for and resolve the agreement without releasing its buffer.
+
+        The returned ``DPSyncState`` may contain a view into the coordinator's
+        reusable buffer and is valid only until :meth:`release` is called.
+        """
+        if self._released:
+            raise RuntimeError("Cannot resolve a released DP sync future")
+        if self._result is not None:
+            return self._result
+
+        if self._work is None:
+            self._result = self._local_batch_desc, None
+        else:
+            self._work.wait()
+            self._waited = True
+            tensor = self._coordinator._tensor
+            assert tensor is not None
+            self._result = _finish_cudagraph_and_dp_padding(
+                cudagraph_manager,
+                self._local_batch_desc,
+                tensor,
+                self._num_tokens,
+                self._num_reqs,
+                self._num_active_loras,
+            )
+        return self._result
+
+    def release(self) -> None:
+        """Wait for unfinished work and return the backing buffer."""
+        if self._released:
+            return
+        if self._work is not None and not self._waited:
+            self._work.wait()
+            self._waited = True
+        self._coordinator._release(self)
+        self._released = True
+
+
+class DPSyncCoordinator:
+    """Own one persistent CPU buffer for asynchronous DP shape agreement."""
+
+    def __init__(
+        self,
+        dp_size: int,
+        dp_rank: int,
+        *,
+        group: dist.ProcessGroup | None = None,
+    ) -> None:
+        self.dp_size = dp_size
+        self.dp_rank = dp_rank
+        self.group = group
+        self._tensor = (
+            torch.zeros(4, dp_size, dtype=torch.int32, device="cpu")
+            if dp_size > 1
+            else None
+        )
+        self._active_future: DPSyncFuture | None = None
+
+    def start(
+        self,
+        cudagraph_manager: CudaGraphManager | None,
+        num_reqs: int,
+        num_tokens: int,
+        uniform_token_count: int | None,
+        max_query_len: int | None = None,
+        need_eager: bool = False,
+        num_active_loras: int = 0,
+    ) -> DPSyncFuture:
+        """Dispatch locally and issue the DP collective without waiting."""
+        if self._active_future is not None:
+            raise RuntimeError("A DP sync is already in flight")
+
+        batch_desc = _dispatch_local_batch(
+            cudagraph_manager,
+            num_reqs,
+            num_tokens,
+            uniform_token_count,
+            max_query_len,
+            need_eager,
+            num_active_loras,
+        )
+
+        work = None
+        if self._tensor is not None:
+            tensor = self._tensor
+            tensor.zero_()
+            tensor[0][self.dp_rank] = num_tokens
+            tensor[1][self.dp_rank] = batch_desc.cg_mode.value
+            tensor[2][self.dp_rank] = uniform_token_count or 0
+            tensor[3][self.dp_rank] = max_query_len or -1
+            group = self.group
+            if group is None:
+                group = get_dp_group().cpu_group
+            work = dist.all_reduce(tensor, group=group, async_op=True)
+
+        future = DPSyncFuture(
+            self,
+            batch_desc,
+            num_tokens,
+            num_reqs,
+            num_active_loras,
+            work,
+        )
+        self._active_future = future
+        return future
+
+    def _release(self, future: DPSyncFuture) -> None:
+        if self._active_future is not future:
+            raise RuntimeError("DP sync future is not owned by this coordinator")
+        self._active_future = None
+
+
+def _dispatch_local_batch(
+    cudagraph_manager: CudaGraphManager | None,
+    num_reqs: int,
+    num_tokens: int,
+    uniform_token_count: int | None,
+    max_query_len: int | None,
+    need_eager: bool,
+    num_active_loras: int,
+) -> BatchExecutionDescriptor:
+    if need_eager:
+        return BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.NONE,
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            num_active_loras=num_active_loras,
+        )
+
+    assert cudagraph_manager is not None, (
+        "cudagraph_manager should only be None during profile run, "
+        "where need_eager must be True"
+    )
+    return cudagraph_manager.dispatch(
+        num_reqs,
+        num_tokens,
+        uniform_token_count,
+        num_active_loras=num_active_loras,
+        max_query_len=max_query_len,
+    )
+
+
 def sync_cudagraph_and_dp_padding(
     cudagraph_manager: CudaGraphManager | None,
     desired_batch_desc: BatchExecutionDescriptor,
@@ -60,6 +227,24 @@ def sync_cudagraph_and_dp_padding(
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
     dist.all_reduce(tensor, group=group)
 
+    return _finish_cudagraph_and_dp_padding(
+        cudagraph_manager,
+        desired_batch_desc,
+        tensor,
+        num_tokens,
+        num_reqs,
+        num_active_loras,
+    )
+
+
+def _finish_cudagraph_and_dp_padding(
+    cudagraph_manager: CudaGraphManager | None,
+    desired_batch_desc: BatchExecutionDescriptor,
+    tensor: torch.Tensor,
+    num_tokens: int,
+    num_reqs: int,
+    num_active_loras: int,
+) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
     uniform_token_counts_across_dp = tensor[2]
@@ -175,25 +360,15 @@ def dispatch_cg_and_sync_dp(
     """
     reuse_eager = dp_sync is not None and dp_sync.eager
 
-    if need_eager or reuse_eager:
-        batch_desc = BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.NONE,
-            num_tokens=num_tokens,
-            num_reqs=num_reqs,
-            num_active_loras=num_active_loras,
-        )
-    else:
-        assert cudagraph_manager is not None, (
-            "cudagraph_manager should only be None during profile run, "
-            "where need_eager must be True"
-        )
-        batch_desc = cudagraph_manager.dispatch(
-            num_reqs,
-            num_tokens,
-            dp_sync.uniform_token_count if dp_sync is not None else uniform_token_count,
-            num_active_loras=num_active_loras,
-            max_query_len=max_query_len,
-        )
+    batch_desc = _dispatch_local_batch(
+        cudagraph_manager,
+        num_reqs,
+        num_tokens,
+        dp_sync.uniform_token_count if dp_sync is not None else uniform_token_count,
+        max_query_len,
+        need_eager or reuse_eager,
+        num_active_loras,
+    )
 
     if dp_size == 1:
         return batch_desc, None
