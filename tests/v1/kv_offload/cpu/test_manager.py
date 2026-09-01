@@ -965,6 +965,28 @@ def test_filter_reused_manager():
     assert manager.counts.get(to_keys([1])[0]) == 1
 
 
+def test_filter_reused_manager_oversized_offer_makes_progress():
+    """An offer larger than the tracker capacity must not churn forever."""
+    manager = make_cpu_manager(
+        num_blocks=4,
+        cache_policy="lru",
+        store_threshold=2,
+        max_tracker_size=3,
+    )
+    keys = to_keys([1, 2, 3, 4])
+    stored_keys: set[OffloadKey] = set()
+
+    for _ in range(4):
+        remaining_keys = [key for key in keys if key not in stored_keys]
+        output = manager.prepare_store(remaining_keys, _EMPTY_REQ_CTX)
+        assert output is not None
+        if output.keys_to_store:
+            manager.complete_store(output.keys_to_store, _EMPTY_REQ_CTX)
+            stored_keys.update(output.keys_to_store)
+
+    assert stored_keys == set(keys)
+
+
 def test_evictable_cache_block_count():
     """
     Verifies _num_evictable_cache_blocks is maintained correctly through the
