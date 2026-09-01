@@ -5948,6 +5948,8 @@ dependencies = [
  "asynk-strim-attr",
  "auto_enums",
  "axum",
+ "base64 0.22.1",
+ "bytemuck",
  "bytes",
  "clap",
  "educe",
