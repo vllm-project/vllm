@@ -35,6 +35,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -156,26 +157,72 @@ def gather_moonep_weight_layout(
     return make_moonep_weight_layout(w13_global, w2_global, num_prefetch_slots)
 
 
+MOONEP_MIN_DISPATCH_TOKENS = 128
+
+
+class MoonEPBufferPool:
+    """Lazily creates ``moonep.Buffer`` instances at power-of-two capacities.
+
+    ``Buffer`` fixes its token capacity ``S`` at construction, so a single
+    full-capacity buffer would pad every dispatch to
+    ``max_num_batched_tokens``. The pool instead serves the smallest
+    power-of-two capacity that fits the step's token count, so decode-sized
+    batches dispatch a few hundred slots rather than the full capacity.
+
+    Selection must be identical on every EP rank (dispatch is collective and
+    ``Buffer`` construction is itself a collective): callers derive the token
+    count from ``dp_metadata`` (the max across DP ranks) so all ranks create
+    and pick the same buffer at the same step.
+    """
+
+    def __init__(self, buffer_kwargs: dict[str, Any], max_tokens_per_rank: int):
+        self._kwargs = {k: v for k, v in buffer_kwargs.items() if k != "S"}
+        self.max_tokens_per_rank = max_tokens_per_rank
+        self._buffers: dict[int, Any] = {}
+
+    def capacity_for(self, num_tokens: int) -> int:
+        if num_tokens >= self.max_tokens_per_rank:
+            return self.max_tokens_per_rank
+        cap = 1 << max(num_tokens - 1, 0).bit_length()
+        return min(max(cap, MOONEP_MIN_DISPATCH_TOKENS), self.max_tokens_per_rank)
+
+    def get(self, num_tokens: int) -> tuple[int, Any]:
+        """Return ``(capacity, buffer)`` for the given step token count."""
+        from moonep import Buffer  # type: ignore[import-not-found]
+
+        capacity = self.capacity_for(num_tokens)
+        buffer = self._buffers.get(capacity)
+        if buffer is None:
+            buffer = Buffer(S=capacity, **self._kwargs)
+            self._buffers[capacity] = buffer
+        return capacity, buffer
+
+    def destroy(self) -> None:
+        for buffer in self._buffers.values():
+            buffer.destroy()
+        self._buffers.clear()
+
+
 class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """Prepare/Finalize using MoonEP balanced dispatch/combine.
 
-    ``prepare`` pads the batch to the buffer's static token capacity,
-    dispatches, runs ``prefetch_weight`` for the planned redundant experts,
-    and stashes the ``plan`` for ``finalize`` (the same pattern DeepEP-HT
-    uses for its handle). Downstream expert compute must consume the
-    expert-grouped ``[NvS, H]`` layout via ``cu_seqlens``.
+    ``prepare`` pads the batch to the selected buffer's static token
+    capacity, dispatches, runs ``prefetch_weight`` for the planned redundant
+    experts, and stashes the ``plan`` for ``finalize`` (the same pattern
+    DeepEP-HT uses for its handle). Downstream expert compute must consume
+    the expert-grouped ``[NvS, H]`` layout via ``cu_seqlens``.
     """
 
     def __init__(
         self,
-        buffer: Any,  # moonep.Buffer
+        buffer_pool: "MoonEPBufferPool",
         max_tokens_per_rank: int,
         num_dispatchers: int,
         num_global_experts: int,
         weight_layout: MoonEPExpertWeightLayout | None = None,
     ):
         super().__init__()
-        self.buffer = buffer
+        self.buffer_pool = buffer_pool
         self.max_tokens_per_rank = max_tokens_per_rank
         self.num_dispatchers_ = num_dispatchers
         self.num_global_experts = num_global_experts
@@ -186,6 +233,7 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self._plan: Any = None
         self._cu_seqlens: torch.Tensor | None = None
         self._num_tokens: int = 0
+        self._buffer: Any = None  # the pool buffer used by the current step
 
     def post_init_setup(self, fused_experts: mk.FusedMoEExperts) -> None:
         # The [E+B] weight layout is attached to the experts by their
@@ -209,8 +257,9 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     @property
     def num_dispatched_slots(self) -> int:
-        """``NvS``: static number of dispatched token slots per rank."""
-        return int(self.buffer._ctx["NvS"])
+        """``NvS`` of the buffer selected by the current step's prepare()."""
+        assert self._buffer is not None, "prepare() has not been called"
+        return int(self._buffer._ctx["NvS"])
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -247,9 +296,9 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         a1: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        capacity: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
         num_tokens = a1.shape[0]
-        capacity = self.max_tokens_per_rank
         if num_tokens > capacity:
             raise ValueError(
                 f"MoonEP static buffer capacity exceeded: {num_tokens} tokens "
@@ -302,15 +351,27 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             "MoonEPPrepareAndFinalize.prepare() called again before finalize()"
         )
 
+        # Buffer choice must be rank-symmetric: use the max token count
+        # across DP ranks (every rank sees the same dp_metadata), falling
+        # back to the local count outside a forward context (tests).
+        num_tokens = a1.shape[0]
+        try:
+            dp_meta = get_forward_context().dp_metadata
+        except AssertionError:
+            dp_meta = None
+        if dp_meta is not None:
+            num_tokens = int(dp_meta.num_tokens_across_dp_cpu.max())
+        capacity, self._buffer = self.buffer_pool.get(num_tokens)
+
         a1, topk_ids, topk_weights, self._num_tokens = self._pad_to_capacity(
-            a1, topk_ids, topk_weights
+            a1, topk_ids, topk_weights, capacity
         )
         tokens_per_expert = torch.bincount(
             topk_ids.reshape(-1).to(dtype=torch.int64),
             minlength=num_experts,
         ).to(dtype=torch.int32)
 
-        hidden_nvsh, route_weights_nvs, cu_seqlens, plan = self.buffer.dispatch(
+        hidden_nvsh, route_weights_nvs, cu_seqlens, plan = self._buffer.dispatch(
             a1,
             topk_weights,
             topk_ids,
@@ -320,7 +381,7 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self._cu_seqlens = cu_seqlens
 
         weight_layout = self._resolve_weight_layout()
-        self.buffer.prefetch_weight(
+        self._buffer.prefetch_weight(
             plan=plan,
             full_gate_weight=weight_layout.full_gate_weight,
             full_up_weight=weight_layout.full_up_weight,
@@ -357,7 +418,7 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             "MoonEP requires TopKWeightAndReduceNoOP, got "
             f"{type(weight_and_reduce_impl).__name__}"
         )
-        combined, _, _ = self.buffer.combine(
+        combined, _, _ = self._buffer.combine(
             plan=self.plan,
             hidden_nvsh=fused_expert_output,
             route_weights_nvs=None,

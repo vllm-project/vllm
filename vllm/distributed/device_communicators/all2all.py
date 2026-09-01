@@ -1144,11 +1144,19 @@ class MoonEPAll2AllManager(All2AllManagerBase):
         )
 
     def get_handle(self, kwargs):
-        from moonep import Buffer  # type: ignore[import-not-found]
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.moonep import (
+            MoonEPBufferPool,
+        )
 
         buffer_kwargs = self._make_buffer_kwargs(**kwargs)
         logger.debug("MoonEP all2all args %s", buffer_kwargs)
-        handle: Buffer = self.handle_cache.get_or_create(buffer_kwargs, Buffer)
+
+        def make_pool(**kw):
+            return MoonEPBufferPool(kw, max_tokens_per_rank=kw["S"])
+
+        handle: MoonEPBufferPool = self.handle_cache.get_or_create(
+            buffer_kwargs, make_pool
+        )
         return handle
 
     def destroy(self):
