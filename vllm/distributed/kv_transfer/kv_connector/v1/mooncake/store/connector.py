@@ -285,9 +285,23 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(metadata, MooncakeStoreConnectorMetadata)
         self.connector_worker.start_load_kv(metadata)
 
+    @property
+    def _layerwise_enabled(self) -> bool:
+        """Check if layerwise mode is enabled."""
+        extra_config = self._kv_transfer_config.kv_connector_extra_config
+        return str(extra_config.get("use_layerwise", "False")).lower() == "true"
+
     def wait_for_layer_load(self, layer_name: str) -> None:
-        # No layerwise support - no-op
-        return
+        """Wait for a layer's KV cache to finish loading.
+
+        Called by the ``@maybe_transfer_kv_layer`` decorator before each
+        layer's attention computation in layerwise mode.
+        """
+        if not self._layerwise_enabled:
+            return
+
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_layer_load(layer_name)
 
     def save_kv_layer(
         self,
@@ -296,8 +310,16 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
-        # No layerwise support - no-op
-        return
+        """Save a layer's KV cache to the store.
+
+        Called by the ``@maybe_transfer_kv_layer`` decorator after each layer's
+        attention computation in layerwise mode.
+        """
+        if not self._layerwise_enabled:
+            return
+
+        assert self.connector_worker is not None
+        self.connector_worker.save_kv_layer(layer_name, kv_layer, attn_metadata)
 
     def wait_for_save(self):
         assert self.connector_worker is not None

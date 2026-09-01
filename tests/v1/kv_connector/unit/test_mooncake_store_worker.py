@@ -2756,6 +2756,11 @@ def _make_bare_worker(
     worker.tp_size = 1
     worker.num_kv_head = 1
     worker.pp_size = 1
+    # __init__ (worker.py:2204-2205) sets these unconditionally; replicate
+    # here since the bare worker bypasses __init__. register_kv_caches(),
+    # get_finished(), and lookup() all read these layerwise guards.
+    worker._layerwise_enabled = False
+    worker._use_session_api = False
     # Minimal single-full-attention-group config so the coordinator-based
     # lookup path works (the connector no longer carries a legacy single-group
     # path; everything flows through the coordinator).

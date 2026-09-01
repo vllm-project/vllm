@@ -49,6 +49,9 @@ def _make_bare_scheduler(
     scheduler._next_store_job_id = 0
     scheduler._pinned_saves = {}
     scheduler._boundary_state_group_ids = frozenset({1})
+    # __init__ (scheduler.py:68) sets this unconditionally; the bare stub
+    # bypasses __init__ but lookup()/alloc path read this layerwise guard.
+    scheduler._layerwise_enabled = False
     return scheduler
 
 
