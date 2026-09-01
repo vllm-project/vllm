@@ -7,7 +7,7 @@ Tests the functionality of the DecodeBenchConnector which fills KV cache
 with dummy values for decode performance benchmarking.
 """
 
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -34,15 +34,16 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.request import Request
 
 from .utils import (
     EOS_TOKEN_ID,
     create_model_runner_output,
+    create_request,
     create_scheduler,
     create_vllm_config,
-    make_kv_cache_config,
 )
 
 
@@ -283,30 +284,61 @@ def test_decode_bench_connector_uses_per_group_block_sizes():
     assert num_tokens == 17
 
 
-def test_decode_bench_connector_dcp_uses_virtual_block_size():
-    """DCP must not fill the decode token's block at a prefix boundary."""
+def test_decode_bench_connector_uses_per_group_dcp_block_sizes():
+    """DCP scales full-attention blocks but not sliding-window blocks."""
     block_size = 16
     dcp_world_size = 2
     vllm_config = create_vllm_config(
         block_size=block_size,
         kv_connector="DecodeBenchConnector",
     )
-    vllm_config.parallel_config.tensor_parallel_size = dcp_world_size
     vllm_config.parallel_config.decode_context_parallel_size = dcp_world_size
+    full_attention = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    sliding_window = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=2 * block_size,
+    )
     connector = DecodeBenchConnector(
         vllm_config,
         KVConnectorRole.SCHEDULER,
-        make_kv_cache_config(block_size=block_size, num_blocks=3),
+        KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(["full_attention"], full_attention),
+                KVCacheGroupSpec(["sliding_window"], sliding_window),
+            ],
+        ),
     )
-    request = Mock(request_id="dcp-boundary")
-    num_external_tokens = block_size * dcp_world_size
-    blocks = KVCacheBlocks(([KVCacheBlock(block_id=1), KVCacheBlock(block_id=2)],))
+    num_external_tokens = block_size * dcp_world_size + 1
+    request = create_request(
+        request_id=1,
+        num_tokens=num_external_tokens + 1,
+        block_size=block_size,
+    )
+    blocks = KVCacheBlocks(
+        (
+            [KVCacheBlock(block_id=i) for i in (1, 2, 3)],
+            [KVCacheBlock(block_id=i) for i in (5, 6, 7, 8)],
+        )
+    )
 
     connector.update_state_after_alloc(request, blocks, num_external_tokens)
     metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
 
     assert isinstance(metadata, DecodeBenchConnectorMetadata)
-    assert metadata.reqs_to_fill[request.request_id] == (([1],), num_external_tokens)
+    assert metadata.reqs_to_fill[request.request_id] == (
+        ([1, 2], [5, 6, 7]),
+        num_external_tokens,
+    )
 
 
 def test_decode_bench_connector_no_refill():
