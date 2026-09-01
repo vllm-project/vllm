@@ -2768,23 +2768,15 @@ class VllmConfig:
                 "deprecated when PCP is fully supported."
             )
 
-        if self.kv_transfer_config is None:
-            return
-
         # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
         # scaling by dcp_size (we need the local block_size here).
         local_block_size = min(
             g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
         )
-        if self.parallel_config.cp_kv_cache_interleave_size == local_block_size:
-            return
-
-        from vllm.distributed.kv_transfer.kv_connector.factory import (
-            KVConnectorFactory,
-        )
-
-        connector_cls = KVConnectorFactory.get_connector_class(self.kv_transfer_config)
-        if connector_cls.requires_dcp_block_aligned_interleave:
+        if (
+            self._requires_dcp_block_aligned_interleave()
+            and self.parallel_config.cp_kv_cache_interleave_size != local_block_size
+        ):
             interleave = self.parallel_config.cp_kv_cache_interleave_size
             self.parallel_config.cp_kv_cache_interleave_size = local_block_size
             logger.info_once(
@@ -2805,13 +2797,10 @@ class VllmConfig:
         """
         block_size = self.cache_config.block_size
 
-        # Skip DCP interleave-size compatibility for NIXL P/D: the interleave
-        # size is pinned to block_size by each worker.
-        nixl_pd_active = (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("NixlConnector")
-        )
-        if self.parallel_config.decode_context_parallel_size > 1 and not nixl_pd_active:
+        if (
+            self.parallel_config.decode_context_parallel_size > 1
+            and not self._requires_dcp_block_aligned_interleave()
+        ):
             assert (
                 self.parallel_config.cp_kv_cache_interleave_size <= block_size
                 and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0
@@ -2827,6 +2816,18 @@ class VllmConfig:
                 "to schedule a multiple of block_size tokens even if they are "
                 "in the middle of a mm input"
             )
+
+    def _requires_dcp_block_aligned_interleave(self) -> bool:
+        """Whether the configured connector composition needs block alignment."""
+        config = self.kv_transfer_config
+        if config is None or not config.is_kv_transfer_instance:
+            return False
+
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
+        )
+
+        return KVConnectorFactory.requires_dcp_block_aligned_interleave(config)
 
     @model_validator(mode="after")
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
