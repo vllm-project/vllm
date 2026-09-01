@@ -456,7 +456,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if mixed_qkv_ns is not None:
             assert g1_ns is not None and beta_ns is not None
             if m.num_prefills > 0:
-                if envs.VLLM_USE_AITER_FUSED_QKV_CONV:
+                if envs.VLLM_ROCM_USE_AITER_FUSED_QKV_CONV:
                     from aiter.ops.triton.gated_delta_net import (
                         causal_conv1d_split_qkv_triton_tile_fn,
                     )
