@@ -8,6 +8,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import Field, field_validator, model_validator
 
+import vllm.envs as envs
 from vllm.config.utils import config, get_from_deprecated_env_if_set
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
@@ -117,6 +118,12 @@ class CacheConfig:
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
     set the GPU memory utilization to 0.5 for each instance."""
+    moe_activation_safety_factor: float = Field(
+        default=envs.VLLM_MOE_ACTIVATION_SAFETY_FACTOR,
+        ge=0.0,
+    )
+    """Safety factor buffer applied to active-parameter-aware MoE activation
+    headroom during memory profiling (e.g. 0.05 for 5% buffer)."""
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
@@ -267,6 +274,7 @@ class CacheConfig:
             # Runtime/derived knobs that don't affect compiled graph shape
             "gpu_memory_utilization",
             "kv_cache_memory_bytes",
+            "moe_activation_safety_factor",
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",

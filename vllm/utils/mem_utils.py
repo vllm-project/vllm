@@ -324,3 +324,28 @@ def memory_profiling(
         result.after_profile.torch_peak - result.after_profile.torch_allocated
     )
     result.non_kv_cache_memory = result.total_consumed + result.transient_peak_headroom
+
+
+def calculate_moe_active_headroom(
+    peak_activation_memory: int,
+    alpha: float,
+    safety_factor: float = 0.05,
+) -> int:
+    """Calculates active-parameter-aware activation headroom for MoE models.
+
+    Args:
+        peak_activation_memory: Peak activation memory measured during profile run.
+        alpha: Ratio of active parameters to total parameters (0.0 < alpha <= 1.0).
+        safety_factor: Safety buffer (default: 0.05 / 5%) to absorb routing skew.
+
+    Returns:
+        Adjusted peak activation headroom in bytes.
+    """
+    assert peak_activation_memory >= 0, (
+        f"peak_activation_memory must be non-negative, got {peak_activation_memory}"
+    )
+    assert 0.0 <= alpha <= 1.0, f"alpha must be between 0.0 and 1.0, got {alpha}"
+    assert safety_factor >= 0.0, (
+        f"safety_factor must be non-negative, got {safety_factor}"
+    )
+    return int(peak_activation_memory * alpha * (1.0 + safety_factor))

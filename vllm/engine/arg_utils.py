@@ -541,6 +541,7 @@ class EngineArgs:
     offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
+    moe_activation_safety_factor: float = CacheConfig.moe_activation_safety_factor
     max_num_batched_tokens: int | None = None
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
@@ -1236,6 +1237,10 @@ class EngineArgs:
         cache_group.add_argument("--block-size", **cache_kwargs["block_size"])
         cache_group.add_argument(
             "--gpu-memory-utilization", **cache_kwargs["gpu_memory_utilization"]
+        )
+        cache_group.add_argument(
+            "--moe-activation-safety-factor",
+            **cache_kwargs["moe_activation_safety_factor"],
         )
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
@@ -2043,6 +2048,7 @@ class EngineArgs:
             block_size=self.block_size,  # type: ignore[arg-type]
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
+            moe_activation_safety_factor=self.moe_activation_safety_factor,
             cache_dtype=resolved_cache_dtype,  # type: ignore[arg-type]
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
