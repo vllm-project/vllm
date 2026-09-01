@@ -634,13 +634,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     )
 
                     _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
-        if (
-            vllm_config.kernel_config.enable_jit_warmup
-            and vllm_config.parallel_config.decode_context_parallel_size > 1
-        ):
-            from vllm.v1.attention.ops.dcp import _CORRECT_ATTN_CP_OUT_KERNEL
-
-            _CORRECT_ATTN_CP_OUT_KERNEL.register_warmup()
 
         self.dcp_manager: MLADCPManager | None = None
         if self.impl.dcp_world_size > 1:

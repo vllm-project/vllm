@@ -116,6 +116,8 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         /,
         **kwargs: Any,
     ) -> Any:
+        runtime_launcher = kwargs.pop("_runtime_launcher", None)
+        runtime_launcher_arg_count = kwargs.pop("_runtime_launcher_arg_count", 0)
         for name, value in inputs.items():
             target = name if name in self._kernel_param_names else f"{name}_ptr"
             if target in self._kernel_param_names and target not in kwargs:
@@ -124,6 +126,12 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
             warmup = getattr(self.kernel, "warmup", None)
             assert warmup is not None
             return warmup(grid=(1,), **kwargs)
+        if runtime_launcher is not None:
+            regular_args = [
+                kwargs.pop(name)
+                for name in self.kernel.arg_names[:runtime_launcher_arg_count]
+            ]
+            return runtime_launcher(self.kernel, grid, *regular_args, **kwargs)
         return self.kernel[grid](**kwargs)
 
 

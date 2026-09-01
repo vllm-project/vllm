@@ -86,6 +86,8 @@ class PackDCPTopkCandidatesKernel(
         topk: int
         block_size: int
 
+    # These scalars only describe runtime layouts and bounds; the constexpr
+    # fields below own the launch geometry and algorithmic specialization.
     @staticmethod
     @triton.jit(
         do_not_specialize=[
