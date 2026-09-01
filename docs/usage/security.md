@@ -152,30 +152,21 @@ The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentic
 
 ### Protected Endpoints (Require API Key)
 
-The scale-out `/render`, `/derender`, and `/inference/v1/generate` endpoints are
-registered on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`. The
-dedicated `vllm launch render` server registers the render and derender
-endpoints when this environment variable is unset or set to `1`; an explicit
-value of `0` is rejected. When registered, these endpoints use the same API key
-authentication as the other protected endpoints below.
-
-This setting does not disable `/v1/tokenize`, which remains available and
-shares parts of the request preprocessing path used by the render endpoints.
-
 When `--api-key` is configured, the following `/v1` endpoints require Bearer token authentication:
 
 - `/v1/models` - List available models
 - `/v1/chat/completions` - Chat completions
 - `/v1/chat/completions/batch` - Batch chat completions
-- `/v1/chat/completions/render` - Render chat completion requests
-- `/v1/chat/completions/derender` - Derender chat completion requests
+- `/v1/chat/completions/render` - Render chat completion requests (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
+- `/v1/chat/completions/derender` - Derender chat completion requests (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
 - `/v1/completions` - Text completions
-- `/v1/completions/render` - Render completion requests
-- `/v1/completions/derender` - Derender completion requests
+- `/v1/completions/render` - Render completion requests (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
+- `/v1/completions/derender` - Derender completion requests (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
 - `/v1/embeddings` - Generate embeddings
 - `/v1/audio/transcriptions` - Audio transcription
 - `/v1/audio/translations` - Audio translation
 - `/v1/messages` - Anthropic-compatible messages API
+- `/v1/messages/render` - Render Anthropic-compatible messages (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
 - `/v1/messages/count_tokens` - Count tokens for Anthropic messages
 - `/v1/responses` - Create a response
 - `/v1/responses/{response_id}` - Retrieve a response
@@ -184,7 +175,8 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 - `/v1/rerank` - Reranking API
 - `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
-- `/inference/v1/generate` - Generate completions
+- `/inference/v1/generate` - Generate completions (available when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or with `--tokens-only` unless explicitly disabled)
+- `/cohere/v2/chat/render` - Render Cohere Chat v2 requests (requires both `VLLM_ENABLE_COHERE_API=1` and `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`)
 - `/v2/embed` - Cohere Embed API
 - `/v2/rerank` - Cohere Rerank API
 
@@ -212,11 +204,11 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
-- `/abort_requests` - Abort in-flight requests (only when `--tokens-only` is also set)
+- `/abort_requests` - Abort in-flight requests (available with `--tokens-only` unless `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=0`)
 
 **Utility endpoints:**
 
-- `/tokenize` - Tokenize text
+- `/tokenize` - Tokenize text (not disabled by `VLLM_ENABLE_SCALE_OUT_ENDPOINTS`)
 - `/detokenize` - Detokenize tokens
 - `/health` - Health check
 - `/ping` - SageMaker health check

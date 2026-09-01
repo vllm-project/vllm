@@ -352,6 +352,15 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     return bool(int(value))
 
 
+def maybe_convert_scale_out_endpoints(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if normalized not in ("0", "1"):
+        raise ValueError("VLLM_ENABLE_SCALE_OUT_ENDPOINTS must be 0 or 1")
+    return maybe_convert_bool(normalized)
+
+
 def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -1856,10 +1865,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, expose the scale-out endpoints on `vllm serve`.
     # The dedicated `vllm launch render` server exposes render and derender
     # endpoints when this variable is unset or set to 1.
-    "VLLM_ENABLE_SCALE_OUT_ENDPOINTS": lambda: (
-        bool(int(os.environ["VLLM_ENABLE_SCALE_OUT_ENDPOINTS"]))
-        if "VLLM_ENABLE_SCALE_OUT_ENDPOINTS" in os.environ
-        else None
+    "VLLM_ENABLE_SCALE_OUT_ENDPOINTS": lambda: maybe_convert_scale_out_endpoints(
+        os.getenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS") or None
     ),
     # If set, use the fp8 mfma in rocm paged attention.
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(

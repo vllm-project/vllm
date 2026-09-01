@@ -49,15 +49,7 @@ def register_api_routers(
 
         elastic_ep_attach_router(app)
 
-    if "render" in supported_tasks and envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is False:
-        raise ValueError(
-            "`VLLM_ENABLE_SCALE_OUT_ENDPOINTS=0` conflicts with "
-            "`vllm launch render`; unset it or set it to 1"
-        )
-
-    if "render" in supported_tasks or (
-        "generate" in supported_tasks and envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS
-    ):
+    if "generate" in supported_tasks or "render" in supported_tasks:
         from vllm.entrypoints.scale_out.factories import register_scale_out_api_routers
 
         register_scale_out_api_routers(app, supported_tasks)

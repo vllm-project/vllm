@@ -54,6 +54,7 @@ use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{
     build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
+    build_router_with_scale_out_endpoints, parse_scale_out_endpoints_flag,
     render::build_router as build_render_router,
 };
 use crate::config::{ApiServerOptions, CorsConfig};
@@ -716,6 +717,83 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
     )
 }
 
+#[test]
+fn scale_out_flag_accepts_unset_empty_zero_one_and_whitespace() {
+    assert_eq!(parse_scale_out_endpoints_flag(None), Ok(false));
+    assert_eq!(parse_scale_out_endpoints_flag(Some("")), Ok(false));
+    assert_eq!(parse_scale_out_endpoints_flag(Some("0")), Ok(false));
+    assert_eq!(parse_scale_out_endpoints_flag(Some("1")), Ok(true));
+    assert_eq!(parse_scale_out_endpoints_flag(Some(" 1 ")), Ok(true));
+}
+
+#[test]
+fn scale_out_flag_rejects_values_other_than_zero_or_one() {
+    for value in ["-1", "2", "01", "+1", "invalid", " "] {
+        assert_eq!(
+            parse_scale_out_endpoints_flag(Some(value)),
+            Err("VLLM_ENABLE_SCALE_OUT_ENDPOINTS must be 0 or 1".to_string())
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_generate_route_is_disabled_by_default() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-disabled",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        false,
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_generate_route_can_be_enabled() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-enabled",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        true,
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+}
+
 /// Build a dev-mode router backed by a mock engine using a custom ready
 /// response, returning the router and the engine task handle so the engine
 /// stays alive for the duration of the test.
@@ -916,10 +994,13 @@ async fn test_app_with_stream_output_specs(
     )
     .await;
     (
-        build_router(Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        ))),
+        build_router_with_scale_out_endpoints(
+            Arc::new(AppState::new(
+                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+                chat,
+            )),
+            true,
+        ),
         engine_task,
     )
 }
@@ -1236,10 +1317,10 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    let mut generate_app = build_router(Arc::new(AppState::new(
-        vec!["render-model".to_string()],
-        chat,
-    )));
+    let mut generate_app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["render-model".to_string()], chat)),
+        true,
+    );
     let generate_response = generate_app
         .call(
             Request::builder()
@@ -3986,10 +4067,13 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new(
-        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-        chat,
-    )));
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        true,
+    );
 
     let response = app
         .call(
@@ -4100,10 +4184,13 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new(
-        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-        chat,
-    )));
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        true,
+    );
 
     let response = app
         .call(
