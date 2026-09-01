@@ -321,3 +321,129 @@ def test_encode_messages_unknown_role_raises_value_error(encoding_module):
             [{"role": "SYSTEM", "content": "Hello"}],
             thinking_mode="chat",
         )
+
+
+# --- GHSA-cg76-73hw-qg4m: stop_token_ids count cap and set lookup ---------
+
+
+def test_stop_token_ids_count_cap_rejects_oversized_list():
+    with pytest.raises(VLLMValidationError, match="Too many stop_token_ids"):
+        SamplingParams(stop_token_ids=list(range(200)))
+
+
+def test_stop_token_ids_pydantic_cap_on_completion_request():
+    with pytest.raises(ValidationError, match="at most 128"):
+        CompletionRequest(
+            model="test-model",
+            prompt="hello",
+            stop_token_ids=list(range(200)),
+        )
+
+
+def test_stop_token_ids_pydantic_cap_on_chat_request():
+    with pytest.raises(ValidationError, match="at most 128"):
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "hello"}],
+            stop_token_ids=list(range(200)),
+        )
+
+
+def test_stop_token_ids_set_property():
+    params = SamplingParams(stop_token_ids=[10, 20, 30])
+    assert params.stop_token_ids_set == frozenset({10, 20, 30})
+
+
+# --- GHSA-v782-f4x3-chvf: stop strings dedup and cap at SamplingParams ----
+
+
+def test_stop_strings_deduped_at_sampling_params():
+    params = SamplingParams(stop=["a", "b", "a", "c"])
+    assert params.stop == ["a", "b", "c"]
+
+
+def test_stop_strings_cap_at_sampling_params():
+    with pytest.raises(VLLMValidationError, match="Too many stop strings"):
+        SamplingParams(stop=[f"stop{i}" for i in range(10)])
+
+
+# --- GHSA-4r96-ccfx-mq85: DeepSeek V3.2 tool-message linear scan ---------
+
+
+def test_deepseek_v32_tool_messages_linear_scan():
+    k = 64
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {"name": f"f{i}", "arguments": "{}"},
+                }
+                for i in range(k)
+            ],
+        },
+    ]
+    msgs.extend({"role": "tool", "content": "result"} for _ in range(k))
+
+    reads = 0
+    orig_getitem = list.__getitem__
+
+    class CountingList(list):
+        def __getitem__(self, i):
+            nonlocal reads
+            reads += 1
+            return orig_getitem(self, i)
+
+    counting_msgs = CountingList(msgs)
+
+    deepseek_v32_encoding.encode_messages(counting_msgs, thinking_mode="chat")
+
+    # O(n) should be well under k^2/2 = 2048
+    assert reads < k * 10, (
+        f"Expected linear reads but got {reads} "
+        f"(k={k}, quadratic would be ~{k * k // 2})"
+    )
+
+
+# --- GHSA-9862-57p7-p868: bad_words Pydantic cap and total-token limit ----
+
+
+def test_bad_words_pydantic_cap_on_completion_request():
+    with pytest.raises(ValidationError, match="at most 128"):
+        CompletionRequest(
+            model="test-model",
+            prompt="hello",
+            bad_words=[f"bad{i}" for i in range(200)],
+        )
+
+
+def test_bad_words_pydantic_cap_on_chat_request():
+    with pytest.raises(ValidationError, match="at most 128"):
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "hello"}],
+            bad_words=[f"bad{i}" for i in range(200)],
+        )
+
+
+def test_bad_words_count_cap_at_sampling_params():
+    with pytest.raises(VLLMValidationError, match="Too many bad_words"):
+        SamplingParams(bad_words=[f"bad{i}" for i in range(200)])
+
+
+class MultiTokenMockTokenizer:
+    max_token_id = 1024
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return list(range(10))
+
+
+def test_bad_words_total_token_limit_enforced_in_frontend():
+    params = SamplingParams(bad_words=[f"word{i}" for i in range(120)])
+    tokenizer = MultiTokenMockTokenizer()
+
+    with pytest.raises(VLLMValidationError, match="Too many total bad word tokens"):
+        params.update_from_tokenizer(tokenizer)
