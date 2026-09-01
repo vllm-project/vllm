@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Qwen4Exp decode GEMM selection on Blackwell.
+"""Qwen4Exp decode GEMM selection on Hopper and Blackwell.
 
 Dispatch follows Kimi-K3 and uses the local ``(N, K)`` shape and token count.
 Plans contain measured CUDA graph capture sizes; other token counts use the
@@ -78,9 +78,27 @@ QWEN4_EXP_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
     },
 }
 
+# H200 plans measured under CUDA graph replay. Only M=1 is enabled so larger
+# batches retain the standard linear implementation and its GEMM heuristics.
+QWEN4_EXP_SM90_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
+    shape: {1: plans[1]} for shape, plans in QWEN4_EXP_GEMM_PLANS.items()
+}
+
 
 def _is_sm103() -> bool:
     return current_platform.is_device_capability((10, 3))
+
+
+def _is_sm90() -> bool:
+    return current_platform.is_device_capability((9, 0))
+
+
+def _gemm_plans() -> dict[tuple[int, int], dict[int, SkinnyGemmConfig]]:
+    if _is_sm103():
+        return QWEN4_EXP_GEMM_PLANS
+    if _is_sm90():
+        return QWEN4_EXP_SM90_GEMM_PLANS
+    return {}
 
 
 def _is_packed_row_major(tensor: torch.Tensor) -> bool:
@@ -124,7 +142,7 @@ class Qwen4ExpLowLatencyEmbeddingMethod(
 
 
 def _qwen4_exp_low_latency_gemm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    plan = QWEN4_EXP_GEMM_PLANS.get((weight.shape[0], weight.shape[1]))
+    plan = _gemm_plans().get((weight.shape[0], weight.shape[1]))
     config = None if plan is None else plan.get(x.shape[0])
     if (
         config is not None
@@ -152,7 +170,8 @@ def enable_qwen4_exp_low_latency_gemm(
     module: nn.Module,
     dtype: torch.dtype,
 ) -> None:
-    if dtype != torch.bfloat16 or not _is_sm103():
+    plans = _gemm_plans()
+    if dtype != torch.bfloat16 or not plans:
         return
     if not shape_dynamic_skinny_gemm.is_available():
         return
@@ -172,7 +191,7 @@ def enable_qwen4_exp_low_latency_gemm(
         weight = getattr(child, "weight", None)
         if weight is None or weight.dim() != 2:
             continue
-        plan = QWEN4_EXP_GEMM_PLANS.get((weight.shape[0], weight.shape[1]))
+        plan = plans.get((weight.shape[0], weight.shape[1]))
         if plan is None:
             continue
         if is_linear:

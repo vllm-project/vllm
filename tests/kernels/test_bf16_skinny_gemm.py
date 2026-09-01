@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for BF16 skinny GEMMs and the Kimi-K3 SM90/SM100/SM103 selectors."""
+"""Tests for BF16 skinny GEMMs and model-specific selectors."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +17,7 @@ from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
 from vllm.models.deepseek_v32.nvidia import glm52_low_latency_gemm as glm52_gemm
 from vllm.models.kimi_k3.nvidia import low_latency_gemm as k3_gemm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
+from vllm.models.qwen4_exp.nvidia import low_latency_gemm as qwen4_exp_gemm
 
 # Keyed by local (N, K): (cute token counts, dsv3 token counts). 1536x7168 is
 # the unified shared_gate_up_proj/mla_g_proj entry (dsv3 M1..16).
@@ -526,6 +527,35 @@ def test_low_latency_table_capability_routing(
         k3_gemm.current_platform, "is_device_capability", lambda cc: False
     )
     assert k3_gemm._low_latency_table() is None
+
+
+def test_qwen4_exp_hopper_plans_are_decode_only() -> None:
+    plans = qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS
+
+    assert plans.keys() == qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS.keys()
+    assert all(set(shape_plans) == {1} for shape_plans in plans.values())
+
+
+@pytest.mark.parametrize(
+    "capability,expected_plans",
+    [
+        ((10, 3), qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS),
+        ((9, 0), qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS),
+        ((8, 0), {}),
+    ],
+)
+def test_qwen4_exp_gemm_capability_routing(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
+    expected_plans: dict[tuple[int, int], dict[int, SkinnyGemmConfig]],
+) -> None:
+    monkeypatch.setattr(
+        qwen4_exp_gemm.current_platform,
+        "is_device_capability",
+        lambda target: capability == target,
+    )
+
+    assert qwen4_exp_gemm._gemm_plans() == expected_plans
 
 
 def test_installation_is_shape_specific_and_unquantized(
