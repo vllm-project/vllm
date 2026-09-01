@@ -24,6 +24,40 @@ GET_META_MSG = b"get_meta_msg"
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
+
+_REQUIRED_RECV_FIELDS = (
+    "remote_block_ids",
+    "remote_engine_id",
+    "remote_request_id",
+    "remote_host",
+    "remote_port",
+)
+
+# int32 bounds used by _compute_desc_ids (np.asarray(..., dtype=np.int32)).
+_I32_MAX = 2**31 - 1
+
+
+def _valid_block_ids(block_ids: object) -> bool:
+    """Return True when *block_ids* is a valid ``BlockIds`` value.
+
+    Checks structure (sequence of sequences of ints), non-negativity, and
+    that every element fits in int32 — the dtype used by
+    ``_compute_desc_ids``.  Rejects ``None``, non-int entries, negatives,
+    and values that would overflow ``np.int32``.
+    """
+    if not isinstance(block_ids, (list, tuple)):
+        return False
+    for group in block_ids:
+        if not isinstance(group, (list, tuple)):
+            return False
+        for bid in group:
+            if not isinstance(bid, int) or isinstance(bid, bool):
+                return False
+            if bid < 0 or bid > _I32_MAX:
+                return False
+    return True
+
+
 #
 # NIXL Connector Version
 #
@@ -298,6 +332,25 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
     ):
+        missing = [f for f in _REQUIRED_RECV_FIELDS if f not in kv_transfer_params]
+        if missing:
+            logger.warning(
+                "Skipping recv registration for %s: "
+                "kv_transfer_params missing required fields %s",
+                request_id,
+                missing,
+            )
+            return
+
+        remote_block_ids = kv_transfer_params["remote_block_ids"]
+        if not _valid_block_ids(remote_block_ids):
+            logger.warning(
+                "Skipping recv registration for %s: "
+                "remote_block_ids failed shape/type validation",
+                request_id,
+            )
+            return
+
         req = self._add_new_req(
             local_block_ids, kv_transfer_params, local_num_computed_blocks
         )

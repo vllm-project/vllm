@@ -27,6 +27,7 @@ external tokens > 0.
 
 import copy
 import time
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -379,6 +380,90 @@ def test_add_new_req_to_recv_populates_remote_meta():
     assert rm.remote.host == "decode-host"
     assert rm.remote.port == 5678
     assert rm.local_block_ids == local_block_ids
+
+
+def test_add_new_req_to_recv_skips_incomplete_params():
+    """add_new_req_to_recv with missing required remote fields should not
+    raise KeyError and should not add the request to reqs_to_recv.
+
+    Regression test for GHSA-2xp9-2v3c-q6cg: a client-supplied
+    kv_transfer_params dict containing only {"do_remote_prefill": true}
+    (no remote_block_ids, remote_engine_id, etc.) previously crashed the
+    Decode EngineCore with an uncaught KeyError.
+    """
+    meta = NixlConnectorMetadata()
+    incomplete_params: dict[str, Any] = {"do_remote_prefill": True}
+    meta.add_new_req_to_recv(
+        request_id="malformed-req",
+        local_block_ids=([1, 2, 3],),
+        kv_transfer_params=incomplete_params,
+    )
+    assert "malformed-req" not in meta.reqs_to_recv
+
+
+def test_add_new_req_to_recv_skips_partially_complete_params():
+    """Even if some remote fields are present but not all, the request
+    should be skipped rather than crashing."""
+    meta = NixlConnectorMetadata()
+    partial_params: dict[str, Any] = {
+        "do_remote_prefill": True,
+        "remote_engine_id": "some-engine",
+        # missing: remote_block_ids, remote_request_id, remote_host, remote_port
+    }
+    meta.add_new_req_to_recv(
+        request_id="partial-req",
+        local_block_ids=([1, 2],),
+        kv_transfer_params=partial_params,
+    )
+    assert "partial-req" not in meta.reqs_to_recv
+
+
+def _complete_params(**overrides: Any) -> dict[str, Any]:
+    """Return a valid kv_transfer_params dict, with optional overrides."""
+    base: dict[str, Any] = {
+        "do_remote_prefill": True,
+        "remote_block_ids": ([0, 1],),
+        "remote_engine_id": "engine-0",
+        "remote_request_id": "req-0",
+        "remote_host": "127.0.0.1",
+        "remote_port": 5678,
+    }
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.parametrize(
+    "bad_block_ids",
+    [
+        "not-a-list",
+        [[-1]],
+        [[None]],
+        [[2**31]],
+        123,
+        [[1, "two", 3]],
+        [[True]],
+    ],
+    ids=[
+        "string",
+        "negative",
+        "none-element",
+        "overflow-int32",
+        "bare-int",
+        "mixed-types",
+        "bool-element",
+    ],
+)
+def test_add_new_req_to_recv_rejects_hostile_block_ids(bad_block_ids):
+    """Hostile remote_block_ids values must be rejected at the metadata
+    layer instead of propagating to _compute_desc_ids."""
+    meta = NixlConnectorMetadata()
+    params = _complete_params(remote_block_ids=bad_block_ids)
+    meta.add_new_req_to_recv(
+        request_id="hostile-req",
+        local_block_ids=([0],),
+        kv_transfer_params=params,
+    )
+    assert "hostile-req" not in meta.reqs_to_recv
 
 
 def test_build_connector_meta_recv_entries():

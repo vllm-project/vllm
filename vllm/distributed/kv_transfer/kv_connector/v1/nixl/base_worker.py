@@ -133,6 +133,11 @@ class NixlBaseConnectorWorker:
             num_blocks = int(num_blocks * block_size_ratio)
         num_fa_descs = self.num_regions * num_blocks
 
+        for group in block_ids:
+            for bid in group:
+                if not isinstance(bid, int) or bid < 0 or bid >= num_blocks:
+                    raise ValueError(f"block id {bid!r} out of range [0, {num_blocks})")
+
         # All-attention fast path: single vectorized broadcast.
         if num_ssm_regions == 0:
             # NOTE (NickLucche) With HMA, every kv group has the same number of layers
