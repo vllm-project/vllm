@@ -1038,7 +1038,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
         # Select LinearMethod implementation based on quant_algo (FP8 pattern).
         # NVFP4         -> W4A4: cutlass NVFP4 GEMM with input quantization
-        # W4A16_NVFP4   -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
+        # W4A16_NVFP4   -> W4A16: flashinfer cute-dsl or Marlin with 16-bit inputs
         if quant_method == "NVFP4":
             self.LinearMethodCls = ModelOptNvFp4LinearMethod
         elif quant_method == "W4A16_NVFP4":
@@ -1080,6 +1080,22 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         **kwargs: Any,
     ) -> "ModelOptNvFp4Config":
         is_checkpoint_nvfp4_serialized = "NVFP4" in quant_method
+
+        # A checkpoint can declare quant_algo "NVFP4" yet quantize weights
+        # only (input_activations is null in every config group). The W4A4
+        # MoE path then folds an uninitialized input_scale that was never
+        # loaded and can zero every expert, so route it through W4A16.
+        if quant_method == "NVFP4":
+            config_groups = original_config.get("config_groups")
+            if (
+                isinstance(config_groups, dict)
+                and config_groups
+                and all(
+                    isinstance(group, dict) and group.get("input_activations") is None
+                    for group in config_groups.values()
+                )
+            ):
+                quant_method = "W4A16_NVFP4"
 
         if group_size is None:
             group_size = 16  # Default value
@@ -1267,7 +1283,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.marlin_input_dtype = None
         # `init_nvfp4_linear_kernel(use_a16=True)` is best of both worlds:
-        # 1. `use_a16=True` forces  `Marlin`: https://github.com/vllm-project/vllm/commit/e68988a#diff-7135ab92aa94dfacb1ad3c77fc13f9c4ffe0b977f8eac5d86c2afe243e5f92a6R842-R889
+        # 1. `use_a16=True` forces flashinfer cutedsl for sm100 and `Marlin` for others.
         # for `--linear-backend=auto`, avoiding a W4A4 kernel that requires input_scale.
         # 2. Specifying e.g. `--linear-backend=humming` will override.
         self.kernel = init_nvfp4_linear_kernel(use_a16=True)

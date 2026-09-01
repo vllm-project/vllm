@@ -2,7 +2,7 @@ group: Model Runner V2
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200) Model Runner V2 Core"
+- label: ":nvidia: (H200 MIG 35GB) Model Runner V2 Core"
   device: h200_35gb
   key: model-runner-v2-core-tests
   timeout_in_minutes: 35
@@ -24,7 +24,7 @@ steps:
   # Temporary hack filter to exclude ngram spec decoding based tests.
   - pytest -v -s entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0"
 
-- label: ":nvidia: (H200) Model Runner V2 Examples"
+- label: ":nvidia: (H200 MIG 35GB) Model Runner V2 Examples"
   device: h200_35gb
   key: model-runner-v2-examples
   timeout_in_minutes: 35
@@ -65,6 +65,7 @@ steps:
   key: model-runner-v2-distributed-2-gpus
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
     - vllm/v1/worker/gpu/
@@ -112,6 +113,7 @@ steps:
   key: model-runner-v2-pipeline-parallelism-4-gpus
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
     - vllm/v1/worker/gpu/
@@ -126,7 +128,7 @@ steps:
     - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
     - pytest -v -s v1/distributed/test_pp_dp_v2.py
 
-- label: ":nvidia: (H200) Model Runner V2 Spec Decode"
+- label: ":nvidia: (H200 MIG 35GB) Model Runner V2 Spec Decode"
   device: h200_35gb
   key: model-runner-v2-spec-decode
   timeout_in_minutes: 50
@@ -149,3 +151,19 @@ steps:
   - >-
     pytest -v -s
     'v1/e2e/spec_decode/mtp/test_mtp.py::test_mtp_correctness[qwen3_5-hybrid]'
+  mirror:
+    amd:
+      label: ":amd: (MI355) Model Runner V2 Spec Decode"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 75
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      - vllm/v1/worker/gpu/
+      - vllm/v1/worker/gpu_worker.py
+      - tests/v1/spec_decode/test_max_len.py
+      - tests/v1/spec_decode/test_rejection_sampler_utils.py
+      - tests/v1/spec_decode/test_synthetic_rejection_sampler_utils.py
+      - tests/v1/e2e/spec_decode/

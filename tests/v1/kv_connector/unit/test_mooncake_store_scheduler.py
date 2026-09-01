@@ -7,6 +7,7 @@ import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     LoadSpec,
+    MooncakeLookupResult,
     MooncakeStoreWorkerMetadata,
     ReqMeta,
     RequestTracker,
@@ -15,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
     MooncakeStoreScheduler,
 )
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.sched.output import KVConnectorBlockState
 
 
 def _make_bare_scheduler(
@@ -33,6 +35,9 @@ def _make_bare_scheduler(
     scheduler._block_size = 16
     scheduler._hash_block_size = hash_block_size
     scheduler.enable_partial_hash_hits = enable_partial_hash_hits
+    scheduler.kv_cache_config = SimpleNamespace(
+        select_transfer_block_ids=lambda block_ids: tuple(block_ids)
+    )
     scheduler.load_specs = {}
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
@@ -43,7 +48,18 @@ def _make_bare_scheduler(
     scheduler._num_workers = 1
     scheduler._next_store_job_id = 0
     scheduler._pinned_saves = {}
+    scheduler._boundary_state_group_ids = frozenset({1})
     return scheduler
+
+
+def _make_connector_block_state(
+    block_ids: tuple[list[int], ...] | None = None,
+    offloads: list[tuple[int, int, int]] | None = None,
+) -> KVConnectorBlockState:
+    return KVConnectorBlockState(
+        block_ids={} if block_ids is None else {"req-0": block_ids},
+        boundary_state_offloads=({} if offloads is None else {"req-0": offloads}),
+    )
 
 
 def _make_scheduler_output(*, scheduled_spec_tokens: list[int] | None):
@@ -61,6 +77,7 @@ def _make_scheduler_output(*, scheduled_spec_tokens: list[int] | None):
         scheduled_spec_decode_tokens=(
             {"req-0": scheduled_spec_tokens} if scheduled_spec_tokens else {}
         ),
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1, 2],)),
     )
 
 
@@ -80,6 +97,7 @@ def _make_decode_scheduler_output(
         ),
         num_scheduled_tokens={"req-0": num_scheduled_tokens},
         scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1, 2],)),
     )
 
 
@@ -105,6 +123,7 @@ def _make_new_scheduler_output() -> SimpleNamespace:
         ),
         num_scheduled_tokens={"req-0": 32},
         scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1],)),
     )
 
 
@@ -177,6 +196,20 @@ def _add_unfinished_request(
         token_ids=token_ids[:44],
         prefill_end_tokens=prefill_end_tokens,
     )
+
+
+def test_update_state_excludes_nontransfer_groups():
+    """Store metadata must match the worker's registered cache groups."""
+    scheduler = _make_bare_scheduler()
+    scheduler.kv_cache_config = SimpleNamespace(
+        select_transfer_block_ids=lambda block_ids: (block_ids[0],)
+    )
+    request = SimpleNamespace(request_id="req-1")
+    blocks = SimpleNamespace(get_block_ids=lambda: ([1, 2], [9]))
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=32)
+
+    assert scheduler._unfinished_requests["req-1"][1] == ([1, 2],)
 
 
 def _setup_decode_request(
@@ -473,6 +506,7 @@ def _make_resumed_scheduler_output(*, num_scheduled_tokens: int) -> SimpleNamesp
         ),
         num_scheduled_tokens={"req-0": num_scheduled_tokens},
         scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1, 2],)),
     )
 
 
@@ -685,9 +719,9 @@ class _StubLookupClient:
         num_tokens: int,
         block_hashes: list[bytes],
         non_block: bool = False,
-    ) -> int:
+    ) -> MooncakeLookupResult:
         self.num_tokens.append(num_tokens)
-        return self._hit_tokens
+        return MooncakeLookupResult(self._hit_tokens)
 
 
 def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
@@ -897,7 +931,10 @@ def _add_pending_partial_tail_request(
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
-        partial_tail_offloads={"req-0": [(1, 7, 12)]},
+        kv_connector_block_state=_make_connector_block_state(
+            block_ids=block_ids,
+            offloads=[(1, 7, 12)],
+        ),
     )
 
 
@@ -922,15 +959,262 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     assert req_meta.req_id == "req-0"
     assert req_meta.can_save is True
     assert req_meta.token_len_chunk == 0
-    assert req_meta.partial_tail_offloads == [(1, 7, 12)]
+    assert req_meta.boundary_state_offloads == [(1, 7, 12)]
     assert req_meta.num_prompt_tokens == 12
     assert req_meta.block_ids == ([0],)
+    store_job_id = req_meta.store_job_id
+    assert scheduler._pinned_saves[store_job_id][0] == [7]
+    assert scheduler._gpu_block_pool.blocks[0].ref_cnt == 0
+    assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.num_saved_tokens == 0
     assert tracker.has_pending_offload is True
 
 
-def test_resumed_partial_tail_uses_handoff_boundary():
+def test_decode_boundary_state_offload_dropped_unclaimed():
+    # A hand-off past the prefill end can never complete a joint hybrid hit
+    # (every other group stops saving there), so it is neither transferred nor
+    # claimed — leaving the core free to release the block immediately.
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    request = SimpleNamespace(
+        all_token_ids=list(range(24)),
+        block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5"],
+        num_output_placeholders=0,
+        num_prompt_tokens=12,
+    )
+    scheduler._unfinished_requests["req-0"] = (request, ([0],))
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=12,
+        allocated_block_ids=([0],),
+        num_saved_tokens=12,
+        token_ids=list(range(12)),
+        prefill_end_tokens=12,
+    )
+
+    out = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={},
+        scheduled_spec_decode_tokens={},
+        # Boundary 16 is a decode boundary for a 12-token prefill.
+        kv_connector_block_state=_make_connector_block_state(offloads=[(1, 7, 16)]),
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert meta.requests == []
+    assert scheduler._pinned_saves == {}
+    assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 0
+    assert scheduler._request_trackers["req-0"].has_pending_offload is False
+
+
+def _register_offload_request(scheduler, *, prefill_end_tokens, num_prompt_tokens):
+    request = SimpleNamespace(
+        all_token_ids=list(range(64)),
+        block_hashes=[bytes([i]) for i in range(16)],
+        num_output_placeholders=0,
+        num_prompt_tokens=num_prompt_tokens,
+    )
+    scheduler._unfinished_requests["req-0"] = (request, ([0],))
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=prefill_end_tokens,
+        allocated_block_ids=([0],),
+        num_saved_tokens=prefill_end_tokens,
+        token_ids=list(range(prefill_end_tokens)),
+        prefill_end_tokens=prefill_end_tokens,
+    )
+
+
+def _make_offload_only_output(entries, block_ids=([0],)):
+    return SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={},
+        scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(
+            block_ids=block_ids,
+            offloads=entries,
+        ),
+    )
+
+
+def test_resumed_prefill_claims_boundaries_past_prompt_length():
+    # A resumed request re-prefills its previously generated tokens, so its
+    # save window (`prefill_end_tokens`) extends past `num_prompt_tokens`.
+    # Boundaries in that range must still be claimed, or the mamba key would be
+    # missing for boundaries full attention does store and no joint hit could
+    # complete there.
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    _register_offload_request(scheduler, prefill_end_tokens=20, num_prompt_tokens=12)
+    out = _make_offload_only_output([(1, 7, 16), (1, 9, 20), (1, 11, 24)])
+
+    meta = scheduler.build_connector_meta(out)
+
+    # 16 and 20 are inside the resumed prefill; 24 is past it.
+    assert meta.requests[0].boundary_state_offloads == [(1, 7, 16), (1, 9, 20)]
+    store_job_id = meta.requests[0].store_job_id
+    assert scheduler._pinned_saves[store_job_id][0] == [7, 9]
+
+
+def test_boundary_state_job_pins_exact_blocks_once():
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
+    scheduler._request_trackers["req-0"].allocated_block_ids = ([7],)
+    out = _make_offload_only_output(
+        [(1, 7, 16), (1, 8, 32), (1, 9, 48)], block_ids=([7],)
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    req_meta = meta.requests[0]
+    assert req_meta.boundary_state_offloads == [
+        (1, 7, 16),
+        (1, 8, 32),
+        (1, 9, 48),
+    ]
+    store_job_id = req_meta.store_job_id
+    assert scheduler._pinned_saves[store_job_id][0] == [7, 8, 9]
+    assert [scheduler._gpu_block_pool.blocks[i].ref_cnt for i in (7, 8, 9)] == [
+        1,
+        1,
+        1,
+    ]
+
+    scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
+    assert [scheduler._gpu_block_pool.blocks[i].ref_cnt for i in (7, 8, 9)] == [
+        0,
+        0,
+        0,
+    ]
+
+
+def test_store_job_pins_current_non_null_non_mamba_blocks():
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    request = SimpleNamespace(
+        all_token_ids=list(range(48)),
+        block_hashes=[bytes([i]) for i in range(12)],
+        num_output_placeholders=0,
+    )
+    scheduler._unfinished_requests["req-0"] = (request, ([7, 2, 0], [21, 0, 22]))
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=44,
+        allocated_block_ids=([7, 2, 0], [21, 0, 22]),
+        num_saved_tokens=32,
+        token_ids=list(range(44)),
+        prefill_end_tokens=48,
+    )
+    stale_block_ids = ([7, 2, 0, 5], [21, 0, 22, 23])
+    current_block_ids = ([7, 2, 0, 6], [24, 0, 25, 26])
+    out = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-0"],
+            new_block_ids=[([5], [23])],
+            num_computed_tokens=[44],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={"req-0": 4},
+        scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(
+            block_ids=current_block_ids,
+            offloads=[(1, 8, 16)],
+        ),
+    )
+    pool = scheduler._gpu_block_pool
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert scheduler._request_trackers["req-0"].allocated_block_ids == stale_block_ids
+    req_meta = meta.requests[0]
+    assert req_meta.block_ids == current_block_ids
+    store_job_id = req_meta.store_job_id
+    assert scheduler._pinned_saves[store_job_id][0] == [8, 7, 2, 6]
+    assert pool.blocks[0].ref_cnt == 0
+    assert pool.blocks[5].ref_cnt == 0
+    assert [pool.blocks[i].ref_cnt for i in (21, 22, 23, 24, 25, 26)] == [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]
+    assert [pool.blocks[i].ref_cnt for i in (8, 7, 2, 6)] == [1, 1, 1, 1]
+
+    scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
+
+    assert [pool.blocks[i].ref_cnt for i in (8, 7, 2, 6)] == [0, 0, 0, 0]
+
+
+def test_boundary_state_release_is_per_store_job():
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
+    first = scheduler.build_connector_meta(_make_offload_only_output([(1, 7, 16)]))
+    second = scheduler.build_connector_meta(_make_offload_only_output([(1, 8, 32)]))
+    first_job_id = first.requests[0].store_job_id
+    second_job_id = second.requests[0].store_job_id
+
+    scheduler.update_connector_output(_make_worker_output({first_job_id: 1}))
+
+    assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 0
+    assert scheduler._gpu_block_pool.blocks[8].ref_cnt == 1
+    assert first_job_id not in scheduler._pinned_saves
+    assert second_job_id in scheduler._pinned_saves
+
+
+def test_preemption_and_request_id_reuse_do_not_release_inflight_job():
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
+    first = scheduler.build_connector_meta(_make_offload_only_output([(1, 7, 16)]))
+    first_job_id = first.requests[0].store_job_id
+
+    scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
+    assert first_job_id in scheduler._pinned_saves
+
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
+    second = scheduler.build_connector_meta(_make_offload_only_output([(1, 8, 32)]))
+    second_job_id = second.requests[0].store_job_id
+    assert second.requests[0].boundary_state_offloads == [(1, 8, 32)]
+
+    scheduler.update_connector_output(_make_worker_output({first_job_id: 1}))
+    assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 0
+    assert scheduler._gpu_block_pool.blocks[8].ref_cnt == 1
+    assert second_job_id in scheduler._pinned_saves
+
+
+def test_boundary_state_never_claimed_without_a_send_thread():
+    # A kv_consumer has no store job that can acknowledge the block reference.
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler.kv_role = "kv_consumer"
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
+    out = _make_offload_only_output([(1, 7, 16)])
+
+    assert scheduler.build_connector_meta(out).requests == []
+    assert scheduler._pinned_saves == {}
+    assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 0
+
+
+def test_resumed_partial_tail_uses_exact_boundary():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
     # Resumption replays prompt + previously generated tokens.
     out = _add_pending_partial_tail_request(
@@ -943,7 +1227,7 @@ def test_resumed_partial_tail_uses_handoff_boundary():
     meta = scheduler.build_connector_meta(out)
 
     assert len(meta.requests) == 1
-    assert meta.requests[0].partial_tail_offloads == [(1, 7, 12)]
+    assert meta.requests[0].boundary_state_offloads == [(1, 7, 12)]
     # Ordinary metadata retains the full resumed prefill range.
     assert meta.requests[0].num_prompt_tokens == 20
     tracker = scheduler._request_trackers["req-0"]
@@ -951,8 +1235,9 @@ def test_resumed_partial_tail_uses_handoff_boundary():
     assert tracker.has_pending_offload is True
 
 
-def test_resumed_partial_tail_attached_to_save_keeps_handoff_boundary():
+def test_resumed_partial_tail_attached_to_save_keeps_exact_boundary():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler._boundary_state_group_ids = frozenset({0})
     request = SimpleNamespace(
         all_token_ids=list(range(48)),
         block_hashes=[b"h0", b"h1", b"h2"],
@@ -969,13 +1254,13 @@ def test_resumed_partial_tail_attached_to_save_keeps_handoff_boundary():
         prefill_end_tokens=48,
     )
     out = _make_scheduler_output(scheduled_spec_tokens=None)
-    out.partial_tail_offloads = {"req-0": [(0, 7, 36)]}
+    out.kv_connector_block_state.boundary_state_offloads = {"req-0": [(0, 7, 36)]}
 
     meta = scheduler.build_connector_meta(out)
 
     assert len(meta.requests) == 1
     assert meta.requests[0].can_save is True
-    assert meta.requests[0].partial_tail_offloads == [(0, 7, 36)]
+    assert meta.requests[0].boundary_state_offloads == [(0, 7, 36)]
     assert meta.requests[0].num_prompt_tokens == 48
     # Ordinary saving still covers the full resumed prefill range.
     tracker = scheduler._request_trackers["req-0"]
@@ -1001,7 +1286,8 @@ def test_partial_tail_cow_block_is_referenced_for_the_job():
     store_job_id = meta.requests[0].store_job_id
     # It leads the list, as in `pop_blocks_for_free`, so that the reversed free
     # puts it last in eviction priority.
-    assert scheduler._pinned_saves[store_job_id][0] == [7, 0]
+    assert scheduler._pinned_saves[store_job_id][0] == [7]
+    assert pool.blocks[0].ref_cnt == 0
     assert pool.blocks[7].ref_cnt == 1
 
     scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))

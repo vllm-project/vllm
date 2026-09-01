@@ -234,6 +234,63 @@ def test_fused_norm_rope(num_tokens: int, index_interleave: bool, mla_dtype: str
     assert (topk == -1).all(), "topk buffer not cleared on indexer layer"
 
 
+def test_fused_norm_rope_normalizes_query_without_local_cache_slots():
+    """DCP non-owner ranks still need valid query shards for query AllGather."""
+    torch.manual_seed(7)
+    dev = "cuda"
+    num_tokens = 4
+    max_pos = 16
+    pos = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+
+    q_c = torch.randn(num_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, KV_LORA, device=dev, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16)
+    qw = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
+    kvw = torch.randn(KV_LORA, device=dev, dtype=torch.bfloat16)
+    ik = torch.randn(num_tokens, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16)
+    ikw = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    ikb = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
+
+    mla_cache = torch.zeros(
+        1, max_pos, KV_LORA + ROPE_DIM, device=dev, dtype=torch.bfloat16
+    )
+    idx_row = INDEX_HEAD_DIM + INDEX_HEAD_DIM // 128 * 4
+    idx_cache = torch.zeros(1, max_pos, idx_row, device=dev, dtype=torch.uint8)
+    no_local_slots = torch.full((num_tokens,), -1, device=dev, dtype=torch.int64)
+    topk = torch.full((num_tokens, 2048), 7, device=dev, dtype=torch.int32)
+
+    q_out = K.fused_norm_rope(
+        pos,
+        q_c,
+        qw,
+        EPS,
+        kv_c,
+        kvw,
+        EPS,
+        k_pe,
+        cos_sin,
+        ik,
+        ikw,
+        ikb,
+        EPS,
+        cos_sin,
+        topk,
+        slot_mapping=no_local_slots,
+        indexer_k_cache=idx_cache,
+        mla_kv_cache=mla_cache,
+        mla_kv_cache_dtype="auto",
+        mla_k_scale=None,
+        has_indexer=True,
+        index_rope_interleave=True,
+    )
+
+    assert_bf16(q_out, rms_norm(q_c, qw), "q_c rmsnorm without local cache slots")
+    assert not mla_cache.any(), "non-owner rank wrote the MLA KV cache"
+    assert not idx_cache.any(), "non-owner rank wrote the indexer KV cache"
+    assert (topk == -1).all(), "topk buffer not cleared on non-owner rank"
+
+
 @pytest.mark.parametrize("num_tokens", [1, 17, 512])
 def test_fused_norm_rope_no_indexer(num_tokens: int):
     """Shared (no-indexer) layer: q + kv/MLA only; top-k buffer untouched."""

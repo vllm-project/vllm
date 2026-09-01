@@ -29,7 +29,7 @@ import torch
 import transformers
 from packaging.version import Version
 from torch import nn
-from transformers import AutoModel
+from transformers import AutoModel, PretrainedConfig
 from transformers.conversion_mapping import (
     WeightRenaming,
     get_model_conversion_mapping,
@@ -168,13 +168,6 @@ class Base(
         self.recursive_replace()
         # Create attention instances for KV cache allocation
         self.attention_instances = self.create_attention_instances()
-
-        # Input embeddings
-        input_embeddings = self.model.get_input_embeddings()
-        if not isinstance(input_embeddings, PPMissingLayer):
-            self.model.set_input_embeddings(
-                replace_embedding_class(input_embeddings, self.quant_config)
-            )
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -423,6 +416,31 @@ class Base(
                 # attrsetter in case the module is nested (e.g. "text_model.norm")
                 attrsetter(name)(module, PPMissingLayer())
 
+    def _vocab_embedding_ids(self) -> set[int]:
+        """ids of the `nn.Embedding`s in `self.model` which hold a vocab table."""
+
+        def vocab_sizes(config: PretrainedConfig):
+            for key, value in vars(config).items():
+                if isinstance(value, PretrainedConfig):
+                    yield from vocab_sizes(value)
+                elif "vocab_size" in key and isinstance(value, int):
+                    yield value
+
+        sizes = set(vocab_sizes(self.config))
+        # `get_input_embeddings` may return a module which composes the `nn.Embedding`,
+        # or a `PPMissingLayer` if the embeddings are not on this pipeline stage
+        ids = {
+            id(module)
+            for module in self.model.get_input_embeddings().modules()
+            if isinstance(module, nn.Embedding)
+        }
+        ids.update(
+            id(module)
+            for module in self.model.modules()
+            if isinstance(module, nn.Embedding) and module.num_embeddings in sizes
+        )
+        return ids
+
     def recursive_replace(self):
         """Recursively replace modules in the model as needed.
 
@@ -432,6 +450,7 @@ class Base(
         - Attention QKV projections with a fused `QKVParallelLinear` + split
         - `nn.Linear` with vLLM's tensor parallel linear classes
         - `nn.Conv2d` / `nn.Conv3d` with vLLM's `Conv2d` / `Conv3d`
+        - Vocab `nn.Embedding`s with vLLM's `VocabParallelEmbedding`
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
         """
         tp_plan = self.model.tp_plan or {}
@@ -453,6 +472,8 @@ class Base(
         tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
         # Detect fusable patterns once per module class (cached, so this is cheap)
         fusers = Fusers(self.model, self.vllm_config)
+
+        vocab_embedding_ids = self._vocab_embedding_ids()
 
         def register_fusion(fuser: BaseFuser, prefix: str):
             """Register a fused layer's mappings just before it is built."""
@@ -503,6 +524,10 @@ class Base(
                     )
                 elif isinstance(child_module, (nn.Conv2d, nn.Conv3d)):
                     new_module = replace_conv_class(child_module)
+                elif id(child_module) in vocab_embedding_ids:
+                    new_module = replace_embedding_class(
+                        child_module, self.quant_config, prefix=qual_name
+                    )
                 elif (fuser := fusers[child_module]) is not None:
                     register_fusion(fuser, qual_name)
                     new_module = fuser.fuse(child_module, qual_name, self.vllm_config)

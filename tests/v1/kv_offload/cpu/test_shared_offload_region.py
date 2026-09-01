@@ -42,6 +42,7 @@ def _make_region(
     cpu_page_size: int = PAGE_SIZE,
     num_workers: int = 1,
     rank: int = 0,
+    barrier=None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
@@ -50,6 +51,7 @@ def _make_region(
         rank=rank,
         kv_bytes_per_block=num_workers * cpu_page_size,
         cpu_page_size=cpu_page_size,
+        barrier=barrier,
     )
 
 
@@ -179,6 +181,40 @@ def _mp_race_construct_and_write(
         cleanup_queue.get()  # wait for parent's verification to finish
         del t  # release view before cleanup to avoid BufferError
         region.cleanup()
+    except Exception as e:
+        done_queue.put({"rank": rank, "error": repr(e)})
+
+
+def _mp_barrier_construct_and_hold(
+    engine_id: str,
+    rank: int,
+    num_workers: int,
+    barrier,
+    fill_value: int,
+    done_queue,
+) -> None:
+    """Construct with a real cross-process barrier, write, then hold the
+    mapping (no cleanup) until the parent SIGKILLs this process."""
+    try:
+        region = SharedOffloadRegion(
+            engine_id=engine_id,
+            num_blocks=2,
+            rank=rank,
+            kv_bytes_per_block=num_workers * PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            barrier=lambda: barrier.wait(30),
+        )
+        t = region.create_next_worker_view(PAGE_SIZE)
+        t[:, :] = fill_value
+        done_queue.put(
+            {
+                "rank": rank,
+                "error": None,
+                "inode": os.fstat(region.fd).st_ino,
+                "path_exists": os.path.exists(region.mmap_path),
+            }
+        )
+        time.sleep(60)  # hold the mapping until killed
     except Exception as e:
         done_queue.put({"rank": rank, "error": repr(e)})
 
@@ -840,3 +876,122 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
 
     mock_unlink.assert_called_once_with(mmap_path)
     mock_close.assert_called_once_with(9999)
+
+
+# ---------------------------------------------------------------------------
+# Unlink-after-barrier — leak immunity to hard kills
+# ---------------------------------------------------------------------------
+
+
+def test_backing_file_unlinked_after_barrier(iid):
+    """The file must exist until the barrier releases (late joiners need the
+    name) and be gone right after, so no exit path can leak it."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    seen_at_barrier = []
+
+    region = _make_region(
+        iid, barrier=lambda: seen_at_barrier.append(os.path.exists(path))
+    )
+    try:
+        assert seen_at_barrier == [True], "file must exist during rendezvous"
+        assert not os.path.exists(path), "name must be dropped after the barrier"
+        assert region._creator is False, "nothing left for cleanup() to unlink"
+        t = region.create_next_worker_view(PAGE_SIZE)
+        t[:, :] = 7
+        assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
+        del t
+    finally:
+        region.cleanup()
+        _cleanup_file(path)
+
+
+def test_barrier_failure_unlinks_creator_and_raises(iid):
+    """A failed rendezvous must remove the creator's file and re-raise, not
+    leave a stub that wedges the next start in _wait_for_file_size."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    with pytest.raises(RuntimeError, match="peer died"):
+        _make_region(iid, barrier=MagicMock(side_effect=RuntimeError("peer died")))
+    assert not os.path.exists(path)
+
+
+def test_mp_barrier_unlinks_file_and_survives_sigkill(iid):
+    """With a real cross-process barrier every worker maps one shared inode,
+    the name is gone while they run, and SIGKILL leaks nothing."""
+    num_workers = 2
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    ctx = get_mp_context()
+    barrier = ctx.Barrier(num_workers)
+    done_queue = ctx.Queue()
+    procs = [
+        ctx.Process(
+            target=_mp_barrier_construct_and_hold,
+            args=(iid, rank, num_workers, barrier, rank + 1, done_queue),
+        )
+        for rank in range(num_workers)
+    ]
+    try:
+        for p in procs:
+            p.start()
+        results = [done_queue.get(timeout=30) for _ in range(num_workers)]
+        for r in results:
+            assert r["error"] is None, f"rank {r['rank']}: {r['error']}"
+        assert len({r["inode"] for r in results}) == 1, "workers split onto two files"
+        assert not any(r["path_exists"] for r in results)
+        assert not os.path.exists(path)
+    finally:
+        for p in procs:
+            p.kill()  # SIGKILL: no cleanup() runs
+            p.join(timeout=10)
+
+    assert not os.path.exists(path), "SIGKILL must not leak the file"
+    with _region(iid) as restarted:
+        assert restarted._creator is True, "restart must be able to create anew"
+
+
+def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch):
+    """A worker that dies before the rendezvous must still arrive at the
+    barrier, or its peers block in the collective until it times out."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    monkeypatch.setattr(
+        region,
+        "check_shm_free_space",
+        MagicMock(side_effect=RuntimeError("Insufficient space")),
+    )
+    barrier = MagicMock()
+
+    with pytest.raises(RuntimeError, match="Insufficient space"):
+        _make_region(iid, barrier=barrier)
+
+    barrier.assert_called_once_with()
+    assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+
+
+def test_mmap_failure_unlinks_creator_before_releasing_peers(iid, monkeypatch):
+    """A creator that fails after sizing the file must drop it before arriving
+    at the barrier, so the next start does not land on a stale file."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    monkeypatch.setattr("mmap.mmap", MagicMock(side_effect=OSError("mmap")))
+    seen_at_barrier = []
+
+    with pytest.raises(OSError, match="mmap"):
+        _make_region(iid, barrier=lambda: seen_at_barrier.append(os.path.exists(path)))
+
+    assert seen_at_barrier == [False], "file must be gone before peers release"
+
+
+def test_barrier_release_failure_keeps_original_error(iid, monkeypatch):
+    """When releasing the peers fails too, the setup error that explains the
+    failure must be the one that propagates."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    monkeypatch.setattr(
+        region,
+        "check_shm_free_space",
+        MagicMock(side_effect=RuntimeError("Insufficient space")),
+    )
+
+    with pytest.raises(RuntimeError, match="Insufficient space"):
+        _make_region(iid, barrier=MagicMock(side_effect=TimeoutError("barrier")))
+
+    assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")

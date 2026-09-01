@@ -66,6 +66,49 @@ def _minimax_m3_aiter_sparse_pa_requested() -> bool:
     return rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_shuffle_kv_cache_enabled()
 
 
+def minimax_m3_rebase_slots_to_page16(
+    slot_mapping: torch.Tensor,
+    block_size: int,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Rebase a token slot mapping onto AITER's page-16 page numbering.
+
+    AITER's KV writer derives the destination page from ``slot // 16`` and
+    assumes pages are numbered consecutively. When the resolved layout stores
+    both K/V sides inside a block, a block spans twice as many pages, so only
+    the block component of the slot doubles -- the offset within the page must
+    not move. Clamping before the division leaves padding slots at their
+    negative sentinel, which is what tells the writer to skip them.
+    """
+    if out is None:
+        out = torch.empty_like(slot_mapping)
+    torch.clamp(slot_mapping, min=0, out=out)
+    return (
+        out.div_(block_size, rounding_mode="floor").mul_(block_size).add_(slot_mapping)
+    )
+
+
+def minimax_m3_query_token_positions(
+    cu_seqlens_q: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    total_q: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map each prefill query token to its request id and absolute KV position.
+
+    Both tensors are the same for every sparse layer in a step, so the AITER
+    sparse PA block-table builder reads them from the metadata instead of
+    rebuilding them once per layer.
+    """
+    pos = torch.arange(total_q, dtype=torch.int32, device=cu_seqlens_q.device)
+    query_req_id = torch.searchsorted(
+        cu_seqlens_q[1:].contiguous(), pos, right=True
+    ).to(torch.int32)
+    query_abs_pos = (prefix_lens[query_req_id] + (pos - cu_seqlens_q[query_req_id])).to(
+        torch.int32
+    )
+    return query_req_id, query_abs_pos
+
+
 def minimax_m3_use_aiter_sparse_pa(num_kv_heads: int) -> bool:
     """Whether to use the ROCm AITER page-16 sparse PA prototype."""
     requested = _minimax_m3_aiter_sparse_pa_requested()
@@ -117,10 +160,14 @@ class MiniMaxM3SparseBackend(AttentionBackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
-        # AITER sparse PA unbinds K and V as separate contiguous regions, which
-        # requires the head dimension to sit outside the block dimension.
+        # AITER sparse PA reads K and V as separate page-16 tensors. LHBNC
+        # gives each side a dense plane; LBHNC interleaves the sides inside a
+        # block, which the page-id rebasing in ops/sparse_pa.py absorbs. LBHNC
+        # is listed first because these layers publish two head slots while the
+        # indexer publishes one, and mixed HNC shapes need a block-compact
+        # layout to share the block-id pool.
         if _minimax_m3_aiter_sparse_pa_requested():
-            return (KVCacheLayout.LHBNC,)
+            return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
         return super().supported_kv_cache_layouts()
 
 
@@ -136,6 +183,12 @@ class MiniMaxM3SparsePrefillMetadata:
     max_query_len: int
     max_seq_len: int
     total_kv_blocks: int
+
+    # Per-query-token request id and absolute KV position, built once per step
+    # for the AITER sparse PA block-table kernel. See
+    # ``minimax_m3_query_token_positions``.
+    query_req_id: torch.Tensor | None = None
+    query_abs_pos: torch.Tensor | None = None
 
 
 @dataclass
@@ -167,6 +220,11 @@ class MiniMaxM3SparseMetadata(AttentionMetadata):
     prefill: MiniMaxM3SparsePrefillMetadata | None = None
     decode: MiniMaxM3SparseDecodeMetadata | None = None
 
+    # ``slot_mapping`` rebased onto the page-16 numbering AITER's KV writer
+    # uses when both K/V sides share a block. Only set for the AITER sparse PA
+    # path; see ``MiniMaxM3SparseMetadataBuilder.build``.
+    page16_slot_mapping: torch.Tensor | None = None
+
 
 class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMetadata]):
     # Full cudagraphs for uniform decode batches, incl. spec-decode verify
@@ -191,6 +249,19 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
             dtype=torch.int32,
             device=device,
         )
+        # Every sparse layer shares one slot mapping, so the AITER page-16
+        # rebase is done here once per step instead of once per layer. Stable
+        # buffer for the same reason as the context lengths above.
+        self.use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
+            kv_cache_spec.num_kv_heads
+        )
+        self.page16_slot_mapping_buffer: torch.Tensor | None = None
+        if self.use_aiter_sparse_pa:
+            self.page16_slot_mapping_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                dtype=torch.int64,
+                device=device,
+            )
 
     def build(
         self,
@@ -236,17 +307,26 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
             )
             prefill_cu_seqlens_k[0] = 0
             torch.cumsum(prefill_kv_lens, dim=0, out=prefill_cu_seqlens_k[1:])
+            prefill_cu_seqlens_q = (
+                query_start_loc[num_decodes:] - num_decode_tokens
+            ).to(torch.int32)
+            prefill_context_lens = context_lens[num_decodes:]
+            query_req_id = query_abs_pos = None
+            if self.use_aiter_sparse_pa:
+                query_req_id, query_abs_pos = minimax_m3_query_token_positions(
+                    prefill_cu_seqlens_q, prefill_context_lens, num_prefill_tokens
+                )
             prefill_metadata = MiniMaxM3SparsePrefillMetadata(
-                cu_seqlens_q=(query_start_loc[num_decodes:] - num_decode_tokens).to(
-                    torch.int32
-                ),
+                cu_seqlens_q=prefill_cu_seqlens_q,
                 cu_seqlens_k=prefill_cu_seqlens_k,
                 seq_lens=prefill_kv_lens,
-                context_lens=context_lens[num_decodes:],
+                context_lens=prefill_context_lens,
                 block_table=block_table[num_decodes:],
                 max_query_len=common_attn_metadata.max_query_len,
                 max_seq_len=common_attn_metadata.max_seq_len,
                 total_kv_blocks=prefill_total_kv_blocks,
+                query_req_id=query_req_id,
+                query_abs_pos=query_abs_pos,
             )
 
         decode_metadata: MiniMaxM3SparseDecodeMetadata | None = None
@@ -265,10 +345,20 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
                 decode_query_len=decode_query_len,
             )
 
+        page16_slot_mapping = None
+        if self.page16_slot_mapping_buffer is not None:
+            slot_mapping = common_attn_metadata.slot_mapping
+            page16_slot_mapping = minimax_m3_rebase_slots_to_page16(
+                slot_mapping,
+                self.kv_cache_spec.block_size,
+                out=self.page16_slot_mapping_buffer[: slot_mapping.shape[0]],
+            )
+
         return MiniMaxM3SparseMetadata(
             seq_lens=seq_lens,
             max_seq_len=common_attn_metadata.max_seq_len,
             slot_mapping=common_attn_metadata.slot_mapping,
+            page16_slot_mapping=page16_slot_mapping,
             num_actual_tokens=num_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,

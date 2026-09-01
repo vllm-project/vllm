@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
@@ -77,6 +79,10 @@ class BaseRenderer(ABC, Generic[_T]):
         self.model_config = config.model_config
         self.api_process_rank = config.parallel_config._api_process_rank
 
+        self._resources = ExitStack()
+        self._resources.callback(logger.debug, f"[shutdown] {self.__class__.__name__}")
+        self._finalizer = weakref.finalize(self, self._resources.close)
+
         self.tokenizer = tokenizer
 
         # Thread pool executor for blocking tokenizer operations.  The
@@ -84,10 +90,12 @@ class BaseRenderer(ABC, Generic[_T]):
         # so it is safe to run tokenization and MM preprocessing concurrently.
         pool_workers = config.model_config.renderer_num_workers
         self._executor = ThreadPoolExecutor(max_workers=pool_workers)
+        self._resources.callback(self._executor.shutdown, wait=False)
 
         # Separate single-worker executor so tokenization never queues behind
         # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
-        self._mm_executor: Executor = ThreadPoolExecutor(max_workers=1)
+        self._mm_executor = ThreadPoolExecutor(max_workers=1)
+        self._resources.callback(self._mm_executor.shutdown, wait=False)
 
         # Offload tokenization to the thread pool. The sync
         # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
@@ -132,6 +140,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
             if mm_processor_cache:
                 self._mm_cache_stats = MultiModalCacheStats()
+                self._resources.callback(mm_processor_cache.close)
 
             # A second processor with its own processor-only cache.
             # Used by the tokenize endpoint so that tokenize-only
@@ -288,17 +297,7 @@ class BaseRenderer(ABC, Generic[_T]):
         await self._clear_mm_cache_async()
 
     def shutdown(self) -> None:
-        mm_processor_cache = self.mm_processor_cache
-        if mm_processor_cache is not None:
-            mm_processor_cache.close()
-
-        if executor := getattr(self, "_executor", None):
-            executor.shutdown(wait=False)
-
-        if (
-            mm_executor := getattr(self, "_mm_executor", None)
-        ) is not None and mm_executor is not executor:
-            mm_executor.shutdown(wait=False)
+        self._resources.close()
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
@@ -469,6 +468,27 @@ class BaseRenderer(ABC, Generic[_T]):
             )
         return TokensPrompt(prompt_token_ids=list(token_ids), **prompt)
 
+    @staticmethod
+    def _apply_prompt_char_offset(
+        prompt: TokensPrompt, char_offset: int
+    ) -> TokensPrompt:
+        """Map token offsets back to the original prompt after a text pre-trim."""
+        if char_offset == 0:
+            return prompt
+
+        offsets = prompt.get("prompt_token_offsets")
+        if offsets is not None:
+            prompt["prompt_token_offsets"] = [
+                # Fast tokenizers use (0, 0) for special tokens, which are
+                # not character spans in the source prompt.
+                (start, end)
+                if (start, end) == (0, 0)
+                else (start + char_offset, end + char_offset)
+                for start, end in offsets
+            ]
+
+        return prompt
+
     def _tokenize_prompt(
         self,
         prompt: TextPrompt,
@@ -524,8 +544,12 @@ class BaseRenderer(ABC, Generic[_T]):
                     "Expected prompt['prompt'] to be a string before tokenization; "
                     "use 'prompt_token_ids' for token ID inputs"
                 )
+            prompt_char_offset = params._get_text_truncation_offset(
+                self.tokenizer, prompt["prompt"]
+            )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = self._tokenize_prompt(prompt, params)
+            prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
@@ -560,8 +584,12 @@ class BaseRenderer(ABC, Generic[_T]):
                     "Expected prompt['prompt'] to be a string before tokenization; "
                     "use 'prompt_token_ids' for token ID inputs"
                 )
+            prompt_char_offset = params._get_text_truncation_offset(
+                self.tokenizer, prompt["prompt"]
+            )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = await self._tokenize_prompt_async(prompt, params)
+            prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
@@ -731,6 +759,7 @@ class BaseRenderer(ABC, Generic[_T]):
         mm_data: MultiModalDataDict,
         mm_uuids: MultiModalUUIDDict | None,
         mm_processor_kwargs: Mapping[str, object] | None,
+        media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
         *,
         skip_mm_cache: bool = False,
     ) -> "MultiModalInput":
@@ -753,6 +782,7 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_data_items,
             mm_uuid_items,
             hf_processor_mm_kwargs=mm_processor_kwargs or {},
+            media_io_kwargs=media_io_kwargs or {},
         )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 
@@ -781,6 +811,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 multi_modal_data,
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
                 mm_uuids=prompt.get("multi_modal_uuids"),
+                media_io_kwargs=prompt.get("media_io_kwargs"),
                 skip_mm_cache=skip_mm_cache,
             )
         else:
@@ -843,6 +874,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 multi_modal_data,
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
                 mm_uuids=prompt.get("multi_modal_uuids"),
+                media_io_kwargs=prompt.get("media_io_kwargs"),
                 skip_mm_cache=skip_mm_cache,
             )
         else:
@@ -1054,6 +1086,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
 
+        prompt_extras = dict(prompt_extras or {})
+        prompt_extras["media_io_kwargs"] = chat_params.media_io_kwargs or {}
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
         eng_prompts = [
@@ -1090,6 +1124,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
 
+        prompt_extras = dict(prompt_extras or {})
+        prompt_extras["media_io_kwargs"] = chat_params.media_io_kwargs or {}
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
         eng_prompts = await asyncio.gather(

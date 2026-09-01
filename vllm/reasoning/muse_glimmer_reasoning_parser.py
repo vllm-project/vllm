@@ -19,8 +19,8 @@ from collections.abc import Iterable, Sequence
 
 import regex as re
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 

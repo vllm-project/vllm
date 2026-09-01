@@ -2,7 +2,7 @@ group: Kernels
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) vLLM IR"
+- label: ":nvidia: (H200 MIG 18GB) vLLM IR"
   key: vllm-ir-tests
   timeout_in_minutes: 35
   device: h200_18gb
@@ -14,7 +14,7 @@ steps:
     - pytest -v -s tests/ir
     - pytest -v -s tests/kernels/ir
 
-- label: ":nvidia: (H200) Core Operation Kernels Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Core Operation Kernels Shard %N"
   device: h200_35gb
   key: kernels-core-operation-test
   timeout_in_minutes: 120
@@ -80,6 +80,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/kernels/
   commands:
     - pytest -v -s kernels/
@@ -103,6 +104,8 @@ steps:
 
 - label: ":nvidia: (L4) Attention Kernels Shard %N"
   key: kernels-attention-test
+  device: l4
+  num_devices: 1
   timeout_in_minutes: 65
   source_file_dependencies:
   - csrc/attention/
@@ -164,6 +167,8 @@ steps:
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
+  device: l4
+  num_devices: 1
   timeout_in_minutes: 60
   source_file_dependencies:
   - csrc/quantization/
@@ -193,6 +198,8 @@ steps:
 
 - label: ":nvidia: (L4) MoE Kernels Shard %N"
   key: kernels-moe-test
+  device: l4
+  num_devices: 1
   timeout_in_minutes: 50
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
@@ -225,7 +232,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Mamba Kernels"
+- label: ":nvidia: (H200 MIG 35GB) Mamba Kernels"
   device: h200_35gb
   key: kernels-mamba-test
   timeout_in_minutes: 60
@@ -235,6 +242,13 @@ steps:
   - vllm/model_executor/layers/mamba/ops
   commands:
     - pytest -v -s kernels/mamba
+  mirror:
+    amd:
+      label: ":amd: (MI250) Mamba Kernels"
+      device: mi250_1
+      timeout_in_minutes: 55
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H100) DeepGEMM Kernels"
   key: kernels-deepgemm-test-h100
@@ -375,7 +389,7 @@ steps:
   - tests/quantization/reference_mxfp4.py
   - tests/quantization/test_auto_round.py
   commands:
-  - uv pip install --system b12x==1.2.6
+  - uv pip install --system b12x==1.3.0
   - pytest -v -s model_executor/kernels/test_b12x_linear.py
       model_executor/test_b12x_warmup.py
       kernels/quantization/test_block_fp8.py
@@ -393,6 +407,13 @@ steps:
     - pip install helion==1.4.0
     - pytest -v -s kernels/helion/ --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
+  mirror:
+    amd:
+      label: ":amd: (MI250) Helion Kernels Shard %N"
+      device: mi250_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
 
  
 - label: ":nvidia: (H100) FP8 MoE Kernels"

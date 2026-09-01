@@ -27,7 +27,7 @@
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from functools import lru_cache, partial
+from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
 import einops
@@ -82,6 +82,7 @@ from vllm.multimodal.video_prune.evs import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.cache import LRUCache
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -647,6 +648,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.fullatt_block_indexes = vision_config.fullatt_block_indexes
         self.spatial_merge_unit = self.spatial_merge_size**2
+        self._rope_by_thw_cache = LRUCache(capacity=1024)
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
             1
@@ -715,8 +717,11 @@ class Qwen2_5_VisionTransformer(nn.Module):
         return self.patch_embed.proj.weight.device
 
     def rotary_pos_emb_thw(self, t, h, w):
-        hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-        wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+        # Use pre-computed cos_sin_cache from RotaryEmbedding
+        cos, sin = self.rotary_pos_emb.get_cos_sin(max(h, w))
+
+        hpos_ids = torch.arange(h, device=cos.device).unsqueeze(1).expand(-1, w)
+        wpos_ids = torch.arange(w, device=cos.device).unsqueeze(0).expand(h, -1)
         hpos_ids = (
             hpos_ids.reshape(
                 h // self.spatial_merge_size,
@@ -738,12 +743,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             .flatten()
         )
         pos_ids = torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1)
-        max_size = max(h, w)
 
-        # Use pre-computed cos_sin_cache from RotaryEmbedding
-        cos, sin = self.rotary_pos_emb.get_cos_sin(max_size)
-
-        pos_ids = pos_ids.to(cos.device, non_blocking=True)
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)
 
@@ -797,8 +797,11 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         return index_new, cu_seqlens_tmp
 
-    @lru_cache(maxsize=1024)  # noqa: B019
     def get_rope_by_thw(self, t, h, w):
+        cache_key = (t, h, w)
+        if cache_key in self._rope_by_thw_cache:
+            return self._rope_by_thw_cache[cache_key]
+
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
         cos_thw, sin_thw = self.rotary_pos_emb_thw(t, h, w)
 
@@ -811,13 +814,15 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_seqlens_thw = torch.repeat_interleave(
             torch.tensor([h * w], dtype=torch.int32), t
         )
-        return (
+        result = (
             cos_thw,
             sin_thw,
             window_index_thw,
             cu_seqlens_window_thw,
             cu_seqlens_thw,
         )
+        self._rope_by_thw_cache[cache_key] = result
+        return result
 
     def compute_attn_mask_seqlen(
         self,

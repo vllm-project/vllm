@@ -14,10 +14,10 @@ from tests.parser.engine.streaming_helpers import (
     collect_tool_arguments,
     simulate_tool_streaming,
 )
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.parser.gemma4 import Gemma4Parser
 
 # ── Special token IDs (arbitrary but consistent) ─────────────────────

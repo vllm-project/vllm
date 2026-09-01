@@ -38,7 +38,12 @@ def _torch_topk_softplus_sqrt(
         assert input_ids is not None
         topk_ids = hash_indices_table[input_ids.long()]
     else:
-        topk_ids = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=True)[1]
+        # Match the fused kernel's deterministic tie-break: lower expert ids
+        # win when scores are equal. torch.topk does not guarantee which tied
+        # index it selects at the k-th boundary.
+        topk_ids = torch.argsort(
+            scores_for_choice, dim=-1, descending=True, stable=True
+        )[:, :topk]
 
     topk_weights = original_scores.gather(1, topk_ids.long())
     if renormalize:
@@ -46,6 +51,19 @@ def _torch_topk_softplus_sqrt(
     if routed_scaling_factor != 1.0:
         topk_weights = topk_weights * routed_scaling_factor
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
+
+def test_torch_topk_softplus_sqrt_breaks_ties_by_expert_id():
+    gating_output = torch.tensor([[2.0, 1.0, 1.0, 0.0]])
+
+    _, topk_ids = _torch_topk_softplus_sqrt(
+        gating_output,
+        topk=2,
+        renormalize=False,
+        routed_scaling_factor=1.0,
+    )
+
+    assert topk_ids.tolist() == [[0, 1]]
 
 
 def test_sqrtsoftplus_bias_uses_deepseek_v4_routing_method():

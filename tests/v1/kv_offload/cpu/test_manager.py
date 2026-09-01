@@ -932,41 +932,37 @@ def test_filter_reused_manager():
         max_tracker_size=3,
     )
 
-    # Lookup [1, 2] -> 1st time, added to tracker but not eligible for store yet
+    # lookup() does not count towards store admission
     assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.MISS
     assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.MISS
+    assert not manager.counts
 
-    # prepare store [1, 2] -> should be filtered
+    # 1st offer of [1, 2] -> tracked at count 1, not eligible yet
     prepare_store_output = manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == []
+    assert manager.counts[to_keys([1])[0]] == 1
+    assert manager.counts[to_keys([2])[0]] == 1
 
-    # Lookup [1] -> 2nd time, eligible now
-    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.MISS
-
-    # prepare store [1, 2] -> [1] should be eligible, [2] should be filtered
+    # 2nd offer -> the whole repeated prefix becomes eligible at once
     prepare_store_output = manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     assert prepare_store_output is not None
-    assert prepare_store_output.keys_to_store == to_keys([1])
+    assert prepare_store_output.keys_to_store == to_keys([1, 2])
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
 
-    # Lookup [3, 4] -> 1st time
-    # (evicts [2] from tracker since max_size is 3 and tracker has [1])
-    assert manager.lookup(to_key(3), _EMPTY_REQ_CTX) is LookupResult.MISS
-    assert manager.lookup(to_key(4), _EMPTY_REQ_CTX) is LookupResult.MISS
-    # Verify [2] was evicted from the tracker (tracker now has: [1], [3], [4])
-    assert to_keys([2])[0] not in manager.counts
-
-    # Lookup [2] again -> (this adds [2] back to the tracker as 1st time)
-    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.MISS
-    # Verify [2] was re-added with count=1 (not eligible yet)
-    assert manager.counts.get(to_keys([2])[0]) == 1
-
-    # prepare store [2] -> should still be filtered out since count was reset
-    prepare_store_output = manager.prepare_store(to_keys([2]), _EMPTY_REQ_CTX)
+    # Offer [3, 4] -> 1st time, evicting the tracker's LRU entry [1]
+    prepare_store_output = manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == []
+    assert to_keys([1])[0] not in manager.counts
+    assert manager.counts[to_keys([3])[0]] == 1
+    assert manager.counts[to_keys([4])[0]] == 1
 
-    manager.complete_store(to_keys([1]), _EMPTY_REQ_CTX)
+    # [1] re-enters the tracker at count 1, so it is filtered again
+    prepare_store_output = manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX)
+    assert prepare_store_output is not None
+    assert prepare_store_output.keys_to_store == []
+    assert manager.counts.get(to_keys([1])[0]) == 1
 
 
 def test_evictable_cache_block_count():

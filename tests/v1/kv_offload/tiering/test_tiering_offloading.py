@@ -1063,10 +1063,17 @@ class TestTieringOffloadingManager:
         self.manager.on_request_finished(ctx)
         assert ctx.req_id not in self.manager._req_state
 
+    @pytest.mark.parametrize("new_ids", [(), (3, 4)], ids=["fully_warm", "mixed"])
     def test_prepare_store_cascades_existing_blocks_to_request_level_tiers(
-        self, manager_setup
+        self, manager_setup, new_ids
     ):
-        """prepare_store cascades hit blocks to request-level tiers only."""
+        """prepare_store cascades hit blocks to request-level tiers only.
+
+        The fully-warm case is the producer shape from issue #52808: nothing is
+        new, so primary returns an empty keys_to_store and no GPU->primary
+        transfer runs. A request-level tier must still be handed the blocks,
+        otherwise a peer waiting on them has nothing to fetch.
+        """
         # Store some blocks to primary first
         existing_blocks = to_keys(range(3))
         self._start_request()
@@ -1093,7 +1100,7 @@ class TestTieringOffloadingManager:
         )
 
         # Call prepare_store with existing + new blocks
-        new_blocks = to_keys(range(3, 5))
+        new_blocks = to_keys(new_ids)
         all_blocks = existing_blocks + new_blocks
         result = self.manager.prepare_store(all_blocks, ctx)
         assert result is not None

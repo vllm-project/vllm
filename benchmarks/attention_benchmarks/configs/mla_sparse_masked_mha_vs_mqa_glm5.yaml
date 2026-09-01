@@ -1,0 +1,59 @@
+mode: mha_vs_mqa
+model:
+  name: "glm-5.x"
+  num_layers: 78
+  num_q_heads: 64
+  num_kv_heads: 1
+  head_dim: 576
+  kv_lora_rank: 512
+  qk_nope_head_dim: 192
+  qk_rope_head_dim: 64
+  v_head_dim: 256
+  block_size: 128
+  max_model_len: 131072
+model_parameter_sweep:
+  param_name: "num_q_heads"
+  values: [64, 32, 16, 8]
+  label_format: "{backend}_{value}h"
+batch_specs:
+  - "q256s2048"
+  - "q512s2048"
+  - "q1024s2048"
+  - "q1536s2048"
+  - "q2048"
+  - "q256s4096"
+  - "q512s4096"
+  - "q1024s4096"
+  - "q1536s4096"
+  - "q2048s4096"
+  - "q4096"
+  - "q256s8192"
+  - "q512s8192"
+  - "q1024s8192"
+  - "q1536s8192"
+  - "q2048s8192"
+  - "q4096s8192"
+  - "q8192"
+  - "q256s16384"
+  - "q512s16384"
+  - "q1024s16384"
+  - "q1536s16384"
+  - "q2048s16384"
+  - "q4096s16384"
+  - "q8192s16384"
+  - "q16384"
+  - "q256s32768"
+  - "q512s32768"
+  - "q1024s32768"
+  - "q1536s32768"
+  - "q2048s32768"
+  - "q4096s32768"
+  - "q8192s32768"
+  - "q16384s32768"
+  - "q32768"
+backends: ["FLASHMLA_SPARSE", "FLASHINFER_MLA_SPARSE"]
+device: "cuda:0"
+profile_memory: false
+sparse_mla_masked_mha_max_seq_len: 131072
+sparse_mla_mha_variants: ["masked_mha", "mqa"]
+sparse_mla_topk_pattern: "random"

@@ -44,9 +44,10 @@ def _build(layer_num_heads: list[int]) -> CPUAttentionMetadataBuilder:
     vllm_config = MagicMock()
     vllm_config.model_config.dtype = torch.bfloat16
     vllm_config.model_config.get_num_attention_heads.return_value = MODEL_WIDE_NUM_HEADS
-    vllm_config.cache_config.block_size = 16
     vllm_config.cache_config.cache_dtype = "auto"
-    kv_cache_spec = SimpleNamespace(num_kv_heads=NUM_KV_HEADS, head_size=64)
+    kv_cache_spec = SimpleNamespace(
+        num_kv_heads=NUM_KV_HEADS, head_size=64, block_size=16
+    )
 
     with (
         patch(

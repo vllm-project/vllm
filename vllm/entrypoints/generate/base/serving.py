@@ -5,27 +5,28 @@ import time
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
+from typing import ClassVar, Generic, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
 from starlette.datastructures import Headers
 
+from vllm import RequestOutput
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    GenerationError,
+from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     SpeculativeDecodingMetrics,
 )
+from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
@@ -37,9 +38,6 @@ from vllm.tracing import (
     log_tracing_disabled_warning,
 )
 from vllm.v1.metrics.stats import RequestStateStats
-
-if TYPE_CHECKING:
-    from vllm.outputs import RequestOutput
 
 logger = init_logger(__name__)
 
@@ -172,6 +170,19 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         except Exception:
             # Never fail server startup over the fingerprint.
             self.system_fingerprint = None
+
+    def _preflight(self, n: int = 1) -> None:
+        """Engine checks that must run before a response is started.
+
+        This is required for the streaming case, where we return a success
+        status before we actually start generating text :).
+
+        Args:
+            n: Number of sequences the request will occupy.
+        """
+        if self.engine_client.errored:
+            raise self.engine_client.dead_error
+        self.engine_client.check_admission(n)
 
     def create_streaming_error_response(
         self,

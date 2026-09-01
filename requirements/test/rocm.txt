@@ -37,6 +37,7 @@ anyio==4.13.0
     # via
     #   anthropic
     #   httpx
+    #   httpx2
     #   mcp
     #   openai
     #   sse-starlette
@@ -71,6 +72,8 @@ azure-identity==1.25.3
 azure-storage-blob==12.28.0
     # via runai-model-streamer-azure
 backoff==2.2.1
+    # via -r requirements/test/rocm.in
+bitsandbytes==0.50.0
     # via -r requirements/test/rocm.in
 black==26.3.1
     # via datamodel-code-generator
@@ -317,6 +320,7 @@ grpcio-reflection==1.78.0
 h11==0.16.0
     # via
     #   httpcore
+    #   httpcore2
     #   uvicorn
 h2==4.3.0
     # via httpx
@@ -332,6 +336,8 @@ html2text==2025.4.15
     # via gpt-oss
 httpcore==1.0.9
     # via httpx
+httpcore2==2.12.0
+    # via httpx2
 httptools==0.7.1
     # via uvicorn
 httpx==0.27.2
@@ -342,12 +348,11 @@ httpx==0.27.2
     #   fastapi
     #   fastapi-cloud-cli
     #   huggingface-hub
-    #   mcp
     #   model-hosting-container-standards
     #   openai
     #   perceptron
     #   schemathesis
-httpx-sse==0.4.3
+httpx2==2.12.0
     # via mcp
 huggingface-hub==1.28.0
     # via
@@ -377,11 +382,12 @@ hypothesis-graphql==0.13.0
     # via schemathesis
 hypothesis-jsonschema==0.23.1
     # via schemathesis
-idna==3.11
+idna==3.19
     # via
     #   anyio
     #   email-validator
     #   httpx
+    #   httpx2
     #   requests
     #   yarl
 ijson==3.5.0
@@ -498,8 +504,12 @@ mbstrdecoder==1.1.4
     #   dataproperty
     #   pytablewriter
     #   typepy
-mcp==1.27.0
-    # via -r requirements/test/../common.txt
+mcp==2.1.1
+    # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
+mcp-types==2.1.1
+    # via mcp
 mdurl==0.1.2
     # via markdown-it-py
 mistral-common==1.11.6
@@ -566,6 +576,7 @@ numpy==2.2.6
     #   -r requirements/test/../common.txt
     #   accelerate
     #   albumentations
+    #   bitsandbytes
     #   bm25s
     #   contourpy
     #   cupy-cuda12x
@@ -639,6 +650,7 @@ opentelemetry-api==1.40.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   mcp
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-exporter-prometheus
@@ -691,10 +703,11 @@ outlines-core==0.2.14
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-packaging==26.0
+packaging==26.2
     # via
     #   -c requirements/rocm.txt
     #   accelerate
+    #   bitsandbytes
     #   black
     #   datasets
     #   evaluate
@@ -843,6 +856,7 @@ pydantic==2.12.5
     #   gpt-oss
     #   lm-format-enforcer
     #   mcp
+    #   mcp-types
     #   mistral-common
     #   model-hosting-container-standards
     #   mteb
@@ -861,9 +875,7 @@ pydantic-extra-types==2.11.1
     #   fastapi
     #   mistral-common
 pydantic-settings==2.13.1
-    # via
-    #   fastapi
-    #   mcp
+    # via fastapi
 pygments==2.19.2
     # via
     #   pytest
@@ -1237,6 +1249,10 @@ transformers-stream-generator==0.0.5
     # via -r requirements/test/rocm.in
 tritonclient==2.66.0
     # via -r requirements/test/rocm.in
+truststore==0.10.4
+    # via
+    #   httpcore2
+    #   httpx2
 typeguard==4.5.1
     # via inflect
 typepy==1.3.4
@@ -1270,10 +1286,12 @@ typing-extensions==4.15.0
     #   cohere
     #   fastapi
     #   grpcio
+    #   httpx2
     #   huggingface-hub
     #   librosa
     #   lm-eval
     #   mcp
+    #   mcp-types
     #   mistral-common
     #   mteb
     #   openai

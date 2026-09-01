@@ -13,7 +13,7 @@ use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::utility::PauseMode as EnginePauseMode;
 
 use super::{ControlServer, pb};
-use crate::lora::{LoadLoraError, LoraDisabledError, UnloadLoraError};
+use crate::lora::{LoadLoraError, LoraDisabledError, LoraPathAccessError, UnloadLoraError};
 use crate::state::AppState;
 
 pub(crate) type ControlGrpcService = ControlServer<ControlServiceImpl>;
@@ -148,6 +148,10 @@ fn load_lora_status(error: LoadLoraError) -> Status {
     let code = match &error {
         LoadLoraError::Disabled(_) => Code::FailedPrecondition,
         LoadLoraError::InvalidRequest(_) => Code::InvalidArgument,
+        LoadLoraError::PathAccess(LoraPathAccessError::InvalidPath { .. }) => Code::InvalidArgument,
+        LoadLoraError::PathAccess(LoraPathAccessError::InvalidConfiguration { .. }) => {
+            Code::Internal
+        }
         LoadLoraError::AlreadyLoaded { .. } | LoadLoraError::BaseModelName { .. } => {
             Code::AlreadyExists
         }

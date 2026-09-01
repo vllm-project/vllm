@@ -874,12 +874,20 @@ def _try_load_fp8_indexer_wk(
     # We have both weight and scale: dequantize FP8 to BF16.
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
     del buf[layer_prefix]
+    if scale_inv.dtype in (torch.uint8, torch.float8_e8m0fnu):
+        # MXFP8 checkpoints store power-of-two E8M0 scales, decode them to float.
+        scale_inv = scale_inv.view(torch.float8_e8m0fnu).to(torch.float32)
     if scale_inv.ndim == 1:
         # Per-channel scale: one scale per row of [out, in]
         group_shape = GroupShape(1, weight_fp8.shape[1])
     else:
-        block_size = weight_fp8.shape[1] // scale_inv.shape[1]
-        group_shape = GroupShape(block_size, block_size)
+        # Derive the block size independently per dim so that per-channel
+        # ([out, 1]), MX ([out, in / 32]) and 2D block ([out / 128, in / 128])
+        # scale layouts are all handled.
+        group_shape = GroupShape(
+            weight_fp8.shape[0] // scale_inv.shape[0],
+            weight_fp8.shape[1] // scale_inv.shape[1],
+        )
     weight_bf16 = scaled_dequantize(
         weight_fp8,
         scale_inv,

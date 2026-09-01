@@ -74,6 +74,20 @@ void pack_vnni2(scalar_t* __restrict__ dst, float* __restrict__ src, const float
 #endif
 }
 
+template <typename state_t>
+inline void store_state_vec2(
+    state_t* __restrict__ dst,
+    const at::vec::Vectorized<float>& src0,
+    const at::vec::Vectorized<float>& src1) {
+  if constexpr (std::is_same_v<state_t, float>) {
+    src0.store(dst);
+    src1.store(dst + at::vec::Vectorized<float>::size());
+  } else {
+    auto state_vec = convert_from_float_ext<state_t>(src0, src1);
+    state_vec.store(dst);
+  }
+}
+
 template <typename scalar_t, int SIZE>
 inline void fill_stub(scalar_t* __restrict__ out, float val) {
   using Vec = at::vec::Vectorized<scalar_t>;
@@ -1255,10 +1269,10 @@ void chunk_gated_delta_rule_fwd_intra_kernel_impl(
 // d             : [B, NT, Hv, C, C]
 // cu_seqlens    : [num_seqs + 1]
 // chunk_offsets : [num_seqs + 1]
-template <typename scalar_t, int D, int CHUNK_SIZE>
+template <typename scalar_t, typename state_t, int D, int CHUNK_SIZE>
 void chunk_gated_delta_rule_fwd_inter_kernel_impl(
     scalar_t* __restrict__ out,
-    float* __restrict__ state,
+    state_t* __restrict__ state,
     const int32_t* __restrict__ indices,
     const scalar_t* __restrict__ q,
     const scalar_t* __restrict__ k,
@@ -1297,6 +1311,7 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
     // thread local temp buffer
     DECL_ZERO_BUF(scalar_t, tmp, CHUNK_SIZE * D);
     DECL_ZERO_BUF(scalar_t, tmp2, D * D);
+    DECL_ZERO_BUF(float, state_tmp, D * D);
     DECL_ZERO_BUF(float, tmp3, CHUNK_SIZE* D);
     DECL_ZERO_BUF(scalar_t, tmp4, CHUNK_SIZE * D);
     DECL_ZERO_BUF(float, attn, CHUNK_SIZE* CHUNK_SIZE);
@@ -1370,7 +1385,27 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
         apply_mask_kernel<scalar_t, CHUNK_SIZE, false>::apply(attn2, attn, nullptr, d_ptr, mb_size);
 
         // step 2.a: v' = w @ state (fuse state *= exp(g_last) with packing)
-        float* __restrict__ s_ptr = state + indices[bs] * state_strideS + hv * (D * D);
+        state_t* __restrict__ state_slot =
+            state + indices[bs] * state_strideS + hv * (D * D);
+        float* s_ptr;
+        if constexpr (std::is_same_v<state_t, float>) {
+          s_ptr = state_slot;
+        } else {
+          using bVec = at::vec::Vectorized<state_t>;
+          using fVec = at::vec::Vectorized<float>;
+          constexpr int kVecSize = bVec::size();
+          constexpr int fVecSize = fVec::size();
+          int64_t d0 = 0;
+          for (; d0 + kVecSize <= D * D; d0 += kVecSize) {
+            auto [state_vec0, state_vec1] = load_float_vec2(state_slot + d0);
+            state_vec0.store(state_tmp + d0);
+            state_vec1.store(state_tmp + d0 + fVecSize);
+          }
+          for (; d0 < D * D; ++d0) {
+            state_tmp[d0] = static_cast<float>(state_slot[d0]);
+          }
+          s_ptr = state_tmp;
+        }
         const float* __restrict__ g_ptr = g + nt * (Hv * CHUNK_SIZE) + hv * (CHUNK_SIZE);
         float g_last = g_ptr[mb_size - 1];
         const scalar_t* __restrict__ w_ptr = w + (batch_offset + mb_start) * w_strideT + hv * w_strideH;
@@ -1547,6 +1582,22 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
               s_ptr,
               D);
         }
+
+        if constexpr (!std::is_same_v<state_t, float>) {
+          using bVec = at::vec::Vectorized<state_t>;
+          using fVec = at::vec::Vectorized<float>;
+          constexpr int kVecSize = bVec::size();
+          constexpr int fVecSize = fVec::size();
+          int64_t d0 = 0;
+          for (; d0 + kVecSize <= D * D; d0 += kVecSize) {
+            fVec state_vec0 = fVec::loadu(s_ptr + d0);
+            fVec state_vec1 = fVec::loadu(s_ptr + d0 + fVecSize);
+            store_state_vec2<state_t>(state_slot + d0, state_vec0, state_vec1);
+          }
+          for (; d0 < D * D; ++d0) {
+            state_slot[d0] = static_cast<state_t>(s_ptr[d0]);
+          }
+        }
       }
 
       // move to the next index
@@ -1576,7 +1627,7 @@ inline at::vec::Vectorized<float> softplus(const at::vec::Vectorized<float>& x, 
   return Vec::blendv(Vec::blendv(log1pex, expx, mask_lo), x, mask_hi);
 }
 
-template <typename scalar_t, typename param_t>
+template <typename scalar_t, typename param_t, typename state_t>
 void fused_sigmoid_gating_delta_rule_update_kernel_impl(
     const scalar_t* __restrict__ q_ptr,
     const scalar_t* __restrict__ k_ptr,
@@ -1586,7 +1637,7 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
     const scalar_t* __restrict__ dt_bias_ptr,
     const scalar_t* __restrict__ b_ptr,
     const int32_t* __restrict__ indices_ptr,
-    float* __restrict__ state_ptr,
+    state_t* __restrict__ state_ptr,
     scalar_t* __restrict__ o_ptr,
     float* __restrict__ qk_scale_buf,
     int64_t seq_len,
@@ -1700,8 +1751,10 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
           state_vec1 = state_vec1 * g_val_exp_vec + k_vec * dt_vec1;
           o_vec0 = o_vec0 + state_vec0 * q_vec * scale_vec;
           o_vec1 = o_vec1 + state_vec1 * q_vec * scale_vec;
-          state_vec0.store(state_ptr + state_offset + di * v_head_dim + dvi);
-          state_vec1.store(state_ptr + state_offset + di * v_head_dim + dvi + fVecSize);
+          store_state_vec2<state_t>(
+              state_ptr + state_offset + di * v_head_dim + dvi,
+              state_vec0,
+              state_vec1);
         }
         bVec o_vec = at::vec::convert_from_float<scalar_t>(o_vec0, o_vec1);
         o_vec.store(o_ptr + o_offset + dvi);
@@ -1710,8 +1763,10 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
         float kv_mem_val = 0;
         for (int di = 0; di < head_dim; ++di) {
           float k_val = k_ptr[k_offset + di] * k_scale;
-          state_ptr[state_offset + di * v_head_dim + dvi] *= g_val_exp;
-          kv_mem_val += state_ptr[state_offset + di * v_head_dim + dvi] * k_val;
+          float state_val =
+              static_cast<float>(state_ptr[state_offset + di * v_head_dim + dvi]) *
+              g_val_exp;
+          kv_mem_val += state_val * k_val;
         }
         float v_val = v_ptr[v_offset + dvi];
         float dt_val = (v_val - kv_mem_val) * beta_val;
@@ -1719,8 +1774,13 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
         for (int di = 0; di < head_dim; ++di) {
           float q_val = q_ptr[q_offset + di] * q_scale;
           float k_val = k_ptr[k_offset + di] * k_scale;
-          state_ptr[state_offset + di * v_head_dim + dvi] += k_val * dt_val;
-          o_val += state_ptr[state_offset + di * v_head_dim + dvi] * q_val * scale;
+          float state_val =
+              static_cast<float>(state_ptr[state_offset + di * v_head_dim + dvi]) *
+              g_val_exp;
+          state_val += k_val * dt_val;
+          state_ptr[state_offset + di * v_head_dim + dvi] =
+              static_cast<state_t>(state_val);
+          o_val += state_val * q_val * scale;
         }
         o_ptr[o_offset + dvi] = o_val;
       }
@@ -1736,7 +1796,7 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
 // token ``t`` into cache slot ``t`` (multi-slot rollback, matching the GPU
 // kernel). Parallelized over (sequence, v_head); the per-sequence token loop is
 // sequential as required by the recurrence.
-template <typename scalar_t, typename param_t>
+template <typename scalar_t, typename param_t, typename state_t>
 void fused_sigmoid_gating_delta_rule_update_spec_kernel_impl(
     const scalar_t* __restrict__ q_ptr,  // [T, HK, EK]
     const scalar_t* __restrict__ k_ptr,  // [T, HK, EK]
@@ -1748,7 +1808,7 @@ void fused_sigmoid_gating_delta_rule_update_spec_kernel_impl(
     const int32_t* __restrict__ spec_indices_ptr,  // [N, S]
     const int32_t* __restrict__ num_accepted_ptr,  // [N]
     const int32_t* __restrict__ cu_seqlens_ptr,     // [N + 1]
-    float* __restrict__ state_ptr,
+    state_t* __restrict__ state_ptr,
     scalar_t* __restrict__ o_ptr,  // [T, HV, EV]
     float* __restrict__ qk_scale_buf,  // [2, T, HK]
     int64_t total_tokens,
@@ -1770,7 +1830,6 @@ void fused_sigmoid_gating_delta_rule_update_spec_kernel_impl(
   using bVec = at::vec::Vectorized<scalar_t>;
   using fVec = at::vec::Vectorized<float>;
   constexpr int64_t VecSize = bVec::size();
-  constexpr int64_t fVecSize = fVec::size();
   int64_t group_size = v_num_heads / num_heads;
   double scale = 1 / std::sqrt((double)head_dim);
   fVec scale_vec = fVec((float)scale);
@@ -1815,8 +1874,10 @@ void fused_sigmoid_gating_delta_rule_update_spec_kernel_impl(
       for (int64_t t = 0; t < q_len; ++t) {
         int64_t cur_slot = (int64_t)spec_indices_ptr[bi * spec_stride + t];
         int64_t token = q_start + t;
-        const float* src = state_ptr + prev_slot * state_slot_stride + ni * head_dim * v_head_dim;
-        float* dst = state_ptr + cur_slot * state_slot_stride + ni * head_dim * v_head_dim;
+        const state_t* src =
+            state_ptr + prev_slot * state_slot_stride + ni * head_dim * v_head_dim;
+        state_t* dst =
+            state_ptr + cur_slot * state_slot_stride + ni * head_dim * v_head_dim;
         float g_val = -std::exp((float)A_log_ptr[ni]) *
             softplus((float)a_ptr[token * v_num_heads + ni] + (float)dt_bias_ptr[ni], softplus_threshold);
         float g_val_exp = std::exp(g_val);
@@ -1836,8 +1897,8 @@ void fused_sigmoid_gating_delta_rule_update_spec_kernel_impl(
           fVec kv_mem_vec1 = fVec(0.f);
           for (int di = 0; di < head_dim; ++di) {
             fVec k_val_vec = fVec((float)k_ptr[k_offset + di] * k_scale);
-            fVec sv0 = fVec::loadu(src + di * v_head_dim + dvi);
-            fVec sv1 = fVec::loadu(src + di * v_head_dim + dvi + fVecSize);
+            auto [sv0, sv1] =
+                load_float_vec2(src + di * v_head_dim + dvi);
             kv_mem_vec0 = kv_mem_vec0 + sv0 * g_val_exp_vec * k_val_vec;
             kv_mem_vec1 = kv_mem_vec1 + sv1 * g_val_exp_vec * k_val_vec;
           }
@@ -1851,14 +1912,14 @@ void fused_sigmoid_gating_delta_rule_update_spec_kernel_impl(
           for (int di = 0; di < head_dim; ++di) {
             fVec q_vec = fVec((float)q_ptr[q_offset + di] * q_scale);
             fVec k_vec = fVec((float)k_ptr[k_offset + di] * k_scale);
-            fVec sv0 = fVec::loadu(src + di * v_head_dim + dvi);
-            fVec sv1 = fVec::loadu(src + di * v_head_dim + dvi + fVecSize);
+            auto [sv0, sv1] =
+                load_float_vec2(src + di * v_head_dim + dvi);
             sv0 = sv0 * g_val_exp_vec + k_vec * dt_vec0;
             sv1 = sv1 * g_val_exp_vec + k_vec * dt_vec1;
             o_vec0 = o_vec0 + sv0 * q_vec * scale_vec;
             o_vec1 = o_vec1 + sv1 * q_vec * scale_vec;
-            sv0.store(dst + di * v_head_dim + dvi);
-            sv1.store(dst + di * v_head_dim + dvi + fVecSize);
+            store_state_vec2<state_t>(
+                dst + di * v_head_dim + dvi, sv0, sv1);
           }
           bVec o_vec = at::vec::convert_from_float<scalar_t>(o_vec0, o_vec1);
           o_vec.store(o_ptr + o_offset + dvi);
@@ -1867,7 +1928,8 @@ void fused_sigmoid_gating_delta_rule_update_spec_kernel_impl(
           float kv_mem_val = 0.f;
           for (int di = 0; di < head_dim; ++di) {
             float k_val = (float)k_ptr[k_offset + di] * k_scale;
-            kv_mem_val += src[di * v_head_dim + dvi] * g_val_exp * k_val;
+            kv_mem_val += static_cast<float>(src[di * v_head_dim + dvi]) *
+                g_val_exp * k_val;
           }
           float v_val = (float)v_ptr[v_offset + dvi];
           float dt_val = (v_val - kv_mem_val) * beta_val;
@@ -1875,8 +1937,10 @@ void fused_sigmoid_gating_delta_rule_update_spec_kernel_impl(
           for (int di = 0; di < head_dim; ++di) {
             float q_val = (float)q_ptr[q_offset + di] * q_scale;
             float k_val = (float)k_ptr[k_offset + di] * k_scale;
-            float ns = src[di * v_head_dim + dvi] * g_val_exp + k_val * dt_val;
-            dst[di * v_head_dim + dvi] = ns;
+            float ns = static_cast<float>(src[di * v_head_dim + dvi]) *
+                    g_val_exp +
+                k_val * dt_val;
+            dst[di * v_head_dim + dvi] = static_cast<state_t>(ns);
             o_val += ns * q_val * scale;
           }
           o_ptr[o_offset + dvi] = (scalar_t)o_val;
@@ -2112,10 +2176,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_intra(
   return std::make_tuple(w, u, decay_mask);
 }
 
-#define LAUNCH_CHUNK_GATED_DELTA_RULE_FWD_INTER_KERNEL(HD)                \
-  chunk_gated_delta_rule_fwd_inter_kernel_impl<scalar_t, HD, CHUNK_SIZE>( \
+#define LAUNCH_CHUNK_GATED_DELTA_RULE_FWD_INTER_KERNEL(HD)                    \
+  chunk_gated_delta_rule_fwd_inter_kernel_impl<scalar_t, state_t, HD, CHUNK_SIZE>( \
       o.data_ptr<scalar_t>(),                                             \
-      initial_state.data_ptr<float>(),                                    \
+      initial_state.data_ptr<state_t>(),                                  \
       initial_state_indices.data_ptr<int32_t>(),                          \
       q.data_ptr<scalar_t>(),                                             \
       k.data_ptr<scalar_t>(),                                             \
@@ -2134,7 +2198,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_intra(
       k.stride(2),                                                        \
       initial_state.stride(0));
 
-template <int CHUNK_SIZE>
+template <typename state_t, int CHUNK_SIZE>
 std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_inter(
     const at::Tensor& q,
     const at::Tensor& k,
@@ -2172,7 +2236,7 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_inter(
 //   value: [B, T, Hv, Dv]
 //   g: [B, T, Hv] FP32
 //   beta: [B, T, Hv]
-//   initial_state: [num_seqs, Hv, Dv, D] FP32
+//   initial_state: [num_seqs, Hv, Dv, D] FP16, BF16, or FP32 persisted state
 //   cu_seqlens: [num_seqs + 1] INT32
 //
 std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
@@ -2211,7 +2275,12 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
   CHECK_INPUT_SHAPE_DTYPE<false>(cu_seqlens, {num_seqs + 1}, at::kInt);
   TORCH_CHECK(initial_state.sizes() == at::IntArrayRef({initial_state.size(0), Hv, Dv, D}),
               "chunk_gated_delta_rule_cpu: initial_state shape mismatch, got ", initial_state.sizes());
-  TORCH_CHECK(initial_state.scalar_type() == at::kFloat, "chunk_gated_delta_rule_cpu: initial_state dtype mismatch");
+  TORCH_CHECK(
+      initial_state.scalar_type() == at::kFloat ||
+          initial_state.scalar_type() == at::kBFloat16 ||
+          initial_state.scalar_type() == at::kHalf,
+      "chunk_gated_delta_rule_cpu: initial_state dtype must be float16, "
+      "bfloat16, or float32");
   CHECK_CPU(initial_state);
   // initial_state may be a pooled/paged buffer with padding between slots
   // (e.g. mamba cache-align mode), so only the per-slot (Hv, Dv, D) layout
@@ -2237,18 +2306,28 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
       chunk_gated_delta_rule_fwd_intra<CHUNK_SIZE>(key_, value, g_, beta, cu_seqlens, chunk_indices);
 
   // fused `chunk_gated_delta_rule_fwd_h` + `chunk_fwd_o`
-  auto [output, final_state] = chunk_gated_delta_rule_fwd_inter<CHUNK_SIZE>(
-      query_,
-      key_,
-      w,
-      u,
-      g_,
-      decay_mask,
-      initial_state,
-      output_final_state,
-      cu_seqlens,
-      chunk_offsets,
-      initial_state_indices);
+  auto launch_inter = [&](auto state_tag) {
+    using state_t = decltype(state_tag);
+    return chunk_gated_delta_rule_fwd_inter<state_t, CHUNK_SIZE>(
+        query_,
+        key_,
+        w,
+        u,
+        g_,
+        decay_mask,
+        initial_state,
+        output_final_state,
+        cu_seqlens,
+        chunk_offsets,
+        initial_state_indices);
+  };
+  auto output_and_state =
+      initial_state.scalar_type() == at::kFloat
+          ? launch_inter(float{})
+          : initial_state.scalar_type() == at::kBFloat16
+              ? launch_inter(at::BFloat16{})
+              : launch_inter(at::Half{});
+  auto [output, final_state] = output_and_state;
 
   return std::make_tuple(output, final_state);
 }
@@ -2261,6 +2340,7 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
 // a: [batch_size, v_num_heads]
 // b: [batch_size, v_num_heads]
 // initial_state_source:[num_tokens, v_num_heads, head_dim, v_head_dim]
+//   FP16, BF16, or FP32 persisted state; recurrent arithmetic remains FP32.
 // initial_state_indices: [batch_size]
 // cu_seqlens: [batch_size + 1]
 at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
@@ -2293,8 +2373,24 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
   CHECK_INPUT_SHAPE_DTYPE<true>(b, {batch_size, v_num_heads}, q.scalar_type());
   CHECK_INPUT_SHAPE_DTYPE<true>(initial_state_indices, {batch_size}, at::kInt);
   CHECK_INPUT_SHAPE_DTYPE<true>(cu_seqlens, {batch_size + 1}, at::kInt);
-  CHECK_INPUT_SHAPE_DTYPE<true>(
-      initial_state_source, {initial_state_source.size(0), v_num_heads, head_dim, v_head_dim}, at::kFloat);
+  TORCH_CHECK(
+      initial_state_source.scalar_type() == at::kFloat ||
+          initial_state_source.scalar_type() == at::kBFloat16 ||
+          initial_state_source.scalar_type() == at::kHalf,
+      "fused_sigmoid_gating_delta_rule_update_cpu: initial_state dtype must "
+      "be float16, bfloat16, or float32");
+  TORCH_CHECK(
+      initial_state_source.sizes() ==
+          at::IntArrayRef(
+              {initial_state_source.size(0), v_num_heads, head_dim, v_head_dim}),
+      "Input tensor shape mismatch for initial_state_source");
+  CHECK_CPU(initial_state_source);
+  TORCH_CHECK(
+      initial_state_source.stride(-1) == 1 &&
+          initial_state_source.stride(-2) == v_head_dim &&
+          initial_state_source.stride(-3) == head_dim * v_head_dim,
+      "fused_sigmoid_gating_delta_rule_update_cpu: expect initial_state_source "
+      "to be contiguous per pool slot.");
   CHECK(initial_state_source.size(0) >= batch_size);
   CHECK_EQ(v_num_heads % num_heads, 0);
   TORCH_CHECK(
@@ -2318,46 +2414,63 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
   at::Tensor core_attn_out = at::empty({batch_size, seq_len, v_num_heads, v_head_dim}, q.options());
   at::Tensor qk_scale_buf = at::empty({2 * batch_size, seq_len, num_heads}, at::kFloat);
 
-  CPU_DISPATCH_REDUCED_FLOATING_TYPES_EXT(
-      q.scalar_type(), A_log.scalar_type(), "fused_sigmoid_gating_delta_rule_update_kernel_impl", [&] {
-        fused_sigmoid_gating_delta_rule_update_kernel_impl<scalar_t, param_t>(
-            q.data_ptr<scalar_t>(),
-            k.data_ptr<scalar_t>(),
-            v.data_ptr<scalar_t>(),
-            A_log.data_ptr<param_t>(),
-            a.data_ptr<scalar_t>(),
-            dt_bias.data_ptr<scalar_t>(),
-            b.data_ptr<scalar_t>(),
-            initial_state_indices.data_ptr<int32_t>(),
-            initial_state_source.data_ptr<float>(),
-            core_attn_out.data_ptr<scalar_t>(),
-            qk_scale_buf.data_ptr<float>(),
-            seq_len,
-            batch_size,
-            num_heads,
-            head_dim,
-            v_num_heads,
-            v_head_dim,
-            q_strideB,
-            q_strideS,
-            q_strideH,
-            k_strideB,
-            k_strideS,
-            k_strideH,
-            v_strideB,
-            v_strideS,
-            v_strideH,
-            state_slot_stride,
-            use_qk_l2norm_in_kernel,
-            softplus_threshold);
-      });
+  auto launch = [&](auto state_tag) {
+    using state_t = decltype(state_tag);
+    CPU_DISPATCH_REDUCED_FLOATING_TYPES_EXT(
+        q.scalar_type(), A_log.scalar_type(),
+        "fused_sigmoid_gating_delta_rule_update_kernel_impl", [&] {
+          fused_sigmoid_gating_delta_rule_update_kernel_impl<scalar_t, param_t, state_t>(
+              q.data_ptr<scalar_t>(),
+              k.data_ptr<scalar_t>(),
+              v.data_ptr<scalar_t>(),
+              A_log.data_ptr<param_t>(),
+              a.data_ptr<scalar_t>(),
+              dt_bias.data_ptr<scalar_t>(),
+              b.data_ptr<scalar_t>(),
+              initial_state_indices.data_ptr<int32_t>(),
+              initial_state_source.data_ptr<state_t>(),
+              core_attn_out.data_ptr<scalar_t>(),
+              qk_scale_buf.data_ptr<float>(),
+              seq_len,
+              batch_size,
+              num_heads,
+              head_dim,
+              v_num_heads,
+              v_head_dim,
+              q_strideB,
+              q_strideS,
+              q_strideH,
+              k_strideB,
+              k_strideS,
+              k_strideH,
+              v_strideB,
+              v_strideS,
+              v_strideH,
+              state_slot_stride,
+              use_qk_l2norm_in_kernel,
+              softplus_threshold);
+        });
+  };
+  if (initial_state_source.scalar_type() == at::kFloat) {
+    launch(float());
+  } else if (initial_state_source.scalar_type() == at::kBFloat16) {
+    launch(at::BFloat16());
+  } else if (initial_state_source.scalar_type() == at::kHalf) {
+    launch(at::Half());
+  } else {
+    TORCH_CHECK(
+        false,
+        "fused_sigmoid_gating_delta_rule_update_cpu: initial_state dtype must "
+        "be float16, bfloat16, or float32");
+  }
   return core_attn_out;
 }
 
 // Speculative-decode update (multi-token, multi-slot rollback).
 // q: [T, HK, EK]  k: [T, HK, EK]  v: [T, HV, EV]
 // a: [T, HV]  b: [T, HV]
-// initial_state_source: [N_slots, HV, EK, EV] FP32 (updated in place)
+// initial_state_source: [N_slots, HV, EK, EV] FP16, BF16, or FP32 persisted state
+// (updated in place; recurrent arithmetic remains FP32)
 // spec_state_indices: [batch, S] INT32 (S = num_spec + 1)
 // num_accepted_tokens: [batch] INT32
 // cu_seqlens: [batch + 1] INT32
@@ -2385,21 +2498,65 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_spec_cpu(
   int64_t head_dim = q.size(2);
   int64_t v_num_heads = v.size(1);
   int64_t v_head_dim = v.size(2);
-  int64_t batch_size = cu_seqlens.size(0) - 1;
-  int64_t spec_stride = spec_state_indices.stride(0);
   CHECK_INPUT_SHAPE_DTYPE<true>(k, {total_tokens, num_heads, head_dim}, q.scalar_type());
   CHECK_INPUT_SHAPE_DTYPE<true>(v, {total_tokens, v_num_heads, v_head_dim}, q.scalar_type());
   CHECK_INPUT_SHAPE_DTYPE<true>(a, {total_tokens, v_num_heads}, q.scalar_type());
   CHECK_INPUT_SHAPE_DTYPE<true>(b, {total_tokens, v_num_heads}, q.scalar_type());
   CHECK_INPUT_SHAPE_DTYPE<true>(dt_bias, {v_num_heads}, q.scalar_type());
+  CHECK_DIM(1, cu_seqlens);
+  int64_t batch_size = cu_seqlens.size(0) - 1;
   CHECK_INPUT_SHAPE_DTYPE<true>(num_accepted_tokens, {batch_size}, at::kInt);
   CHECK_INPUT_SHAPE_DTYPE<true>(cu_seqlens, {batch_size + 1}, at::kInt);
+  CHECK_DIM(2, spec_state_indices);
+  CHECK_CPU(spec_state_indices);
+  TORCH_CHECK(
+      spec_state_indices.scalar_type() == at::kInt,
+      "spec_state_indices must be an int32 CPU tensor");
+  TORCH_CHECK(
+      spec_state_indices.size(0) == batch_size,
+      "spec_state_indices first dimension must equal batch_size");
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(spec_state_indices);
+  const int32_t* cu_seqlens_ptr = cu_seqlens.data_ptr<int32_t>();
+  int64_t max_seq_len = 0;
+  for (int64_t i = 0; i < batch_size; ++i) {
+    int64_t span = static_cast<int64_t>(cu_seqlens_ptr[i + 1]) -
+        static_cast<int64_t>(cu_seqlens_ptr[i]);
+    TORCH_CHECK(
+        span >= 0,
+        "cu_seqlens must be non-decreasing at index ",
+        i);
+    if (span > max_seq_len) {
+      max_seq_len = span;
+    }
+  }
+  TORCH_CHECK(
+      spec_state_indices.size(1) >= max_seq_len,
+      "spec_state_indices second dimension must be at least the longest "
+      "cu_seqlens span; got ",
+      spec_state_indices.size(1),
+      " but required ",
+      max_seq_len);
+  int64_t spec_stride = spec_state_indices.stride(0);
   CHECK_EQ(v_num_heads % num_heads, 0);
   TORCH_CHECK(A_log.sizes() == at::IntArrayRef({v_num_heads}));
-  CHECK_INPUT_SHAPE_DTYPE<true>(
-      initial_state_source,
-      {initial_state_source.size(0), v_num_heads, head_dim, v_head_dim},
-      at::kFloat);
+  TORCH_CHECK(
+      initial_state_source.scalar_type() == at::kFloat ||
+          initial_state_source.scalar_type() == at::kBFloat16 ||
+          initial_state_source.scalar_type() == at::kHalf,
+      "fused_sigmoid_gating_delta_rule_update_spec_cpu: initial_state dtype "
+      "must be float16, bfloat16, or float32");
+  TORCH_CHECK(
+      initial_state_source.sizes() ==
+          at::IntArrayRef(
+              {initial_state_source.size(0), v_num_heads, head_dim, v_head_dim}),
+      "Input tensor shape mismatch for initial_state_source");
+  CHECK_CPU(initial_state_source);
+  TORCH_CHECK(
+      initial_state_source.stride(-1) == 1 &&
+          initial_state_source.stride(-2) == v_head_dim &&
+          initial_state_source.stride(-3) == head_dim * v_head_dim,
+      "fused_sigmoid_gating_delta_rule_update_spec_cpu: expect "
+      "initial_state_source to be contiguous per pool slot.");
   TORCH_CHECK(initial_state_source.size(0) >= batch_size,
       "initial_state_source capacity too small: size(0)=",
       initial_state_source.size(0), ", batch_size=", batch_size);
@@ -2415,39 +2572,56 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_spec_cpu(
   at::Tensor o = at::empty({total_tokens, v_num_heads, v_head_dim}, q.options());
   at::Tensor qk_scale_buf = at::empty({2, total_tokens, num_heads}, at::kFloat);
 
-  CPU_DISPATCH_REDUCED_FLOATING_TYPES_EXT(
-      q.scalar_type(), A_log.scalar_type(), "fused_sigmoid_gating_delta_rule_update_spec_kernel_impl", [&] {
-        fused_sigmoid_gating_delta_rule_update_spec_kernel_impl<scalar_t, param_t>(
-            q.data_ptr<scalar_t>(),
-            k.data_ptr<scalar_t>(),
-            v.data_ptr<scalar_t>(),
-            A_log.data_ptr<param_t>(),
-            a.data_ptr<scalar_t>(),
-            dt_bias.data_ptr<scalar_t>(),
-            b.data_ptr<scalar_t>(),
-            spec_state_indices.data_ptr<int32_t>(),
-            num_accepted_tokens.data_ptr<int32_t>(),
-            cu_seqlens.data_ptr<int32_t>(),
-            initial_state_source.data_ptr<float>(),
-            o.data_ptr<scalar_t>(),
-            qk_scale_buf.data_ptr<float>(),
-            total_tokens,
-            batch_size,
-            spec_stride,
-            num_heads,
-            head_dim,
-            v_num_heads,
-            v_head_dim,
-            q_strideT,
-            q_strideH,
-            k_strideT,
-            k_strideH,
-            v_strideT,
-            v_strideH,
-            state_slot_stride,
-            use_qk_l2norm_in_kernel,
-            softplus_threshold);
-      });
+  auto launch = [&](auto state_tag) {
+    using state_t = decltype(state_tag);
+    CPU_DISPATCH_REDUCED_FLOATING_TYPES_EXT(
+        q.scalar_type(), A_log.scalar_type(),
+        "fused_sigmoid_gating_delta_rule_update_spec_kernel_impl", [&] {
+          fused_sigmoid_gating_delta_rule_update_spec_kernel_impl<
+              scalar_t, param_t, state_t>(
+              q.data_ptr<scalar_t>(),
+              k.data_ptr<scalar_t>(),
+              v.data_ptr<scalar_t>(),
+              A_log.data_ptr<param_t>(),
+              a.data_ptr<scalar_t>(),
+              dt_bias.data_ptr<scalar_t>(),
+              b.data_ptr<scalar_t>(),
+              spec_state_indices.data_ptr<int32_t>(),
+              num_accepted_tokens.data_ptr<int32_t>(),
+              cu_seqlens.data_ptr<int32_t>(),
+              initial_state_source.data_ptr<state_t>(),
+              o.data_ptr<scalar_t>(),
+              qk_scale_buf.data_ptr<float>(),
+              total_tokens,
+              batch_size,
+              spec_stride,
+              num_heads,
+              head_dim,
+              v_num_heads,
+              v_head_dim,
+              q_strideT,
+              q_strideH,
+              k_strideT,
+              k_strideH,
+              v_strideT,
+              v_strideH,
+              state_slot_stride,
+              use_qk_l2norm_in_kernel,
+              softplus_threshold);
+        });
+  };
+  if (initial_state_source.scalar_type() == at::kFloat) {
+    launch(float());
+  } else if (initial_state_source.scalar_type() == at::kBFloat16) {
+    launch(at::BFloat16());
+  } else if (initial_state_source.scalar_type() == at::kHalf) {
+    launch(at::Half());
+  } else {
+    TORCH_CHECK(
+        false,
+        "fused_sigmoid_gating_delta_rule_update_spec_cpu: initial_state "
+        "dtype must be float16, bfloat16, or float32");
+  }
   return o;
 }
 

@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import numpy.typing as npt
 import torch
@@ -35,6 +35,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
     VideoBackend,
+    VideoDecoderBackend,
     VideoSourceMetadata,
     VideoTargetMetadata,
 )
@@ -485,13 +486,7 @@ class MiniMaxM3VideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal[
-            "opencv",
-            "pyav",
-            "torchcodec",
-            "pynvvideocodec",
-            "deepstream",
-        ] = "opencv",
+        backend: VideoDecoderBackend = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(

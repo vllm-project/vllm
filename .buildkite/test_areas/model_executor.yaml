@@ -2,7 +2,7 @@ group: Model Executor
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) Model Executor"
+- label: ":nvidia: (H200 MIG 35GB) Model Executor"
   device: h200_35gb
   key: model-executor
   timeout_in_minutes: 60

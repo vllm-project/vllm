@@ -87,7 +87,7 @@ capacity objectives.
 python3 tools/recipes/recipe_json_to_vllm_config.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --hardware xeon6 \
-  --input-tokens 2048 \
+  --input-tokens 128 \
   --output-tokens 128 \
   --concurrency 32 \
   --ttft-sla-ms 3000 \
@@ -111,7 +111,7 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --hardware xeon6 \
   --detect-hardware \
-  --input-tokens 2048 \
+  --input-tokens 128 \
   --output-tokens 128 \
   --concurrency 32 \
   --generate-sweep

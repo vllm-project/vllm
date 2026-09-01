@@ -1738,12 +1738,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hound"
-version = "3.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
-
-[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2307,7 +2301,7 @@ dependencies = [
  "hf-hub",
  "image",
  "libloading",
- "ndarray 0.17.2",
+ "ndarray",
  "once_cell",
  "pkg-config",
  "rayon",
@@ -2675,21 +2669,6 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
-]
-
-[[package]]
-name = "ndarray"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "882ed72dce9365842bf196bdeedf5055305f11fc8c03dee7bb0194a6cad34841"
-dependencies = [
- "matrixmultiply",
- "num-complex",
- "num-integer",
- "num-traits",
- "portable-atomic",
- "portable-atomic-util",
- "rawpointer",
 ]
 
 [[package]]
@@ -3847,18 +3826,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rubato"
-version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5258099699851cfd0082aeb645feb9c084d9a5e1f1b8d5372086b989fc5e56a1"
-dependencies = [
- "num-complex",
- "num-integer",
- "num-traits",
- "realfft",
-]
-
-[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4814,25 +4781,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "tekken-rs"
-version = "0.1.1"
+name = "tekken"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49623843103837f53f7ebe8cfafc19ccff28ff0e15e7c4b9f6ad21e36fbfde3a"
+checksum = "1d1481e6bbb98c7e1b04124420b6e7c367c87fc897aae340edcdeb4e91b639d2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "env_logger",
- "hound",
  "log",
- "ndarray 0.16.1",
  "regex",
- "rubato",
  "rustc-hash 1.1.0",
- "rustfft",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "tiktoken-rs 0.7.0",
+ "tiktoken-rs",
 ]
 
 [[package]]
@@ -4931,21 +4894,6 @@ dependencies = [
  "quick-error",
  "weezl",
  "zune-jpeg",
-]
-
-[[package]]
-name = "tiktoken-rs"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25563eeba904d770acf527e8b370fe9a5547bacd20ff84a0b6c3bc41288e5625"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "bstr",
- "fancy-regex 0.13.0",
- "lazy_static",
- "regex",
- "rustc-hash 1.1.0",
 ]
 
 [[package]]
@@ -5779,7 +5727,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "thiserror-ext",
- "tiktoken-rs 0.9.1",
+ "tiktoken-rs",
  "tokenizers",
  "tokio",
  "tokio-stream",
@@ -5810,7 +5758,7 @@ dependencies = [
  "llm-multimodal",
  "minijinja",
  "minijinja-contrib",
- "ndarray 0.17.2",
+ "ndarray",
  "oss-harmony",
  "paste",
  "reqwest 0.13.4",
@@ -6095,11 +6043,11 @@ dependencies = [
  "rustc-hash 1.1.0",
  "serde",
  "serde_json",
- "tekken-rs",
+ "tekken",
  "tempfile",
  "thiserror 2.0.18",
  "thiserror-ext",
- "tiktoken-rs 0.9.1",
+ "tiktoken-rs",
  "tokenizers",
  "tokio",
  "tracing",

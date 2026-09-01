@@ -38,19 +38,19 @@ def test_metadata_saves_dict_operations():
     assert meta.saves["mm_hash_2"] == [10, 11]
 
 
-def test_metadata_loads_dict_operations():
-    """The loads dict supports standard dict operations."""
+def test_metadata_loads_carry_a_transfer_id_and_blocks():
+    """Each load entry is a (transfer_id, block_ids) pair, so the worker can
+    report the transfer rather than the mm_hash."""
     meta = ECCPUConnectorMetadata()
 
-    # Add multiple entries
-    meta.loads["mm_hash_1"] = [5, 6, 7]
-    meta.loads["mm_hash_2"] = [100]
+    meta.loads["mm_hash_1"] = (0, [5, 6, 7])
+    meta.loads["mm_hash_2"] = (1, [100])
 
-    assert "mm_hash_1" in meta.loads
-    assert "mm_hash_2" in meta.loads
     assert len(meta.loads) == 2
-    assert meta.loads["mm_hash_1"] == [5, 6, 7]
-    assert meta.loads["mm_hash_2"] == [100]
+    assert meta.loads["mm_hash_1"] == (0, [5, 6, 7])
+    transfer_id, block_ids = meta.loads["mm_hash_2"]
+    assert transfer_id == 1
+    assert block_ids == [100]
 
 
 def test_metadata_saves_and_loads_are_independent():
@@ -58,11 +58,11 @@ def test_metadata_saves_and_loads_are_independent():
     meta = ECCPUConnectorMetadata()
 
     meta.saves["key"] = [1, 2]
-    meta.loads["key"] = [3, 4]
+    meta.loads["key"] = (0, [3, 4])
 
     # Same key but different dicts should not interfere
     assert meta.saves["key"] == [1, 2]
-    assert meta.loads["key"] == [3, 4]
+    assert meta.loads["key"] == (0, [3, 4])
 
     # Modifying one should not affect the other
     meta.saves["other"] = [99]
@@ -74,11 +74,11 @@ def test_metadata_block_indices_are_integers():
     meta = ECCPUConnectorMetadata()
 
     meta.saves["hash"] = [0, 100, 999, 65535]
-    meta.loads["hash"] = [1, 2, 3]
+    meta.loads["hash"] = (0, [1, 2, 3])
 
     for idx in meta.saves["hash"]:
         assert isinstance(idx, int)
-    for idx in meta.loads["hash"]:
+    for idx in meta.loads["hash"][1]:
         assert isinstance(idx, int)
 
 

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.entrypoints.openai.engine.protocol import ExtractedToolCallInformation
+from vllm.entrypoints.generate.base.protocol import ExtractedToolCallInformation
 from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 
 LLAMA_MODEL = "meta-llama/Llama-3.2-1B-Instruct"

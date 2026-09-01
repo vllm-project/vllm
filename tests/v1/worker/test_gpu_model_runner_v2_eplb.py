@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
@@ -84,6 +85,7 @@ def _make_runner(**overrides: Any) -> Any:
         post_forward=lambda *_, **__: None,
     )
     runner.eplb = eplb.EPLBController(runner.parallel_config, runner.device)
+    runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.pooling_runner = None
     runner.execute_model_state = None
     for key, value in overrides.items():
@@ -179,10 +181,10 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         slot_mappings_by_layer=None,
         hidden_states=None,
         aux_hidden_states=None,
+        dp_sync=None,
         finished_req_ids=set(),
         ec_connector_output=None,
         routed_experts=None,
-        num_tokens_across_dp=None,
     )
     runner.req_states = SimpleNamespace()
 

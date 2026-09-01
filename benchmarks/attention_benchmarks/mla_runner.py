@@ -313,6 +313,9 @@ _BACKEND_PROPERTIES = {
     "FLASHMLA_SPARSE": {
         "query_format": "concat",  # Single concatenated tensor (vs tuple)
     },
+    "FLASHINFER_MLA_SPARSE": {
+        "query_format": "concat",  # Single concatenated tensor (vs tuple)
+    },
 }
 
 
@@ -1184,6 +1187,35 @@ def _run_mla_benchmark_batched(
                     )
         # Run each benchmark with the shared impl
         for config, threshold, num_splits in configs_with_params:
+            force_masked_mha = (
+                is_sparse and getattr(config, "sparse_mla_mha_mode", "auto") == "masked"
+            )
+            if force_masked_mha:
+                impl.masked_mha_available = True
+                from vllm.model_executor.layers.attention.sparse_mla_attention import (
+                    GLOBAL_TOPK_MASK_MAX_BYTES,
+                    _topk_mask_shape,
+                )
+
+                requests = parse_batch_spec(config.batch_spec)
+                max_query_len = max(request.q_len for request in requests)
+                mask_shape = _topk_mask_shape(
+                    len(requests), max_query_len, max_query_len
+                )
+                mask_words = max(
+                    GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
+                    mask_shape[0] * mask_shape[1] * mask_shape[2],
+                )
+                if (
+                    builder_instance.topk_mask_workspace is None
+                    or builder_instance.topk_mask_workspace.numel() != mask_words
+                ):
+                    builder_instance.topk_mask_workspace = torch.zeros(
+                        mask_words,
+                        dtype=torch.int32,
+                        device=device,
+                    )
+
             # Set threshold for this benchmark (FlashAttn/FlashMLA only)
             original_threshold = None
             effective_threshold = threshold

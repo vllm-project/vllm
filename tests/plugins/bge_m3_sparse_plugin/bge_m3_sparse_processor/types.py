@@ -5,11 +5,11 @@ from typing import Literal, get_args
 
 from pydantic import BaseModel, Field
 
-from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
     CompletionRequestMixin,
     EmbedRequestMixin,
 )
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 
 EmbedTask = Literal[
     "sparse",

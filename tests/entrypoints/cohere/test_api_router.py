@@ -33,8 +33,8 @@ from vllm.entrypoints.cohere.protocol import (
     CohereChatV2Response,
 )
 from vllm.entrypoints.cohere.serving import CohereServingChatV2
-from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.exception_handling.handlers.http import (
     http_exception_handler,
 )

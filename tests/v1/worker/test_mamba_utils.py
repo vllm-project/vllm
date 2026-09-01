@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -10,11 +9,20 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncsByType,
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.mamba_utils import (
     MambaCopyBuffers,
     MambaSpecDecodeGPUContext,
@@ -22,17 +30,21 @@ from vllm.v1.worker.mamba_utils import (
     batch_memcpy,
     collect_mamba_copy_meta,
     do_mamba_copy_block,
+    get_mamba_groups,
     preprocess_mamba,
     stage_postprocess_inputs_to_gpu,
 )
 
-MambaStateCopyFunc = Callable[..., Any]
-
 # Conv + temporal copy specs, in the order the tests' MambaSpec shapes expect.
-_COPY_FUNCS: tuple[MambaStateCopyFunc, ...] = (
+_DEFAULT_COPY_FUNCS: tuple[MambaStateCopyFunc, ...] = (
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
+_COPY_FUNCS: MambaStateCopyFuncsByType = {
+    MambaAttentionBackendEnum.MAMBA2: _DEFAULT_COPY_FUNCS,
+    MambaAttentionBackendEnum.GDN_ATTN: _DEFAULT_COPY_FUNCS,
+    MambaAttentionBackendEnum.SHORT_CONV: (get_conv_copy_spec,),
+}
 
 
 def postprocess_mamba(
@@ -41,7 +53,7 @@ def postprocess_mamba(
     input_batch: Any,
     requests: dict[str, Any],
     forward_context: dict[str, Any],
-    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
+    mamba_state_copy_funcs: MambaStateCopyFuncsByType,
     copy_bufs: "MambaCopyBuffers",
 ):
     """CPU reference for the align-mode postprocess.
@@ -147,7 +159,7 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
             input_batch,
             {},  # requests
             {},  # forward_context
-            (),  # mamba_state_copy_funcs
+            {},  # mamba_state_copy_funcs
             copy_bufs,
         )
 
@@ -430,7 +442,10 @@ def _make_requests(
 
 
 def _make_copy_bufs(
-    cfg: _TestConfig, kv_cache_config: KVCacheConfig, device: torch.device
+    cfg: _TestConfig,
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    copy_funcs: MambaStateCopyFuncsByType = _COPY_FUNCS,
 ) -> MambaCopyBuffers:
     """Create MambaCopyBuffers for the Python path."""
 
@@ -440,13 +455,16 @@ def _make_copy_bufs(
     return MambaCopyBuffers.create(
         max_num_reqs=cfg.max_num_reqs,
         kv_cache_config=kv_cache_config,
-        copy_funcs=(get_conv_copy_spec, get_temporal_copy_spec),
+        copy_funcs=copy_funcs,
         make_buffer=make_buffer,
     )
 
 
 def _make_gpu_ctx(
-    cfg: _TestConfig, kv_cache_config: KVCacheConfig, device: torch.device
+    cfg: _TestConfig,
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    copy_funcs: MambaStateCopyFuncsByType = _COPY_FUNCS,
 ) -> MambaSpecDecodeGPUContext:
     """Create MambaSpecDecodeGPUContext for the GPU path."""
 
@@ -456,10 +474,168 @@ def _make_gpu_ctx(
     return MambaSpecDecodeGPUContext.create(
         max_num_reqs=cfg.max_num_reqs,
         kv_cache_config=kv_cache_config,
-        num_state_types=2,
+        copy_funcs=copy_funcs,
         device=device,
         make_buffer=make_buffer,
     )
+
+
+def test_mamba_groups_support_different_state_specs():
+    gdn_spec = MambaSpec(
+        block_size=16,
+        shapes=((4, 4), (2, 4, 4)),
+        dtypes=(torch.float16, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+    )
+    short_conv_spec = MambaSpec(
+        block_size=16,
+        shapes=((12, 8),),
+        dtypes=(torch.float16,),
+        mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["gdn.0", "gdn.1"], gdn_spec),
+            KVCacheGroupSpec(["ple.0"], short_conv_spec),
+        ],
+    )
+
+    mamba_groups = get_mamba_groups(kv_cache_config)
+    assert mamba_groups == {gdn_spec: [0], short_conv_spec: [1]}
+
+    model_state = object.__new__(MambaHybridModelState)
+    model_state._mamba_group_ids = []
+    model_state._mamba_spec = None
+    group_ids, representative_spec = model_state._get_mamba_group_info(kv_cache_config)
+    assert group_ids == [0, 1]
+    assert representative_spec is gdn_spec
+
+    cfg = _TestConfig()
+    copy_bufs = _make_copy_bufs(cfg, kv_cache_config, torch.device("cpu"))
+    assert copy_bufs.src_ptrs.cpu.numel() == cfg.max_num_reqs * 5
+    assert copy_bufs.dst_ptrs.cpu.numel() == cfg.max_num_reqs * 5
+    assert copy_bufs.sizes.cpu.numel() == cfg.max_num_reqs * 5
+
+    ctx = _make_gpu_ctx(cfg, kv_cache_config, torch.device("cpu"))
+    assert ctx.num_states == 5
+
+    forward_context = {}
+    gdn_spec_layer_names = ["gdn.0", "gdn.1"]
+    for layer_name in gdn_spec_layer_names:
+        attention = MagicMock()
+        attention.kv_cache = (
+            torch.empty(8, 4, 4, dtype=torch.float16),
+            torch.empty(8, 2, 4, 4, dtype=torch.float32),
+        )
+        forward_context[layer_name] = attention
+    ple_attention = MagicMock()
+    ple_attention.kv_cache = (torch.empty(8, 12, 8, dtype=torch.float16),)
+    forward_context["ple.0"] = ple_attention
+    assert gdn_spec_layer_names == kv_cache_config.kv_cache_groups[0].layer_names
+
+    block_tables = [
+        torch.zeros(4, 8, dtype=torch.int32),
+        torch.zeros(4, 8, dtype=torch.int32),
+    ]
+    ctx.initialize_from_forward_context(
+        kv_cache_config,
+        forward_context,
+        _COPY_FUNCS,
+        block_tables,
+    )
+    assert ctx.is_initialized
+    assert ctx.state_group_indices.tolist() == [0, 0, 0, 0, 1]
+    assert ctx.state_conv_widths.tolist() == [4, 0, 4, 0, 12]
+
+
+def test_mamba_groups_support_mixed_specs_in_uniform_group():
+    gdn_spec = MambaSpec(
+        block_size=16,
+        shapes=((4, 4), (2, 4, 4)),
+        dtypes=(torch.float16, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+    )
+    short_conv_spec = MambaSpec(
+        block_size=16,
+        shapes=((12, 8),),
+        dtypes=(torch.float16,),
+        mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+    )
+    layer_specs = {
+        "gdn.0": gdn_spec,
+        "gdn.1": gdn_spec,
+        "ple.0": short_conv_spec,
+    }
+    kv_cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                list(layer_specs),
+                UniformTypeKVCacheSpecs(
+                    block_size=16,
+                    kv_cache_specs=layer_specs,
+                ),
+            )
+        ],
+    )
+
+    assert kv_cache_config.has_mamba_layers
+    assert get_mamba_groups(kv_cache_config) == {
+        gdn_spec: [0],
+        short_conv_spec: [0],
+    }
+
+    # The group is listed once per spec, so its id must not be repeated.
+    model_state = object.__new__(MambaHybridModelState)
+    model_state._mamba_group_ids = []
+    model_state._mamba_spec = None
+    group_ids, representative_spec = model_state._get_mamba_group_info(kv_cache_config)
+    assert group_ids == [0]
+    assert representative_spec is gdn_spec
+
+    cfg = _TestConfig()
+    copy_bufs = _make_copy_bufs(cfg, kv_cache_config, torch.device("cpu"))
+    assert copy_bufs.mamba_group_ids == [0]
+    assert copy_bufs.src_ptrs.cpu.numel() == cfg.max_num_reqs * 5
+
+    ctx = _make_gpu_ctx(cfg, kv_cache_config, torch.device("cpu"))
+    assert ctx.mamba_group_ids == [0]
+    assert ctx.num_states == 5
+
+    forward_context = {
+        "gdn.0": MagicMock(
+            kv_cache=(
+                torch.empty(8, 4, 4, dtype=torch.float16),
+                torch.empty(8, 2, 4, 4, dtype=torch.float32),
+            )
+        ),
+        "gdn.1": MagicMock(
+            kv_cache=(
+                torch.empty(8, 4, 4, dtype=torch.float16),
+                torch.empty(8, 2, 4, 4, dtype=torch.float32),
+            )
+        ),
+        "ple.0": MagicMock(kv_cache=(torch.empty(8, 12, 8, dtype=torch.float16),)),
+    }
+    ctx.initialize_from_forward_context(
+        kv_cache_config,
+        forward_context,
+        _COPY_FUNCS,
+        [torch.zeros(4, 8, dtype=torch.int32)],
+    )
+    assert ctx.state_group_indices.tolist() == [0, 0, 0, 0, 0]
+    assert ctx.state_conv_widths.tolist() == [4, 0, 4, 0, 12]
 
 
 # -----------------------------------------------------------------------------
@@ -620,7 +796,7 @@ def _run_gpu_postprocess(
     *,
     kv_cache_config: KVCacheConfig,
     forward_context: dict[str, Any],
-    copy_funcs: tuple,
+    copy_funcs: MambaStateCopyFuncsByType,
     block_table: torch.Tensor,
     req_ids: list[str],
     num_accepted_tokens: list[int],

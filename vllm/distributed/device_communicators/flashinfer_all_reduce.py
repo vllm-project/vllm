@@ -386,7 +386,6 @@ class FlashInferAllReduce:
                 self.world_size,
             )
             return
-
         backend, _ = _resolve_fi_ar_backend()
         tuned_max_size = _get_tuned_standalone_max_size(
             self.world_size,
@@ -450,7 +449,27 @@ class FlashInferAllReduce:
         if num_tokens > self.max_num_tokens:
             return False
 
-        return self._ensure_workspace(hidden_dim, input_tensor.dtype)
+        if not self._ensure_workspace(hidden_dim, input_tensor.dtype):
+            return False
+
+        workspace = get_fi_ar_workspace(
+            world_size=self.world_size,
+            rank=self.rank,
+            max_token_num=self.max_num_tokens,
+            hidden_dim=hidden_dim,
+            dtype=input_tensor.dtype,
+            group=self.group,
+        )
+        assert workspace is not None
+        # The token bound above uses the full allocation budget, but mnnvl's
+        # Lamport buffers rotate through three slots, so only ~1/3 is usable per
+        # call. Asking the workspace directly to reject sizes the kernel can't fit.
+        return workspace.is_buffer_size_sufficient(
+            tp_size=self.world_size,
+            num_tokens=num_tokens,
+            hidden_dim=hidden_dim,
+            dtype=input_tensor.dtype,
+        )
 
     def all_reduce(self, input_tensor: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = input_tensor.shape

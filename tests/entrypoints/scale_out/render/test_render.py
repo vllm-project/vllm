@@ -348,6 +348,42 @@ async def test_chat_render_default_no_token_offsets(client):
 
 
 @pytest.mark.asyncio
+async def test_completion_render_truncated_token_offsets(client):
+    """Truncation must shorten token_offsets together with token_ids.
+
+    An explicit truncation_side turns off tokenizer-level truncation, so the
+    tokenizer returns offsets for the whole prompt and they are reduced
+    afterwards -- separately from token_ids. GenerateRequest documents that the
+    two lists have equal length.
+    """
+    prompt = "The quick brown fox jumps over the lazy dog."
+    keep = 4
+    response = await client.post(
+        "/v1/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "prompt": prompt,
+            "return_token_offsets": True,
+            "truncate_prompt_tokens": keep,
+            "truncation_side": "left",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    token_ids = data[0]["token_ids"]
+    offsets = data[0]["token_offsets"]
+
+    assert len(token_ids) == keep
+    assert len(offsets) == len(token_ids)
+
+    # Equal length is not enough: truncating from the left keeps the *last*
+    # tokens, so the surviving offsets must cover the end of the prompt.
+    assert offsets[-1][1] == len(prompt)
+    assert offsets[0][0] > 0
+
+
+@pytest.mark.asyncio
 async def test_completion_render_multiple_prompts_token_offsets(client):
     """Each prompt in a batch gets its own offsets aligned with its tokens."""
     prompts = ["Hello, world.", "Goodbye, world."]
@@ -493,6 +529,52 @@ async def test_chat_completion_render_assistant_tokens_mask_with_generation_tags
     assert detok_rest.status_code == 200
     assert "Hi!" not in detok_rest.json()["prompt"]
     assert "Bye" in detok_rest.json()["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_chat_render_assistant_tokens_mask_follows_truncation(client):
+    """The assistant mask must be truncated with the prompt it describes.
+
+    `assistant_tokens_mask` is positional: entry i labels token i. Truncating
+    `token_ids` from the left without truncating the mask leaves the two
+    describing different positions, and the mask ends up marking whichever
+    tokens happen to sit at the old offsets.
+    """
+    messages = [
+        # Deliberately lopsided: a long leading user turn and a short trailing
+        # one, so keeping the head of the mask is distinguishable from keeping
+        # its tail.
+        {"role": "user", "content": "Hello hello hello hello hello hello"},
+        {"role": "assistant", "content": "Hi!"},
+        {"role": "user", "content": "Bye"},
+    ]
+    body = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "chat_template": _TEMPLATE_WITH_GENERATION,
+        "return_assistant_tokens_mask": True,
+    }
+
+    full = await client.post("/v1/chat/completions/render", json=body)
+    assert full.status_code == 200
+    full_token_ids = full.json()["token_ids"]
+    full_mask = full.json()["assistant_tokens_mask"]
+    assert sum(full_mask) > 0
+
+    keep = len(full_token_ids) - 4
+    # Precondition: with this prompt the head and tail slices of the mask
+    # really do differ, so the assertion below can tell them apart.
+    assert full_mask[-keep:] != full_mask[:keep]
+
+    truncated = await client.post(
+        "/v1/chat/completions/render",
+        json={**body, "truncate_prompt_tokens": keep, "truncation_side": "left"},
+    )
+    assert truncated.status_code == 200
+    data = truncated.json()
+
+    assert data["token_ids"] == full_token_ids[-keep:]
+    assert data["assistant_tokens_mask"] == full_mask[-keep:]
 
 
 @pytest.mark.asyncio

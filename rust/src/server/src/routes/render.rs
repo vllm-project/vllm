@@ -68,6 +68,14 @@ fn model_resolution(state: &RenderState) -> LoraModelResolution {
     }
 }
 
+fn response_model(state: &RenderState, requested_model: Option<&str>) -> String {
+    requested_model
+        .filter(|model| !model.is_empty())
+        .or_else(|| state.served_model_names.first().map(String::as_str))
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn lower_render_request(
     state: &RenderState,
     text_request: TextRequest,
@@ -108,7 +116,7 @@ async fn render_chat(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Result<Json<GenerateRequest>, ApiError> {
-    let model = body.model.clone();
+    let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
@@ -132,7 +140,7 @@ async fn render_completion(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Result<Json<Vec<GenerateRequest>>, ApiError> {
-    let model = body.model.clone();
+    let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());

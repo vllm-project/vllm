@@ -72,8 +72,9 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
         render_index += 1;
     }
 
+    let mut last_tool_call_order = HashMap::new();
     for (message_index, message) in request.messages.iter().enumerate() {
-        if is_following_tool_response(request.messages.as_slice(), message_index) {
+        if is_following_user_content(request.messages.as_slice(), message_index) {
             continue;
         }
 
@@ -93,7 +94,14 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
             ChatMessage::Developer { content, tools } => {
                 render_developer_message(&mut out, content, tools.as_deref().unwrap_or(&[]))?;
             }
-            ChatMessage::User { content } => render_user_message(&mut out, content)?,
+            ChatMessage::User { .. } | ChatMessage::ToolResponse { .. } => {
+                render_user_content_block(
+                    &mut out,
+                    request.messages.as_slice(),
+                    message_index,
+                    &last_tool_call_order,
+                )?;
+            }
             ChatMessage::Assistant { content } => {
                 // Mirror Python: thinking block (reasoning + </think>) is
                 // emitted whenever thinking is active and reasoning isn't
@@ -104,9 +112,16 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
                 let append_eos = !(message_index + 1 == request.messages.len()
                     && request.chat_options.continue_final_message());
                 render_assistant_message(&mut out, emit_thinking_block, append_eos, content)?;
-            }
-            ChatMessage::ToolResponse { .. } => {
-                render_tool_response_block(&mut out, request.messages.as_slice(), message_index)?;
+
+                if content.has_tool_calls() {
+                    last_tool_call_order.clear();
+                    last_tool_call_order.extend(
+                        content
+                            .tool_calls()
+                            .enumerate()
+                            .map(|(index, tool_call)| (tool_call.id.clone(), index)),
+                    );
+                }
             }
         }
 
@@ -191,7 +206,7 @@ fn find_last_user_render_index(messages: &[ChatMessage], synthetic_tool_system: 
     let mut last_user_index = -1;
 
     for (message_index, message) in messages.iter().enumerate() {
-        if is_following_tool_response(messages, message_index) {
+        if is_following_user_content(messages, message_index) {
             continue;
         }
 
@@ -204,14 +219,20 @@ fn find_last_user_render_index(messages: &[ChatMessage], synthetic_tool_system: 
     last_user_index
 }
 
-/// Return whether this tool message is already covered by a previous tool run.
-fn is_following_tool_response(messages: &[ChatMessage], message_index: usize) -> bool {
-    matches!(messages[message_index], ChatMessage::ToolResponse { .. })
+/// Return whether this message is already covered by a previous user-content
+/// entry.
+fn is_following_user_content(messages: &[ChatMessage], message_index: usize) -> bool {
+    is_user_content_entry(&messages[message_index])
         && message_index > 0
-        && matches!(
-            messages[message_index - 1],
-            ChatMessage::ToolResponse { .. }
-        )
+        && is_user_content_entry(&messages[message_index - 1])
+}
+
+/// Return whether one message contributes content to a V4 user turn.
+fn is_user_content_entry(message: &ChatMessage) -> bool {
+    matches!(
+        message,
+        ChatMessage::User { .. } | ChatMessage::ToolResponse { .. }
+    )
 }
 
 /// Return whether one rendered entry should be treated as user-like.
@@ -226,10 +247,8 @@ fn is_user_like_entry(message: &ChatMessage) -> bool {
 /// entry.
 fn next_rendered_entry_is_assistant_or_end(messages: &[ChatMessage], message_index: usize) -> bool {
     let mut next_index = message_index + 1;
-    if matches!(messages[message_index], ChatMessage::ToolResponse { .. }) {
-        while next_index < messages.len()
-            && matches!(messages[next_index], ChatMessage::ToolResponse { .. })
-        {
+    if is_user_content_entry(&messages[message_index]) {
+        while next_index < messages.len() && is_user_content_entry(&messages[next_index]) {
             next_index += 1;
         }
     }
@@ -329,47 +348,49 @@ fn render_developer_message(
     Ok(())
 }
 
-/// Render one plain user turn.
-fn render_user_message(out: &mut String, content: &ChatContent) -> Result<()> {
-    out.push_str(USER_SP_TOKEN);
-    write_chat_content(out, content)?;
-    Ok(())
-}
-
-/// Render a contiguous tool-response run as one synthetic user turn.
-fn render_tool_response_block(
+/// Render contiguous user and tool-response messages as one V4 user turn.
+fn render_user_content_block(
     out: &mut String,
     messages: &[ChatMessage],
     message_index: usize,
+    tool_call_order: &HashMap<String, usize>,
 ) -> Result<()> {
-    let (block_start, block_end) = tool_response_block_bounds(messages, message_index);
-    let sorted_indices = sorted_tool_response_indices(messages, block_start, block_end);
+    let (block_start, block_end) = user_content_block_bounds(messages, message_index);
+    let mut sorted_tool_indices =
+        sorted_tool_response_indices(messages, block_start, block_end, tool_call_order).into_iter();
 
     out.push_str(USER_SP_TOKEN);
-    for (offset, message_index) in sorted_indices.iter().enumerate() {
+    for (offset, message_index) in (block_start..block_end).enumerate() {
         if offset > 0 {
             out.push_str("\n\n");
         }
-        let ChatMessage::ToolResponse { content, .. } = &messages[*message_index] else {
-            unreachable!("tool response block should only contain tool messages");
-        };
-        write_tool_result(out, content)?;
+        match &messages[message_index] {
+            ChatMessage::User { content } => write_chat_content(out, content)?,
+            ChatMessage::ToolResponse { .. } => {
+                let sorted_index = sorted_tool_indices
+                    .next()
+                    .expect("tool response block should include this tool message");
+                let ChatMessage::ToolResponse { content, .. } = &messages[sorted_index] else {
+                    unreachable!("sorted tool response index should reference a tool message");
+                };
+                write_tool_result(out, content)?;
+            }
+            _ => unreachable!("user content block should only contain user content messages"),
+        }
     }
 
     Ok(())
 }
 
-/// Return the contiguous tool-response block containing `actual_index`.
-fn tool_response_block_bounds(messages: &[ChatMessage], actual_index: usize) -> (usize, usize) {
+/// Return the contiguous user-content block containing `actual_index`.
+fn user_content_block_bounds(messages: &[ChatMessage], actual_index: usize) -> (usize, usize) {
     let mut block_start = actual_index;
-    while block_start > 0 && matches!(messages[block_start - 1], ChatMessage::ToolResponse { .. }) {
+    while block_start > 0 && is_user_content_entry(&messages[block_start - 1]) {
         block_start -= 1;
     }
 
     let mut block_end = actual_index + 1;
-    while block_end < messages.len()
-        && matches!(messages[block_end], ChatMessage::ToolResponse { .. })
-    {
+    while block_end < messages.len() && is_user_content_entry(&messages[block_end]) {
         block_end += 1;
     }
 
@@ -380,12 +401,15 @@ fn sorted_tool_response_indices(
     messages: &[ChatMessage],
     block_start: usize,
     block_end: usize,
+    tool_call_order: &HashMap<String, usize>,
 ) -> Vec<usize> {
-    let Some(tool_call_order) = last_tool_call_order_before(messages, block_start) else {
-        return (block_start..block_end).collect();
-    };
+    let mut indices = (block_start..block_end)
+        .filter(|index| matches!(messages[*index], ChatMessage::ToolResponse { .. }))
+        .collect::<Vec<_>>();
+    if indices.len() <= 1 || tool_call_order.is_empty() {
+        return indices;
+    }
 
-    let mut indices = (block_start..block_end).collect::<Vec<_>>();
     indices.sort_by_key(|index| {
         let ChatMessage::ToolResponse { tool_call_id, .. } = &messages[*index] else {
             unreachable!("tool response block should only contain tool messages");
@@ -393,26 +417,6 @@ fn sorted_tool_response_indices(
         tool_call_order.get(tool_call_id.as_str()).copied().unwrap_or(0)
     });
     indices
-}
-
-fn last_tool_call_order_before(
-    messages: &[ChatMessage],
-    message_index: usize,
-) -> Option<HashMap<&str, usize>> {
-    let mut tool_call_order = None;
-    for message in &messages[..message_index] {
-        if let ChatMessage::Assistant { content } = message {
-            let order = content
-                .tool_calls()
-                .enumerate()
-                .map(|(index, tool_call)| (tool_call.id.as_str(), index))
-                .collect::<HashMap<_, _>>();
-            if !order.is_empty() {
-                tool_call_order = Some(order);
-            }
-        }
-    }
-    tool_call_order
 }
 
 /// Render one tool response payload inside a V4 `<tool_result>` block.

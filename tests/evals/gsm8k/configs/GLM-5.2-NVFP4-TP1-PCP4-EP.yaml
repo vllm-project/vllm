@@ -4,7 +4,7 @@ num_questions: 1319
 num_fewshot: 5
 max_concurrency: 100
 server_args: >-
-  --enforce-eager
+  --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
   --max-model-len 4096
   --max-num-batched-tokens 32768
   --safetensors-load-strategy prefetch

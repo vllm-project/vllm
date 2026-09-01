@@ -2,7 +2,7 @@ group: Miscellaneous
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) V1 Sample + Logits"
+- label: ":nvidia: (H200 MIG 18GB) V1 Sample + Logits"
   key: v1-sample-logits
   timeout_in_minutes: 83
   device: h200_18gb
@@ -40,7 +40,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) V1 Core + KV + Metrics"
+- label: ":nvidia: (H200 MIG 35GB) V1 Core + KV + Metrics"
   device: h200_35gb
   key: v1-core-kv-metrics
   timeout_in_minutes: 80
@@ -132,7 +132,7 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
 
-- label: ":nvidia: (H200) Extract Hidden States Integration"
+- label: ":nvidia: (H200 MIG 18GB) Extract Hidden States Integration"
   key: extract-hidden-states-integration
   timeout_in_minutes: 20
   device: h200_18gb
@@ -150,6 +150,7 @@ steps:
 - label: ":nvidia: (L4) Extract Hidden States Integration"
   key: extract-hidden-states-integration-2-gpus
   timeout_in_minutes: 20
+  device: l4
   num_devices: 2
   working_dir: "/vllm-workspace"
   source_file_dependencies:
@@ -162,7 +163,7 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -m 'distributed' tests/v1/kv_connector/extract_hidden_states_integration
 
-- label: ":nvidia: (H200) Regression"
+- label: ":nvidia: (H200 MIG 18GB) Regression"
   key: regression
   timeout_in_minutes: 30
   device: h200_18gb
@@ -185,7 +186,7 @@ steps:
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
-- label: ":nvidia: (H200) Examples"
+- label: ":nvidia: (H200 MIG 35GB) Examples"
   device: h200_35gb
   key: examples
   timeout_in_minutes: 40
@@ -234,6 +235,7 @@ steps:
 - label: ":nvidia: (L4) Metrics, Tracing"
   key: metrics-tracing-2-gpus
   timeout_in_minutes: 25
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/config/
@@ -268,7 +270,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Python-only Installation"
+- label: ":nvidia: (H200 MIG 18GB) Python-only Installation"
   key: python-only-installation
   depends_on: ~
   optional: true
@@ -293,7 +295,7 @@ steps:
       - setup.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200) Async Engine, Inputs, Utils, Worker"
+- label: ":nvidia: (H200 MIG 35GB) Async Engine, Inputs, Utils, Worker"
   device: h200_35gb
   key: async-engine-inputs-utils-worker
   timeout_in_minutes: 25
@@ -340,7 +342,7 @@ steps:
   - vllm/entrypoints/chat_utils.py
   - vllm/entrypoints/mcp/
   - vllm/entrypoints/openai/chat_completion/protocol.py
-  - vllm/entrypoints/openai/engine/protocol.py
+  - vllm/entrypoints/generate/base/protocol.py
   - vllm/envs.py
   - vllm/exceptions.py
   - vllm/inputs/
@@ -433,6 +435,7 @@ steps:
     - pip install pytest-timeout pytest-forked
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+    - pytest -v -s v1/determinism/test_batch_invariance_vlm.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
     - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
@@ -440,7 +443,7 @@ steps:
     - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
     - pytest -v -s v1/determinism/test_online_batch_invariance.py
 
-- label: ":nvidia: (H200) Acceptance Length (Large Models)"
+- label: ":nvidia: (H200 MIG 35GB) Acceptance Length (Large Models)"
   device: h200_35gb
   key: acceptance-length-test-large-models
   timeout_in_minutes: 20

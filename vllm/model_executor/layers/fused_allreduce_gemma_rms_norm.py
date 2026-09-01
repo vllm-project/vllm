@@ -97,6 +97,17 @@ def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool
     )
     if workspace is None:
         return False, 0
+    # The token-count bound above uses the whole workspace budget, but a backend
+    # may use only a fraction of it per call (mnnvl rotates through three Lamport
+    # buffers). Ask the workspace so we don't admit tensors that the kernel will
+    # reject with "The buffer size in the given workspace is insufficient".
+    if not workspace.is_buffer_size_sufficient(
+        tp_size=tp_size,
+        num_tokens=num_tokens,
+        hidden_dim=hidden_size,
+        dtype=hidden_states.dtype,
+    ):
+        return False, 0
     return True, max_token_num
 
 

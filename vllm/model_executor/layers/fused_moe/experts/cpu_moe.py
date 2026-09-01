@@ -20,7 +20,10 @@ from vllm._custom_ops import (
     cpu_prepack_moe_weight_int8,
     fused_experts_cpu,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.zentorch_utils import (
+    _ZENTORCH_MOE_ACTIVATIONS,
+    has_zentorch_op,
     is_zentorch_moe_config_supported,
     is_zentorch_moe_supported,
 )
@@ -44,6 +47,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.math_utils import round_up
 
+logger = init_logger(__name__)
 # ===========================================================================
 # Routing
 # ===========================================================================
@@ -1382,3 +1386,161 @@ class ArmCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
             "neon",
             skip_weighted=apply_router_weight_on_input,
         )
+
+
+class ZenCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
+    """AMD Zen INT8 MoE with per-token activation and channelwise weight
+    quantization, dispatched through zentorch."""
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+        assert self.w1_scale is not None and self.w2_scale is not None, (
+            "ZenCPUExpertsInt8 requires per-channel weight scales on the layer."
+        )
+        num_experts = self.w1_scale.shape[0]
+        self._w1_scale_bf16 = (
+            self.w1_scale.detach()
+            .to(torch.bfloat16)
+            .reshape(num_experts, -1)
+            .contiguous()
+        )
+        self._w2_scale_bf16 = (
+            self.w2_scale.detach()
+            .to(torch.bfloat16)
+            .reshape(num_experts, -1)
+            .contiguous()
+        )
+        self._w1_bias_bf16 = (
+            None
+            if self.w1_bias is None
+            else self.w1_bias.detach().to(torch.bfloat16).contiguous()
+        )
+        self._w2_bias_bf16 = (
+            None
+            if self.w2_bias is None
+            else self.w2_bias.detach().to(torch.bfloat16).contiguous()
+        )
+        logger.info_once(
+            "[zen_cpu] Using zentorch_fused_moe for W8A8 INT8 MoE (monolithic experts)"
+        )
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        # zentorch_fused_moe quantizes activations itself.
+        return True
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return has_zentorch_op(["zentorch_fused_moe"])
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return str(activation.value).lower() in _ZENTORCH_MOE_ACTIVATIONS
+
+    @staticmethod
+    def _supports_parallel_config(
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> bool:
+        return not moe_parallel_config.use_ep
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (
+            kInt8StaticChannelSym,
+            kInt8DynamicTokenSym,
+        )
+
+    @staticmethod
+    def _supports_routing_method(
+        routing_method: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return routing_method in [
+            RoutingMethodType.Default,
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+        ]
+
+    @staticmethod
+    def _supports_router_logits_dtype(
+        router_logits_dtype: torch.dtype | None,
+        routing_method: RoutingMethodType,
+    ) -> bool:
+        return True
+
+    def supports_expert_map(self) -> bool:
+        return False
+
+    def apply(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
+    ) -> torch.Tensor:
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            use_grouped_topk=num_expert_group is not None,
+            top_k=self.moe_config.experts_per_token,
+            renormalize=self.moe_config.routing_method
+            in (
+                RoutingMethodType.Renormalize,
+                RoutingMethodType.RenormalizeNaive,
+            ),
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            scoring_func="softmax",
+            routed_scaling_factor=(
+                routed_scaling_factor if routed_scaling_factor is not None else 1.0
+            ),
+            e_score_correction_bias=e_score_correction_bias,
+        )
+
+        if apply_router_weight_on_input:
+            assert topk_ids.size(1) == 1, (
+                "apply_router_weight_on_input is only implemented for topk=1"
+            )
+            hidden_states = hidden_states.mul(topk_weights.to(hidden_states.dtype))
+
+        output = torch.empty_like(hidden_states)
+        torch.ops.zentorch.zentorch_fused_moe(
+            output,
+            hidden_states,
+            w1,
+            w2,
+            self._w1_bias_bf16,
+            self._w2_bias_bf16,
+            topk_weights.to(torch.float32).contiguous(),
+            topk_ids.to(torch.int32).contiguous(),
+            apply_router_weight_on_input,  # skip_weighted
+            str(activation.value).lower(),
+            self._w1_scale_bf16,
+            self._w2_scale_bf16,
+        )
+        return output

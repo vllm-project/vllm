@@ -11,16 +11,17 @@ and consumer instances read/write KV to/from the store independently,
 enabling prefix caching via hash-based deduplication.
 """
 
-from collections.abc import Iterable
+from collections import Counter
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
+    BlockStored,
     KVCacheEvent,
     KVConnectorKVEvents,
-    KVEventAggregator,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -56,31 +57,66 @@ logger = init_logger(__name__)
 class MooncakeStoreKVEvents(KVConnectorKVEvents):
     """KV event aggregation for MooncakeStoreConnector."""
 
-    def __init__(self, num_workers: int) -> None:
-        self._aggregator = KVEventAggregator(num_workers)
+    def __init__(
+        self,
+        num_workers: int,
+        group_tp_replication_factors: Sequence[int] = (1,),
+    ) -> None:
+        if num_workers <= 0:
+            raise ValueError("num_workers must be greater than zero.")
+        if any(factor <= 0 for factor in group_tp_replication_factors):
+            raise ValueError("TP replication factors must be greater than zero.")
+        self._event_counter: Counter[KVCacheEvent] = Counter()
+        self._num_workers = num_workers
+        self._group_tp_replication_factors = tuple(group_tp_replication_factors)
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
-        self._aggregator.add_events(events)
+        if not isinstance(events, list):
+            raise TypeError("events must be a list of KVCacheEvent.")
+        self._event_counter.update(events)
+
+    def _replication_factor(self, event: KVCacheEvent) -> int:
+        if not isinstance(event, BlockStored) or event.group_idx is None:
+            return 1
+        return self._group_tp_replication_factors[event.group_idx]
+
+    def _is_common_event(self, event: KVCacheEvent, count: int) -> bool:
+        return count * self._replication_factor(event) >= self._num_workers
 
     def aggregate(self) -> "MooncakeStoreKVEvents":
-        common_events = self._aggregator.get_common_events()
-        self._aggregator.clear_events()
-        self._aggregator.add_events(common_events)
-        self._aggregator.reset_workers()
+        common_events = self.pop_common_events()
+        self._event_counter.clear()
+        self._event_counter.update(common_events)
+        self._num_workers = 1
         return self
 
+    def pop_common_events(self) -> list[KVCacheEvent]:
+        common_events = [
+            event
+            for event, count in self._event_counter.items()
+            if self._is_common_event(event, count)
+        ]
+        for event in common_events:
+            del self._event_counter[event]
+        return common_events
+
+    def has_events(self) -> bool:
+        return bool(self._event_counter)
+
     def increment_workers(self, count: int = 1) -> None:
-        self._aggregator.increment_workers(count)
+        if count <= 0:
+            raise ValueError("count must be positive.")
+        self._num_workers += count
 
     def get_all_events(self) -> list[KVCacheEvent]:
-        return self._aggregator.get_all_events()
+        return list(self._event_counter.elements())
 
     def get_number_of_workers(self) -> int:
-        return self._aggregator.get_number_of_workers()
+        return self._num_workers
 
     def clear_events(self) -> None:
-        self._aggregator.clear_events()
-        self._aggregator.reset_workers()
+        self._event_counter.clear()
+        self._num_workers = 1
 
     def __repr__(self) -> str:
         return f"<MooncakeStoreKVEvents events={self.get_all_events()}>"
@@ -97,7 +133,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         unsupported: list[str] = []
         cache_block_size = vllm_config.cache_config.block_size
-        for g_idx, g in enumerate(kv_cache_config.kv_cache_groups):
+        for g_idx, g in enumerate(kv_cache_config.transfer_groups):
             spec = g.kv_cache_spec
             if isinstance(spec, CrossAttentionSpec):
                 unsupported.append(f"group {g_idx}: CrossAttentionSpec")
@@ -109,11 +145,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
                     f"{cache_block_size} (mamba_cache_mode != 'align')"
                 )
         pcp = vllm_config.parallel_config.prefill_context_parallel_size
-        dcp = vllm_config.parallel_config.decode_context_parallel_size
-        if len(kv_cache_config.kv_cache_groups) > 1 and pcp * dcp > 1:
-            unsupported.append(
-                f"PCP/DCP > 1 (pcp={pcp}, dcp={dcp}) with hybrid attention"
-            )
+        if len(kv_cache_config.transfer_groups) > 1 and pcp > 1:
+            unsupported.append(f"PCP > 1 (pcp={pcp}) with hybrid attention")
         if unsupported:
             raise ValueError(
                 "MooncakeStoreConnector does not support: " + "; ".join(unsupported)
@@ -263,16 +296,13 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             self._kv_cache_events = kv_cache_events
         else:
             self._kv_cache_events.add_events(kv_cache_events.get_all_events())
-            self._kv_cache_events.increment_workers(
-                kv_cache_events.get_number_of_workers()
-            )
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         if self._kv_cache_events is not None:
-            self._kv_cache_events.aggregate()
-            yield from self._kv_cache_events.get_all_events()
-            self._kv_cache_events.clear_events()
-            self._kv_cache_events = None
+            events = self._kv_cache_events.pop_common_events()
+            if not self._kv_cache_events.has_events():
+                self._kv_cache_events = None
+            yield from events
 
     # ============================================================
     # Worker-side methods
@@ -283,8 +313,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
-        # No-op: loads are issued in get_finished() for compute overlap.
-        pass
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        self.connector_worker.start_load_kv(metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         # No layerwise support - no-op
@@ -301,8 +333,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return
 
     def wait_for_save(self):
-        # No-op: stores are issued in get_finished() for compute overlap.
-        pass
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        self.connector_worker.wait_for_save(metadata)
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -320,11 +354,19 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self,
     ) -> MooncakeStoreKVEvents | None:
         assert self.connector_worker is not None
-        events = self.connector_worker.get_kv_events()
-        if not events:
+        if (
+            not self.connector_worker.enable_kv_events
+            or self.connector_worker.kv_send_thread is None
+        ):
             return None
-
-        kv_events = MooncakeStoreKVEvents(num_workers=1)
+        events = self.connector_worker.get_kv_events()
+        # Empty containers still count this worker toward the poll's quorum.
+        kv_events = MooncakeStoreKVEvents(
+            num_workers=1,
+            group_tp_replication_factors=(
+                self.connector_worker.group_tp_replication_factors
+            ),
+        )
         kv_events.add_events(events)
         return kv_events
 
