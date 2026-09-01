@@ -69,7 +69,7 @@ logger = init_logger(__name__)
 # TODO(rocm): These models are either unsupported by MRV2 or slower with
 # MRV2 on AMD GPUs.
 ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
-    {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM"}
+    {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM", "GlmMoeDsaForCausalLM"}
 )
 
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
@@ -79,6 +79,8 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "DeepseekV4ForCausalLM",
         "DeepseekV4ForConditionalGeneration",
         "DeepSeekV4MTPModel",
+        "Dots3NoteForCausalLM",
+        "Dots3NoteMTPModel",
         "GlmMoeDsaForCausalLM",
         "HYV4ForCausalLM",
         "HYV4MTPModel",
@@ -99,10 +101,10 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES - {
-            "DeepseekV32ForCausalLM",
-            "DeepseekV32MTPModel",
-        }
+        # Breakable CUDA graphs currently regress performance on ROCm, so no
+        # architecture opts in by default here. Users can still force it with
+        # VLLM_USE_BREAKABLE_CUDAGRAPH=1.
+        return frozenset()
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
@@ -2820,14 +2822,18 @@ class VllmConfig:
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
         if self.model_config is None:
             return self
+        # The ds_mla layouts are MLA-only by construction; the plain nvfp4
+        # layout (head_size//2 + head_size//16) does not apply to MLA.
         if (
             self.cache_config.cache_dtype.startswith("nvfp4")
+            and not self.cache_config.cache_dtype.endswith("_ds_mla")
             and self.model_config.use_mla
         ):
             raise ValueError(
                 "nvfp4 KV cache is not supported with MLA (Multi-head Latent "
                 "Attention) backends. Please use a different --kv-cache-dtype "
-                "(e.g., 'fp8' or 'auto') for MLA models such as DeepSeek."
+                "(e.g., 'fp8', 'auto', or 'nvfp4_ds_mla' with a sparse MLA "
+                "backend) for MLA models such as DeepSeek."
             )
         return self
 
