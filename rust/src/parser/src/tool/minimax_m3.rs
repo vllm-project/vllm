@@ -266,7 +266,10 @@ fn parse_invoke_params(invoke_body: &str) -> ModalResult<Vec<(String, ParamInput
             continue;
         }
         if input.starts_with(NAMESPACE) {
-            return malformed();
+            // Namespace marker not followed by `<`: the model elided this
+            // parameter's opening tag. Recover it from its closing tag.
+            elements.push(elided_parameter_element(&mut input)?);
+            continue;
         }
         // Be tolerant: ordinary text at an invokeparameter boundary ends this invoke.
         // Keep parsed parameters and drop the remaining invoke body.
@@ -282,6 +285,35 @@ fn parameter_element(input: &mut &str) -> ModalResult<ParamElement> {
     let value = element_body(input, &name)?;
     close_element_tag(input, &name)?;
     Ok(ParamElement { name, value })
+}
+
+/// Parse a MiniMax M3 parameter element whose opening tag was elided.
+///
+/// Deployed MiniMax M3 checkpoints emit parameters whose opening tag is
+/// missing: the value sits directly between the namespace marker and a closing
+/// tag carrying the parameter name, e.g.
+/// `]<]minimax[>[offerta.docx]<]minimax[>[</filename>`. Recover the parameter
+/// by taking the value up to the next namespace marker, which must start the
+/// closing tag that names the parameter. Any other shape stays malformed.
+fn elided_parameter_element(input: &mut &str) -> ModalResult<ParamElement> {
+    let (value, name) = seq!(
+        _: literal(NAMESPACE),
+        take_until(0.., NAMESPACE),
+        _: literal(ELEMENT_END_START),
+        take_until(1.., ">"),
+        _: literal(">"),
+    )
+    .parse_next(input)
+    .map_err(ErrMode::cut)?;
+
+    if name.starts_with('/') || name.trim().is_empty() {
+        return malformed();
+    }
+
+    Ok(ParamElement {
+        name: name.to_string(),
+        value: ParamInput::Text(value.to_string()),
+    })
 }
 
 /// Parse a MiniMax M3 opening element tag.
@@ -327,8 +359,16 @@ fn element_body(input: &mut &str, closing_name: &str) -> ModalResult<ParamInput>
             continue;
         }
         if input.starts_with(NAMESPACE) {
-            // Unexpected namespace marker.
-            return malformed();
+            // Namespace marker not followed by `<`: the model elided a child
+            // element's opening tag. Recover it from its closing tag, unless
+            // that closing tag is the parent's own (recovering it as a child
+            // would leave this element body unterminated).
+            let element = elided_parameter_element(input)?;
+            if element.name == closing_name {
+                return malformed();
+            }
+            elements.push(element);
+            continue;
         }
     }
 
@@ -388,7 +428,7 @@ mod tests {
     use thiserror_ext::AsReport;
 
     use super::{
-        ELEMENT_END_START, ELEMENT_START, INVOKE_END, INVOKE_START, MinimaxM3ToolParser,
+        ELEMENT_END_START, ELEMENT_START, INVOKE_END, INVOKE_START, MinimaxM3ToolParser, NAMESPACE,
         TOOL_CALL_END, TOOL_CALL_START, ToolParser,
     };
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
@@ -396,6 +436,10 @@ mod tests {
 
     fn element(name: &str, body: &str) -> String {
         format!("{ELEMENT_START}{name}>{body}{ELEMENT_END_START}{name}>")
+    }
+
+    fn elided_element(name: &str, body: &str) -> String {
+        format!("{NAMESPACE}{body}{ELEMENT_END_START}{name}>")
     }
 
     fn invoke(function_name: &str, body: &str) -> String {
@@ -453,6 +497,18 @@ mod tests {
                         "type": "array",
                         "items": { "type": "integer" }
                     }
+                }
+            }),
+            strict: None,
+        });
+        tools.push(Tool {
+            name: "save_file".to_string(),
+            description: None,
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "filename": { "type": "string" },
+                    "content": { "type": "string" }
                 }
             }),
             strict: None,
@@ -589,6 +645,155 @@ mod tests {
 
         assert_eq!(
             serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "city": "Seattle" })
+        );
+    }
+
+    #[test]
+    fn minimax_m3_parse_complete_accepts_elided_first_param_opening_tag() {
+        // Real capture: deployed MiniMax M3 checkpoints elide the FIRST
+        // parameter's opening tag after the invoke header. The value sits
+        // directly between the namespace marker and a closing tag carrying the
+        // parameter name; the second parameter is fully tagged.
+        let capture = concat!(
+            "]<]minimax[>[<tool_call>\n",
+            "]<]minimax[>[<invoke name=\"save_file\">",
+            "]<]minimax[>[offerta.docx",
+            "]<]minimax[>[</filename>",
+            "]<]minimax[>[<content>Hello",
+            "]<]minimax[>[</content>",
+            "]<]minimax[>[</invoke>",
+            "]<]minimax[>[</tool_call>",
+        );
+        let mut parser = MinimaxM3ToolParser::new(&m3_test_tools());
+        let output = parser.parse_complete(capture).unwrap();
+
+        assert!(output.normal_text().is_empty());
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("save_file"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "filename": "offerta.docx", "content": "Hello" })
+        );
+    }
+
+    #[test]
+    fn minimax_m3_parse_complete_accepts_elided_first_param_second_capture() {
+        // Second real capture, truncated in flight at "]<]minimax[>[</filen";
+        // completed here with the same shape the model was emitting.
+        let capture = concat!(
+            "]<]minimax[>[<tool_call>\n",
+            "]<]minimax[>[<invoke name=\"save_file\">",
+            "]<]minimax[>[test.txt",
+            "]<]minimax[>[</filename>",
+            "]<]minimax[>[<content>Hello",
+            "]<]minimax[>[</content>",
+            "]<]minimax[>[</invoke>",
+            "]<]minimax[>[</tool_call>",
+        );
+        let mut parser = MinimaxM3ToolParser::new(&m3_test_tools());
+        let output = parser.parse_complete(capture).unwrap();
+
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("save_file"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "filename": "test.txt", "content": "Hello" })
+        );
+    }
+
+    #[test]
+    fn minimax_m3_parse_complete_accepts_all_params_elided() {
+        // The recovery rule is positional: the invoke body is already
+        // delimited by the invoke end marker, so every closing tag inside it
+        // unambiguously ends one parameter. Any parameter may therefore have
+        // its opening tag elided, not just the first, and elided values flow
+        // through the same schema coercion as tagged ones ("days" becomes an
+        // integer).
+        let mut parser = MinimaxM3ToolParser::new(&m3_test_tools());
+        let output = parser
+            .parse_complete(&build_tool_block(&[(
+                "get_weather",
+                format!(
+                    "{}{}",
+                    elided_element("city", "Seattle"),
+                    elided_element("days", "5")
+                ),
+            )]))
+            .unwrap();
+
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "city": "Seattle", "days": 5 })
+        );
+    }
+
+    #[test]
+    fn minimax_m3_parse_complete_accepts_elided_first_child_in_nested_element() {
+        // The same elision can follow any opening tag. Inside a nested
+        // element, recovery requires the discovered closing tag to differ from
+        // the parent's, which keeps the parent element properly terminated.
+        let mut parser = MinimaxM3ToolParser::new(&m3_test_tools());
+        let shipping = element(
+            "shipping",
+            &format!(
+                "{}{}",
+                elided_element("city", "Singapore"),
+                element("zip", "018956")
+            ),
+        );
+        let output =
+            parser.parse_complete(&build_tool_block(&[("create_order", shipping)])).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "shipping": { "city": "Singapore", "zip": 18956 } })
+        );
+    }
+
+    #[test]
+    fn minimax_m3_elided_close_tag_matching_parent_stays_malformed() {
+        // Inside `<note>`, the only closing tag after the stray namespace
+        // marker is the parent's own. Recovering it as an elided child would
+        // leave the parent unterminated, so this shape stays malformed.
+        let mut parser = MinimaxM3ToolParser::new(&m3_test_tools());
+        let body = format!("{ELEMENT_START}note>{NAMESPACE}text{ELEMENT_END_START}note>");
+
+        assert!(parser.parse_chunk(&build_tool_block(&[("get_weather", body)])).is_err());
+    }
+
+    #[test]
+    fn minimax_m3_parse_complete_extracts_mixed_elided_and_tagged_invokes() {
+        let mut parser = MinimaxM3ToolParser::new(&m3_test_tools());
+        let text = format!(
+            "Saving now. {}",
+            build_tool_block(&[
+                (
+                    "save_file",
+                    format!(
+                        "{}{}",
+                        elided_element("filename", "offerta.docx"),
+                        element("content", "Hello")
+                    ),
+                ),
+                ("get_weather", element("city", "Seattle")),
+            ])
+        );
+        let output = parser.parse_complete(&text).unwrap();
+
+        assert_eq!(output.normal_text(), "Saving now. ");
+        assert_eq!(output.calls().len(), 2);
+        assert_eq!(output.calls()[0].tool_index, 0);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("save_file"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "filename": "offerta.docx", "content": "Hello" })
+        );
+        assert_eq!(output.calls()[1].tool_index, 1);
+        assert_eq!(output.calls()[1].name.as_deref(), Some("get_weather"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[1].arguments).unwrap(),
             json!({ "city": "Seattle" })
         );
     }
@@ -773,6 +978,31 @@ mod tests {
 
         assert_eq!(output.calls().len(), 1);
         assert!(output.normal_text().is_empty());
+    }
+
+    #[test]
+    fn minimax_m3_streaming_handles_elided_param_split_across_chunks() {
+        // Capture-shaped invoke with an elided first parameter, streamed in
+        // tiny chunks so every marker is split across chunk boundaries.
+        let text = build_tool_block(&[(
+            "save_file",
+            format!(
+                "{}{}",
+                elided_element("filename", "offerta.docx"),
+                element("content", "Hello")
+            ),
+        )]);
+        let chunks = split_by_chars(&text, 3);
+        let mut parser = MinimaxM3ToolParser::new(&m3_test_tools());
+        let output = collect_stream(&mut parser, &chunks);
+
+        assert!(output.normal_text().is_empty());
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("save_file"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "filename": "offerta.docx", "content": "Hello" })
+        );
     }
 
     #[test]
