@@ -24,6 +24,15 @@ from vllm.multimodal.media.video import VideoEmbeddingMediaIO
 from vllm.utils.sparse_utils import safe_to_dense
 
 # 4 TiB of float32 once densified, but only a handful of stored elements.
+#
+# The shape is deliberately far larger than any host: `safe_to_dense` rejects
+# it before `to_dense()` is reached, and if the guard were ever removed the
+# allocation is refused outright rather than filled. Measured on a 252 GiB host
+# with `vm.overcommit_memory=0`, calling `to_dense()` on this tensor raises
+# `RuntimeError: DefaultCPUAllocator: can't allocate memory: you tried to
+# allocate 4398046511104 bytes` and peak RSS moves 498 -> 504 MiB, so the test
+# cannot exhaust the machine it runs on. Picking a shape that *fits* would be
+# the unsafe choice: a 30000x30000 payload really does materialize 3.4 GiB.
 BOMB_SHAPE = (2**20, 2**20)
 
 
@@ -31,6 +40,7 @@ def _oversized_sparse_tensor() -> torch.Tensor:
     """A *valid* sparse tensor whose declared shape is enormous.
 
     Indices are in bounds, so `check_sparse_tensor_invariants()` accepts it.
+    That is the point: the invariant checks are not what stops this.
     """
     indices = torch.tensor([[0], [0]])
     values = torch.tensor([1.0])
