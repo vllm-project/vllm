@@ -11,7 +11,8 @@ For each token and channel, the output kernel computes
 State may use either [slot, window, channel] or [slot, channel, window]
 layout. Decode, speculative decode, and prefill differ in their state-window
 offset and write-back rule. The write-back runs separately because it
-overwrites state read by the output kernel. Slot zero is never updated.
+overwrites state read by the output kernel. An optional token map lets mixed
+batches retain their original row order. Slot zero is never updated.
 """
 
 from typing import Literal
@@ -26,7 +27,7 @@ BLOCK_C = 512
 NUM_WARPS = 8
 
 
-@triton.jit(do_not_specialize=["num_reqs", "bs_iters"])
+@triton.jit(do_not_specialize=["num_reqs", "bs_iters", "has_token_map"])
 def _ple_conv_kernel(
     x_ptr,
     state_ptr,
@@ -36,6 +37,8 @@ def _ple_conv_kernel(
     qsl_ptr,
     num_acc_ptr,
     has_init_ptr,
+    token_idx_ptr,
+    has_token_map,
     num_reqs,
     bs_iters,
     state_bs,
@@ -54,6 +57,7 @@ def _ple_conv_kernel(
     pid_c = tl.program_id(1)
     c_offs = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
     c_mask = c_offs < C
+    output_t = tl.load(token_idx_ptr + t, mask=has_token_map, other=t).to(tl.int64)
 
     if MODE == "decode":
         r = t
@@ -109,8 +113,14 @@ def _ple_conv_kernel(
             mask=c_mask & read_state & from_state,
             other=0.0,
         )
+        input_t = q_start + h - STATE_LEN
+        input_t = tl.load(
+            token_idx_ptr + input_t,
+            mask=has_token_map & out_ok & (~from_state),
+            other=input_t,
+        ).to(tl.int64)
         input_tap = tl.load(
-            x_ptr + (q_start + h - STATE_LEN) * C + c_offs,
+            x_ptr + input_t * C + c_offs,
             mask=c_mask & out_ok & (~from_state),
             other=0.0,
         )
@@ -127,18 +137,18 @@ def _ple_conv_kernel(
     y = conv * tl.sigmoid(conv)
     conv_output = tl.where(out_ok, y, 0.0).to(residual_ptr.dtype.element_ty)
     residual = tl.load(
-        residual_ptr + t * C + c_offs,
+        residual_ptr + output_t * C + c_offs,
         mask=c_mask,
         other=0.0,
     )
     tl.store(
-        residual_ptr + t * C + c_offs,
+        residual_ptr + output_t * C + c_offs,
         residual + conv_output,
         mask=c_mask,
     )
 
 
-@triton.jit(do_not_specialize=["num_reqs"])
+@triton.jit(do_not_specialize=["num_reqs", "has_token_map"])
 def _ple_conv_writeback_kernel(
     x_ptr,
     state_ptr,
@@ -146,6 +156,8 @@ def _ple_conv_writeback_kernel(
     qsl_ptr,
     num_acc_ptr,
     has_init_ptr,
+    token_idx_ptr,
+    has_token_map,
     num_reqs,
     state_bs,
     state_ws,
@@ -203,8 +215,14 @@ def _ple_conv_writeback_kernel(
             mask=c_mask & from_state & src_ok,
             other=0.0,
         )
+        input_t = q_start + m - STATE_LEN
+        input_t = tl.load(
+            token_idx_ptr + input_t,
+            mask=has_token_map & (~from_state) & do_write,
+            other=input_t,
+        ).to(tl.int64)
         input_value = tl.load(
-            x_ptr + (q_start + m - STATE_LEN) * C + c_offs,
+            x_ptr + input_t * C + c_offs,
             mask=c_mask & (~from_state) & do_write,
             other=0.0,
         )
@@ -266,12 +284,15 @@ def ple_conv(
     num_accepted_tokens: torch.Tensor | None = None,
     has_initial_states: torch.Tensor | None = None,
     spec_query_len: int = 1,
+    token_indices: torch.Tensor | None = None,
 ) -> None:
-    """Run short convolution in place for decode, spec decode, or prefill."""
+    """Add short-convolution output to ``residual`` and update its state."""
     kernel_spec_query_len = spec_query_len if mode == "spec" else 1
     T, C, K, state_len, state_width = _conv_dimensions(
         inputs, conv_weights, dilation, kernel_spec_query_len
     )
+    if token_indices is not None:
+        T = token_indices.numel()
     state_bs, state_ws, state_cs = _get_conv_state_strides(conv_state, C, state_width)
 
     if mode == "decode":
@@ -310,6 +331,8 @@ def ple_conv(
         query_start_loc,
         num_accepted_tokens,
         has_initial_states,
+        token_indices if token_indices is not None else state_indices,
+        token_indices is not None,
         num_reqs,
         binary_search_iters,
         state_bs,
@@ -332,6 +355,8 @@ def ple_conv(
         query_start_loc,
         num_accepted_tokens,
         has_initial_states,
+        token_indices if token_indices is not None else state_indices,
+        token_indices is not None,
         num_reqs,
         state_bs,
         state_ws,
