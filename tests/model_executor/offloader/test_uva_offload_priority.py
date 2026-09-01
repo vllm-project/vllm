@@ -32,6 +32,34 @@ def _make_mock_param(tensor: torch.Tensor) -> nn.Parameter:
     return MockParam(tensor.clone())
 
 
+class TrackedParam(nn.Parameter):
+    @property
+    def device(self) -> torch.device:
+        return torch.device("cuda:0")
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "_vllm_is_uva_offloaded" and value is True:
+            tracker = getattr(self, "_tracker", None)
+            layer_idx = getattr(self, "_layer_idx", "unknown")
+            param_name = getattr(self, "_param_name", "unknown")
+            if tracker is not None:
+                tracker.append(f"offload_layer_{layer_idx}_{param_name}")
+        super().__setattr__(name, value)
+
+
+def _make_tracked_param(
+    tensor: torch.Tensor,
+    layer_idx: int,
+    param_name: str,
+    tracker: list[str],
+) -> nn.Parameter:
+    p = TrackedParam(tensor.clone())
+    p._layer_idx = layer_idx
+    p._param_name = param_name
+    p._tracker = tracker
+    return p
+
+
 class MockAttention(nn.Module):
     def __init__(self, dim: int = 128):
         super().__init__()
@@ -88,6 +116,37 @@ class MockDenseLayer(nn.Module):
         self.mlp_w2.weight = _make_mock_param(self.mlp_w2.weight)
 
 
+class TrackedMoELayer(nn.Module):
+    def __init__(
+        self,
+        layer_idx: int,
+        tracker: list[str],
+        dim: int = 128,
+        num_experts: int = 4,
+    ):
+        super().__init__()
+        self.layer_idx = layer_idx
+        tracker.append(f"construct_layer_{layer_idx}")
+        self.input_layernorm = nn.LayerNorm(dim)
+        self.input_layernorm.weight = _make_tracked_param(
+            self.input_layernorm.weight, layer_idx, "input_layernorm", tracker
+        )
+        self.qkv_proj = nn.Linear(dim, dim * 3, bias=False)
+        self.qkv_proj.weight = _make_tracked_param(
+            self.qkv_proj.weight, layer_idx, "qkv_proj", tracker
+        )
+        self.gate = nn.Linear(dim, num_experts, bias=False)
+        self.gate.weight = _make_tracked_param(
+            self.gate.weight, layer_idx, "gate", tracker
+        )
+        self.experts = _make_tracked_param(
+            torch.randn(num_experts, dim, dim * 2),
+            layer_idx,
+            "experts",
+            tracker,
+        )
+
+
 @pytest.fixture(autouse=True)
 def mock_uva_runtime(monkeypatch):
     monkeypatch.setattr(
@@ -135,7 +194,7 @@ def test_moe_expert_priority_offloading_single_layer():
 
     # Allocate budget sufficient only for expert parameters
     offloader = UVAOffloader(cpu_offload_max_bytes=expert_bytes)
-    offloader.wrap_modules([layer], prefix="model.layers.0")
+    offloader.wrap_modules((m for m in [layer]), prefix="model.layers.0")
 
     # Experts MUST be offloaded
     assert _is_offloaded(layer.mlp.experts)
@@ -161,7 +220,7 @@ def test_moe_expert_priority_multi_layer_global_ordering():
     # Budget covers exactly 2 layers of experts
     budget = expert_bytes_per_layer * 2
     offloader = UVAOffloader(cpu_offload_max_bytes=budget)
-    offloader.wrap_modules([layer0, layer1], prefix="model.layers")
+    offloader.wrap_modules((m for m in [layer0, layer1]), prefix="model.layers")
 
     # Both layers' experts MUST be offloaded
     assert _is_offloaded(layer0.mlp.experts)
@@ -174,51 +233,79 @@ def test_moe_expert_priority_multi_layer_global_ordering():
     assert not _is_offloaded(layer1.input_layernorm.weight)
 
 
-def test_lazy_generator_incremental_offload():
-    """Verify that wrap_modules offloads sparse experts incrementally as layers
-    are yielded by the generator, rather than eagerly materializing all layers.
+def test_lazy_generator_temporal_ordering():
+    """Verify that each layer's priority-0 offloading happens BEFORE the next
+    layer is constructed by the generator.
+
+    Guards directly against eager materialization: list(modules_generator).
     """
     events: list[str] = []
 
-    class TrackedMoELayer(MockMoELayer):
-        def __init__(self, idx: int, dim: int = 128):
-            super().__init__(dim=dim)
-            self.idx = idx
-            events.append(f"construct_layer_{idx}")
-
     def layer_generator(count: int) -> Generator[nn.Module, None, None]:
         for i in range(count):
-            layer = TrackedMoELayer(i)
-            yield layer
+            yield TrackedMoELayer(i, tracker=events)
 
-    layer_sample = MockMoELayer(dim=128)
-    expert_bytes = (
-        layer_sample.mlp.experts.numel() * layer_sample.mlp.experts.element_size()
-    )
+    sample = TrackedMoELayer(999, tracker=[])
+    expert_bytes = sample.experts.numel() * sample.experts.element_size()
 
     # Budget covers 2 layers of experts
     offloader = UVAOffloader(cpu_offload_max_bytes=expert_bytes * 2)
+    events.clear()
 
-    created_layers: list[TrackedMoELayer] = []
+    modules = offloader.wrap_modules(layer_generator(3), prefix="model.layers")
 
-    def wrapped_gen() -> Generator[nn.Module, None, None]:
-        for layer in layer_generator(3):
-            created_layers.append(layer)
-            yield layer
+    # Temporal invariant: construction of layer i+1 MUST occur AFTER
+    # offloading of layer i experts.
+    expected_sequence = [
+        "construct_layer_0",
+        "offload_layer_0_experts",
+        "construct_layer_1",
+        "offload_layer_1_experts",
+        "construct_layer_2",
+    ]
+    assert events == expected_sequence
+    assert len(modules) == 3
 
-    # Subclass to record offload timing
-    modules = offloader.wrap_modules(wrapped_gen(), prefix="model.layers")
 
-    # Layer 0 experts offloaded immediately during pass 1
-    assert _is_offloaded(modules[0].mlp.experts)
-    # Layer 1 experts offloaded during pass 1
-    assert _is_offloaded(modules[1].mlp.experts)
-    # Layer 2 experts untouched (budget exhausted)
-    assert not _is_offloaded(modules[2].mlp.experts)
-    # None of the dense layers offloaded
-    assert not _is_offloaded(modules[0].self_attn.qkv_proj.weight)
-    assert not _is_offloaded(modules[1].self_attn.qkv_proj.weight)
-    assert not _is_offloaded(modules[2].self_attn.qkv_proj.weight)
+def test_constrained_budget_incremental_expert_then_dense():
+    """Verify that when budget exceeds total experts across multiple layers,
+    sparse experts are offloaded incrementally in Pass 1, and dense parameters
+    consume the remainder in Pass 2 in declaration order.
+    """
+    events: list[str] = []
+
+    def layer_generator(count: int) -> Generator[nn.Module, None, None]:
+        for i in range(count):
+            yield TrackedMoELayer(i, tracker=events)
+
+    sample = TrackedMoELayer(999, tracker=[])
+    expert_bytes = sample.experts.numel() * sample.experts.element_size()
+    ln_bytes = (
+        sample.input_layernorm.weight.numel()
+        * sample.input_layernorm.weight.element_size()
+    )
+    qkv_bytes = sample.qkv_proj.weight.numel() * sample.qkv_proj.weight.element_size()
+
+    # Budget covers exactly 2 layers of experts + Layer 0 layernorm + Layer 0 qkv_proj
+    total_budget = (expert_bytes * 2) + ln_bytes + qkv_bytes
+    offloader = UVAOffloader(cpu_offload_max_bytes=total_budget)
+    events.clear()
+
+    modules = offloader.wrap_modules(layer_generator(2), prefix="model.layers")
+
+    # In Pass 1: experts offloaded incrementally
+    # In Pass 2: remaining budget offloads Layer 0 layernorm and qkv
+    expected_sequence = [
+        "construct_layer_0",
+        "offload_layer_0_experts",
+        "construct_layer_1",
+        "offload_layer_1_experts",
+        "offload_layer_0_input_layernorm",
+        "offload_layer_0_qkv_proj",
+    ]
+    assert events == expected_sequence
+    assert offloader.cpu_offload_bytes == total_budget
+    assert len(modules) == 2
 
 
 def test_budget_spillover_to_dense():
@@ -235,7 +322,7 @@ def test_budget_spillover_to_dense():
     # Budget covers all experts + layernorm + qkv_proj
     budget = expert_bytes + qkv_bytes + 1024
     offloader = UVAOffloader(cpu_offload_max_bytes=budget)
-    offloader.wrap_modules([layer], prefix="model.layers.0")
+    offloader.wrap_modules((m for m in [layer]), prefix="model.layers.0")
 
     # Experts offloaded first
     assert _is_offloaded(layer.mlp.experts)
@@ -252,7 +339,7 @@ def test_explicit_params_filter_overrides_heuristic():
         cpu_offload_max_bytes=10 * 1024 * 1024,
         cpu_offload_params={"self_attn"},
     )
-    offloader.wrap_modules([layer], prefix="model.layers.0")
+    offloader.wrap_modules((m for m in [layer]), prefix="model.layers.0")
 
     # Only self_attn matches explicit filter
     assert _is_offloaded(layer.self_attn.qkv_proj.weight)
@@ -269,9 +356,39 @@ def test_dense_model_offload():
     )
 
     offloader = UVAOffloader(cpu_offload_max_bytes=qkv_bytes + 512)
-    offloader.wrap_modules([layer], prefix="model.layers.0")
+    offloader.wrap_modules((m for m in [layer]), prefix="model.layers.0")
 
     # Layernorm and QKV offloaded in declaration order
     assert _is_offloaded(layer.input_layernorm.weight)
     assert _is_offloaded(layer.self_attn.qkv_proj.weight)
     assert not _is_offloaded(layer.self_attn.o_proj.weight)
+
+
+def test_non_uva_single_wrap_protection(monkeypatch):
+    """Verify non-UVA fallback does not double-wrap forward when a module
+    participates in both Pass 1 and Pass 2 offloading.
+    """
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.is_uva_available", lambda: False
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.offloader.uva.should_pin_memory", lambda: False
+    )
+
+    layer = MockMoELayer(dim=128)
+    expert_bytes = layer.mlp.experts.numel() * layer.mlp.experts.element_size()
+    ln_bytes = (
+        layer.input_layernorm.weight.numel()
+        * layer.input_layernorm.weight.element_size()
+    )
+
+    # Budget covers experts (Pass 1) and layernorm (Pass 2)
+    offloader = UVAOffloader(cpu_offload_max_bytes=expert_bytes + ln_bytes)
+
+    def gen() -> Generator[nn.Module, None, None]:
+        yield layer
+
+    offloader.wrap_modules(gen(), prefix="model.layers.0")
+
+    # Module forward must be marked as wrapped exactly once
+    assert getattr(layer, "_vllm_non_uva_wrapped", False) is True
