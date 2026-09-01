@@ -496,6 +496,7 @@ class DeepseekV32Attention(MLAAttention):
 
         if self._use_sparse_mha(attn_metadata):
             assert kv_c is not None and k_pe is not None
+            assert self.rotary_emb is not None
             mha_q_pe = self.rotary_emb(positions, q_pe)[0] if self._fp8_query else mqa_q
             mha_q = torch.cat((q_nope, mha_q_pe), dim=-1)
             self.forward_impl(
