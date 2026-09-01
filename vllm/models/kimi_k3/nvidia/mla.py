@@ -76,6 +76,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.utils import replace_parameter
 from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_decode_q_concat_kv_cache_insert,
@@ -111,6 +112,7 @@ logger = init_logger(__name__)
 # Below this conservative threshold, overlap the gate projection with attention
 # on the auxiliary stream.
 _GATE_MULTI_STREAM_TOKEN_THRESHOLD = 512
+_MLA_AG_GEMM_MIN_LOCAL_M = 512
 
 
 @torch.compile(backend=current_platform.simple_compile_backend)
@@ -139,9 +141,12 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         aux_stream: torch.cuda.Stream | None = None,
         use_rope: bool = False,
         non_causal_multi_token_decode: bool = False,
-        run_gemm_rs_ar: bool = False,
+        use_sequence_parallel: bool = False,
+        run_gemm_ar: bool = False,
     ) -> None:
         super().__init__()
+        assert not (use_sequence_parallel and run_gemm_ar)
+        self.use_sequence_parallel = use_sequence_parallel
         self.hidden_size = hidden_size
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -296,18 +301,52 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        self.gemm_rs_ar = None
-        if run_gemm_rs_ar:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
-                get_gemm_rs_ar,
-            )
+        self.ag_gemm = None
+        self.gemm_rs = None
+        self.gemm_ar = None
 
-            gemm_rs_ar = get_gemm_rs_ar()
-            if gemm_rs_ar.can_run(self.o_proj):
-                self.gemm_rs_ar = gemm_rs_ar
-            else:
+        if self.use_sequence_parallel:
+            from vllm.models.kimi_k3.nvidia.ops.ag_gemm import get_ag_gemm
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import get_gemm_rs
+
+            ag_gemm = get_ag_gemm()
+            gemm_rs = get_gemm_rs()
+
+            # Only the merged q-LoRA qkv_a + gate projection uses AG-GEMM.
+            ag_projection = self.fused_qkv_a_g_proj
+            if (
+                ag_gemm is not None
+                and ag_projection is not None
+                and ag_gemm.can_run(ag_projection)
+            ):
+                self.ag_gemm = ag_gemm
+            elif ag_gemm is not None and ag_projection is not None:
                 logger.warning_once(
-                    "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
+                    "Fused AG-GEMM is disabled for %s due to an "
+                    "incompatible projection.",
+                    prefix,
+                )
+
+            # Fuse the output projection with the reduce-scatter.
+            if gemm_rs is not None and gemm_rs.can_run(self.o_proj):
+                self.gemm_rs = gemm_rs
+            elif gemm_rs is not None:
+                logger.warning_once(
+                    "Fused GEMM-RS is disabled for %s due to an "
+                    "incompatible projection.",
+                    prefix,
+                )
+        elif run_gemm_ar:
+            # Non-SP tokens require an all-reduce after the output projection.
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import get_gemm_ar
+
+            gemm_ar = get_gemm_ar()
+            if gemm_ar is not None and gemm_ar.can_run(self.o_proj):
+                self.gemm_ar = gemm_ar
+            elif gemm_ar is not None:
+                logger.warning_once(
+                    "Fused GEMM-AR is disabled for %s due to an "
+                    "incompatible projection.",
                     prefix,
                 )
 
@@ -517,7 +556,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
     def _apply_q_lora_attention(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
         qkv_lora: torch.Tensor,
     ) -> torch.Tensor:
         """Expand q-LoRA output and run attention."""
@@ -536,9 +574,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
 
         attn_out = torch.empty(
-            (hidden_states.shape[0], self.num_local_heads * self.v_head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
+            (q.shape[0], self.num_local_heads * self.v_head_dim),
+            dtype=q.dtype,
+            device=q.device,
         )
         self._attention(positions, q, kv_c_normed, k_pe.unsqueeze(1), attn_out)
         return attn_out
@@ -556,8 +594,11 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         # run g_proj in aux_stream
         if (
             self._gate_events is not None
-            and hidden_states.shape[0] < _GATE_MULTI_STREAM_TOKEN_THRESHOLD
+            and positions.shape[0] < _GATE_MULTI_STREAM_TOKEN_THRESHOLD
         ):
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
+
             fused_qkv_a_g_proj = self.fused_qkv_a_g_proj
             assert fused_qkv_a_g_proj is not None
             qkv_a_weight = fused_qkv_a_g_proj.weight[:qkv_a_rows]
@@ -567,7 +608,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             return maybe_execute_in_parallel(
                 lambda: self._apply_q_lora_attention(
                     positions,
-                    hidden_states,
                     self._unquantized_gemm(hidden_states, qkv_a_weight),
                 ),
                 lambda: self._unquantized_gemm(hidden_states, gate_weight),
@@ -578,18 +618,33 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
 
         # run g_proj together with qkv_a
         if self.use_output_gate:
-            qkv_a_proj = self.fused_qkv_a_g_proj
-            assert qkv_a_proj is not None
-            qkv_lora, gate = qkv_a_proj(hidden_states)[0].split(
+            fused_qkv_a_g_proj = self.fused_qkv_a_g_proj
+            assert fused_qkv_a_g_proj is not None
+            # run AG-GEMM
+            if (
+                self.ag_gemm is not None
+                and hidden_states.shape[0] >= _MLA_AG_GEMM_MIN_LOCAL_M
+            ):
+                fused_projection = self.ag_gemm(
+                    hidden_states, fused_qkv_a_g_proj.weight
+                )
+            else:
+                if self.use_sequence_parallel:
+                    hidden_states = sp_all_gather(hidden_states)
+                fused_projection = fused_qkv_a_g_proj(hidden_states)[0]
+            fused_projection = fused_projection[: positions.shape[0]]
+            qkv_lora, gate = fused_projection.split(
                 [qkv_a_rows, self.num_local_heads * self.v_head_dim], dim=-1
             )
         else:
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
             qkv_a_proj = self.fused_qkv_a_proj
             assert qkv_a_proj is not None
             qkv_lora = qkv_a_proj(hidden_states)[0]
             gate = None
 
-        attn_out = self._apply_q_lora_attention(positions, hidden_states, qkv_lora)
+        attn_out = self._apply_q_lora_attention(positions, qkv_lora)
         return attn_out, gate
 
     def _forward_full_rank_q(
@@ -623,6 +678,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         if self.q_lora_rank is None:
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
             attn_out, gate = self._forward_full_rank_q(positions, hidden_states)
         else:
             attn_out, gate = self._forward_q_lora(positions, hidden_states)
@@ -630,10 +687,18 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         if gate is not None:
             attn_out = _gate_sigmoid_mul(attn_out, gate)
 
-        if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(attn_out):
-            return self.gemm_rs_ar(attn_out, self.o_proj.weight)
+        # At most one fused reduction is active for a layer.
+        if self.gemm_rs is not None and self.gemm_rs.should_run(attn_out):
+            return self.gemm_rs(attn_out, self.o_proj.weight)
 
-        return self.o_proj(attn_out)[0]
+        if self.gemm_ar is not None and self.gemm_ar.should_run(attn_out):
+            return self.gemm_ar(attn_out, self.o_proj.weight)
+
+        # Fall back to the standard projection and collective.
+        output = self.o_proj(attn_out)[0]
+        if self.use_sequence_parallel:
+            output = sp_reduce_scatter(output)
+        return output
 
     @eager_break_during_capture
     def _attention(

@@ -39,6 +39,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter, BlockQuantScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
@@ -55,6 +56,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 logger = init_logger(__name__)
 
 _KDA_GATE_LOGBOUND_MIN = -5.0
+_KDA_AG_GEMM_MIN_LOCAL_M = 384
 
 
 def a_log_weight_loader(
@@ -399,9 +401,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
-        run_gemm_rs_ar: bool = False,
+        use_sequence_parallel: bool = False,
+        run_gemm_ar: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
+        assert not (use_sequence_parallel and run_gemm_ar)
+        self.use_sequence_parallel = use_sequence_parallel
         self.use_recoverssm = self.cache_config.use_kda_recoverssm
         if self.cache_config.use_replayssm and not self.use_recoverssm:
             raise ValueError(
@@ -572,20 +577,50 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        self.gemm_rs_ar = None
-        if run_gemm_rs_ar:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
-                get_gemm_rs_ar,
-            )
+        self.ag_gemm = None
+        self.gemm_rs = None
+        self.gemm_ar = None
 
-            gemm_rs_ar = get_gemm_rs_ar()
-            if gemm_rs_ar.can_run(self.o_proj):
-                self.gemm_rs_ar = gemm_rs_ar
-            else:
+        if self.use_sequence_parallel:
+            from vllm.models.kimi_k3.nvidia.ops.ag_gemm import get_ag_gemm
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import get_gemm_rs
+
+            ag_gemm = get_ag_gemm()
+            gemm_rs = get_gemm_rs()
+
+            # Fuse the input all-gather with the merged input projection.
+            if ag_gemm is not None and ag_gemm.can_run(self.in_proj_qkvgfab):
+                self.ag_gemm = ag_gemm
+            elif ag_gemm is not None:
                 logger.warning_once(
-                    "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
+                    "Fused AG-GEMM is disabled for %s due to an "
+                    "incompatible projection.",
                     prefix,
                 )
+
+            # Fuse the output projection with the reduce-scatter.
+            if gemm_rs is not None and gemm_rs.can_run(self.o_proj):
+                self.gemm_rs = gemm_rs
+            elif gemm_rs is not None:
+                logger.warning_once(
+                    "Fused GEMM-RS is disabled for %s due to an "
+                    "incompatible projection.",
+                    prefix,
+                )
+        elif run_gemm_ar:
+            # Non-SP tokens require an all-reduce after the output projection.
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import get_gemm_ar
+
+            gemm_ar = get_gemm_ar()
+            if gemm_ar is not None and gemm_ar.can_run(self.o_proj):
+                self.gemm_ar = gemm_ar
+            elif gemm_ar is not None:
+                logger.warning_once(
+                    "Fused GEMM-AR is disabled for %s due to an "
+                    "incompatible projection.",
+                    prefix,
+                )
+
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -604,8 +639,18 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        num_tokens = hidden_states.size(0)
-        projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
+        if (
+            self.ag_gemm is not None
+            and hidden_states.shape[0] >= _KDA_AG_GEMM_MIN_LOCAL_M
+        ):
+            projected_qkvgfab = self.ag_gemm(hidden_states, self.in_proj_qkvgfab.weight)
+        else:
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
+            projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
+
+        num_tokens = positions.size(0)
+        projected_qkvgfab = projected_qkvgfab[:num_tokens]
         split_sizes = [
             3 * self.local_projection_size,
             self.local_projection_size,
@@ -634,9 +679,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
-        if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(core_attn_out):
-            return self.gemm_rs_ar(core_attn_out, self.o_proj.weight)
-        return self.o_proj(core_attn_out)[0]
+
+        # At most one fused reduction is active for a layer.
+        if self.gemm_rs is not None and self.gemm_rs.should_run(core_attn_out):
+            return self.gemm_rs(core_attn_out, self.o_proj.weight)
+
+        if self.gemm_ar is not None and self.gemm_ar.should_run(core_attn_out):
+            return self.gemm_ar(core_attn_out, self.o_proj.weight)
+
+        # Fall back to the standard projection and collective.
+        output = self.o_proj(core_attn_out)[0]
+        if self.use_sequence_parallel:
+            output = sp_reduce_scatter(output)
+        return output
 
     @eager_break_during_capture
     def _forward(

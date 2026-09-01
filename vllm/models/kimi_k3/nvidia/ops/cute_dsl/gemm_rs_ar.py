@@ -698,12 +698,9 @@ class GemmRsAr:
 
     All TP ranks must belong to one NVLink domain for multimem instructions.
 
-    Each instance is bound to either RS or AR. A vLLM worker has one static
-    sequence-parallel topology, so the process-wide singleton only needs one
-    mode. Two independent mode-specific singletons would lift that restriction
-    but duplicate the large symmetric workspace. A future mixed-mode design
-    should instead use lightweight RS/AR frontends over one shared multicast
-    workspace; that is outside this integration's current scope.
+    Each instance is bound to either RS or AR. Separate process-wide handles
+    expose the two modes, while the worker's static sequence-parallel topology
+    guarantees that only one is initialized and allocates a workspace.
     """
 
     def __init__(self, *, max_M: int, N: int, all_reduce: bool = False) -> None:
@@ -842,43 +839,60 @@ class GemmRsAr:
         return output
 
 
-_gemm_rs_ar: GemmRsAr | None = None
+_gemm_rs: GemmRsAr | None = None
+_gemm_ar: GemmRsAr | None = None
 
 
-def init_gemm_rs_ar(max_M: int, N: int, *, all_reduce: bool = False) -> None:
-    """Collectively initialize the process-wide, mode-bound GEMM-RS/AR state."""
-    global _gemm_rs_ar
-    if _gemm_rs_ar is not None:
-        if _gemm_rs_ar.all_reduce != all_reduce:
-            current = "AR" if _gemm_rs_ar.all_reduce else "RS"
-            requested = "AR" if all_reduce else "RS"
-            raise RuntimeError(
-                f"GEMM-RS/AR is already initialized for {current}; "
-                f"a worker cannot reinitialize it for {requested}"
-            )
-        assert _gemm_rs_ar.max_M >= max_M and _gemm_rs_ar.N == N
+def init_gemm_rs(max_M: int, N: int) -> None:
+    """Initialize the process-wide GEMM reduce-scatter state."""
+    global _gemm_rs
+    if _gemm_ar is not None:
+        raise ValueError("GEMM-AR is already initialized")
+    if _gemm_rs is not None:
+        assert _gemm_rs.max_M >= max_M and _gemm_rs.N == N
         return
-    _gemm_rs_ar = GemmRsAr(max_M=max_M, N=N, all_reduce=all_reduce)
+    _gemm_rs = GemmRsAr(max_M=max_M, N=N, all_reduce=False)
+
+
+def init_gemm_ar(max_M: int, N: int) -> None:
+    """Initialize the process-wide GEMM all-reduce state."""
+    global _gemm_ar
+    if _gemm_rs is not None:
+        raise ValueError("GEMM-RS is already initialized")
+    if _gemm_ar is not None:
+        assert _gemm_ar.max_M >= max_M and _gemm_ar.N == N
+        return
+    _gemm_ar = GemmRsAr(max_M=max_M, N=N, all_reduce=True)
 
 
 def warmup_gemm_rs_ar() -> int:
-    """Compile every reachable dispatch for the initialized GEMM-RS/AR mode."""
-    # Initialization can be disabled or fail when multicast is unavailable.
-    if _gemm_rs_ar is None:
-        return 0
+    """Compile dispatch profiles for every initialized reduction mode."""
+    # The topology normally initializes only one mode. Iterate over both slots
+    # so warmup follows the mode-specific singleton lifecycle directly.
     # Keep these profiles in sync with the dispatch in GemmRsAr.__call__.
     profiles = ((128, 1), (128, 2), (256, 2))
-    for BN, cta_group in profiles:
-        Sm100GemmRsArBF16.compile(
-            _gemm_rs_ar.rank,
-            _gemm_rs_ar.world_size,
-            BN,
-            cta_group,
-            _gemm_rs_ar.all_reduce,
-        )
-    return len(profiles)
+
+    num_compiled = 0
+    for gemm_reduction in (_gemm_rs, _gemm_ar):
+        if gemm_reduction is None:
+            continue
+
+        for BN, cta_group in profiles:
+            Sm100GemmRsArBF16.compile(
+                gemm_reduction.rank,
+                gemm_reduction.world_size,
+                BN,
+                cta_group,
+                gemm_reduction.all_reduce,
+            )
+        num_compiled += len(profiles)
+
+    return num_compiled
 
 
-def get_gemm_rs_ar() -> GemmRsAr:
-    assert _gemm_rs_ar is not None, "GEMM-RS/AR is not initialized"
-    return _gemm_rs_ar
+def get_gemm_rs() -> GemmRsAr | None:
+    return _gemm_rs
+
+
+def get_gemm_ar() -> GemmRsAr | None:
+    return _gemm_ar

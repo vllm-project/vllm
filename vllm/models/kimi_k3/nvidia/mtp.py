@@ -42,7 +42,11 @@ from .model import (
     KimiDecoderLayer,
     KimiMoE,
     get_spec_layer_idx_from_weight_name,
+    kimi_sequence_parallel_enabled,
     make_kimi_k3_mega_moe_expert_params_mapping,
+    maybe_init_ag_gemm,
+    maybe_init_gemm_ar,
+    maybe_init_gemm_rs,
 )
 
 logger = init_logger(__name__)
@@ -74,8 +78,12 @@ class KimiK3MultiTokenPredictorLayer(nn.Module):
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str,
+        *,
+        use_sequence_parallel: bool,
+        run_gemm_ar: bool,
     ) -> None:
         super().__init__()
+        assert not (use_sequence_parallel and run_gemm_ar)
         self.config = config
         quant_config = vllm_config.quant_config
 
@@ -102,7 +110,12 @@ class KimiK3MultiTokenPredictorLayer(nn.Module):
         # convention: the MTP block creates its own stream).
         aux_stream = torch.cuda.Stream()
         self.mtp_block = KimiDecoderLayer(
-            block_config, vllm_config, prefix=prefix, aux_stream=aux_stream
+            block_config,
+            vllm_config,
+            prefix=prefix,
+            aux_stream=aux_stream,
+            use_sequence_parallel=use_sequence_parallel,
+            run_gemm_ar=run_gemm_ar,
         )
 
     def forward(
@@ -159,11 +172,25 @@ class KimiK3MultiTokenPredictor(nn.Module):
         self.config = config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
+        use_sequence_parallel = kimi_sequence_parallel_enabled(vllm_config)
+
+        if use_sequence_parallel:
+            # Initialize both SP fused collectives independently.
+            maybe_init_ag_gemm(vllm_config)
+            maybe_init_gemm_rs(vllm_config)
+            run_gemm_ar = False
+        else:
+            # Replicated-token layers may fuse their output all-reduce.
+            run_gemm_ar = maybe_init_gemm_ar(vllm_config)
 
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): KimiK3MultiTokenPredictorLayer(
-                    config, vllm_config, f"{prefix}.layers.{idx}"
+                    config,
+                    vllm_config,
+                    f"{prefix}.layers.{idx}",
+                    use_sequence_parallel=use_sequence_parallel,
+                    run_gemm_ar=run_gemm_ar,
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,

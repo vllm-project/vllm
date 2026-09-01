@@ -132,6 +132,18 @@ logger = init_logger(__name__)
 # it the GEMMs saturate the device and the cross-stream sync is pure overhead,
 # so it falls back to sequential.
 _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 256
+_SHARED_EXPERT_AG_GEMM_MIN_LOCAL_M = 2048
+
+
+def kimi_sequence_parallel_enabled(vllm_config: VllmConfig) -> bool:
+    parallel_config = vllm_config.parallel_config
+    use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+    return (
+        parallel_config.pipeline_parallel_size == 1
+        and parallel_config.enable_expert_parallel
+        and parallel_config.tensor_parallel_size > 1
+        and (use_mega_moe or parallel_config.data_parallel_size > 1)
+    )
 
 
 def shard_sequence_parallel_mlp(
@@ -154,13 +166,9 @@ def shard_sequence_parallel_mlp(
     )
 
 
-def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
-    # Both feature flags may be enabled; the worker's static SP topology binds
-    # its singleton to exactly one mode.
-    all_reduce = not use_sequence_parallel
-    mode = "GEMM-AR" if all_reduce else "GEMM-RS"
-    enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_KIMI_K3_GEMM_RS
-    if not enabled:
+def maybe_init_gemm_rs(vllm_config: VllmConfig) -> bool:
+    """Initialize GEMM-RS when eligible and return whether it is available."""
+    if not envs.VLLM_KIMI_K3_GEMM_RS:
         return False
 
     parallel_config = vllm_config.parallel_config
@@ -181,32 +189,107 @@ def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) 
         reason = None
 
     if reason is not None:
-        logger.warning_once("%s is disabled because %s.", mode, reason)
+        logger.warning_once("GEMM-RS is disabled because %s.", reason)
         return False
 
-    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import init_gemm_rs_ar
+    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import init_gemm_rs
 
     config = vllm_config.model_config.hf_text_config
     try:
-        init_gemm_rs_ar(
-            max_M=vllm_config.scheduler_config.max_num_batched_tokens,
-            N=config.hidden_size,
-            all_reduce=all_reduce,
+        init_gemm_rs(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            config.hidden_size,
         )
     except RuntimeError as e:
         logger.warning_once(
-            "%s is disabled because initialization failed: %s. This may mean "
+            "GEMM-RS is disabled because initialization failed: %s. This may mean "
             "the TP ranks do not share one NVLink domain.",
-            mode,
             e,
         )
         return False
-    if all_reduce:
-        logger.info_once(
-            "GEMM-AR is enabled. To disable it, set VLLM_KIMI_K3_GEMM_AR=0."
-        )
+
+    logger.info_once("GEMM-RS is enabled.")
+    return True
+
+
+def maybe_init_gemm_ar(vllm_config: VllmConfig) -> bool:
+    """Initialize GEMM-AR when eligible and return whether it is available."""
+    if not envs.VLLM_KIMI_K3_GEMM_AR:
+        return False
+
+    parallel_config = vllm_config.parallel_config
+    tp_size = parallel_config.tensor_parallel_size
+    if parallel_config.use_ubatching:
+        reason = "ubatching is enabled"
+    elif vllm_config.model_config.dtype != torch.bfloat16:
+        reason = "the model dtype is not BF16"
+    elif not current_platform.is_cuda():
+        reason = "the device is not CUDA"
+    elif not current_platform.is_device_capability_family(100):
+        reason = "the device is not SM100-family"
+    elif not 1 < tp_size <= 16:
+        reason = "TP size is not in the supported range 2-16"
+    elif 128 % tp_size != 0:
+        reason = "TP size does not divide 128"
     else:
-        logger.info_once("GEMM-RS is enabled.")
+        reason = None
+
+    if reason is not None:
+        logger.warning_once("GEMM-AR is disabled because %s.", reason)
+        return False
+
+    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import init_gemm_ar
+
+    config = vllm_config.model_config.hf_text_config
+    try:
+        init_gemm_ar(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            config.hidden_size,
+        )
+    except RuntimeError as e:
+        logger.warning_once(
+            "GEMM-AR is disabled because initialization failed: %s. This may mean "
+            "the TP ranks do not share one NVLink domain.",
+            e,
+        )
+        return False
+
+    logger.info_once("GEMM-AR is enabled. To disable it, set VLLM_KIMI_K3_GEMM_AR=0.")
+    return True
+
+
+def maybe_init_ag_gemm(vllm_config: VllmConfig) -> bool:
+    """Initialize AG-GEMM when eligible and return whether it is available."""
+    if not envs.VLLM_KIMI_K3_AG_GEMM:
+        return False
+
+    if vllm_config.parallel_config.use_ubatching:
+        reason = "ubatching is enabled"
+    elif vllm_config.model_config.dtype != torch.bfloat16:
+        reason = "the model dtype is not BF16"
+    else:
+        reason = None
+
+    if reason is not None:
+        logger.warning_once("AG-GEMM is disabled because %s.", reason)
+        return False
+
+    from vllm.models.kimi_k3.nvidia.ops.ag_gemm import init_ag_gemm
+
+    config = vllm_config.model_config.hf_text_config
+    try:
+        init_ag_gemm(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            config.hidden_size,
+        )
+    except RuntimeError as e:
+        logger.warning_once(
+            "AG-GEMM is disabled because initialization failed: %s.",
+            e,
+        )
+        return False
+
+    logger.info_once("AG-GEMM is enabled.")
     return True
 
 
@@ -235,12 +318,13 @@ class KimiMLP(nn.Module):
         reduce_results: bool = True,
         use_sequence_parallel: bool = False,
         can_shard_sequence_parallel: bool = False,
-        run_gemm_rs_ar: bool = False,
+        run_gemm_ar: bool = False,
         prefix: str = "",
         activation_situ_beta: float | None = None,
         activation_situ_linear_beta: float | None = None,
     ) -> None:
         super().__init__()
+        assert not (use_sequence_parallel and run_gemm_ar)
 
         self.shard_sequence_parallel = shard_sequence_parallel_mlp(
             hidden_size,
@@ -269,24 +353,50 @@ class KimiMLP(nn.Module):
             disable_tp=replicate,
             prefix=f"{prefix}.down_proj",
         )
-        self.gemm_rs_ar = None
-        # RS requires sequence sharding; AR operates on replicated tokens.
-        use_gemm_rs_ar = self.shard_sequence_parallel or (
-            not use_sequence_parallel and reduce_results
-        )
-        if use_gemm_rs_ar and run_gemm_rs_ar:
-            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
-                get_gemm_rs_ar,
-            )
+        self.ag_gemm = None
+        self.gemm_rs = None
+        self.gemm_ar = None
 
-            gemm_rs_ar = get_gemm_rs_ar()
-            if gemm_rs_ar.can_run(self.down_proj):
-                self.gemm_rs_ar = gemm_rs_ar
-            else:
+        if self.shard_sequence_parallel:
+            from vllm.models.kimi_k3.nvidia.ops.ag_gemm import get_ag_gemm
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import get_gemm_rs
+
+            ag_gemm = get_ag_gemm()
+            gemm_rs = get_gemm_rs()
+
+            # Fuse the input all-gather with the gate/up projection.
+            if ag_gemm is not None and ag_gemm.can_run(self.gate_up_proj):
+                self.ag_gemm = ag_gemm
+            elif ag_gemm is not None:
                 logger.warning_once(
-                    "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
+                    "Fused AG-GEMM is disabled for %s due to an "
+                    "incompatible projection.",
                     prefix,
                 )
+
+            # Fuse the down projection with the reduce-scatter.
+            if gemm_rs is not None and gemm_rs.can_run(self.down_proj):
+                self.gemm_rs = gemm_rs
+            elif gemm_rs is not None:
+                logger.warning_once(
+                    "Fused GEMM-RS is disabled for %s due to an "
+                    "incompatible projection.",
+                    prefix,
+                )
+        elif run_gemm_ar and reduce_results:
+            # GEMM-AR applies only when this MLP owns the output reduction.
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import get_gemm_ar
+
+            gemm_ar = get_gemm_ar()
+            if gemm_ar is not None and gemm_ar.can_run(self.down_proj):
+                self.gemm_ar = gemm_ar
+            elif gemm_ar is not None:
+                logger.warning_once(
+                    "Fused GEMM-AR is disabled for %s due to an "
+                    "incompatible projection.",
+                    prefix,
+                )
+
         if hidden_act == "silu":
             self.act_fn = SiluAndMul()
         elif hidden_act == "situ":
@@ -301,18 +411,29 @@ class KimiMLP(nn.Module):
             )
 
     def forward(self, x):
-        if self.shard_sequence_parallel:
-            # Each rank holds a weight shard but only its own tokens, so it
-            # cannot finish those tokens alone: gather the full token set,
-            # compute this rank's partial for all of them, then reduce-scatter,
-            # which sums across TP and restores the sequence sharding.
-            x = sp_all_gather(x)
-        gate_up, _ = self.gate_up_proj(x)
+        if (
+            self.ag_gemm is not None
+            and x.shape[0] >= _SHARED_EXPERT_AG_GEMM_MIN_LOCAL_M
+        ):
+            gate_up = self.ag_gemm(x, self.gate_up_proj.weight)
+        else:
+            if self.shard_sequence_parallel:
+                # Each rank holds a weight shard but only its own tokens, so it
+                # cannot finish those tokens alone: gather the full token set,
+                # compute this rank's partial for all of them, then reduce-scatter,
+                # which sums across TP and restores the sequence sharding.
+                x = sp_all_gather(x)
+            gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
 
-        if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(x):
-            return self.gemm_rs_ar(x, self.down_proj.weight)
+        # At most one fused reduction is active for a layer.
+        if self.gemm_rs is not None and self.gemm_rs.should_run(x):
+            return self.gemm_rs(x, self.down_proj.weight)
 
+        if self.gemm_ar is not None and self.gemm_ar.should_run(x):
+            return self.gemm_ar(x, self.down_proj.weight)
+
+        # Fall back to the standard projection and collective.
         x, _ = self.down_proj(x)
         if self.shard_sequence_parallel:
             x = sp_reduce_scatter(x)
@@ -549,7 +670,6 @@ class KimiMoE(nn.Module):
         prefix: str = "",
         layer_idx: int = 0,
         use_sequence_parallel: bool = False,
-        run_gemm_rs_ar: bool = False,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -638,7 +758,6 @@ class KimiMoE(nn.Module):
                 # FusedMoE path below hands them to the runner, which fuses
                 # their reduction and assumes the replicated layout.
                 can_shard_sequence_parallel=self.use_mega_moe,
-                run_gemm_rs_ar=run_gemm_rs_ar,
                 prefix=f"{prefix}.shared_experts",
                 activation_situ_beta=activation_situ_beta,
                 activation_situ_linear_beta=activation_situ_linear_beta,
@@ -860,9 +979,12 @@ class KimiDecoderLayer(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         aux_stream: torch.cuda.Stream | None = None,
-        run_gemm_rs_ar: bool = False,
+        *,
+        use_sequence_parallel: bool,
+        run_gemm_ar: bool,
     ) -> None:
         super().__init__()
+        assert not (use_sequence_parallel and run_gemm_ar)
         self.hidden_size = config.hidden_size
         self.layer_idx = int(prefix.rsplit(".", 1)[1])
 
@@ -870,7 +992,6 @@ class KimiDecoderLayer(nn.Module):
         layer_idx = self.layer_idx
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        parallel_config = vllm_config.parallel_config
         self.is_moe_layer = (
             self.is_moe
             and config.num_experts is not None
@@ -878,13 +999,7 @@ class KimiDecoderLayer(nn.Module):
             and layer_idx % config.moe_layer_freq == 0
         )
 
-        use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        self.use_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
-            and parallel_config.enable_expert_parallel
-            and parallel_config.tensor_parallel_size > 1
-            and (use_mega_moe or parallel_config.data_parallel_size > 1)
-        )
+        self.use_sequence_parallel = use_sequence_parallel
         if config.is_kda_layer(layer_idx):
             kda_config = config.linear_attn_config
             assert kda_config is not None
@@ -895,7 +1010,8 @@ class KimiDecoderLayer(nn.Module):
                     config,
                     vllm_config,
                     prefix=f"{prefix}.self_attn",
-                    run_gemm_rs_ar=run_gemm_rs_ar,
+                    use_sequence_parallel=self.use_sequence_parallel,
+                    run_gemm_ar=run_gemm_ar,
                 )
                 self._self_attn_writes_output = False
             else:
@@ -932,7 +1048,8 @@ class KimiDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
                 aux_stream=aux_stream,
-                run_gemm_rs_ar=run_gemm_rs_ar,
+                use_sequence_parallel=self.use_sequence_parallel,
+                run_gemm_ar=run_gemm_ar,
             )
             self._self_attn_writes_output = False
 
@@ -947,7 +1064,6 @@ class KimiDecoderLayer(nn.Module):
                 prefix=f"{prefix}.block_sparse_moe",
                 layer_idx=layer_idx,
                 use_sequence_parallel=self.use_sequence_parallel,
-                run_gemm_rs_ar=run_gemm_rs_ar,
             )
             self.mlp = self.block_sparse_moe
         else:
@@ -959,7 +1075,7 @@ class KimiDecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
                 use_sequence_parallel=self.use_sequence_parallel,
                 can_shard_sequence_parallel=True,
-                run_gemm_rs_ar=run_gemm_rs_ar,
+                run_gemm_ar=run_gemm_ar,
                 activation_situ_beta=config.activation_situ_beta,
                 activation_situ_linear_beta=config.activation_situ_linear_beta,
             )
@@ -1090,19 +1206,21 @@ class KimiDecoderLayer(nn.Module):
         )
         assert hidden_states is not None
 
-        M = None
-        if self.use_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)
-            # Remove SP padding before attention.
-            hidden_states = hidden_states[: positions.shape[0]]
-            M = hidden_states.shape[0]
+        full_num_tokens = positions.shape[0]
+        self_attn = getattr(self, "self_attn", None)
+
+        # KDA and MLA own their SP input gather and output reduction. Other
+        # attention implementations still rely on the decoder layer to do so.
+        attention_owns_sp_collectives = isinstance(
+            self_attn, (KimiK3DeltaAttention, MultiHeadLatentAttention)
+        )
+        if self.use_sequence_parallel and not attention_owns_sp_collectives:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         # Attention.
         hidden_states = self._run_self_attn(positions, hidden_states)
 
-        # GEMM-RS returns the local sequence shard; standard O-proj preserves M.
-        if self.use_sequence_parallel and hidden_states.shape[0] == M:
-            # Add SP padding if needed, and then perform reduce scatter.
+        if self.use_sequence_parallel and not attention_owns_sp_collectives:
             hidden_states = sp_reduce_scatter(hidden_states)
 
         hidden_states, prefix_sum, residual = self._post_attn_norm(
@@ -1130,22 +1248,18 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         self.config = config
         self.attn_res_block_size: int | None = config.attn_res_block_size
         self.use_attn_res = self.attn_res_block_size is not None
-        parallel_config = vllm_config.parallel_config
-        use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        self.use_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
-            and parallel_config.enable_expert_parallel
-            and parallel_config.tensor_parallel_size > 1
-            and (use_mega_moe or parallel_config.data_parallel_size > 1)
-        )
+        self.use_sequence_parallel = kimi_sequence_parallel_enabled(vllm_config)
+
+        if self.use_sequence_parallel:
+            # Initialize both SP fused collectives independently.
+            maybe_init_ag_gemm(vllm_config)
+            maybe_init_gemm_rs(vllm_config)
+            self.run_gemm_ar = False
+        else:
+            # Replicated-token layers may fuse their output all-reduce.
+            self.run_gemm_ar = maybe_init_gemm_ar(vllm_config)
 
         self.vocab_size = config.vocab_size
-
-        # GEMM-RS/AR uses NCCL symmetric-memory multicast, which requires all
-        # TP ranks to belong to one NVLink domain.
-        self.run_gemm_rs_ar = maybe_init_gemm_rs_ar(
-            vllm_config, self.use_sequence_parallel
-        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -1167,7 +1281,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 vllm_config,
                 prefix,
                 aux_stream=aux_stream,
-                run_gemm_rs_ar=self.run_gemm_rs_ar,
+                use_sequence_parallel=self.use_sequence_parallel,
+                run_gemm_ar=self.run_gemm_ar,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
