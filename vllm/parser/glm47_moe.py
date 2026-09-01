@@ -27,6 +27,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -221,6 +222,31 @@ class Glm47MoeParser(ParserEngine):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
-        if not self.thinking_enabled:
+        if self.thinking_enabled:
+            return super().extract_reasoning(model_output, request)
+        if THINK_START not in model_output and THINK_END not in model_output:
+            # A template that honored the switch emits no think tags, so
+            # tag-free output is pure content.
             return None, model_output
-        return super().extract_reasoning(model_output, request)
+        # The caller asked to skip extraction, but the output still carries a
+        # think block: this template has no off switch (GLM-5.3 family) and
+        # thinks regardless, so passing the scratchpad through as the answer
+        # leaks it into content (#54744). Split with a thinking-armed engine
+        # instead; the request-scoped engine keeps the unarmed config, so
+        # streaming and id-space paths are untouched.
+        engine = StreamingParserEngine(
+            glm47_moe_config(thinking=True), self.model_tokenizer, vocab=self.vocab
+        )
+        events = engine.feed(model_output, [])
+        events.extend(engine.finish())
+        reasoning_parts: list[str] = []
+        content_parts: list[str] = []
+        for event in events:
+            if event.type == EventType.REASONING_CHUNK:
+                reasoning_parts.append(event.value)
+            elif event.type == EventType.TEXT_CHUNK:
+                content_parts.append(event.value)
+        reasoning = "".join(reasoning_parts)
+        if self._strip_trailing_reasoning_ws:
+            reasoning = reasoning.rstrip()
+        return reasoning or None, "".join(content_parts) or None
