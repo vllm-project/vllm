@@ -2321,6 +2321,48 @@ def test_engine_ttl_eviction(default_vllm_config, dist_init):
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
+def test_engine_with_inflight_transfer_is_not_evicted(default_vllm_config, dist_init):
+    """A transfer that outlives the TTL must keep its engine registered.
+
+    _engine_last_active is stamped when a read is issued and not refreshed
+    while it runs, so a stalled transfer -- a peer that has lost its NIC holds
+    one indefinitely -- leaves its engine looking idle. Evicting it releases
+    the dlist handle and remote agent the transfer is still reading through.
+    """
+    worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=10.0)
+    nixl_wrapper = worker.nixl_wrapper
+
+    request_id = "req-still-reading"
+    worker._recving_transfers[request_id] = [MagicMock()]
+    worker._recving_metadata[request_id] = MagicMock(
+        remote=MagicMock(engine_id=engine_id)
+    )
+
+    with (
+        patch.object(nixl_wrapper, "release_dlist_handle") as mock_rel,
+        patch.object(nixl_wrapper, "remove_remote_agent") as mock_rem,
+    ):
+        worker._engine_last_active[engine_id] = time.perf_counter() - 20.0
+
+        worker._evict_stale_engines()
+
+        assert engine_id in worker._remote_agents
+        assert engine_id in worker.dst_xfer_side_handles
+        mock_rel.assert_not_called()
+        mock_rem.assert_not_called()
+
+        # Once the transfer is done the engine is stale like any other.
+        del worker._recving_transfers[request_id]
+        worker._evict_stale_engines()
+
+        assert engine_id not in worker._remote_agents
+        assert mock_rem.call_count == 2
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
 def test_engine_ttl_disabled(default_vllm_config, dist_init):
     """Eviction is disabled when engine_ttl <= 0."""
     worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=0.0)
