@@ -2959,8 +2959,8 @@ class Scheduler(SchedulerInterface):
         # these requests must be rescheduled, but only the first will recompute
         # it. This set tracks blocks already marked for recomputation.
         marked_invalid_block_ids: set[int] = set()
-        null_block_id = self.kv_cache_manager.block_pool.null_block.block_id
-        managers = self.kv_cache_manager.coordinator.single_type_managers
+        null_block_id = self.kv_cache_manager.null_block_id
+        group_block_sizes = self.kv_cache_manager.group_block_sizes
         # num_computed_tokens is a single cross-group value, so it can only be
         # truncated to an alignment every group agrees on. Groups whose own
         # block is finer than the scheduler block lose a little already-computed
@@ -2976,12 +2976,11 @@ class Scheduler(SchedulerInterface):
             )
 
             invalid_positions: list[tuple[int, int]] = []
-            for manager, req_block_ids in zip(
-                managers,
+            for group_block_size, req_block_ids in zip(
+                group_block_sizes,
                 req_block_ids_by_group,
                 strict=True,
             ):
-                group_block_size = manager.block_size
                 req_num_computed_blocks = (
                     req_num_computed_tokens + group_block_size - 1
                 ) // group_block_size
@@ -3022,13 +3021,13 @@ class Scheduler(SchedulerInterface):
                 if evict_blocks:
                     # Every group can depend on tokens after the failed
                     # boundary, so evict each group's downstream blocks.
-                    for manager, req_block_ids in zip(
-                        managers,
+                    for group_block_size, req_block_ids in zip(
+                        group_block_sizes,
                         req_block_ids_by_group,
                         strict=True,
                     ):
                         first_invalid_idx = (
-                            request.num_computed_tokens // manager.block_size
+                            request.num_computed_tokens // group_block_size
                         )
                         blocks_to_evict.update(
                             block_id
