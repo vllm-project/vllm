@@ -198,6 +198,8 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
         import flashinfer
         from flashinfer.fused_moe import WeightLayout
 
+        topk_ids = topk_ids.to(dtype=torch.int32)
+
         result = flashinfer.fused_moe.trtllm_bf16_routed_moe(
             topk_ids=(topk_ids, topk_weights),
             hidden_states=hidden_states,

@@ -272,6 +272,8 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
         import flashinfer
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
 
+        topk_ids = topk_ids.to(dtype=torch.int32)
+
         if a1q_scale is None:
             raise RuntimeError(
                 "TRT-LLM FP8 experts require precomputed activation scales"
