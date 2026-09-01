@@ -2,15 +2,17 @@ group: Spec Decode
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200) V1 Spec Decode"
+- label: ":nvidia: (H200 MIG 35GB) V1 Spec Decode"
   device: h200_35gb
   key: v1-spec-decode
   timeout_in_minutes: 40
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
+    - "!vllm/distributed/kv_transfer/"
     - vllm/inputs/
     - vllm/model_executor/
+    - vllm/models/qwen4_exp/
     - vllm/platforms/
     - vllm/sampling_params.py
     - vllm/transformers_utils/
@@ -30,7 +32,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Spec Decode Eagle 1: DeepSeek + Qwen"
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode Eagle 1: DeepSeek + Qwen"
   key: spec-decode-eagle-1-deepseek-qwen
   timeout_in_minutes: 25
   device: h200_35gb
@@ -57,7 +59,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other"
   key: spec-decode-eagle-2-llama3-qwen-vl-other
   timeout_in_minutes: 25
   device: h200_35gb
@@ -96,7 +98,7 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode/eagle/
 
-- label: ":nvidia: (H200) Spec Decode Speculators + MTP"
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode Speculators + MTP"
   key: spec-decode-speculators-mtp
   timeout_in_minutes: 50
   device: h200_35gb
@@ -141,7 +143,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/speculators/
     - pytest -v -s v1/e2e/spec_decode/mtp/
 
-- label: ":nvidia: (H200) Spec Decode N-Gram + Suffix"
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode N-Gram + Suffix"
   key: spec-decode-ngram-suffix
   timeout_in_minutes: 20
   device: h200_35gb
@@ -170,7 +172,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200) Spec Decode Draft Model"
+- label: ":nvidia: (H200 MIG 18GB) Spec Decode Draft Model"
   key: spec-decode-draft-model
   timeout_in_minutes: 45
   device: h200_18gb
@@ -269,7 +271,7 @@ steps:
       - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200) Spec Decode AL DFlash Nightly"
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DFlash Nightly"
   key: spec-decode-dflash-nightly
   timeout_in_minutes: 90
   device: h200_35gb
@@ -305,7 +307,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200) Spec Decode AL DSpark Nightly"
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DSpark Nightly"
   key: spec-decode-dspark-nightly
   timeout_in_minutes: 60
   device: h200_35gb
@@ -345,7 +347,7 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200) Spec Decode AL MTP + Other Acceptance Nightly"
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode AL MTP + Other Acceptance Nightly"
   key: spec-decode-mtp-other-acceptance-nightly
   timeout_in_minutes: 60
   device: h200_35gb
