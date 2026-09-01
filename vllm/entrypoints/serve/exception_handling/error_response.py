@@ -2,13 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from http import HTTPStatus
 
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorInfo,
-    ErrorResponse,
-    GenerationError,
-)
+from vllm.exceptions import GenerationError
 from vllm.logger import init_logger
 
+from ..engine.protocol import ErrorInfo, ErrorResponse
 from .utils import sanitize_message
 
 logger = init_logger(__name__)
@@ -29,6 +26,7 @@ def create_error_response(
         )
 
         from vllm.exceptions import (
+            GracefulHTTPError,
             VLLMClientError,
             VLLMNotFoundError,
             VLLMServerError,
@@ -36,7 +34,11 @@ def create_error_response(
             VLLMValidationError,
         )
 
-        if isinstance(exc, VLLMValidationError):
+        if isinstance(exc, GracefulHTTPError):
+            err_type = HTTPStatus(exc.http_status).phrase
+            status_code = exc.http_status
+            param = None
+        elif isinstance(exc, VLLMValidationError):
             err_type = "BadRequestError"
             status_code = HTTPStatus.BAD_REQUEST
             param = exc.parameter
