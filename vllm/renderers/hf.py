@@ -510,18 +510,18 @@ def _consolidate_system_messages(
 
 
 _CONTENT_FORMATS_MAXSIZE = 32
-_CONTENT_FORMATS = dict[tuple[str, bool, str], "ChatTemplateContentFormat"]()
+_CONTENT_FORMATS = dict[
+    tuple[str | None, bool, str, str | None, str | None, bool],
+    "ChatTemplateContentFormat",
+]()
 """
-Used in `_resolve_chat_template_content_format` to avoid re-parsing an
-explicitly given chat template on every request.
+Used in `_resolve_chat_template_content_format` to avoid resolving and parsing
+the chat template on every request.
 
-Only that case is cached. `resolve_chat_template` returns straight away when
-`chat_template` is not None, so the result depends on nothing else; when it is
-None the work is already memoized by `_try_get_processor_chat_template` and
-`_detect_content_format`.
-
-`lru_cache` cannot be used because `tools` is unhashable. Only its presence is
-part of the key: it selects the template, and its contents never reach the AST.
+`lru_cache` cannot be used because `tools` is a list and `ModelConfig` defines
+`__eq__` without `__hash__`, so the key holds the fields `resolve_chat_template`
+selects the template by. Only the presence of `tools` is part of it: it decides
+whether the processor template is tried, and its contents never reach the AST.
 """
 
 
@@ -533,12 +533,14 @@ def _resolve_chat_template_content_format(
     model_config: ModelConfig,
 ) -> ChatTemplateContentFormat:
     cache_key = (
-        (chat_template, tools is None, tokenizer.name_or_path)
-        if chat_template is not None
-        else None
+        chat_template,
+        tools is None,
+        tokenizer.name_or_path,
+        model_config.revision,
+        model_config.code_revision,
+        model_config.trust_remote_code,
     )
-    cached_format = _CONTENT_FORMATS.get(cache_key) if cache_key else None
-    if cached_format is not None:
+    if (cached_format := _CONTENT_FORMATS.get(cache_key)) is not None:
         return cached_format
 
     resolved_chat_template = resolve_chat_template(
@@ -560,11 +562,10 @@ def _resolve_chat_template_content_format(
         else _detect_content_format(jinja_text, default="string")
     )
 
-    if cache_key is not None:
-        # Requests may carry their own chat template, so bound the cache.
-        if len(_CONTENT_FORMATS) >= _CONTENT_FORMATS_MAXSIZE:
-            _CONTENT_FORMATS.clear()
-        _CONTENT_FORMATS[cache_key] = detected_format
+    # Requests may carry their own chat template, so bound the cache.
+    if len(_CONTENT_FORMATS) >= _CONTENT_FORMATS_MAXSIZE:
+        _CONTENT_FORMATS.clear()
+    _CONTENT_FORMATS[cache_key] = detected_format
 
     return detected_format
 
