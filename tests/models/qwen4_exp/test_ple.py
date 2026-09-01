@@ -492,7 +492,7 @@ def test_fused_ngram_ids_correctness(
     contexts: list[list[int]],
     first_token_id: int,
 ) -> None:
-    from vllm.models.qwen4_exp.nvidia.ops.ple_ngram import ple_ngram_ids
+    from vllm.models.qwen4_exp.nvidia.ops.ple import ple_ngram_ids
 
     device = torch.device("cuda")
     query_start_loc = torch.tensor(
@@ -1258,7 +1258,7 @@ def test_fused_conv_correctness(
 def test_fused_gate_correctness(num_tokens: int, strided_kv: bool) -> None:
     import math
 
-    from vllm.models.qwen4_exp.nvidia.ops.ple_gate import ple_gate
+    from vllm.models.qwen4_exp.nvidia.ops.ple import ple_gate
 
     device = torch.device("cuda")
     hc, h = 4, 2560

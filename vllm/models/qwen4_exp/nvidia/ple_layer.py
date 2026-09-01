@@ -43,9 +43,7 @@ from vllm.v1.attention.backends.short_conv_attn import (
 )
 
 from ..common.ple import PLEVocabParallelEmbedding
-from .ops.ple_conv import ple_conv
-from .ops.ple_gate import ple_gate
-from .ops.ple_ngram import ple_ngram_ids
+from .ops.ple import ple_conv, ple_gate, ple_ngram_ids
 
 
 class Qwen4ExpPLEGroupedNorm(nn.Module):

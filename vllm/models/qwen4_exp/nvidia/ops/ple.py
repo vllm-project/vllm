@@ -1,26 +1,330 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused PLE dilated short-convolution kernels.
-
-For each token and channel, the output kernel computes
-
-  out[t] = residual[t] + silu(sum_k w[k] * hist[j + k*dilation])
-  hist[m] = state[sid, slot_off + m, c]  if m < state_len
-            x[qsl[r] + m - state_len, c] otherwise
-
-State is a logical [slot, channel, window] view and may have arbitrary strides.
-Decode, speculative decode, and prefill differ in their state-window offset and
-write-back rule. The write-back runs separately because it overwrites state
-read by the output kernel. An optional token map lets mixed batches retain
-their original row order. Slot zero is never updated.
-"""
+"""Fused kernels for PLE n-gram IDs, gating, and short convolution."""
 
 from typing import Literal
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+# N-gram ID generation
+
+BLOCK_T = 8
+NUM_WARPS = 4
+
+
+@triton.jit(do_not_specialize=["num_tokens", "num_reqs", "binary_search_iters"])
+def _ple_ngram_ids_kernel(
+    input_ids_ptr,
+    qsl_ptr,
+    ctx_ptr,
+    multipliers_ptr,
+    sizes_ptr,
+    offsets_ptr,
+    out_ptr,
+    num_tokens,
+    num_reqs,
+    eos_token_id,
+    binary_search_iters,
+    NGRAM_CONTEXT_LEN: tl.constexpr,
+    HEADS_PER_NGRAM: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+):
+    NGRAM_HEADS: tl.constexpr = NGRAM_CONTEXT_LEN * HEADS_PER_NGRAM
+    BLOCK_H: tl.constexpr = triton.next_power_of_2(NGRAM_HEADS)
+    pid = tl.program_id(0)
+    token_offsets = pid * BLOCK_T + tl.arange(0, BLOCK_T)
+    token_mask = token_offsets < num_tokens
+
+    # A flattened token offset does not identify its request when query chunks
+    # have different lengths. Binary-search the request boundaries instead.
+    p_lo = tl.full([BLOCK_T], 1, tl.int32)
+    p_hi = tl.full([BLOCK_T], num_reqs + 1, tl.int32)
+    for _ in range(binary_search_iters):
+        mid = (p_lo + p_hi) // 2
+        qmid = tl.load(qsl_ptr + mid, mask=token_mask & (mid <= num_reqs), other=0)
+        pred = qmid <= token_offsets
+        p_lo = tl.where(pred, mid + 1, p_lo)
+        p_hi = tl.where(pred, p_hi, mid)
+    req = tl.minimum(p_lo - 1, num_reqs - 1).to(tl.int64)
+    request_start = tl.load(qsl_ptr + req, mask=token_mask, other=0)
+    chunk_pos = token_offsets - request_start
+
+    # Initialize every head with the current-token term.
+    current_token = tl.load(input_ids_ptr + token_offsets, mask=token_mask, other=0).to(
+        tl.int64
+    )
+    current_multiplier = tl.load(multipliers_ptr)
+    mixed = current_token[:, None] * current_multiplier
+
+    g = tl.arange(0, BLOCK_H)
+    head_mask = g < NGRAM_HEADS
+    ngram_order = g // HEADS_PER_NGRAM + 2
+
+    # Walk predecessors from newest to oldest. At chunk boundaries they come
+    # from ngram_context; otherwise they come from this step's input_ids.
+    crossed = tl.zeros([BLOCK_T], tl.int1)
+    for shift in tl.static_range(1, NGRAM_CONTEXT_LEN + 1):
+        in_step = chunk_pos >= shift
+        ctx_col = NGRAM_CONTEXT_LEN - shift + chunk_pos
+        step_token = tl.load(
+            input_ids_ptr + token_offsets - shift,
+            mask=token_mask & in_step,
+            other=0,
+        )
+        context_token = tl.load(
+            ctx_ptr + req * NGRAM_CONTEXT_LEN + ctx_col,
+            mask=token_mask & (~in_step),
+            other=0,
+        )
+        candidate = tl.where(in_step, step_token, context_token).to(tl.int64)
+        # Older positions remain behind the first EOS boundary.
+        candidate = tl.where(crossed, eos_token_id, candidate)
+        crossed = crossed | (candidate == eos_token_id)
+        multiplier = tl.load(multipliers_ptr + shift)
+        term = candidate[:, None] * multiplier
+        mixed = mixed ^ tl.where((ngram_order > shift)[None, :], term, 0)
+
+    # Map each hash into its embedding-table partition.
+    sizes = tl.load(sizes_ptr + g, mask=head_mask, other=1)[None, :]
+    head_offsets = tl.load(offsets_ptr + g, mask=head_mask, other=0)[None, :]
+    # Hash products may overflow int64; preserve torch.remainder semantics.
+    remainders = mixed % sizes
+    remainders = tl.where(remainders < 0, remainders + sizes, remainders)
+    ids = remainders + head_offsets
+    tl.store(
+        out_ptr + token_offsets[:, None] * NGRAM_HEADS + g[None, :],
+        ids,
+        mask=token_mask[:, None] & head_mask[None, :],
+    )
+
+
+def _ple_ngram_ids(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    layer_multipliers: torch.Tensor,
+    ngram_heads_vocab_sizes: torch.Tensor,
+    ngram_heads_offsets: torch.Tensor,
+    eos_token_id: int,
+    heads_per_ngram: int,
+) -> torch.Tensor:
+    input_ids = input_ids.reshape(-1)
+    num_tokens = input_ids.shape[0]
+    num_reqs = query_start_loc.numel() - 1
+    ctx_len = ngram_context.shape[1]
+    ngram_heads = ctx_len * heads_per_ngram
+    out = torch.empty(
+        (num_tokens, ngram_heads), dtype=torch.int64, device=input_ids.device
+    )
+    _ple_ngram_ids_kernel[(triton.cdiv(num_tokens, BLOCK_T),)](
+        input_ids,
+        query_start_loc,
+        ngram_context,
+        layer_multipliers,
+        ngram_heads_vocab_sizes,
+        ngram_heads_offsets,
+        out,
+        num_tokens,
+        num_reqs,
+        eos_token_id,
+        binary_search_iters=num_reqs.bit_length(),
+        NGRAM_CONTEXT_LEN=ctx_len,
+        HEADS_PER_NGRAM=heads_per_ngram,
+        BLOCK_T=BLOCK_T,
+        num_warps=NUM_WARPS,
+    )
+    return out
+
+
+def _ple_ngram_ids_fake(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    layer_multipliers: torch.Tensor,
+    ngram_heads_vocab_sizes: torch.Tensor,
+    ngram_heads_offsets: torch.Tensor,
+    eos_token_id: int,
+    heads_per_ngram: int,
+) -> torch.Tensor:
+    num_tokens = input_ids.reshape(-1).shape[0]
+    ngram_heads = ngram_context.shape[1] * heads_per_ngram
+    return torch.empty(
+        (num_tokens, ngram_heads), dtype=torch.int64, device=input_ids.device
+    )
+
+
+direct_register_custom_op(
+    op_name="qwen4_exp_ple_ngram_ids",
+    op_func=_ple_ngram_ids,
+    mutates_args=[],
+    fake_impl=_ple_ngram_ids_fake,
+)
+
+
+def ple_ngram_ids(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    layer_multipliers: torch.Tensor,
+    ngram_heads_vocab_sizes: torch.Tensor,
+    ngram_heads_offsets: torch.Tensor,
+    eos_token_id: int,
+    heads_per_ngram: int,
+) -> torch.Tensor:
+    return torch.ops.vllm.qwen4_exp_ple_ngram_ids(
+        input_ids,
+        query_start_loc,
+        ngram_context,
+        layer_multipliers,
+        ngram_heads_vocab_sizes,
+        ngram_heads_offsets,
+        eos_token_id,
+        heads_per_ngram,
+    )
+
+
+# Gating and normalization
+
+
+@triton.jit
+def _ple_gate_kernel(
+    key_ptr,  # [T, HC*H] with row stride key_rs
+    value_ptr,  # [T, H] with row stride value_rs
+    hidden_ptr,  # [T, HC*H]
+    nk_ptr,  # [HC*H] norm_key weight
+    nq_ptr,  # [HC*H] norm_query weight
+    ncw_ptr,  # [HC*H] norm_conv weight
+    gated_ptr,  # [T, HC*H] out
+    normed_ptr,  # [T, HC*H] out
+    key_rs,
+    value_rs,
+    eps,
+    H: tl.constexpr,
+    HC: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    launch_pdl: tl.constexpr,
+):
+    t = tl.program_id(0)
+    s = tl.program_id(1)
+    lanes = tl.arange(0, BLOCK_H)
+    mask = lanes < H
+    offs = s * H + lanes
+    dtype: tl.constexpr = key_ptr.dtype.element_ty
+
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+
+    k = tl.load(key_ptr + t * key_rs + offs, mask=mask, other=0.0).to(tl.float32)
+    q = tl.load(hidden_ptr + t * HC * H + offs, mask=mask, other=0.0).to(tl.float32)
+    nk = tl.load(nk_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+    nq = tl.load(nq_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+
+    # Match eager materialization at each intermediate tensor boundary.
+    k_n = (k * tl.rsqrt(tl.sum(k * k) / H + eps) * (1.0 + nk)).to(dtype)
+    q_n = (q * tl.rsqrt(tl.sum(q * q) / H + eps) * (1.0 + nq)).to(dtype)
+    products = (k_n.to(tl.float32) * q_n.to(tl.float32)).to(dtype)
+    dot = tl.sum(products.to(tl.float32)).to(dtype).to(tl.float32)
+    d = dot / tl.sqrt(float(H))
+    d = d.to(dtype).to(tl.float32)
+    sign = tl.where(d < 0, -1.0, 0.0)
+    sign = tl.where(d > 0, 1.0, sign)
+    magnitude = tl.sqrt(tl.maximum(tl.abs(d), 1e-6)).to(dtype)
+    g = tl.sigmoid(sign * magnitude)
+    g = g.to(dtype).to(tl.float32)
+
+    v = tl.load(value_ptr + t * value_rs + lanes, mask=mask, other=0.0).to(tl.float32)
+    gated = (g * v).to(dtype)
+    gf = gated.to(tl.float32)
+    ncw = tl.load(ncw_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+    normed = gf * tl.rsqrt(tl.sum(gf * gf) / H + eps) * (1.0 + ncw)
+
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
+    tl.store(gated_ptr + t * HC * H + offs, gated, mask=mask)
+    tl.store(normed_ptr + t * HC * H + offs, normed, mask=mask)
+
+
+def _ple_gate(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    hidden: torch.Tensor,
+    norm_key_w: torch.Tensor,
+    norm_query_w: torch.Tensor,
+    norm_conv_w: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_tokens = hidden.shape[0]
+    h = value.shape[-1]
+    hc = hidden.shape[-1] // h
+    assert key.stride(1) == 1 and value.stride(1) == 1
+    assert hidden.is_contiguous()
+    if key.dtype != value.dtype or key.dtype != hidden.dtype:
+        raise ValueError("key, value, and hidden must have the same dtype")
+    if key.dtype not in (torch.bfloat16, torch.float16):
+        raise ValueError("PLE gate supports BF16 and FP16 inputs")
+    gated = torch.empty_like(hidden)
+    normed = torch.empty_like(hidden)
+    _ple_gate_kernel[(num_tokens, hc)](
+        key,
+        value,
+        hidden,
+        norm_key_w,
+        norm_query_w,
+        norm_conv_w,
+        gated,
+        normed,
+        key.stride(0),
+        value.stride(0),
+        eps,
+        H=h,
+        HC=hc,
+        BLOCK_H=triton.next_power_of_2(h),
+        num_warps=4,
+        launch_pdl=current_platform.is_arch_support_pdl(),
+    )
+    return gated, normed
+
+
+def _ple_gate_fake(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    hidden: torch.Tensor,
+    norm_key_w: torch.Tensor,
+    norm_query_w: torch.Tensor,
+    norm_conv_w: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(hidden), torch.empty_like(hidden)
+
+
+direct_register_custom_op(
+    op_name="qwen4_exp_ple_gate",
+    op_func=_ple_gate,
+    mutates_args=[],
+    fake_impl=_ple_gate_fake,
+)
+
+
+def ple_gate(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    hidden: torch.Tensor,
+    norm_key_w: torch.Tensor,
+    norm_query_w: torch.Tensor,
+    norm_conv_w: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.vllm.qwen4_exp_ple_gate(
+        key, value, hidden, norm_key_w, norm_query_w, norm_conv_w, eps
+    )
+
+
+# Dilated short convolution
 
 BLOCK_C = 512
 
