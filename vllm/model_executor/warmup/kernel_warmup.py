@@ -38,6 +38,9 @@ from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
+from vllm.model_executor.warmup.replayssm_warmup import (
+    replayssm_autotune_warmup,
+)
 from vllm.model_executor.warmup.spec_decode_rejection_warmup import (
     spec_decode_rejection_warmup,
 )
@@ -339,6 +342,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             fi_utils.autotune(tune_mode=True, **autotune_kwargs),
         ):
             _run_flashinfer_autotune_dummy_runs(runner)
+            replayssm_autotune_warmup(runner)
     finally:
         set_autotune_process_group(None)
 
