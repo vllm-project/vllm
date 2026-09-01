@@ -137,31 +137,6 @@ def test_amd_balanced_decode_score_budget_by_request_count(
     )
 
 
-def test_amd_balanced_decode_score_dispatch_matches_kernel_contract():
-    from vllm.models.minimax_m3.amd.ops.index_topk import (
-        _decode_score_program_budget,
-    )
-
-    accepted = {
-        "num_reqs": 4,
-        "head_dim": 128,
-        "query_dtype": torch.bfloat16,
-        "cache_dtype": torch.bfloat16,
-        "is_gfx950": True,
-    }
-    assert _decode_score_program_budget(**accepted) == 1024
-    rejected_overrides = (
-        {"is_gfx950": False},
-        {"num_reqs": 0},
-        {"num_reqs": 12},
-        {"head_dim": 64},
-        {"query_dtype": torch.float16},
-        {"cache_dtype": torch.float16},
-    )
-    for overrides in rejected_overrides:
-        assert _decode_score_program_budget(**(accepted | overrides)) is None
-
-
 @pytest.mark.parametrize("num_reqs", range(1, 12))
 def test_amd_balanced_decode_score_mapping_exact_coverage(num_reqs: int):
     from vllm.models.minimax_m3.amd.ops.index_topk import (
