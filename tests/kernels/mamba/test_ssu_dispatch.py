@@ -2,16 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from importlib import import_module
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
 
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
+from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
     TritonSSUBackend,
+    commit_replayssm_ring_trackers,
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
     reset_replayssm_ring_trackers,
@@ -20,7 +23,9 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     update_replayssm_ring_trackers,
 )
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -83,7 +88,141 @@ def test_flashinfer_replayssm_ring_tracker_lifecycle():
         prev_query_len,
         state_batch_indices,
     )
-    assert (ring_start[1].item(), prev_num_accepted[1].item()) == (0, 0)
+    assert (
+        ring_start[1].item(),
+        prev_num_accepted[1].item(),
+        prev_query_len[1].item(),
+    ) == (0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "accepted_sequence",
+    [
+        pytest.param([4] * 12, id="all-accepted"),
+        pytest.param([1] * 24, id="minimum-accepted"),
+        pytest.param([4, 1, 3, 4, 2, 4, 4, 1] * 2, id="mixed"),
+    ],
+)
+def test_replayssm_commit_tracker_acceptance_sequence(accepted_sequence):
+    logical_window = 16
+    query_len = 4
+    ring_buffer_len = logical_window + query_len
+    ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
+    prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
+    prev_query_len = torch.zeros(2, dtype=torch.int32, device="cuda")
+    state_batch_indices = torch.tensor([1], dtype=torch.int32, device="cuda")
+    query_start_loc = torch.tensor([0, query_len], dtype=torch.int32, device="cuda")
+
+    expected_start = 0
+    expected_prev = 0
+    expected_query_len = 0
+    for step, accepted in enumerate(accepted_sequence):
+        commit_replayssm_ring_trackers(
+            ring_start,
+            prev_num_accepted,
+            prev_query_len,
+            state_batch_indices,
+            torch.tensor([accepted], dtype=torch.int32, device="cuda"),
+            query_start_loc,
+            logical_window,
+            ring_buffer_len,
+        )
+
+        must_checkpoint = (
+            expected_query_len > 0
+            and expected_prev + expected_query_len > logical_window
+        )
+        if must_checkpoint:
+            expected_start = (expected_start + expected_prev) % ring_buffer_len
+        if expected_query_len == 0:
+            expected_prev = 0
+        elif must_checkpoint:
+            expected_prev = accepted
+        else:
+            expected_prev += accepted
+        expected_query_len = query_len
+
+        assert (
+            ring_start[1].item(),
+            prev_num_accepted[1].item(),
+            prev_query_len[1].item(),
+        ) == (expected_start, expected_prev, expected_query_len), f"step {step}"
+        assert expected_prev + expected_query_len <= ring_buffer_len
+
+
+def test_replayssm_commit_tracker_ragged_query_lengths():
+    ring_start = torch.zeros(3, dtype=torch.int32, device="cuda")
+    prev_num_accepted = torch.zeros(3, dtype=torch.int32, device="cuda")
+    prev_query_len = torch.zeros(3, dtype=torch.int32, device="cuda")
+    state_batch_indices = torch.tensor([1, 2], dtype=torch.int32, device="cuda")
+    query_start_loc = torch.tensor([0, 4, 6], dtype=torch.int32, device="cuda")
+
+    observed = []
+    for accepted in ([4, 2], [3, 1]):
+        commit_replayssm_ring_trackers(
+            ring_start,
+            prev_num_accepted,
+            prev_query_len,
+            state_batch_indices,
+            torch.tensor(accepted, dtype=torch.int32, device="cuda"),
+            query_start_loc,
+            logical_window=16,
+            ring_buffer_len=20,
+        )
+        observed.append(
+            [
+                (
+                    ring_start[slot].item(),
+                    prev_num_accepted[slot].item(),
+                    prev_query_len[slot].item(),
+                )
+                for slot in (1, 2)
+            ]
+        )
+
+    assert observed == [[(0, 0, 4), (0, 0, 2)], [(0, 3, 4), (0, 1, 2)]]
+
+
+@pytest.mark.parametrize("operation", ["commit", "reset"])
+def test_replayssm_tracker_kernels_mask_invalid_slots(operation):
+    num_states = 3
+    ring_start = torch.tensor([11, 2, 33], dtype=torch.int32, device="cuda")
+    prev_num_accepted = torch.tensor([11, 3, 33], dtype=torch.int32, device="cuda")
+    prev_query_len = torch.tensor([11, 4, 33], dtype=torch.int32, device="cuda")
+    state_batch_indices = torch.tensor(
+        [-1, num_states, NULL_BLOCK_ID, 1], dtype=torch.int32, device="cuda"
+    )
+
+    if operation == "commit":
+        commit_replayssm_ring_trackers(
+            ring_start,
+            prev_num_accepted,
+            prev_query_len,
+            state_batch_indices,
+            torch.tensor([4, 4, 4, 2], dtype=torch.int32, device="cuda"),
+            torch.tensor([0, 4, 8, 12, 16], dtype=torch.int32, device="cuda"),
+            logical_window=16,
+            ring_buffer_len=20,
+        )
+        expected_valid = (2, 5, 4)
+    else:
+        reset_replayssm_ring_trackers(
+            ring_start,
+            prev_num_accepted,
+            prev_query_len,
+            state_batch_indices,
+        )
+        expected_valid = (0, 0, 0)
+
+    assert (
+        ring_start.tolist(),
+        prev_num_accepted.tolist(),
+        prev_query_len.tolist(),
+    ) == (
+        [11, expected_valid[0], 33],
+        [11, expected_valid[1], 33],
+        [11, expected_valid[2], 33],
+    )
 
 
 def _kv_cache_config_with_ssu(
@@ -243,18 +382,37 @@ def test_triton_basic_call():
     assert not torch.isnan(out).any()
 
 
-def test_replayssm_flashinfer_call_forwards_packed_mtp(monkeypatch):
+@pytest.mark.parametrize("layout", ["packed", "dense"])
+def test_replayssm_flashinfer_call_forwards_mtp_layout(monkeypatch, layout):
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
 
-    kernel = Mock(return_value=torch.empty(1, 6, 2, 4))
+    kernel = Mock(return_value=torch.empty(0))
     monkeypatch.setattr(mod, "_flashinfer_replayssm_kernel", kernel)
 
-    tokens, nheads, dim, dstate, ngroups = 6, 2, 4, 8, 1
+    batch, max_seqlen, nheads, dim, dstate, ngroups = 2, 4, 2, 4, 8, 1
     state = torch.empty(2, nheads, dim, dstate)
-    x = torch.empty(tokens, nheads, dim)
+    x_shape: tuple[int, ...]
+    B_shape: tuple[int, ...]
+    expected_x_shape: tuple[int, ...]
+    expected_B_shape: tuple[int, ...]
+    if layout == "packed":
+        x_shape = (6, nheads, dim)
+        B_shape = (6, ngroups, dstate)
+        expected_x_shape = (1, 6, nheads, dim)
+        expected_B_shape = (1, 6, ngroups, dstate)
+        cu_seqlens = torch.tensor([0, 4, 6], dtype=torch.int32)
+        kernel_max_seqlen = max_seqlen
+    else:
+        x_shape = (batch, max_seqlen, nheads, dim)
+        B_shape = (batch, max_seqlen, ngroups, dstate)
+        expected_x_shape = x_shape
+        expected_B_shape = B_shape
+        cu_seqlens = None
+        kernel_max_seqlen = None
+    x = torch.empty(x_shape)
     dt = torch.empty_like(x)
     A = torch.empty(nheads, dim, dstate)
-    B = torch.empty(tokens, ngroups, dstate)
+    B = torch.empty(B_shape)
     C = torch.empty_like(B)
     out = torch.empty_like(x)
     x_cache = torch.empty(2, nheads, 20, dim)
@@ -263,8 +421,6 @@ def test_replayssm_flashinfer_call_forwards_packed_mtp(monkeypatch):
     ring_start = torch.zeros(2, dtype=torch.int32)
     prev_num_accepted = torch.zeros(2, dtype=torch.int32)
     prev_query_len = torch.zeros(2, dtype=torch.int32)
-    cu_seqlens = torch.tensor([0, 4, 6], dtype=torch.int32)
-
     selective_state_update_replayssm_flashinfer(
         state,
         x,
@@ -282,16 +438,121 @@ def test_replayssm_flashinfer_call_forwards_packed_mtp(monkeypatch):
         logical_window=16,
         state_batch_indices=torch.tensor([0, 1], dtype=torch.int32),
         cu_seqlens=cu_seqlens,
-        max_seqlen=4,
+        max_seqlen=kernel_max_seqlen,
         update_trackers=False,
     )
 
     args = kernel.call_args.args
-    assert args[6].shape == (1, tokens, nheads, dim)
-    assert args[7].shape == (1, tokens, nheads, dim)
-    assert args[9].shape == (1, tokens, ngroups, dstate)
-    assert args[10].shape == (1, tokens, ngroups, dstate)
-    assert args[11].shape == (1, tokens, nheads, dim)
+    assert args[6].shape == expected_x_shape
+    assert args[7].shape == expected_x_shape
+    assert args[9].shape == expected_B_shape
+    assert args[10].shape == expected_B_shape
+    assert args[11].shape == expected_x_shape
+    assert kernel.call_args.kwargs["cu_seqlens"] is cu_seqlens
+    assert kernel.call_args.kwargs["max_seqlen"] == kernel_max_seqlen
+
+
+@pytest.mark.parametrize(
+    ("query_start_loc", "expected_shape", "expected_max_seqlen"),
+    [
+        pytest.param([0, 4, 8], (2, 4, 2, 4), None, id="dense"),
+        pytest.param([0, 4, 6], (6, 2, 4), 4, id="packed"),
+    ],
+)
+def test_replayssm_mixer_selects_mtp_layout(
+    monkeypatch, query_start_loc, expected_shape, expected_max_seqlen
+):
+    import vllm.model_executor.layers.mamba.mamba_mixer2 as mod
+
+    mixer = MambaMixer2.__new__(MambaMixer2)
+    torch.nn.Module.__init__(mixer)
+    mixer.prefix = "mixer"
+    mixer.tped_intermediate_size = 0
+    mixer.tped_conv_size = 1
+    mixer.tped_dt_size = 2
+    mixer.num_heads = 2
+    mixer.head_dim = 4
+    mixer.n_groups = mixer.tp_size = 1
+    mixer.ssm_state_size = 8
+    mixer.num_spec = 3
+    mixer.use_replayssm = True
+    mixer.replayssm_buffer_len = 16
+    mixer._commits_replayssm_trackers = True
+    mixer._updates_replayssm_trackers = False
+    mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
+    mixer.cache_config = SimpleNamespace(mamba_block_size=16, mamba_cache_mode="none")
+    mixer.conv_weights = torch.empty(0)
+    mixer.conv1d = SimpleNamespace(bias=None)
+    mixer.activation = "silu"
+    mixer.A = torch.empty(2)
+    mixer.dt_bias = torch.empty(2)
+    mixer.D = torch.empty(2)
+    mixer._replayssm_ring_start = torch.zeros(3, dtype=torch.int32)
+    mixer._replayssm_prev_num_accepted = torch.zeros(3, dtype=torch.int32)
+    mixer._replayssm_prev_query_len = torch.zeros(3, dtype=torch.int32)
+    mixer.kv_cache = (
+        torch.empty(3, 1),
+        torch.empty(3, 2, 4, 8),
+        torch.empty(3, 2, 20, 4),
+        torch.empty(3, 2, 20),
+        torch.empty(3, 1, 20, 8),
+    )
+
+    num_decode_tokens = query_start_loc[-1]
+    query_start_loc_d = torch.tensor(query_start_loc, dtype=torch.int32)
+    metadata = Mamba2AttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=2,
+        num_decode_tokens=num_decode_tokens,
+        num_reqs=2,
+        has_initial_states_p=None,
+        query_start_loc_p=None,
+        num_computed_tokens_p=None,
+        state_indices_tensor_p=None,
+        state_indices_tensor_d=torch.tensor([[1], [2]], dtype=torch.int32),
+        query_start_loc_d=query_start_loc_d,
+        num_accepted_tokens=torch.tensor([4, 2], dtype=torch.int32),
+        block_idx_last_scheduled_token=None,
+        block_idx_first_scheduled_token_p=None,
+        block_idx_last_computed_token=None,
+        block_idx_last_scheduled_token_prev_step=None,
+        seq_lens=torch.tensor([104, 102], dtype=torch.int32),
+        replayssm_scratch=(torch.empty(0), torch.empty(0), torch.empty(0)),
+        replayssm_state_indices_d=torch.tensor([1, 2], dtype=torch.int32),
+    )
+
+    def split_hidden_states_B_C(values):
+        tokens = values.size(0)
+        return (
+            torch.empty(tokens, 8),
+            torch.empty(tokens, 8),
+            torch.empty(tokens, 8),
+        )
+
+    mixer.split_hidden_states_B_C_fn = split_hidden_states_B_C
+    kernel = Mock()
+    monkeypatch.setattr(
+        mod,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={mixer.prefix: metadata}),
+    )
+    monkeypatch.setattr(mod, "commit_replayssm_ring_trackers", Mock())
+    monkeypatch.setattr(
+        mod, "causal_conv1d_update", lambda values, *args, **kwargs: values
+    )
+    monkeypatch.setattr(mod, "selective_state_update_replayssm_flashinfer", kernel)
+
+    mixer.conv_ssm_forward(
+        torch.empty(num_decode_tokens, 3), torch.empty(num_decode_tokens, 8)
+    )
+
+    assert kernel.call_args.args[1].shape == expected_shape
+    if expected_max_seqlen is None:
+        assert kernel.call_args.kwargs["cu_seqlens"] is None
+    else:
+        assert kernel.call_args.kwargs["cu_seqlens"] is query_start_loc_d
+    assert kernel.call_args.kwargs["max_seqlen"] == expected_max_seqlen
 
 
 @pytest.mark.skipif(

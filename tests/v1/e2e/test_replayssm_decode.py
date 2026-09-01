@@ -37,16 +37,10 @@ def _check_replayssm_parity(
     mamba_backend: str = "triton",
     name_1: str = "replayssm",
     require_v2: bool = False,
-    monkeypatch: pytest.MonkeyPatch | None = None,
 ):
     # Compare logprobs, not greedy ids: ReplaySSM's fp arithmetic can flip a
     # near-tie. Baseline and ReplaySSM run at the same TP, so TP numerics are
     # common-mode and only ReplaySSM varies.
-    if require_v2:
-        assert monkeypatch is not None
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-        envs.disable_envs_cache()
-
     common = dict(
         max_model_len=1024,
         trust_remote_code=True,
@@ -95,14 +89,20 @@ def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
 def test_replayssm_flashinfer_decode_matches_baseline_v2(
     vllm_runner, model_name, monkeypatch
 ):
-    _check_replayssm_parity(
-        vllm_runner,
-        model_name,
-        mamba_backend="flashinfer",
-        name_1="replayssm_flashinfer_v2",
-        require_v2=True,
-        monkeypatch=monkeypatch,
-    )
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+            envs.disable_envs_cache()
+            _check_replayssm_parity(
+                vllm_runner,
+                model_name,
+                mamba_backend="flashinfer",
+                name_1="replayssm_flashinfer_v2",
+                require_v2=True,
+            )
+    finally:
+        # The context restores the environment before the final cache reset.
+        envs.disable_envs_cache()
 
 
 @pytest.mark.skipif(

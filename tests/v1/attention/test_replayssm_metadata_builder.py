@@ -243,13 +243,17 @@ def _create_replayssm_builder(
     )
 
 
-def _build(builder: MockMambaBuilder, case: ReplaySSMBuildCase):
+def _build(
+    builder: MockMambaBuilder,
+    case: ReplaySSMBuildCase,
+    num_accepted_tokens: torch.Tensor | None = None,
+):
     batch = BatchSpec(seq_lens=case.seq_lens, query_lens=case.query_lens)
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
         is_prefilling=torch.tensor(case.is_prefilling, dtype=torch.bool),
         replayssm_decode_base_cpu=torch.tensor(case.decode_base, dtype=torch.int32),
     )
-    return builder.build(0, common)
+    return builder.build(0, common, num_accepted_tokens=num_accepted_tokens)
 
 
 @pytest.mark.parametrize(
@@ -291,6 +295,34 @@ def test_spec_decode_single_token_chunk_synthesizes_acceptance_metadata():
     assert meta.query_start_loc_d.tolist() == [0, 1]
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.tolist() == [1]
+
+
+def test_flashinfer_mtp_metadata_preserves_ragged_query_lengths():
+    builder = _create_replayssm_builder(
+        16,
+        mamba_backend=MambaBackendEnum.FLASHINFER,
+        num_speculative_tokens=3,
+    )
+    meta = _build(
+        builder,
+        ReplaySSMBuildCase(
+            seq_lens=[104, 102],
+            query_lens=[4, 2],
+            is_prefilling=[False, False],
+            decode_base=[100, 100],
+            buffer_len=16,
+            expected_write_pos=[],
+            expected_is_flush=[],
+        ),
+        num_accepted_tokens=torch.tensor([4, 2], dtype=torch.int32),
+    )
+
+    assert meta.num_decodes == 2
+    assert meta.num_decode_tokens == 6
+    assert meta.query_start_loc_d is not None
+    assert meta.query_start_loc_d.tolist() == [0, 4, 6]
+    assert meta.replayssm_state_indices_d is not None
+    assert meta.replayssm_state_indices_d.shape == (2,)
 
 
 def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
