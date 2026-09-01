@@ -21,21 +21,23 @@ How, with ``VLLM_PLE_MMAP=1``:
     which ``Qwen4ExpPLELayer._dequantize_embeddings`` already knows how to
     consume. Unquantized dtypes (e.g. BF16) need no scale and pass through
     unscaled.
-  * the WHOLE forward — trigram hashing plus the row gather — is wrapped in
-    a custom op, ``vllm::qwen4_exp_ple_mmap_forward``, so it runs OUTSIDE
-    CUDA graph capture and outside torch.compile tracing entirely
-    (the stock hashing's ``.numel()``-derived slicing specializes
-    vLLM's dynamic dims under Dynamo — ``ConstraintViolationError`` on
-    ``query_start_loc.size()[0]`` — when only the gather was split out;
-    widening the op boundary to cover the hashing too sidesteps tracing
-    it at all). The op is
-    listed in ``splitting_ops`` the same way the narrower gather-only op
-    was.
+  * Model Runner V2 only. ``Qwen4ExpModelState`` moves the trigram hashing
+    and row gather out of model forward entirely: ``prepare_inputs`` calls
+    :func:`MmapNgramEmbedding.gather_into` (via
+    ``Qwen4ExpNGramEmbedding.prepare_mmap_rows``) directly into a stable,
+    module-owned buffer BEFORE the compiled/captured forward runs.
+    Captured model code only ever reads that buffer (a plain, symbolically
+    sliced tensor read), so there is no host work, D2H, or Python custom-op
+    body left inside the traced/captured graph — the original
+    ``.numel()``-derived slicing that caused Dynamo's
+    ``ConstraintViolationError`` on ``query_start_loc.size()[0]`` simply
+    never runs under compilation. V1 does not prepare these inputs after
+    #53896 and is rejected at construction with an actionable error.
 
 This module is imported unconditionally at ``nvidia/ple_layer.py`` module
-scope so the custom op registers at import time; every behavior above is
-gated on :func:`enabled` at call time. With ``VLLM_PLE_MMAP`` unset, nothing
-in this module is ever invoked and the stock classes are untouched.
+scope; every behavior above is gated on :func:`enabled` at call time. With
+``VLLM_PLE_MMAP`` unset, nothing in this module is ever invoked and the
+stock classes are untouched.
 
 Knobs (env, registered in ``vllm/envs.py``):
   VLLM_PLE_MMAP=1            enable
@@ -47,9 +49,9 @@ Knobs (env, registered in ``vllm/envs.py``):
                              to N coalesced file ranges via
                              posix_fadvise(WILLNEED) so the worker pool
                              faults against in-flight I/O
-  VLLM_PLE_MMAP_PINNED=0     1 = stage each forward's gathered rows through a
-                             per-call pinned host buffer before the H2D
-                             copy, instead of copying straight out of
+  VLLM_PLE_MMAP_PINNED=0     1 = stage each input-prep gather through a
+                             per-call pinned host buffer before H2D,
+                             instead of copying straight out of
                              gather()'s pageable numpy array
   VLLM_PLE_MMAP_SERIAL=0     N > 0 = a gather touching at most N distinct
                              rows runs its tasks inline on the calling
@@ -77,18 +79,13 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch import nn
 
 import vllm.envs as envs
-from vllm.config.compilation import CompilationMode
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op, get_dtype_size, vllm_lib
+from vllm.utils.torch_utils import get_dtype_size
 
 if TYPE_CHECKING:
-    from vllm.config import CompilationConfig, ModelConfig
+    from vllm.config import CompilationConfig, ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
-
-OP_NAME = "qwen4_exp_ple_mmap_forward"
-QUALIFIED_OP_NAME = f"vllm::{OP_NAME}"
 
 
 @dataclass(frozen=True)
@@ -922,21 +919,57 @@ class MmapNgramEmbedding(nn.Module):
         # is_available() in here too keeps forward's gate to the cheap
         # device-type check instead of re-querying CUDA every call.
         self.pinned = False
-        # (total_ms, sync_ms, gather_ms, h2d_ms) per forward call that
-        # actually gathered — the table-unset zero-fill path never reaches
-        # _record_forward_timing. pinned engagement is tracked separately in
-        # _fwd_pinned_since_log -- see _record_forward_timing.
-        self._fwd_timings_ms: list[tuple[float, float, float, float]] = []
-        self._fwd_rows_since_log = 0
-        self._fwd_pinned_since_log = 0
-        self._fwd_last_log = time.monotonic()
+        # (total_ms, ids_d2h_wait_ms, gather_ms, h2d_ms) for each real
+        # input-preparation call. The IDs wait includes queued accelerator
+        # dependencies.
+        self._prep_timings_ms: list[tuple[float, float, float, float]] = []
+        self._prep_rows_since_log = 0
+        self._prep_pinned_since_log = 0
+        self._prep_last_log = time.monotonic()
         self.register_buffer(
             "weight_scale",
             torch.tensor(1.0, dtype=torch.bfloat16),
             persistent=False,
         )
 
-    def forward(self, ids: torch.Tensor) -> torch.Tensor:
+    def gather_into(self, ids: torch.Tensor, destination: torch.Tensor) -> None:
+        """Gather this table's rows for ``ids`` directly into ``destination``.
+
+        ``destination`` is the caller's stable, module-owned buffer slice
+        (``Qwen4ExpNGramEmbedding._mmap_staging`` under V2 staging): every
+        gathered byte lands there directly, on the current stream — no
+        transient GPU result is allocated and no ``output.copy_``
+        indirection sits between the H2D copy and the real destination.
+
+        Args:
+            ids: row ids, any shape, on the same device as ``destination``.
+            destination: contiguous tensor shaped ``(*ids.shape,
+                embedding_dim)``, on ``ids.device``, dtyped either this
+                table's attached dtype or (no table) this placeholder's
+                fallback dtype.
+
+        Raises:
+            ValueError: ``destination`` fails device/dtype/shape/contiguity
+                validation, or (table attached) the table's row_bytes
+                disagree with ``embedding_dim * itemsize``.
+            RuntimeError: no table is attached and a real (non-dummy) load
+                already streamed weights without ``build_tables`` ever
+                attaching one.
+        """
+        expected_shape = (*ids.shape, self.embedding_dim)
+        if destination.device != ids.device:
+            raise ValueError(
+                f"PLE mmap: destination device {destination.device} != "
+                f"ids device {ids.device}"
+            )
+        if tuple(destination.shape) != expected_shape:
+            raise ValueError(
+                f"PLE mmap: destination shape {tuple(destination.shape)} != "
+                f"expected {expected_shape}"
+            )
+        if not destination.is_contiguous():
+            raise ValueError("PLE mmap: destination must be contiguous")
+
         table = self.table
         if table is None:
             if self.weights_streamed:
@@ -944,17 +977,27 @@ class MmapNgramEmbedding(nn.Module):
                     "PLE mmap table not initialized — load_weights ran but "
                     "build_tables did not"
                 )
-            return torch.zeros(
-                (*ids.shape, self.embedding_dim),
-                dtype=self.torch_dtype,
-                device=ids.device,
+            if destination.dtype != self.torch_dtype:
+                raise ValueError(
+                    f"PLE mmap: destination dtype {destination.dtype} != "
+                    f"placeholder dtype {self.torch_dtype}"
+                )
+            # No table and this is a dummy load: zero the destination in
+            # place rather than gathering — there is nothing to gather from.
+            destination.zero_()
+            return
+        if destination.dtype != table.torch_dtype:
+            raise ValueError(
+                f"PLE mmap: destination dtype {destination.dtype} != "
+                f"table dtype {table.torch_dtype}"
             )
-        sync_t = time.monotonic()
+
+        ids_d2h_wait_t = time.monotonic()
         ids_np = ids.detach().to("cpu", non_blocking=False).numpy().reshape(-1)
-        # gather_t doubles as sync_t's end-of-window read: nothing runs
-        # between the two, so one monotonic() call marks both boundaries.
+        # The blocking transfer also waits for dependency-ordered accelerator
+        # work queued before it. This interval is not pure copy latency.
         gather_t = time.monotonic()
-        sync_ms = (gather_t - sync_t) * 1000.0
+        ids_d2h_wait_ms = (gather_t - ids_d2h_wait_t) * 1000.0
         rows = table.gather(ids_np)  # uint8 [N, row_bytes], fresh & writable
         gather_ms = (time.monotonic() - gather_t) * 1000.0
         itemsize = table.itemsize
@@ -985,107 +1028,88 @@ class MmapNgramEmbedding(nn.Module):
         # Pageable (the default): `out` is still gather()'s pageable numpy
         # array, so non_blocking=True has no effect and the copy is
         # effectively synchronous regardless of the flag passed here.
-        out = out.to(ids.device, non_blocking=True)
+        # copy_ writes directly into the caller's stable destination on the
+        # current stream -- this IS the H2D copy, not a second indirection.
+        destination.copy_(out.reshape(destination.shape), non_blocking=True)
         h2d_ms = (time.monotonic() - h2d_t) * 1000.0
-        self._record_forward_timing(
-            ids_np.size, sync_ms, gather_ms, h2d_ms, pinned=pinned_engaged
+        self._record_input_prep_timing(
+            ids_np.size,
+            ids_d2h_wait_ms,
+            gather_ms,
+            h2d_ms,
+            pinned=pinned_engaged,
         )
-        return out.reshape(*ids.shape, self.embedding_dim)
 
-    def _record_forward_timing(
+    def forward(self, ids: torch.Tensor) -> torch.Tensor:
+        """Allocate a fresh destination and delegate to :meth:`gather_into`.
+
+        Not the active V2 model path (which gathers straight into a stable,
+        pre-allocated buffer via ``prepare_mmap_rows`` before forward runs);
+        kept for direct unit tests and any non-V2 direct caller.
+        """
+        dtype = self.table.torch_dtype if self.table is not None else self.torch_dtype
+        destination = torch.empty(
+            (*ids.shape, self.embedding_dim), dtype=dtype, device=ids.device
+        )
+        self.gather_into(ids, destination)
+        return destination
+
+    def _record_input_prep_timing(
         self,
         rows: int,
-        sync_ms: float,
+        ids_d2h_wait_ms: float,
         gather_ms: float,
         h2d_ms: float,
         *,
         pinned: bool,
     ) -> None:
-        """Rate-limited log of this instance's forward CPU-blocking time.
+        """Log rate-limited host blocking times for mmap input preparation.
 
-        Always on: matches MmapPleTable._record's always-on, 60s-rate-
-        limited posture, and costs six time.monotonic() calls (five in
-        forward -- the sync/gather boundary shares one read, since nothing
-        runs between them -- one here) plus a list append per forward —
-        negligible next to the gather itself — adding one log line per
-        PLE-layer instance per rank (doubling, not exploding, the existing
-        gather-side log volume).
-
-        sync_ms/gather_ms/h2d_ms are each "time this call blocked the
-        calling thread", the number that actually feeds inter-token
-        latency. The h2d_call_ms fields are NOT a bandwidth figure: on the
-        pageable arm they are the real (synchronous) copy cost, on the
-        pinned arm the staging copy plus the async-enqueue time — the
-        `pinned` field makes each line self-attributing about which of those
-        two it reports, instead of relying on a distant info_once.
-
-        The window mixes two populations (decode: small, frequent; prefill:
-        large, rare), so the p99 sample alone is virtually always a prefill
-        call and says nothing about what most calls actually cost. `n=`
-        (the window's sample count) plus a p50 split alongside p99 — the
-        list is already sorted, so this is nearly free — gives a reader
-        both ends without guessing which population p99 came from.
-
-        `pinned=` reports a per-window engaged/total count -- the same
-        shape as MmapPleTable's serial= field -- not the p99 sample's own
-        flag: a window can mix an engaged call with one that fell back to
-        the pageable path, and the p99 sample -- by construction the
-        window's biggest call -- would misreport whichever way that
-        happened to sort.
+        ``ids_d2h_wait_ms`` includes the IDs copy and accelerator work queued
+        before its blocking D2H boundary. It is not pure transfer latency.
+        Component fields describe the samples selected by total p50/p99 time.
         """
-        total_ms = sync_ms + gather_ms + h2d_ms
-        self._fwd_timings_ms.append((total_ms, sync_ms, gather_ms, h2d_ms))
-        self._fwd_rows_since_log += rows
+        total_ms = ids_d2h_wait_ms + gather_ms + h2d_ms
+        self._prep_timings_ms.append((total_ms, ids_d2h_wait_ms, gather_ms, h2d_ms))
+        self._prep_rows_since_log += rows
         if pinned:
-            self._fwd_pinned_since_log += 1
+            self._prep_pinned_since_log += 1
         now = time.monotonic()
-        if now - self._fwd_last_log < _LOG_INTERVAL_S:
+        if now - self._prep_last_log < _LOG_INTERVAL_S:
             return
-        # Sorted by total_ms, same as MmapPleTable._record: the p50/p99
-        # samples' own splits are reported, not an average across fast and
-        # slow calls.
-        timings = sorted(self._fwd_timings_ms)
+        timings = sorted(self._prep_timings_ms)
         n = len(timings)
         p50_idx = max(0, math.ceil(n * 0.50) - 1)
         p99_idx = max(0, math.ceil(n * 0.99) - 1)
-        p50_total, p50_sync, p50_gather, p50_h2d = (
+        p50_total, p50_ids_wait, p50_gather, p50_h2d = (
             timings[p50_idx] if timings else (0.0, 0.0, 0.0, 0.0)
         )
-        p99_total, p99_sync, p99_gather, p99_h2d = (
+        p99_total, p99_ids_wait, p99_gather, p99_h2d = (
             timings[p99_idx] if timings else (0.0, 0.0, 0.0, 0.0)
         )
-        # Every key below is unique within this line and is not a substring of
-        # any gather-side key: fwd_rows=/fwd_p99_ms= are prefixed because
-        # MmapPleTable._record already owns bare rows=/p99_ms=, and every
-        # percentile-scoped field spells out its own p50_/p99_ prefix rather
-        # than leaving one of the pair bare -- a bare sync_ms= would be a
-        # substring of p50_sync_ms=, so `grep -o 'sync_ms=[0-9.]*'` would hand
-        # a reader after the p99 split the p50 value instead, silently. The
-        # containment is one-way, not symmetric: bare rows=/p99_ms= DO match
-        # this line's prefixed keys, so a gather-side grep has to anchor on a
-        # key this line does not carry (copy_ms=, runs=, errors=).
         logger.info(
-            "PLE mmap forward: fwd_rows=%d n=%d p50_ms=%.2f p50_sync_ms=%.2f "
-            "p50_gather_ms=%.2f p50_h2d_call_ms=%.2f fwd_p99_ms=%.2f "
-            "p99_sync_ms=%.2f p99_gather_ms=%.2f p99_h2d_call_ms=%.2f "
-            "pinned=%d/%d",
-            self._fwd_rows_since_log,
+            "PLE mmap input prep: prep_rows=%d n=%d p50_ms=%.2f "
+            "p50_ids_d2h_wait_ms=%.2f p50_gather_ms=%.2f "
+            "p50_h2d_call_ms=%.2f prep_p99_ms=%.2f "
+            "p99_ids_d2h_wait_ms=%.2f p99_gather_ms=%.2f "
+            "p99_h2d_call_ms=%.2f pinned=%d/%d",
+            self._prep_rows_since_log,
             n,
             p50_total,
-            p50_sync,
+            p50_ids_wait,
             p50_gather,
             p50_h2d,
             p99_total,
-            p99_sync,
+            p99_ids_wait,
             p99_gather,
             p99_h2d,
-            self._fwd_pinned_since_log,
+            self._prep_pinned_since_log,
             n,
         )
-        self._fwd_timings_ms.clear()
-        self._fwd_rows_since_log = 0
-        self._fwd_pinned_since_log = 0
-        self._fwd_last_log = now
+        self._prep_timings_ms.clear()
+        self._prep_rows_since_log = 0
+        self._prep_pinned_since_log = 0
+        self._prep_last_log = now
 
 
 def set_weight_scale(
@@ -1109,47 +1133,33 @@ def set_weight_scale(
 
 
 # --------------------------------------------------------------------------- #
-# Startup guard: the whole-forward op (hashing + gather) must never run
-# inside CUDA graph capture.
+# Startup guard: mmap external staging is Model Runner V2-only.
 # --------------------------------------------------------------------------- #
-def check_cudagraph_safety(compilation_config: CompilationConfig) -> None:
-    """Raise if VLLM_PLE_MMAP=1 would run the hashing+gather forward inside
-    a capture.
+def check_cudagraph_safety(vllm_config: VllmConfig) -> None:
+    """Raise unless Model Runner V2 is active.
 
-    Three independent checks, any of which alone would miss
-    a real route into a capture:
-      * FULL cudagraph modes capture decode outside the fx graph regardless
-        of splitting_ops membership.
-      * enforce-eager (mode != VLLM_COMPILE) does not fully suppress capture
-        on this model and leaves splitting_ops empty.
-      * an operator-supplied ``-cc.splitting_ops`` list, or an attn-fusion
-        reset, can silently drop our op from the split set even under
-        PIECEWISE + VLLM_COMPILE.
+    V1 no longer prepares the PLE query/context inputs after #53896 removed
+    its host-side hash-and-gather path, so mmap has no working V1 fallback:
+    V1 must be refused at construction, before weights load.
+
+    V2's ``Qwen4ExpModelState`` moves the hash-and-gather entirely out of
+    model forward and into ``prepare_inputs``/``prepare_dummy_inputs``,
+    before the compiled/captured forward runs; captured code only reads a
+    stable, pre-populated buffer. This makes every V2 cudagraph mode safe,
+    including the FULL-containing ones — V2 model state initializes every
+    mmap module's staging buffer before capture/replay, and a mmap forward
+    without initialized staging raises rather than falling back to host
+    work.
 
     Raises:
-        RuntimeError: any of the above conditions holds.
+        RuntimeError: Model Runner V2 is not active.
     """
-    if compilation_config.cudagraph_mode.has_full_cudagraphs():
+    if not vllm_config.use_v2_model_runner:
         raise RuntimeError(
-            "VLLM_PLE_MMAP=1 requires piecewise-only CUDA graphs (the "
-            "hashing+gather forward cannot run inside a capture); "
-            "got cudagraph_mode="
-            f"{compilation_config.cudagraph_mode}. Pass "
-            "-cc.cudagraph_mode=PIECEWISE."
-        )
-    if compilation_config.mode != CompilationMode.VLLM_COMPILE:
-        raise RuntimeError(
-            "VLLM_PLE_MMAP=1 requires compilation_config.mode="
-            "CompilationMode.VLLM_COMPILE; enforce-eager does not fully "
-            f"suppress CUDA graph capture on this model. Got mode="
-            f"{compilation_config.mode}."
-        )
-    if QUALIFIED_OP_NAME not in (compilation_config.splitting_ops or []):
-        raise RuntimeError(
-            f"VLLM_PLE_MMAP=1 requires {QUALIFIED_OP_NAME!r} in "
-            "compilation_config.splitting_ops (an operator-supplied "
-            "-cc.splitting_ops list, or an attn-fusion reset, can drop it). "
-            f"Got splitting_ops={compilation_config.splitting_ops!r}."
+            "VLLM_PLE_MMAP=1 requires Model Runner V2: V1 no longer "
+            "prepares the PLE query/context inputs after #53896 removed "
+            "its host-side hash-and-gather path, so mmap has no working V1 "
+            "fallback. Set VLLM_USE_V2_MODEL_RUNNER=1."
         )
 
 
@@ -1240,13 +1250,64 @@ def _validate_layer_shards(
     return layer_shards.scale_entry
 
 
+def _validate_shard_placement(
+    layer_shards: _LayerShards,
+    org_vocab_size: int,
+    split_ngram_parts: int,
+    layer_idx: int,
+    model_path: str,
+) -> None:
+    """Shared fail-closed shard cardinality/placement checks between
+    :func:`preflight_reload_check` (before approval/mutation) and
+    :func:`_attach_table` (authoritative, attach-time).
+
+    Verbatim shard-placement math from
+    ``Qwen4ExpNGramEmbedding.load_weights`` (nvidia/ple_layer.py) --
+    discovery and gather must stay two self-consistent halves of the same
+    mapping. Dtype/width/scale are `_validate_layer_shards`'s job, not
+    this function's: a reload can match dtype and width exactly while
+    still carrying the wrong number of shards, or shards holding the
+    wrong row count for their index -- e.g. a checkpoint exported with a
+    different ``split_ngram_parts`` than the one already staged.
+
+    Raises:
+        RuntimeError: an expected shard index is missing, a present shard
+            index exceeds ``split_ngram_parts``, or a present shard's row
+            count does not match what its index implies.
+    """
+    shard_size = (org_vocab_size + split_ngram_parts - 1) // split_ngram_parts
+    num_expected_shards = min(
+        split_ngram_parts,
+        (org_vocab_size + shard_size - 1) // shard_size if shard_size else 0,
+    )
+    missing = [i for i in range(num_expected_shards) if i not in layer_shards.shards]
+    if missing:
+        raise RuntimeError(
+            f"PLE mmap: layer {layer_idx} missing shard(s) {missing} of "
+            f"{num_expected_shards} under {model_path}"
+        )
+    for shard_index, (_path, _offset, rows) in layer_shards.shards.items():
+        if shard_index >= split_ngram_parts:
+            raise RuntimeError(
+                f"PLE mmap: layer {layer_idx} shard {shard_index} exceeds "
+                f"split_ngram_parts={split_ngram_parts}"
+            )
+        checkpoint_start = shard_index * shard_size
+        expected_rows = max(0, min(shard_size, org_vocab_size - checkpoint_start))
+        if rows != expected_rows:
+            raise RuntimeError(
+                f"PLE mmap: layer {layer_idx} shard {shard_index} has "
+                f"{rows} rows, expected {expected_rows}"
+            )
+
+
 # --------------------------------------------------------------------------- #
 # Construction-time validation: cheap, header-only checks run from
 # Qwen4ExpNGramEmbedding.__init__, before the ~78 GiB backbone streams.
 # --------------------------------------------------------------------------- #
 def validate_shards_for(
     model_config: ModelConfig, layer_name: str, head_dim: int
-) -> None:
+) -> torch.dtype | None:
     """Refuse a bad checkpoint at construction time, not after the load.
 
     Header-only checks (path resolution, shard presence, dtype, width,
@@ -1263,6 +1324,17 @@ def validate_shards_for(
     fail-closes at the real load if the checkpoint is genuinely broken, so
     skipping here masks nothing.
 
+    Returns:
+        The layer's validated checkpoint row dtype when the model path
+        resolves and every header check passes, or ``None`` when the model
+        path could not be resolved (deferred to load time). The caller
+        (``Qwen4ExpNGramEmbedding.__init__``) seeds the placeholder's
+        ``torch_dtype`` from this so a dummy load — which never streams
+        weights and so never reaches :func:`_attach_table` — allocates its
+        V2 staging buffer (:meth:`Qwen4ExpNGramEmbedding.initialize_mmap_staging`)
+        at the checkpoint's real dtype instead of the placeholder's stale
+        FP8 default.
+
     Raises:
         RuntimeError: the model path resolves but shards are missing,
             wrong-dtype, wrong-width, or scale-less.
@@ -1275,7 +1347,7 @@ def validate_shards_for(
             "at construction time; deferring to load time",
             layer_name,
         )
-        return
+        return None
     layer_idx = _extract_layer_idx(layer_name)
     layer_shards = discover_shards(model_path).get(layer_idx)
     if layer_shards is None:
@@ -1284,41 +1356,121 @@ def validate_shards_for(
             f"({layer_name!r}) under {model_path}"
         )
     _validate_layer_shards(layer_shards, head_dim, layer_idx, model_path)
+    # _validate_layer_shards already refused an unrecognized dtype_str, so
+    # this lookup cannot miss.
+    return _PLE_DTYPES[layer_shards.dtype_str].torch_dtype
 
 
 # --------------------------------------------------------------------------- #
 # Reload preflight: called from the top-level model's load_weights, before
 # AutoWeightsLoader is even constructed.
 # --------------------------------------------------------------------------- #
-def preflight_reload_check(compilation_config: CompilationConfig) -> None:
-    """Fail closed, before any weights stream, if a PLE layer already has a
-    table attached.
+def _resolve_reload_shards_path(weights_path: str) -> str | None:
+    """Best-effort local resolution of a proposed reload's checkpoint path.
 
-    The child-level guard in ``Qwen4ExpNGramEmbedding.load_weights`` only
-    fires once ``AutoWeightsLoader``'s recursive walk reaches that specific
-    PLE layer's own ``load_weights``. ``AutoWeightsLoader`` walks (and
-    mutates) checkpoint weights in stream order as it descends the module
-    tree, so a same-instance reload can already have overwritten earlier,
-    unrelated parameters (e.g. ``lm_head``, ``embed_tokens``, other decoder
-    layers) before it ever reaches the PLE layer whose guard rejects the
-    call. Calling this from the top-level ``Qwen4ExpForCausalLM.load_weights``
-    / ``Qwen4ExpForConditionalGeneration.load_weights`` — before their
-    ``AutoWeightsLoader`` is constructed and before ``weights`` is advanced
-    at all — rejects that same reload before anything is mutated. The
-    child-level guard stays in place as defense in depth for any load path
-    that reaches a PLE child directly.
+    Unlike :func:`resolve_model_path`, this never contacts the network: a
+    reload preflight must fail closed on an unresolvable path rather than
+    block on (or trigger) a download. Returns ``None`` when ``weights_path``
+    is not already a local directory and no offline-cached snapshot exists.
+    """
+    if os.path.isdir(weights_path):
+        return weights_path
+    from vllm.transformers_utils.repo_utils import hf_api
+
+    try:
+        return hf_api().snapshot_download(
+            repo_id=weights_path,
+            revision=None,
+            allow_patterns=["*.safetensors"],
+            local_files_only=True,
+        )
+    except Exception:
+        return None
+
+
+def preflight_reload_check(
+    compilation_config: CompilationConfig,
+    *,
+    weights_path: str | None = None,
+    is_checkpoint_format: bool = True,
+    has_weights_iterator: bool = False,
+) -> None:
+    """Fail closed, before any weights stream, on an unsafe PLE mmap reload.
+
+    Called from the top-level model's ``load_weights``, before
+    ``AutoWeightsLoader`` is constructed or ``weights`` is advanced: waiting
+    for ``Qwen4ExpNGramEmbedding.load_weights``'s own guard would let
+    ``AutoWeightsLoader`` mutate earlier parameters first, since it walks
+    the checkpoint in stream order (that child-level guard stays in place
+    as defense in depth). Also the sole gate for the runtime "kernel
+    format" reload (``is_checkpoint_format=False``), which copies straight
+    into named parameters and never calls ``load_weights`` at all.
 
     Args:
-        compilation_config: the current call's compilation config; every
-            layer registered in ``static_forward_context`` that resolves to
-            an :class:`MmapNgramEmbedding` with a non-None ``table`` fails
-            this check.
+        compilation_config: checked layer by layer via
+            ``static_forward_context``.
+        weights_path: the reload's proposed checkpoint path/repo id, or
+            ``None`` for a caller-supplied weights iterator with no path to
+            prove compatibility against.
+        is_checkpoint_format: ``False`` for pre-repacked "kernel format"
+            weights, which ``discover_shards``' safetensors parsing cannot
+            speak to.
+        has_weights_iterator: whether the caller ALSO supplied a weights
+            iterator alongside ``weights_path``. This function can only
+            validate the checkpoint AT ``weights_path``; if the actual load
+            instead streams from the iterator, a "validated" path proves
+            nothing about what will load. Rejected outright as ambiguous
+            for a model with a staged-but-tableless PLE layer.
 
     Raises:
-        RuntimeError: a PLE layer already has a table attached from a
-            previous load — reloading onto the same live module would mix
-            this reload's rows with the already-attached checkpoint's scale.
+        RuntimeError: the ambiguous iterator+path combination above; a PLE
+            layer already has a table attached (reloading onto a live
+            module would mix this reload's rows with the attached
+            checkpoint's scale); a layer has staging initialized but no
+            table and this reload cannot prove row-layout compatibility
+            with a resolvable checkpoint; the checkpoint's on-disk shards
+            otherwise fail :func:`_validate_layer_shards`; or the shards
+            fail :func:`_validate_shard_placement` (missing/extra shard
+            indices, or a per-shard row count that disagrees with the
+            already-staged layer's ``org_vocab_size``/``split_ngram_parts``
+            even though dtype and width matched).
     """
+    if weights_path is not None and has_weights_iterator:
+        # A dedicated pre-pass, run before any other check below: this
+        # ambiguity must reject before approval, before
+        # `model_config.model` is repointed at `weights_path`, before the
+        # iterator is advanced, before `named_parameters` is walked, and
+        # before a model loader is even constructed for the (unused)
+        # `weights_path` -- all of which the runner's `reload_weights`
+        # would otherwise do first if this ran interleaved with the
+        # ordinary per-layer loop below.
+        for layer_name, layer in compilation_config.static_forward_context.items():
+            ple_embedding_module = getattr(layer, "ple_embedding", None)
+            if ple_embedding_module is None:
+                continue
+            embedding = getattr(ple_embedding_module, "ngram_embedding", None)
+            if not isinstance(embedding, MmapNgramEmbedding):
+                continue
+            if embedding.table is not None:
+                # A different, unrelated rejection ("already has a table
+                # attached") owns this layer's state; the loop below raises
+                # it.
+                continue
+            staging = getattr(ple_embedding_module, "_mmap_staging", None)
+            if staging is None:
+                continue
+            raise RuntimeError(
+                f"PLE mmap: {layer_name!r} has mmap staging initialized "
+                "but no table attached, and this reload supplied BOTH a "
+                f"weights_path ({weights_path!r}) and a weights iterator. "
+                "This preflight can only validate the checkpoint sitting "
+                "at weights_path -- the actual load streams from whichever "
+                "the caller passes to model.load_weights, which is not "
+                "provably the same checkpoint. Supply exactly one of "
+                "weights_path or a weights iterator for a model with an "
+                "unattached, staged PLE layer."
+            )
+
     for layer_name, layer in compilation_config.static_forward_context.items():
         ple_embedding_module = getattr(layer, "ple_embedding", None)
         if ple_embedding_module is None:
@@ -1334,6 +1486,304 @@ def preflight_reload_check(compilation_config: CompilationConfig) -> None:
                 "this reload's rows with the already-attached checkpoint's "
                 "scale. Restart the seat to load different weights."
             )
+        staging = getattr(ple_embedding_module, "_mmap_staging", None)
+        if staging is None:
+            # V2 model state has not (yet) initialized staging for this
+            # layer -- nothing attached, nothing staged, nothing to prove
+            # compatible with. Not this function's problem: the initial
+            # load path reaches here before model state exists at all.
+            continue
+        if weights_path is None or not is_checkpoint_format:
+            raise RuntimeError(
+                f"PLE mmap: {layer_name!r} has mmap staging initialized "
+                "but no table attached, and this reload cannot prove "
+                "row-layout compatibility without a resolvable "
+                "checkpoint-format weights_path (got weights_path="
+                f"{weights_path!r}, is_checkpoint_format="
+                f"{is_checkpoint_format!r}). Only a checkpoint-format "
+                "reload from a resolvable path can be proven safe to "
+                "attach onto already-initialized staging."
+            )
+        layer_idx = getattr(layer, "layer_idx", None)
+        if layer_idx is None:
+            raise RuntimeError(
+                f"PLE mmap: {layer_name!r} has no layer_idx to resolve its "
+                "shards against"
+            )
+        resolved_path = _resolve_reload_shards_path(weights_path)
+        if resolved_path is None:
+            raise RuntimeError(
+                f"PLE mmap: {layer_name!r} has mmap staging initialized "
+                "but no table attached, and the proposed reload path "
+                f"{weights_path!r} does not resolve to a local checkpoint "
+                "directory (and no offline-cached snapshot exists) -- "
+                "cannot prove row-layout compatibility before attaching"
+            )
+        layer_shards = discover_shards(resolved_path).get(layer_idx)
+        if layer_shards is None:
+            raise RuntimeError(
+                f"PLE mmap: {layer_name!r} (layer {layer_idx}) has no "
+                f"shard tensors under the proposed reload path "
+                f"{resolved_path!r}"
+            )
+        desc = _PLE_DTYPES.get(layer_shards.dtype_str)
+        incoming_dtype = desc.torch_dtype if desc is not None else None
+        current_dtype = staging.dtype
+        current_width = staging.shape[-1]
+        if incoming_dtype != current_dtype or layer_shards.cols != current_width:
+            raise RuntimeError(
+                f"PLE mmap: {layer_name!r} reload rejected — incoming "
+                f"checkpoint layout (dtype={layer_shards.dtype_str}, "
+                f"row_width={layer_shards.cols}) under {resolved_path!r} "
+                "does not match the already-staged layout "
+                f"(dtype={current_dtype}, row_width={current_width})"
+            )
+        # The dtype/width match above only proves this reload's SHAPE is
+        # compatible with what is already staged -- it says nothing about
+        # whether the checkpoint itself is a valid PLE export (e.g. an FP8
+        # layer missing its weight_scale entirely, or one carrying a stray
+        # scale it has no business having). Run the same header-only
+        # fail-closed contract _attach_table applies at real attach time
+        # before granting a same-layout approval. head_dim is
+        # layer_shards.cols itself here (already proven == current_width
+        # above), so this call adds the scale-presence/shape/dtype and
+        # dtype-support checks without re-deriving the layout match just
+        # performed -- and without changing the "reload rejected" message
+        # above for a plain layout mismatch.
+        _validate_layer_shards(
+            layer_shards, layer_shards.cols, layer_idx, resolved_path
+        )
+        # Validate placement against the current layer, not the incoming
+        # checkpoint's declaration.
+        _validate_shard_placement(
+            layer_shards,
+            embedding.org_vocab_size,
+            ple_embedding_module.split_ngram_parts,
+            layer_idx,
+            resolved_path,
+        )
+
+
+# Attribute name for the transaction-scoped reload approval token stashed
+# directly on a model instance. See `_ReloadApproval` for the mechanism.
+# Private/mangled-looking on purpose: nothing outside this module should
+# read, set, or rely on its presence.
+_RELOAD_APPROVAL_ATTR = "_ple_mmap_reload_approval"
+
+# `_ReloadApproval.role`: which model instance owns calling `build_tables`
+# at its own `load_weights` boundary. `_ROLE_ROOT` is the outermost
+# `load_weights` call for this transaction -- a standalone model, or the
+# `Qwen4ExpForConditionalGeneration` wrapper -- and builds exactly once,
+# after its own (possibly recursive) load fully returns. `_ROLE_DEFER` is a
+# nested causal LM granted a copy of the outer wrapper's token: it may be
+# invoked more than once per transaction (AutoWeightsLoader's grouping is
+# not a full partition), and every one of those calls must defer building
+# to the root, since only the root has seen every group.
+_ROLE_ROOT = "root"
+_ROLE_DEFER = "nested"
+
+
+@dataclass(frozen=True)
+class _ReloadApproval:
+    """One reload transaction's token, stashed on a model instance under
+    `_RELOAD_APPROVAL_ATTR`.
+
+    Mechanism: `AutoWeightsLoader`'s `load_weights` entry point has no
+    `weights_path` argument, so it cannot itself run the path-aware
+    `preflight_reload_check` a caller who DOES have a path (the runner's
+    `preflight_reload_weights`) already ran. A token bridges the two: the
+    path-aware caller mints one via `approve_reload`; `load_weights` then
+    validates against it via `validate_reload_approval` instead of
+    re-deriving -- and failing -- the same proof pathlessly. A TRUE initial
+    load has no path-aware caller ahead of it at all, so
+    `validate_reload_approval` mints its own token the first time it finds
+    none, once the ordinary pathless preflight proves this really is a
+    fresh load; that call then OWNS the token (see its docstring).
+
+    Not single-use: `AutoWeightsLoader._groupby_prefix` groups an incoming
+    weight stream by CONSECUTIVE runs of a shared top-level prefix, not a
+    full partition, so a checkpoint that interleaves a mapped module's
+    weights with an unrelated group's calls that module's `load_weights`
+    MORE THAN ONCE per transaction -- every call must find the same token
+    still there. Only `clear_reload_approval` ever removes it, once, when
+    the transaction that owns it ends.
+
+    For a multimodal model, both the outer wrapper's
+    (`Qwen4ExpForConditionalGeneration`) and the nested causal LM's
+    (`Qwen4ExpForCausalLM`) copies carry the SAME `transaction` sentinel --
+    proof they share one transaction rather than two coincidentally-present
+    approvals -- but each carries its OWN `role`: `_ROLE_ROOT` on the
+    wrapper, `_ROLE_DEFER` on the nested causal LM, so the two copies of
+    one transaction disagree, by design, on who builds tables.
+    `compilation_config_id` binds the token to the exact
+    `CompilationConfig` validated when it was minted; a token bound to a
+    different config is discarded rather than honored.
+    """
+
+    transaction: object
+    compilation_config_id: int
+    weights_path: str | None
+    is_checkpoint_format: bool
+    role: str
+
+
+def _grant_reload_transaction(
+    model: object,
+    compilation_config: CompilationConfig,
+    *,
+    weights_path: str | None,
+    is_checkpoint_format: bool,
+    inner_model_attr: str | None,
+) -> None:
+    """Mint one transaction and stash a `_ROLE_ROOT` token on `model` (and,
+    when `inner_model_attr` names a nested causal LM attribute, a
+    `_ROLE_DEFER` token sharing the same `transaction` sentinel on that
+    model too -- a no-op when the attribute is absent or aliases `model`).
+    See `_ReloadApproval` for why the two copies carry different roles."""
+    transaction = object()
+    setattr(
+        model,
+        _RELOAD_APPROVAL_ATTR,
+        _ReloadApproval(
+            transaction=transaction,
+            compilation_config_id=id(compilation_config),
+            weights_path=weights_path,
+            is_checkpoint_format=is_checkpoint_format,
+            role=_ROLE_ROOT,
+        ),
+    )
+    inner_model = getattr(model, inner_model_attr, None) if inner_model_attr else None
+    if inner_model is not None and inner_model is not model:
+        setattr(
+            inner_model,
+            _RELOAD_APPROVAL_ATTR,
+            _ReloadApproval(
+                transaction=transaction,
+                compilation_config_id=id(compilation_config),
+                weights_path=weights_path,
+                is_checkpoint_format=is_checkpoint_format,
+                role=_ROLE_DEFER,
+            ),
+        )
+
+
+def approve_reload(
+    model: object,
+    compilation_config: CompilationConfig,
+    *,
+    weights_path: str | None = None,
+    is_checkpoint_format: bool = True,
+    has_weights_iterator: bool = False,
+    inner_model_attr: str | None = None,
+) -> None:
+    """Path-aware preflight a reload; on success, grant it a transaction
+    token (see `_ReloadApproval`) for the matching `load_weights` call(s)
+    to validate against. Raises and grants nothing if the reload is unsafe.
+
+    Args:
+        inner_model_attr: name of `model`'s nested causal LM attribute
+            (``"language_model"`` for `Qwen4ExpForConditionalGeneration`),
+            granted a copy of the same token. `None` for a standalone
+            `Qwen4ExpForCausalLM`, which has no nested model to share with.
+    """
+    preflight_reload_check(
+        compilation_config,
+        weights_path=weights_path,
+        is_checkpoint_format=is_checkpoint_format,
+        has_weights_iterator=has_weights_iterator,
+    )
+    _grant_reload_transaction(
+        model,
+        compilation_config,
+        weights_path=weights_path,
+        is_checkpoint_format=is_checkpoint_format,
+        inner_model_attr=inner_model_attr,
+    )
+
+
+def validate_reload_approval(
+    model: object,
+    compilation_config: CompilationConfig,
+    *,
+    inner_model_attr: str | None = None,
+) -> tuple[bool, bool]:
+    """Enter or validate `model`'s reload transaction; fail closed if unsafe.
+
+    A pre-existing token bound to this `compilation_config` -- runner-
+    granted via `approve_reload`, or an outer wrapper's token already
+    copied onto this nested model -- validates without being consumed (see
+    `_ReloadApproval`). Otherwise this call has no path-aware preflight
+    ahead of it (a true initial load): the ordinary pathless
+    `preflight_reload_check` must pass, and only then does this call mint
+    its own fresh transaction via `_grant_reload_transaction`, so a same-
+    transaction repeat invocation (interleaved `AutoWeightsLoader` groups)
+    finds it on the next call. A freshly minted transaction always grants
+    `model` itself the `_ROLE_ROOT` token (see `_grant_reload_transaction`),
+    so minting implies both return values are True.
+
+    Args:
+        inner_model_attr: forwarded to `_grant_reload_transaction` when
+            this call mints a fresh transaction; see `approve_reload`.
+
+    Returns:
+        `(owns_transaction, should_build_tables)`.
+
+        `owns_transaction` is True when this call minted a fresh
+        transaction it now OWNS and must itself clear via
+        `clear_reload_approval` once its own `load_weights` body finishes,
+        success or failure. False when it validated a token minted
+        elsewhere, which it must leave untouched -- that transaction is not
+        this call's to end.
+
+        `should_build_tables` is True when `model`'s own token carries
+        `_ROLE_ROOT`: this call is the sole table-build owner and must call
+        `build_tables` itself, once, at its own `load_weights` boundary
+        (whether or not it also owns clearing the transaction -- a
+        runner-approved standalone reload is root but does not own).
+        False when `model`'s token carries `_ROLE_DEFER`: a nested causal
+        LM invoked under an outer `Qwen4ExpForConditionalGeneration`
+        transaction, which must defer every one of its (possibly repeated)
+        table-build opportunities to the outer wrapper's own return.
+    """
+    token = getattr(model, _RELOAD_APPROVAL_ATTR, None)
+    if token is not None:
+        if isinstance(token, _ReloadApproval) and token.compilation_config_id == id(
+            compilation_config
+        ):
+            return False, token.role == _ROLE_ROOT
+        # Wrong shape, or bound to a different compilation_config: not
+        # proof of anything about THIS call's reload.
+        delattr(model, _RELOAD_APPROVAL_ATTR)
+    preflight_reload_check(compilation_config)
+    _grant_reload_transaction(
+        model,
+        compilation_config,
+        weights_path=None,
+        is_checkpoint_format=True,
+        inner_model_attr=inner_model_attr,
+    )
+    return True, True
+
+
+def clear_reload_approval(model: object, inner_model: object | None = None) -> None:
+    """End a reload transaction: remove `model`'s token (and
+    `inner_model`'s copy, if any). The only place a token is ever removed
+    on the success path -- `validate_reload_approval` never deletes one it
+    merely validated. Call once, from whichever call owns the transaction:
+    the runner's `finally`, the worker's weight-transfer session cleanup,
+    or a `load_weights` call that itself minted the token (see
+    `validate_reload_approval`'s return value). Idempotent; `inner_model`
+    of `None`/identical-to-`model` is a no-op (the standalone
+    `Qwen4ExpForCausalLM` case, which never had a second token).
+    """
+    if hasattr(model, _RELOAD_APPROVAL_ATTR):
+        delattr(model, _RELOAD_APPROVAL_ATTR)
+    if (
+        inner_model is not None
+        and inner_model is not model
+        and hasattr(inner_model, _RELOAD_APPROVAL_ATTR)
+    ):
+        delattr(inner_model, _RELOAD_APPROVAL_ATTR)
 
 
 # --------------------------------------------------------------------------- #
@@ -1344,13 +1794,19 @@ def build_tables(
 ) -> None:
     """Build and bounded-prewarm the table for every enabled PLE layer.
 
-    Called from both ``Qwen4ExpForConditionalGeneration.load_weights`` and
-    ``Qwen4ExpForCausalLM.load_weights`` after their respective streamed
-    weight passes complete — never from
+    Called from ``Qwen4ExpForConditionalGeneration.load_weights`` and
+    ``Qwen4ExpForCausalLM.load_weights``, but only by whichever call holds
+    the ``_ROLE_ROOT`` token for its transaction (``should_build_tables``
+    from ``validate_reload_approval``) — never from
     ``Qwen4ExpNGramEmbedding.load_weights``, which would stream the whole
-    table mid-load during the tightest memory transient. Since the
-    ConditionalGeneration wrapper composes CausalLM internally, a single
-    real load can reach this function twice.
+    table mid-load during the tightest memory transient. A nested
+    ``Qwen4ExpForCausalLM`` invoked under a ``Qwen4ExpForConditionalGeneration``
+    transaction holds ``_ROLE_DEFER`` instead and never calls this function
+    itself, however many times ``AutoWeightsLoader`` invokes its
+    ``load_weights`` during one load. Only the outer wrapper builds tables,
+    after every nested group has streamed.
+    A standalone ``Qwen4ExpForCausalLM`` (no wrapper) always holds
+    ``_ROLE_ROOT`` and calls this itself, at its own load boundary.
 
     Two costs are avoided on that redundant second call: ``model_path`` is
     resolved (cheap: a directory check or a local HF cache lookup) so every
@@ -1482,32 +1938,14 @@ def _attach_table(
     # happens in a test double, and attaching must not chase that state.
 
     vocab = embedding.org_vocab_size
-    # Verbatim shard-placement math from Qwen4ExpNGramEmbedding.load_weights
-    # (nvidia/ple_layer.py) — discovery and gather must stay two
-    # self-consistent halves of the same mapping.
-    shard_size = (vocab + split_ngram_parts - 1) // split_ngram_parts
-    num_expected_shards = min(
-        split_ngram_parts, (vocab + shard_size - 1) // shard_size if shard_size else 0
+    _validate_shard_placement(
+        layer_shards, vocab, split_ngram_parts, layer_idx, model_path
     )
-    missing = [i for i in range(num_expected_shards) if i not in layer_shards.shards]
-    if missing:
-        raise RuntimeError(
-            f"PLE mmap: layer {layer_idx} missing shard(s) {missing} of "
-            f"{num_expected_shards} under {model_path}"
-        )
-    for shard_index, (_path, _offset, rows) in layer_shards.shards.items():
-        if shard_index >= split_ngram_parts:
-            raise RuntimeError(
-                f"PLE mmap: layer {layer_idx} shard {shard_index} exceeds "
-                f"split_ngram_parts={split_ngram_parts}"
-            )
-        checkpoint_start = shard_index * shard_size
-        expected_rows = max(0, min(shard_size, vocab - checkpoint_start))
-        if rows != expected_rows:
-            raise RuntimeError(
-                f"PLE mmap: layer {layer_idx} shard {shard_index} has "
-                f"{rows} rows, expected {expected_rows}"
-            )
+    # Same formula _validate_shard_placement just checked every shard
+    # against; MmapPleTable needs it too, to map a global row id back to
+    # its owning shard and local offset (see the class docstring's
+    # shard-mapping contract).
+    shard_size = (vocab + split_ngram_parts - 1) // split_ngram_parts
 
     if embedding.table is not None:
         # Defensive: build_tables' own idempotency skip (table is not None
@@ -1544,7 +1982,7 @@ def _attach_table(
             # per-layer argument would re-log for every PLE layer (same
             # rationale as the readahead pre-pass breadcrumb above).
             logger.info_once(
-                "PLE mmap: forward H2D will stage through a pinned host "
+                "PLE mmap: input-prep H2D will use a pinned host "
                 "buffer on CUDA (VLLM_PLE_MMAP_PINNED=1)"
             )
         table_bytes = table.rows_total * row_bytes
@@ -1579,73 +2017,7 @@ def _attach_table(
     )
 
 
-# --------------------------------------------------------------------------- #
-# Custom op: the WHOLE forward (hashing + gather), split out of the
-# compiled/captured graph (see the module docstring for why the boundary
-# is the whole forward rather than only the gather).
-# --------------------------------------------------------------------------- #
-def _qwen4_exp_ple_mmap_forward(
-    input_ids: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    ngram_context: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    from vllm.forward_context import get_forward_context
-
-    try:
-        layer = get_forward_context().no_compile_layers[layer_name]
-    except KeyError:
-        raise RuntimeError(
-            f"PLE mmap: {layer_name!r} is not registered in no_compile_layers"
-        ) from None
-    ple_embedding_module = getattr(layer, "ple_embedding", None)
-    if ple_embedding_module is None or not hasattr(
-        ple_embedding_module, "compute_ngram_ids"
-    ):
-        raise RuntimeError(f"PLE mmap: {layer_name!r} does not resolve to a PLE layer")
-    # The stock trigram hashing runs here, eagerly and untraced — ordinary
-    # GPU tensor ops are fine inside a custom op body; they are simply never
-    # seen by Dynamo, which is the whole point of the widened boundary. Call
-    # the method directly rather than through the registered
-    # qwen4_exp_compute_ple_ngram_ids op: this body already runs inside one
-    # custom op (qwen4_exp_ple_mmap_forward), and nesting a second would
-    # dispatch a custom op from within a custom op.
-    ngram_ids = ple_embedding_module.compute_ngram_ids(
-        input_ids, query_start_loc, ngram_context
-    )
-    result = ple_embedding_module.ngram_embedding(ngram_ids).flatten(-2)
-    output.copy_(result)
-
-
-def _qwen4_exp_ple_mmap_forward_fake(
-    input_ids: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    ngram_context: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name=OP_NAME,
-    op_func=_qwen4_exp_ple_mmap_forward,
-    mutates_args=["output"],
-    fake_impl=_qwen4_exp_ple_mmap_forward_fake,
-)
-# The op above registers under the platform-default dispatch key (CUDA in
-# production). Unit tests run without a GPU-resident model and need the same
-# op reachable with plain CPU tensors, so also register it directly under
-# the CPU key — a second direct_register_custom_op call would
-# re-define the schema and raise at MODULE IMPORT, killing every serve,
-# since this module is imported unconditionally.
-if current_platform.dispatch_key != "CPU":
-    vllm_lib.impl(OP_NAME, _qwen4_exp_ple_mmap_forward, dispatch_key="CPU")
-
 __all__ = [
-    "OP_NAME",
-    "QUALIFIED_OP_NAME",
     "MmapNgramEmbedding",
     "MmapPleTable",
     "build_tables",

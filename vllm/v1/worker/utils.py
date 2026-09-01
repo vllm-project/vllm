@@ -42,11 +42,43 @@ from vllm.v1.worker.block_table import get_block_table_width
 logger = init_logger(__name__)
 
 
-def maybe_preflight_reload_weights(model: torch.nn.Module) -> None:
-    """Run the model's optional pre-mutation reload guard."""
+def maybe_preflight_reload_weights(
+    model: torch.nn.Module,
+    weights_path: str | None = None,
+    is_checkpoint_format: bool = True,
+    has_weights_iterator: bool = False,
+) -> None:
+    """Run the model's optional pre-mutation reload guard, if it has one.
+
+    Args:
+        weights_path: the reload's proposed checkpoint path/repo id, or
+            ``None`` for a raw weights iterator with no path.
+        is_checkpoint_format: ``False`` for a "kernel format" reload,
+            never routed through ``model.load_weights``.
+        has_weights_iterator: whether the caller ALSO supplied a weights
+            iterator alongside ``weights_path`` -- some models' guards
+            reject that combination as ambiguous.
+    """
     preflight_reload_weights = getattr(model, "preflight_reload_weights", None)
     if callable(preflight_reload_weights):
-        preflight_reload_weights()
+        preflight_reload_weights(
+            weights_path=weights_path,
+            is_checkpoint_format=is_checkpoint_format,
+            has_weights_iterator=has_weights_iterator,
+        )
+
+
+def maybe_clear_reload_approval(model: torch.nn.Module) -> None:
+    """End the model's optional reload-transaction approval, if it has one.
+
+    Call once a reload's mutation window ends, whether it succeeded or
+    raised -- a "kernel format" reload never calls ``model.load_weights``,
+    so nothing else would consume the approval a preflight granted for it.
+    No-op for models with no such hook.
+    """
+    clear_reload_approval = getattr(model, "clear_reload_approval", None)
+    if callable(clear_reload_approval):
+        clear_reload_approval()
 
 
 def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:

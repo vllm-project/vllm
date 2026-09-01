@@ -89,6 +89,7 @@ from vllm.v1.worker.startup_plan import (
 )
 from vllm.v1.worker.utils import (
     is_residual_scattered_for_sp,
+    maybe_clear_reload_approval,
     maybe_preflight_reload_weights,
 )
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
@@ -1343,6 +1344,13 @@ class Worker(WorkerBase):
         with set_current_vllm_config(self.vllm_config):
             self._start_weight_update(is_draft=True)
 
+    def _get_weight_update_target_model(
+        self, is_draft: bool | None = None
+    ) -> nn.Module | None:
+        if is_draft is None:
+            is_draft = self._weight_update_is_draft
+        return self.get_draft_model() if is_draft else self.get_model()
+
     def _start_weight_update(self, is_draft: bool = False) -> None:
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1359,15 +1367,24 @@ class Worker(WorkerBase):
                 "active. Call finish_weight_update first."
             )
 
+        target_model = None
         try:
             # Guard the exact base or draft target before starting the engine.
-            target_model = self.get_draft_model() if is_draft else self.get_model()
+            target_model = self._get_weight_update_target_model(is_draft)
             if target_model is not None:
                 maybe_preflight_reload_weights(target_model)
             if is_draft:
                 self._set_draft_weight_update_target()
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
+            # A preflight that granted `target_model` a transaction-scoped
+            # reload approval, followed by a later failure in this same
+            # `try` (draft target set, engine start), must not leave that
+            # approval dangling for an unrelated later reload to validate
+            # against: this session never reaches `finish_weight_update`,
+            # which is the only other place it would otherwise be cleared.
+            if target_model is not None:
+                maybe_clear_reload_approval(target_model)
             self.weight_transfer_engine.reset_weight_update_target()
             raise
         self._weight_update_active = True
@@ -1408,6 +1425,13 @@ class Worker(WorkerBase):
             except BaseException:
                 self._weight_update_active = False
                 self.weight_transfer_engine.reset_weight_update_target()
+                # This session is now dead (a second `start_weight_update`
+                # is required before any further chunk), so nothing else
+                # will ever validate against or clear an approval granted to
+                # this session's target at `start_weight_update` time.
+                target_model = self._get_weight_update_target_model()
+                if target_model is not None:
+                    maybe_clear_reload_approval(target_model)
                 raise
 
     def finish_weight_update(self) -> None:
@@ -1421,9 +1445,16 @@ class Worker(WorkerBase):
             )
 
         with set_current_vllm_config(self.vllm_config):
-            self.weight_transfer_engine.finish_weight_update()
-            self.weight_transfer_engine.reset_weight_update_target()
-            self._weight_update_active = False
+            target_model = self._get_weight_update_target_model()
+            try:
+                self.weight_transfer_engine.finish_weight_update()
+            finally:
+                self.weight_transfer_engine.reset_weight_update_target()
+                # Weight transfer bypasses model.load_weights, so the session
+                # boundary owns approval cleanup even when finalization fails.
+                if target_model is not None:
+                    maybe_clear_reload_approval(target_model)
+                self._weight_update_active = False
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:

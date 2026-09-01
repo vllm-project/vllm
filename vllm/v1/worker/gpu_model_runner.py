@@ -235,6 +235,7 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
     is_residual_scattered_for_sp,
+    maybe_clear_reload_approval,
     maybe_preflight_reload_weights,
     raise_if_nan_logits,
 )
@@ -5622,52 +5623,76 @@ class GPUModelRunner(
                 "to avoid weight reloading errors"
             )
 
-        model = self.get_model()
-        # Reject unsupported reloads before inspecting or mutating model state.
-        maybe_preflight_reload_weights(model)
-        weights_to_load = {
-            name.replace(".base_layer.", ".") if self.lora_config else name
-            for name, _ in model.named_parameters()
-        }
-        counter_before_reloading = time.perf_counter()
+        # Captured before the `weights_iterator is None` branch below can
+        # reassign it: a model's preflight guard needs to know whether the
+        # CALLER supplied an iterator, not whether one exists by the time
+        # the load actually runs (by then one always does).
+        has_weights_iterator = weights_iterator is not None
 
-        # load weights from disk if none are provided
-        if weights_iterator is None:
-            model_loader = get_model_loader(self.load_config)
-            if not hasattr(model_loader, "get_all_weights"):
-                raise NotImplementedError(
-                    f"Model reloading with `{self.load_config.load_format}` format"
+        model = self.get_model()
+
+        # `finally` ends any reload-transaction approval `model` was
+        # granted, on success or on a raise anywhere in this window (the
+        # preflight itself, `named_parameters`, or the load/copy loop). The
+        # checkpoint-format branch's `load_weights` call(s) validate but
+        # never remove it; the kernel-format branch never calls
+        # `load_weights` at all. See `maybe_clear_reload_approval`.
+        try:
+            # Reject unsupported reloads before inspecting or mutating model
+            # state.
+            maybe_preflight_reload_weights(
+                model,
+                weights_path=weights_path,
+                is_checkpoint_format=is_checkpoint_format,
+                has_weights_iterator=has_weights_iterator,
+            )
+            weights_to_load = {
+                name.replace(".base_layer.", ".") if self.lora_config else name
+                for name, _ in model.named_parameters()
+            }
+            counter_before_reloading = time.perf_counter()
+
+            # load weights from disk if none are provided
+            if weights_iterator is None:
+                model_loader = get_model_loader(self.load_config)
+                if not hasattr(model_loader, "get_all_weights"):
+                    raise NotImplementedError(
+                        f"Model reloading with `{self.load_config.load_format}` format"
+                    )
+
+                if weights_path is not None:
+                    # The revision belongs to the model we are reloading away
+                    # from, so it must not be carried over to the new path.
+                    self.model_config.model = weights_path
+                    self.model_config.revision = None
+                weights_iterator = model_loader.get_all_weights(
+                    self.model_config, model
+                )
+                weights_iterator = cast(
+                    Iterable[tuple[str, torch.Tensor]], weights_iterator
                 )
 
-            if weights_path is not None:
-                # The revision belongs to the model we are reloading away from,
-                # so it must not be carried over to the new path.
-                self.model_config.model = weights_path
-                self.model_config.revision = None
-            weights_iterator = model_loader.get_all_weights(self.model_config, model)
-            weights_iterator = cast(
-                Iterable[tuple[str, torch.Tensor]], weights_iterator
-            )
+            # begin loading weights
+            logger.info_once("Reloading weights inplace...")
+            if is_checkpoint_format:
+                # load weights from checkpoint/ original model format
+                initialize_layerwise_reload(model)
+                loaded_weights = model.load_weights(weights_iterator)
+                finalize_layerwise_reload(model, self.model_config)
 
-        # begin loading weights
-        logger.info_once("Reloading weights inplace...")
-        if is_checkpoint_format:
-            # load weights from checkpoint/ original model format
-            initialize_layerwise_reload(model)
-            loaded_weights = model.load_weights(weights_iterator)
-            finalize_layerwise_reload(model, self.model_config)
-
-        else:
-            # load weights from kernel format
-            logger.warning_once(
-                "Reloading with `is_checkpoint_format=True` requires that "
-                "weights be in kernel format and already sharded",
-            )
-            loaded_weights = set()
-            for name, loaded_weight in weights_iterator:
-                param = _get_parameter_for_reload(model, name)  # TODO: buffers?
-                param.copy_(loaded_weight)
-                loaded_weights.add(name)
+            else:
+                # load weights from kernel format
+                logger.warning_once(
+                    "Reloading with `is_checkpoint_format=True` requires that "
+                    "weights be in kernel format and already sharded",
+                )
+                loaded_weights = set()
+                for name, loaded_weight in weights_iterator:
+                    param = _get_parameter_for_reload(model, name)  # TODO: buffers?
+                    param.copy_(loaded_weight)
+                    loaded_weights.add(name)
+        finally:
+            maybe_clear_reload_approval(model)
 
         self.reset_lora_state()
 

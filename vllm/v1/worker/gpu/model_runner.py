@@ -1703,9 +1703,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             "positions": input_batch.positions,
             "inputs_embeds": inputs_embeds,
             "intermediate_tensors": None,
-            # NOTE: Values returned by `prepare_inputs` will override the default
-            # values above.
-            **self.model_state.prepare_inputs(input_batch, self.req_states),
+            # NOTE: Values returned by `prepare_inputs`/
+            # `prepare_runtime_dummy_inputs` will override the default values
+            # above. Dummy/profile runs use the latter so state that must
+            # never read real request state (e.g. Qwen4Exp's mmap-staged PLE
+            # rows) only ever zeros instead.
+            **(
+                self.model_state.prepare_runtime_dummy_inputs(
+                    input_batch, self.req_states
+                )
+                if dummy_run
+                else self.model_state.prepare_inputs(input_batch, self.req_states)
+            ),
         }
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.

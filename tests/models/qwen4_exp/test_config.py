@@ -145,6 +145,7 @@ def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> Non
 def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
     model_state = object.__new__(Qwen4ExpModelState)
     model_state.uses_ngram_embedding = True
+    model_state._mmap_ple_modules = ()
     model_state.ngram_context_len = 3
     model_state.ngram_eos_token_id = 99
     model_state.ngram_context = torch.empty((4, 3), dtype=torch.int32)
@@ -180,6 +181,7 @@ def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
 def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs() -> None:
     model_state = object.__new__(Qwen4ExpModelState)
     model_state.uses_ngram_embedding = True
+    model_state._mmap_ple_modules = ()
     model_state.ngram_eos_token_id = 99
     model_state.ngram_context = torch.empty((4, 3), dtype=torch.int32)
     model_state.ple_query_start_loc = torch.empty(5, dtype=torch.int32)

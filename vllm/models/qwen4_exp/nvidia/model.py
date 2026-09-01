@@ -143,10 +143,27 @@ _QWEN4_EXP_IGNORED_MISSING_SUFFIXES = [
 ]
 
 
-def _preflight_ple_mmap_reload() -> None:
-    """Reject reloads after any PLE mmap table is attached."""
+def _preflight_ple_mmap_reload(
+    model: nn.Module,
+    weights_path: str | None,
+    is_checkpoint_format: bool,
+    *,
+    has_weights_iterator: bool = False,
+    inner_model_attr: str | None = None,
+) -> None:
+    """Validate and approve an mmap reload before model mutation.
+
+    See ``ple_mmap.approve_reload`` for nested transaction semantics.
+    """
     if ple_mmap.enabled():
-        ple_mmap.preflight_reload_check(get_current_vllm_config().compilation_config)
+        ple_mmap.approve_reload(
+            model,
+            get_current_vllm_config().compilation_config,
+            weights_path=weights_path,
+            is_checkpoint_format=is_checkpoint_format,
+            has_weights_iterator=has_weights_iterator,
+            inner_model_attr=inner_model_attr,
+        )
 
 
 # The checkpoint keeps down and injection projections separate; runtime packs
@@ -300,8 +317,10 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 )
                 prev_block_output = prev_injection = None
 
-            if input_ids is None or query_start_loc is None or ngram_context is None:
-                raise RuntimeError("PLE inputs were not prepared")
+            # Qwen4ExpPLELayer/Qwen4ExpNGramEmbedding validate None-ness
+            # themselves, each only where it is actually needed — this lets
+            # a future PP-local staging consumer read prepared rows without
+            # requiring raw input_ids at this call site.
             hidden_states = hidden_states + self.ple(
                 hidden_states,
                 input_ids,
@@ -826,30 +845,62 @@ class Qwen4ExpForCausalLM(
         return positions.unsqueeze(0).expand(3, -1), 0
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Preflight BEFORE AutoWeightsLoader is constructed or `weights` is
-        # advanced: AutoWeightsLoader mutates checkpoint weights in stream
-        # order as it descends the module tree, so waiting for the PLE
-        # child's own guard to fire would let a same-instance reload already
-        # overwrite earlier, unrelated parameters first.
+        # Enter/validate the reload transaction BEFORE AutoWeightsLoader is
+        # constructed or `weights` is advanced (see
+        # `ple_mmap.validate_reload_approval`). `owns_transaction` is True
+        # only for a standalone initial load with no runner/outer-wrapper
+        # token; that call must clear its own token on the way out.
+        # `should_build_tables` is True here for a standalone load (this
+        # call's own token is always root-role) but False when this same
+        # method runs as the nested `language_model` under a
+        # `Qwen4ExpForConditionalGeneration` transaction -- that call must
+        # defer building to the outer wrapper's own return, however many
+        # times `AutoWeightsLoader` invokes this method for one real load
+        # (see `ple_mmap._ReloadApproval`).
         compilation_config = None
+        owns_transaction = False
+        should_build_tables = False
         if ple_mmap.enabled():
             compilation_config = get_current_vllm_config().compilation_config
-            ple_mmap.preflight_reload_check(compilation_config)
-        mapper = self.hf_to_vllm_mapper | WeightsMapper(
-            orig_to_new_substr={"mtp.": None}
-        )
-        loader = AutoWeightsLoader(
-            self,
-            ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
-        )
-        loaded = loader.load_weights(weights, mapper=mapper)
-        if compilation_config is not None:
-            ple_mmap.build_tables(self.model_config, compilation_config)
-        return loaded
+            owns_transaction, should_build_tables = ple_mmap.validate_reload_approval(
+                self, compilation_config
+            )
+        try:
+            mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_substr={"mtp.": None}
+            )
+            loader = AutoWeightsLoader(
+                self,
+                ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
+            )
+            loaded = loader.load_weights(weights, mapper=mapper)
+            if compilation_config is not None and should_build_tables:
+                ple_mmap.build_tables(self.model_config, compilation_config)
+            return loaded
+        finally:
+            if owns_transaction:
+                ple_mmap.clear_reload_approval(self)
 
-    def preflight_reload_weights(self) -> None:
-        """Reject a reload before any model state mutates."""
-        _preflight_ple_mmap_reload()
+    def preflight_reload_weights(
+        self,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+        has_weights_iterator: bool = False,
+    ) -> None:
+        """Runner entry point: reject an unsafe reload before any model
+        state mutates. See ``ple_mmap.approve_reload``."""
+        _preflight_ple_mmap_reload(
+            self,
+            weights_path,
+            is_checkpoint_format,
+            has_weights_iterator=has_weights_iterator,
+        )
+
+    def clear_reload_approval(self) -> None:
+        """End the reload transaction the runner started. See
+        ``ple_mmap.clear_reload_approval``."""
+        if ple_mmap.enabled():
+            ple_mmap.clear_reload_approval(self)
 
 
 class Qwen4ExpProcessingInfo(Qwen3VLProcessingInfo):
@@ -1035,31 +1086,67 @@ class Qwen4ExpForConditionalGeneration(
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Preflight BEFORE AutoWeightsLoader is constructed or `weights` is
-        # advanced — see Qwen4ExpForCausalLM.load_weights for why waiting for
-        # the PLE child's own guard is too late (this wrapper's loader walks
-        # the vision tower first, so it has even more to mutate before ever
-        # reaching a PLE layer).
+        # Enter/validate the reload transaction BEFORE AutoWeightsLoader is
+        # constructed (see Qwen4ExpForCausalLM.load_weights). When this call
+        # owns a fresh initial-load transaction, it grants a copy of the
+        # same token to `language_model` too, so the nested causal LM's own
+        # `load_weights` -- possibly called more than once by
+        # AutoWeightsLoader's recursive walk -- validates against it rather
+        # than re-running the pathless guard after a table has attached.
+        # This call is always the transaction's ROOT (see
+        # `ple_mmap._ReloadApproval`): `should_build_tables` is therefore
+        # always True here, whether it owns a freshly-minted transaction or
+        # validated a runner-approved one -- the outer wrapper is the sole
+        # table-build owner, exactly once, after every nested group
+        # (including any language_model PLE shards) has already streamed.
         compilation_config = None
+        owns_transaction = False
+        should_build_tables = False
         if ple_mmap.enabled():
             compilation_config = get_current_vllm_config().compilation_config
-            ple_mmap.preflight_reload_check(compilation_config)
-        mapper = self.hf_to_vllm_mapper | WeightsMapper(
-            orig_to_new_substr={"mtp.": None},
-            orig_to_new_prefix={"visual.": None} if self.language_model_only else {},
-        )
-        loader = AutoWeightsLoader(
-            self,
-            ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
-        )
-        loaded = loader.load_weights(weights, mapper=mapper)
-        if compilation_config is not None:
-            ple_mmap.build_tables(self.model_config, compilation_config)
-        return loaded
+            owns_transaction, should_build_tables = ple_mmap.validate_reload_approval(
+                self, compilation_config, inner_model_attr="language_model"
+            )
+        try:
+            mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_substr={"mtp.": None},
+                orig_to_new_prefix={"visual.": None}
+                if self.language_model_only
+                else {},
+            )
+            loader = AutoWeightsLoader(
+                self,
+                ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
+            )
+            loaded = loader.load_weights(weights, mapper=mapper)
+            if compilation_config is not None and should_build_tables:
+                ple_mmap.build_tables(self.model_config, compilation_config)
+            return loaded
+        finally:
+            if owns_transaction:
+                ple_mmap.clear_reload_approval(self, inner_model=self.language_model)
 
-    def preflight_reload_weights(self) -> None:
-        """Reject a reload before any model state mutates."""
-        _preflight_ple_mmap_reload()
+    def preflight_reload_weights(
+        self,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+        has_weights_iterator: bool = False,
+    ) -> None:
+        """Runner entry point: approve the outer and nested language-model
+        reload transaction. See ``ple_mmap.approve_reload``."""
+        _preflight_ple_mmap_reload(
+            self,
+            weights_path,
+            is_checkpoint_format,
+            has_weights_iterator=has_weights_iterator,
+            inner_model_attr="language_model",
+        )
+
+    def clear_reload_approval(self) -> None:
+        """End the reload transaction the runner started, on both wrapper
+        and nested language model. See ``ple_mmap.clear_reload_approval``."""
+        if ple_mmap.enabled():
+            ple_mmap.clear_reload_approval(self, inner_model=self.language_model)
 
     @classmethod
     def get_mamba_state_dtype_from_config(

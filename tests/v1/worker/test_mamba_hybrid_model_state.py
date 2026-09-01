@@ -16,6 +16,29 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 
 
+def test_prepare_runtime_dummy_inputs_default_delegates_to_prepare_inputs() -> None:
+    """The ``ModelState`` base's default body -- inherited unchanged by every
+    model state that has no field needing separate dummy-batch handling,
+    e.g. ``MambaHybridModelState`` -- must delegate to ``prepare_inputs``
+    with the same (input_batch, req_states) and return its result as-is."""
+    state = object.__new__(MambaHybridModelState)
+    input_batch = object()
+    req_states = object()
+    sentinel = {"input_ids": "sentinel"}
+    calls = []
+
+    def _prepare_inputs(ib: object, rs: object) -> dict:
+        calls.append((ib, rs))
+        return sentinel
+
+    state.prepare_inputs = _prepare_inputs
+
+    result = state.prepare_runtime_dummy_inputs(input_batch, req_states)
+
+    assert result is sentinel
+    assert calls == [(input_batch, req_states)]
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize(("num_sampled", "expected_value"), [(0, 1), (3, 3)])
 def test_postprocess_state_scalar_with_int32_mapping(

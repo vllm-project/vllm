@@ -20,8 +20,15 @@ from vllm.v1.worker.gpu_worker import Worker
 class _RecordingEngine:
     """Minimal stand-in for a weight transfer engine."""
 
-    def __init__(self, raise_on_update: bool = False):
+    def __init__(
+        self,
+        raise_on_update: bool = False,
+        raise_on_start: bool = False,
+        raise_on_finish: bool = False,
+    ):
         self.raise_on_update = raise_on_update
+        self.raise_on_start = raise_on_start
+        self.raise_on_finish = raise_on_finish
         self.started = False
         self.finished = False
         self.reset_count = 0
@@ -34,6 +41,8 @@ class _RecordingEngine:
 
     def start_weight_update(self) -> None:
         self._record_config()
+        if self.raise_on_start:
+            raise ValueError("boom-start")
         self.started = True
 
     def update_weights(self, update_info: dict) -> None:
@@ -44,6 +53,8 @@ class _RecordingEngine:
 
     def finish_weight_update(self) -> None:
         self._record_config()
+        if self.raise_on_finish:
+            raise ValueError("boom-finish")
         self.finished = True
 
     def reset_weight_update_target(self) -> None:
@@ -74,9 +85,38 @@ class _RaisingPreflightModel:
     def __init__(self) -> None:
         self.calls = 0
 
-    def preflight_reload_weights(self) -> None:
+    def preflight_reload_weights(
+        self,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+        has_weights_iterator: bool = False,
+    ) -> None:
         self.calls += 1
         raise RuntimeError("PLE mmap: table already attached")
+
+
+class _ApprovingPreflightModel:
+    """Stand-in for a model whose `preflight_reload_weights` grants a
+    transaction-scoped reload approval (mirrors `ple_mmap.approve_reload`)
+    that a later `clear_reload_approval` call can revoke."""
+
+    def __init__(self) -> None:
+        self.preflight_calls = 0
+        self.clear_calls = 0
+        self.approved = False
+
+    def preflight_reload_weights(
+        self,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+        has_weights_iterator: bool = False,
+    ) -> None:
+        self.preflight_calls += 1
+        self.approved = True
+
+    def clear_reload_approval(self) -> None:
+        self.clear_calls += 1
+        self.approved = False
 
 
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
@@ -258,6 +298,105 @@ def test_update_resets_active_on_error():
     # A failed update ends the session so the next start is clean.
     assert engine.reset_count == 1
     assert worker._weight_update_active is False
+
+
+def test_finish_weight_update_clears_reload_approval_granted_at_start():
+    """This weight-transfer path never calls `model.load_weights` -- the
+    engine copies parameters directly -- so `finish_weight_update` itself
+    must revoke any transaction-scoped reload approval `start_weight_
+    update`'s preflight granted, or it would outlive this session and be
+    validatable against by an unrelated later reload."""
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    model = _ApprovingPreflightModel()
+    worker.get_model = lambda: model  # type: ignore[method-assign]
+
+    Worker.start_weight_update(worker)
+    assert model.preflight_calls == 1
+    assert model.approved is True
+    assert model.clear_calls == 0
+
+    Worker.finish_weight_update(worker)
+    assert model.clear_calls == 1
+    assert model.approved is False
+
+
+def test_finish_draft_weight_update_clears_draft_model_reload_approval():
+    """A draft-targeted session must clear the draft model's approval, not
+    the base model's."""
+    engine = _RecordingEngine()
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+    worker._set_draft_weight_update_target = lambda: None
+    base_model = _ApprovingPreflightModel()
+    draft_model = _ApprovingPreflightModel()
+    worker.get_model = lambda: base_model  # type: ignore[method-assign]
+    worker.get_draft_model = lambda: draft_model  # type: ignore[method-assign]
+
+    Worker.start_draft_weight_update(worker)
+    assert draft_model.approved is True
+    assert base_model.preflight_calls == 0
+
+    Worker.finish_weight_update(worker)
+    assert draft_model.clear_calls == 1
+    assert draft_model.approved is False
+    assert base_model.clear_calls == 0
+
+
+def test_finish_error_clears_reload_approval_and_deactivates_session():
+    engine = _RecordingEngine(raise_on_finish=True)
+    worker = _make_worker(engine)
+    model = _ApprovingPreflightModel()
+    worker.get_model = lambda: model  # type: ignore[method-assign]
+
+    Worker.start_weight_update(worker)
+    assert model.approved is True
+
+    with pytest.raises(ValueError, match="boom-finish"):
+        Worker.finish_weight_update(worker)
+
+    assert engine.reset_count == 1
+    assert model.approved is False
+    assert model.clear_calls == 1
+    assert worker._weight_update_active is False
+    assert worker.model_runner.reset_lora_calls == 0
+
+
+def test_start_weight_update_clears_reload_approval_when_engine_start_fails():
+    """A preflight that grants an approval, followed by the engine's own
+    `start_weight_update` raising, must not leave that approval behind:
+    this session never reaches `finish_weight_update`, the only other place
+    that would otherwise clear it."""
+    engine = _RecordingEngine(raise_on_start=True)
+    worker = _make_worker(engine)
+    model = _ApprovingPreflightModel()
+    worker.get_model = lambda: model  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="boom-start"):
+        Worker.start_weight_update(worker)
+
+    assert model.approved is False
+    assert model.clear_calls == 1
+    assert engine.reset_count == 1
+    assert worker._weight_update_active is False
+
+
+def test_update_weights_error_clears_reload_approval():
+    """A session that dies mid-update (via `update_weights` raising) never
+    reaches `finish_weight_update` either, so its own error path must clear
+    the target's approval."""
+    engine = _RecordingEngine(raise_on_update=True)
+    worker = _make_worker(engine)
+    model = _ApprovingPreflightModel()
+    worker.get_model = lambda: model  # type: ignore[method-assign]
+    Worker.start_weight_update(worker)
+    assert model.approved is True
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.update_weights(worker, {"names": ["w"]})
+
+    assert model.approved is False
+    assert model.clear_calls == 1
 
 
 def test_missing_engine_raises():

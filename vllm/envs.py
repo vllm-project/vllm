@@ -2182,9 +2182,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # posix_fadvise(WILLNEED) before copying; 0 disables the readahead
     # pre-pass, and a gather needing more ranges than this skips it.
     "VLLM_PLE_MMAP_READAHEAD": lambda: int(os.getenv("VLLM_PLE_MMAP_READAHEAD", "0")),
-    # Stage each PLE mmap forward's gathered rows through a per-call pinned
-    # host buffer before the H2D copy, instead of copying straight out of
-    # gather()'s pageable numpy array.
+    # Stage each PLE mmap gather through a per-call pinned host buffer before
+    # H2D, instead of copying from gather()'s pageable numpy array.
     "VLLM_PLE_MMAP_PINNED": lambda: bool(int(os.getenv("VLLM_PLE_MMAP_PINNED", "0"))),
     # Rows threshold at or under which a PLE mmap gather runs its tasks
     # inline on the calling thread instead of through the worker pool; 0
