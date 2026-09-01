@@ -56,6 +56,7 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
 
     worker = object.__new__(Worker)
     worker._sleep_mode_backend = Backend()
+    worker.model_runner = SimpleNamespace(extensible_kv_cache=None)
     worker._sleep_saved_buffers = {}
     worker._sleep_saved_draft_buffers = {}
     worker.vllm_config = SimpleNamespace(
