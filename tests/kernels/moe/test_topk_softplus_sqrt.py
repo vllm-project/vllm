@@ -277,6 +277,8 @@ def test_fused_topk_softplus_sqrt_padding(
     indices_dtype = torch.int32
 
     gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
+    # Exercise top-k cutoff ties without relying on random low-precision collisions.
+    gating_output[0] = 0
 
     padding_rows = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
     padding_rows[1::2] = True
