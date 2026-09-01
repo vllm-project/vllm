@@ -316,13 +316,17 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
         kv_block_lens=[],
     )
 
-    src_ptrs, dst_ptrs, lengths, err_reqs, err_msg = (
-        await worker._build_transfer_params(
-            [("d-physical-attention-pages", send_meta)],
-            xfer_meta,
-            local_regions,
-            remote_regions,
-        )
+    (
+        src_ptrs,
+        dst_ptrs,
+        lengths,
+        err_reqs,
+        err_msg,
+    ) = await worker._build_transfer_params(
+        [("d-physical-attention-pages", send_meta)],
+        xfer_meta,
+        local_regions,
+        remote_regions,
     )
 
     assert err_reqs == []
@@ -345,13 +349,17 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
         "mooncake_connector.group_concurrent_contiguous",
         side_effect=split_contiguous_blocks,
     ):
-        src_ptrs, dst_ptrs, lengths, err_reqs, err_msg = (
-            await worker._build_transfer_params(
-                [("d-physical-attention-pages", send_meta)],
-                xfer_meta,
-                local_regions,
-                remote_regions,
-            )
+        (
+            src_ptrs,
+            dst_ptrs,
+            lengths,
+            err_reqs,
+            err_msg,
+        ) = await worker._build_transfer_params(
+            [("d-physical-attention-pages", send_meta)],
+            xfer_meta,
+            local_regions,
+            remote_regions,
         )
 
     expected_src_ptrs = [
@@ -360,8 +368,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
         for offset in range(ratio)
     ]
     expected_dst_ptrs = [
-        remote_base_addr
-        + (remote_logical_block * ratio + offset) * physical_page_bytes
+        remote_base_addr + (remote_logical_block * ratio + offset) * physical_page_bytes
         for offset in range(ratio)
     ]
     assert err_reqs == []
