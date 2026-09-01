@@ -199,6 +199,20 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return
 
+    def allocate_fused_expert_output(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        weight_and_reduce_impl: TopKWeightAndReduce,
+    ) -> torch.Tensor | None:
+        """Optionally provide the exact output buffer for the expert kernel.
+
+        Implementations returning a tensor must preserve its identity through
+        finalize; replacing it may silently reintroduce a write-back copy.
+        """
+        return None
+
     @property
     @abstractmethod
     def activation_format(self) -> FusedMoEActivationFormat:
@@ -1130,14 +1144,15 @@ class FusedMoEKernelModularImpl:
         local_num_experts: int,
         expert_tokens_meta: ExpertTokensMetadata | None,
         activation: MoEActivation,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, bool]:
         """
         Allocate temporary and output buffers for the fused experts op.
         Inputs:
         - out_dtype: output type of workspace and output tensors.
         - device: the device of the workspace and output tensors.
         See `workspace_shapes` for a description of the remainder of arguments.
-        Returns a tuple of (workspace13, workspace2, output) tensors.
+        Returns the workspace tensors, output tensor, and whether the output
+        uses a prepare/finalize-provided allocation.
         """
         assert M_full > 0 and M_chunk > 0
 
@@ -1167,18 +1182,36 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
+        fused_out_alias = self.prepare_finalize.allocate_fused_expert_output(
+            fused_out_shape,
+            workspace_dtype,
+            device,
+            self.fused_experts.finalize_weight_and_reduce_impl(),
+        )
+
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
         # Reuse workspace13 for the output since there is only one chunk.
+        # Keep the original fused-output reservation even when the output is
+        # externally aliased. The workspace manager profiles and locks a
+        # process-wide high-water mark; later graph shapes may need this
+        # storage for workspace13.
         max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
         common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
             ((max_shape_size,), workspace_dtype),
             (workspace2_shape, workspace_dtype),
         )
         workspace13 = _resize_cache(common_workspace, workspace13_shape)
-        fused_out = _resize_cache(common_workspace, fused_out_shape)
+        if fused_out_alias is None:
+            fused_out = _resize_cache(common_workspace, fused_out_shape)
+        else:
+            assert fused_out_alias.shape == fused_out_shape
+            assert fused_out_alias.dtype == workspace_dtype
+            assert fused_out_alias.device == device
+            assert fused_out_alias.is_contiguous()
+            fused_out = fused_out_alias
 
-        return workspace13, workspace2, fused_out
+        return workspace13, workspace2, fused_out, fused_out_alias is not None
 
     def _maybe_apply_shared_experts(
         self,
@@ -1312,22 +1345,25 @@ class FusedMoEKernelModularImpl:
         if M_full == 0:
             return torch.empty_like(a1q, dtype=in_dtype)
 
-        workspace13, workspace2, fused_out = self._allocate_buffers(
-            in_dtype,
-            a1q.device,
-            M_full,
-            M_full,
-            N,
-            K,
-            top_k,
-            global_num_experts,
-            local_num_experts,
-            expert_tokens_meta,
-            activation,
+        workspace13, workspace2, fused_out, fused_out_is_specialized = (
+            self._allocate_buffers(
+                in_dtype,
+                a1q.device,
+                M_full,
+                M_full,
+                N,
+                K,
+                top_k,
+                global_num_experts,
+                local_num_experts,
+                expert_tokens_meta,
+                activation,
+            )
         )
 
         use_output_alias = (
-            output_alias is not None
+            not fused_out_is_specialized
+            and output_alias is not None
             and output_alias.shape == fused_out.shape
             and output_alias.dtype == fused_out.dtype
             and output_alias.device == fused_out.device
