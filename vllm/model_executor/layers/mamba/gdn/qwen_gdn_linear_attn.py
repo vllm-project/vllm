@@ -525,7 +525,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _fused_gdn_decode_unsupported_reason(
         self, vllm_config: VllmConfig
     ) -> str | None:
-        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
+        state_dtypes = self.get_state_dtype()
+        conv_state_dtype, recurrent_state_dtype = state_dtypes[:2]
         if (
             self.gqa_interleaved_layout
             or self.head_k_dim != 128
