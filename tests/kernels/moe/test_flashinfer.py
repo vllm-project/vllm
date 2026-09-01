@@ -433,6 +433,83 @@ def test_convert_moe_weights_to_flashinfer_trtllm_block_layout(
 
     assert w13_converted.shape[0] == num_experts
     assert w2_converted.shape[0] == num_experts
+    assert w13_converted.data_ptr() == w13.data_ptr()
+    assert w2_converted.data_ptr() == w2.data_ptr()
+
+
+@pytest.mark.parametrize("is_gated_act_gemm", [True, False])
+def test_convert_moe_weights_to_flashinfer_trtllm_block_layout_values(
+    is_gated_act_gemm,
+):
+    from flashinfer.fused_moe.core import (
+        _maybe_get_cached_w3_w1_permute_indices,
+        get_w2_permute_indices_with_cache,
+    )
+
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        convert_moe_weights_to_flashinfer_trtllm_block_layout,
+    )
+
+    num_experts, intermediate, hidden = 2, 256, 256
+    w13_multiplier = 2 if is_gated_act_gemm else 1
+    w13 = torch.randn(
+        (num_experts, w13_multiplier * intermediate, hidden),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    w2 = torch.randn(
+        (num_experts, hidden, intermediate),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+
+    def _reference_block_layout(
+        weight: torch.Tensor,
+        is_w13: bool,
+        cache: dict[torch.Size, torch.Tensor],
+    ) -> torch.Tensor:
+        outputs = []
+        for expert in weight:
+            expert_uint8 = expert.view(torch.uint8)
+            if is_w13:
+                indices = _maybe_get_cached_w3_w1_permute_indices(
+                    cache,
+                    expert_uint8,
+                    128,
+                    is_gated_act_gemm=is_gated_act_gemm,
+                )
+                if is_gated_act_gemm:
+                    indices = (indices + expert_uint8.shape[0] // 2) % (
+                        expert_uint8.shape[0]
+                    )
+            else:
+                indices = get_w2_permute_indices_with_cache(
+                    cache,
+                    expert_uint8,
+                    128,
+                )
+            rows, cols = expert_uint8.shape
+            blocks = expert_uint8.view(rows, cols // 128, 128).permute(1, 0, 2)
+            outputs.append(torch.index_select(blocks, 1, indices.to(weight.device)))
+        return torch.stack(outputs).view(torch.bfloat16)
+
+    reference_cache: dict[torch.Size, torch.Tensor] = {}
+    expected_w13 = _reference_block_layout(w13, is_w13=True, cache=reference_cache)
+    expected_w2 = _reference_block_layout(w2, is_w13=False, cache=reference_cache)
+    w13_ptr = w13.data_ptr()
+    w2_ptr = w2.data_ptr()
+
+    actual_w13, actual_w2 = convert_moe_weights_to_flashinfer_trtllm_block_layout(
+        {},
+        w13,
+        w2,
+        is_gated_act_gemm=is_gated_act_gemm,
+    )
+
+    assert actual_w13.data_ptr() == w13_ptr
+    assert actual_w2.data_ptr() == w2_ptr
+    assert torch.equal(actual_w13, expected_w13)
+    assert torch.equal(actual_w2, expected_w2)
 
 
 @pytest.mark.parametrize(
