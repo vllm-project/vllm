@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -24,8 +25,9 @@ class DPSyncState:
     value here.
     """
 
-    # Per-rank token counts, for the forward context. All entries hold the
-    # agreed padded count, unless `eager`, where nothing was padded.
+    # Per-rank token counts for the forward context. An execution contract
+    # rewrites every entry to its rank-identical execution capacity; legacy
+    # eager dispatch retains live per-rank counts.
     num_tokens_across_dp: torch.Tensor
     # Agreed uniform decode length. None means the ranks disagreed, which is an
     # answer, not "unknown".
@@ -33,6 +35,53 @@ class DPSyncState:
     # Whether the ranks agreed to run eager. A dispatch reusing this must run
     # eager too; no shape was agreed, so picking a graph per rank would diverge.
     eager: bool
+    # Sequence number within this coordinator's collective lane.
+    generation: int | None = None
+    # Target generation that owns this speculative child agreement.
+    parent_generation: int | None = None
+    # Rank-local work before execution-contract padding. These are immutable
+    # snapshots because ``num_tokens_across_dp`` may be rewritten in place.
+    live_num_tokens_across_dp: tuple[int, ...] = ()
+    live_num_reqs_across_dp: tuple[int, ...] = ()
+    # Request capacity selected by a target execution contract. Unlike
+    # ``batch_desc.num_reqs``, this is populated for PIECEWISE execution too.
+    execution_num_reqs: int | None = None
+
+
+_SYNC_NUM_TOKENS = 0
+_SYNC_CG_MODE = 1
+_SYNC_UNIFORM_TOKEN_COUNT = 2
+_SYNC_MAX_QUERY_LEN = 3
+_SYNC_NUM_REQS = 4
+_SYNC_GENERATION = 5
+_SYNC_PARENT_GENERATION = 6
+_SYNC_NEED_EAGER = 7
+_SYNC_NUM_ACTIVE_LORAS = 8
+_SYNC_NUM_FIELDS = 9
+
+_DP_SYNC_GROUPS: dict[tuple[int, str], dist.ProcessGroup] = {}
+
+
+def _get_dp_sync_group(
+    lane: Literal["target", "speculator"],
+) -> dist.ProcessGroup:
+    """Return the isolated CPU process group for a collective lane."""
+    base_group = get_dp_group().cpu_group
+    if lane == "target":
+        return base_group
+
+    key = (id(base_group), lane)
+    group = _DP_SYNC_GROUPS.get(key)
+    if group is None:
+        # Only members of this DP group construct the clone. Every member
+        # creates the speculator lane on its first speculative agreement.
+        group = dist.new_group(
+            ranks=dist.get_process_group_ranks(base_group),
+            backend="gloo",
+            use_local_synchronization=True,
+        )
+        _DP_SYNC_GROUPS[key] = group
+    return group
 
 
 class DPSyncFuture:
@@ -45,6 +94,8 @@ class DPSyncFuture:
         num_tokens: int,
         num_reqs: int,
         num_active_loras: int,
+        generation: int,
+        parent_generation: int | None,
         work: dist.Work | None,
     ) -> None:
         self._coordinator = coordinator
@@ -52,6 +103,8 @@ class DPSyncFuture:
         self._num_tokens = num_tokens
         self._num_reqs = num_reqs
         self._num_active_loras = num_active_loras
+        self.generation = generation
+        self.parent_generation = parent_generation
         self._work = work
         self._waited = work is None
         self._result: tuple[BatchExecutionDescriptor, DPSyncState | None] | None = None
@@ -77,14 +130,38 @@ class DPSyncFuture:
             self._waited = True
             tensor = self._coordinator._tensor
             assert tensor is not None
-            self._result = _finish_cudagraph_and_dp_padding(
-                cudagraph_manager,
-                self._local_batch_desc,
-                tensor,
-                self._num_tokens,
-                self._num_reqs,
-                self._num_active_loras,
-            )
+            _validate_sync_generation(tensor, self.generation, self.parent_generation)
+            if self._coordinator.execution_contract:
+                self._result = _finish_dp_execution_contract(
+                    cudagraph_manager,
+                    tensor,
+                    self.generation,
+                    self.parent_generation,
+                )
+            else:
+                live_num_tokens = tuple(
+                    int(value) for value in tensor[_SYNC_NUM_TOKENS].tolist()
+                )
+                live_num_reqs = tuple(
+                    int(value) for value in tensor[_SYNC_NUM_REQS].tolist()
+                )
+                batch_desc, sync = _finish_cudagraph_and_dp_padding(
+                    cudagraph_manager,
+                    self._local_batch_desc,
+                    tensor,
+                    self._num_tokens,
+                    self._num_reqs,
+                    self._num_active_loras,
+                )
+                if sync is not None:
+                    sync = replace(
+                        sync,
+                        generation=self.generation,
+                        parent_generation=self.parent_generation,
+                        live_num_tokens_across_dp=live_num_tokens,
+                        live_num_reqs_across_dp=live_num_reqs,
+                    )
+                self._result = batch_desc, sync
         return self._result
 
     def release(self) -> None:
@@ -107,16 +184,21 @@ class DPSyncCoordinator:
         dp_rank: int,
         *,
         group: dist.ProcessGroup | None = None,
+        lane: Literal["target", "speculator"] = "target",
+        execution_contract: bool = False,
     ) -> None:
         self.dp_size = dp_size
         self.dp_rank = dp_rank
         self.group = group
+        self.lane = lane
+        self.execution_contract = execution_contract
         self._tensor = (
-            torch.zeros(4, dp_size, dtype=torch.int32, device="cpu")
+            torch.zeros(_SYNC_NUM_FIELDS, dp_size, dtype=torch.int64, device="cpu")
             if dp_size > 1
             else None
         )
         self._active_future: DPSyncFuture | None = None
+        self._next_generation = 0
 
     def start(
         self,
@@ -127,6 +209,7 @@ class DPSyncCoordinator:
         max_query_len: int | None = None,
         need_eager: bool = False,
         num_active_loras: int = 0,
+        parent_generation: int | None = None,
     ) -> DPSyncFuture:
         """Dispatch locally and issue the DP collective without waiting."""
         if self._active_future is not None:
@@ -142,17 +225,26 @@ class DPSyncCoordinator:
             num_active_loras,
         )
 
+        generation = self._next_generation
+        self._next_generation += 1
         work = None
         if self._tensor is not None:
             tensor = self._tensor
             tensor.zero_()
-            tensor[0][self.dp_rank] = num_tokens
-            tensor[1][self.dp_rank] = batch_desc.cg_mode.value
-            tensor[2][self.dp_rank] = uniform_token_count or 0
-            tensor[3][self.dp_rank] = max_query_len or -1
+            tensor[_SYNC_NUM_TOKENS][self.dp_rank] = num_tokens
+            tensor[_SYNC_CG_MODE][self.dp_rank] = batch_desc.cg_mode.value
+            tensor[_SYNC_UNIFORM_TOKEN_COUNT][self.dp_rank] = uniform_token_count or 0
+            tensor[_SYNC_MAX_QUERY_LEN][self.dp_rank] = max_query_len or -1
+            tensor[_SYNC_NUM_REQS][self.dp_rank] = num_reqs
+            tensor[_SYNC_GENERATION][self.dp_rank] = generation
+            tensor[_SYNC_PARENT_GENERATION][self.dp_rank] = (
+                parent_generation if parent_generation is not None else -1
+            )
+            tensor[_SYNC_NEED_EAGER][self.dp_rank] = int(need_eager)
+            tensor[_SYNC_NUM_ACTIVE_LORAS][self.dp_rank] = num_active_loras
             group = self.group
             if group is None:
-                group = get_dp_group().cpu_group
+                group = _get_dp_sync_group(self.lane)
             work = dist.all_reduce(tensor, group=group, async_op=True)
 
         future = DPSyncFuture(
@@ -161,6 +253,8 @@ class DPSyncCoordinator:
             num_tokens,
             num_reqs,
             num_active_loras,
+            generation,
+            parent_generation,
             work,
         )
         self._active_future = future
@@ -170,6 +264,119 @@ class DPSyncCoordinator:
         if self._active_future is not future:
             raise RuntimeError("DP sync future is not owned by this coordinator")
         self._active_future = None
+
+
+def _validate_sync_generation(
+    tensor: torch.Tensor,
+    generation: int,
+    parent_generation: int | None,
+) -> None:
+    generations = tensor[_SYNC_GENERATION]
+    if not bool(torch.all(generations == generation).item()):
+        raise RuntimeError(
+            "DP sync generation mismatch: "
+            f"local={generation}, observed={generations.tolist()}"
+        )
+
+    expected_parent = parent_generation if parent_generation is not None else -1
+    parents = tensor[_SYNC_PARENT_GENERATION]
+    if not bool(torch.all(parents == expected_parent).item()):
+        raise RuntimeError(
+            "DP sync parent generation mismatch: "
+            f"local={expected_parent}, observed={parents.tolist()}"
+        )
+
+
+def _finish_dp_execution_contract(
+    cudagraph_manager: CudaGraphManager | None,
+    tensor: torch.Tensor,
+    generation: int,
+    parent_generation: int | None,
+) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
+    """Resolve rank-local facts into one target execution descriptor."""
+    live_num_tokens = tensor[_SYNC_NUM_TOKENS]
+    live_num_reqs = tensor[_SYNC_NUM_REQS]
+    live_tokens_tuple = tuple(int(value) for value in live_num_tokens.tolist())
+    live_reqs_tuple = tuple(int(value) for value in live_num_reqs.tolist())
+
+    active = live_num_tokens > 0
+    if not bool(torch.any(active).item()):
+        return (
+            BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=0,
+                num_reqs=0,
+            ),
+            None,
+        )
+
+    active_num_tokens = live_num_tokens[active]
+    active_num_reqs = live_num_reqs[active]
+    if bool(torch.any(active_num_reqs > active_num_tokens).item()):
+        raise RuntimeError(
+            "DP execution contract observed requests exceeding tokens: "
+            f"requests={active_num_reqs.tolist()}, "
+            f"tokens={active_num_tokens.tolist()}"
+        )
+
+    exec_num_tokens = int(active_num_tokens.max().item())
+    exec_num_reqs = int(active_num_reqs.max().item())
+    if exec_num_reqs <= 0:
+        raise RuntimeError("DP execution contract has active tokens but no requests")
+
+    uniform_counts = tensor[_SYNC_UNIFORM_TOKEN_COUNT][active]
+    uniform_token_count: int | None = int(uniform_counts[0].item())
+    if uniform_token_count == 0 or not bool(
+        torch.all(uniform_counts == uniform_token_count).item()
+    ):
+        uniform_token_count = None
+
+    max_query_lens = tensor[_SYNC_MAX_QUERY_LEN][active]
+    max_query_len: int | None = None
+    if bool(torch.all(max_query_lens != -1).item()):
+        max_query_len = int(max_query_lens.max().item())
+
+    num_active_loras = int(tensor[_SYNC_NUM_ACTIVE_LORAS][active].max().item())
+    need_eager = bool(torch.any(tensor[_SYNC_NEED_EAGER][active] != 0).item())
+    if need_eager:
+        batch_desc = BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.NONE,
+            num_tokens=exec_num_tokens,
+            num_reqs=exec_num_reqs,
+            uniform_token_count=uniform_token_count,
+            max_query_len=max_query_len,
+            num_active_loras=num_active_loras,
+        )
+    else:
+        assert cudagraph_manager is not None
+        batch_desc = cudagraph_manager.dispatch(
+            exec_num_reqs,
+            exec_num_tokens,
+            uniform_token_count,
+            num_active_loras=num_active_loras,
+            max_query_len=max_query_len,
+        )
+
+    exec_num_reqs = batch_desc.num_reqs or exec_num_reqs
+    if batch_desc.num_tokens <= 0 or exec_num_reqs <= 0:
+        raise RuntimeError(
+            "DP execution contract resolved invalid geometry: "
+            f"tokens={batch_desc.num_tokens}, requests={exec_num_reqs}"
+        )
+
+    # Forward-context DP metadata describes execution capacity. Preserve live
+    # occupancy above before rewriting this reusable row in place.
+    live_num_tokens.fill_(batch_desc.num_tokens)
+    return batch_desc, DPSyncState(
+        num_tokens_across_dp=live_num_tokens,
+        uniform_token_count=uniform_token_count,
+        eager=batch_desc.cg_mode == CUDAGraphMode.NONE,
+        generation=generation,
+        parent_generation=parent_generation,
+        live_num_tokens_across_dp=live_tokens_tuple,
+        live_num_reqs_across_dp=live_reqs_tuple,
+        execution_num_reqs=exec_num_reqs,
+    )
 
 
 def _dispatch_local_batch(
@@ -350,9 +557,9 @@ def dispatch_cg_and_sync_dp(
             cross-rank agreement; it never changes a bucket's token count.
         dp_sync: Agreement from a prior dispatch over this same batch, to reuse.
             Must come from a batch with this same padded `num_tokens` and the
-            same `uniform_token_count`; `num_reqs` may differ, as neither
-            depends on it. Passing a sync from a different batch is a caller
-            error and trips an assert.
+            same `uniform_token_count`. An execution contract also supplies the
+            rank-identical request capacity used for graph selection. Passing a
+            sync from a different batch is a caller error and trips an assert.
 
     Returns:
         (batch_desc, sync), where `sync` is this batch's agreement for a later
@@ -360,9 +567,14 @@ def dispatch_cg_and_sync_dp(
     """
     reuse_eager = dp_sync is not None and dp_sync.eager
 
+    dispatch_num_reqs = (
+        dp_sync.execution_num_reqs
+        if dp_sync is not None and dp_sync.execution_num_reqs is not None
+        else num_reqs
+    )
     batch_desc = _dispatch_local_batch(
         cudagraph_manager,
-        num_reqs,
+        dispatch_num_reqs,
         num_tokens,
         dp_sync.uniform_token_count if dp_sync is not None else uniform_token_count,
         max_query_len,
