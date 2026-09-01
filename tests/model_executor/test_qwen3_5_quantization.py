@@ -76,3 +76,51 @@ def test_qwen3_5_mtp_lm_head_receives_quant_config():
         MockLMHead.assert_called_once()
         call_kwargs = MockLMHead.call_args.kwargs
         assert call_kwargs["quant_config"] is mock_quant_config
+
+
+def test_qwen3_moe_lm_head_receives_quant_config():
+    from vllm.model_executor.models.qwen3_moe import (
+        Qwen3MoeDecoderLayer,
+        Qwen3MoeForCausalLM,
+        Qwen3MoeSparseMoeBlock,
+    )
+
+    mock_quant_config = Mock()
+
+    mock_hf_config = Mock()
+    mock_hf_config.tie_word_embeddings = False
+    mock_hf_config.vocab_size = 128
+    mock_hf_config.hidden_size = 64
+
+    mock_vllm_config = Mock()
+    mock_vllm_config.model_config.hf_text_config = mock_hf_config
+    mock_vllm_config.quant_config = mock_quant_config
+
+    # Build just enough of a Qwen3-MoE layer to satisfy the metadata scan in
+    # Qwen3MoeForCausalLM.__init__ without constructing the full model.
+    fake_layer = object.__new__(Qwen3MoeDecoderLayer)
+    fake_mlp = object.__new__(Qwen3MoeSparseMoeBlock)
+    for attr, value in {
+        "experts": Mock(),
+        "n_logical_experts": 2,
+        "n_physical_experts": 2,
+        "n_local_physical_experts": 2,
+        "n_routed_experts": 2,
+        "n_redundant_experts": 0,
+    }.items():
+        object.__setattr__(fake_mlp, attr, value)
+    object.__setattr__(fake_layer, "mlp", fake_mlp)
+
+    with (
+        patch("vllm.model_executor.models.qwen3_moe.Qwen3MoeModel") as MockModel,
+        patch("vllm.model_executor.models.qwen3_moe.ParallelLMHead") as MockLMHead,
+        patch("vllm.model_executor.models.qwen3_moe.LogitsProcessor"),
+    ):
+        MockModel.return_value.make_empty_intermediate_tensors = Mock()
+        MockModel.return_value.layers = [fake_layer]
+
+        Qwen3MoeForCausalLM(vllm_config=mock_vllm_config)
+
+        MockLMHead.assert_called_once()
+        call_kwargs = MockLMHead.call_args.kwargs
+        assert call_kwargs["quant_config"] is mock_quant_config
