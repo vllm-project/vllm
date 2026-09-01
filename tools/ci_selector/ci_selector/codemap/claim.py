@@ -42,6 +42,7 @@ RULES = frozenset(
         "release-ci",
         "no-hardware",
         "graph",
+        "colocated-tests",
         "table-diff",
         "no-code",
         "added-conftest",
@@ -51,6 +52,7 @@ RULES = frozenset(
         "added-benchmark",
         "added-head-closure",
         "renamed",
+        "rust",
         "requirements",
         "target-coverage",
         "package-data",
@@ -83,6 +85,10 @@ class Claim:
     # not all say the step runs the path. Both default to not droppable.
     droppable_step_ids: set[str] = field(default_factory=set)
     droppable_test_files: bool = False
+    # This claim already covers everything its path needs, so the docker-image
+    # widening must skip it. Decided per path, unlike _IMAGE_UNION_EXEMPT,
+    # which exempts a whole rule.
+    image_union_exempt: bool = False
 
     def __post_init__(self) -> None:
         if self.rule not in RULES:
@@ -120,7 +126,12 @@ def matches_source_dependency(dep: str, diff_file: str) -> bool:
 def is_catch_all_dep(dep: str) -> bool:
     """A declaration so broad it says nothing about this file: the step named a
     whole package root rather than what it uses. One home, because the selector
-    and crosscheck both read it and must not disagree."""
+    and crosscheck both read it and must not disagree.
+
+    Exact match on a root, so `vllm/v1` counts as specific. Where that line
+    sits is unmeasured: a root is just the one declaration that cannot narrow
+    anything.
+    """
     return dep.rstrip("/") in {p.rstrip("/") for p in CATCH_ALL_DEP_PREFIXES}
 
 

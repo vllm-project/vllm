@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import regex as re
 
-TRUNC_MIN = 45  # Buildkite truncates a context near here
+# Shortest prefix Buildkite truncates a context to; no two steps share one.
+TRUNC_MIN = 44
 
 
 def _slug(label: str, plus_word: bool) -> str:
@@ -20,18 +21,31 @@ def _slug(label: str, plus_word: bool) -> str:
     return re.sub(r"-n$", "", s)
 
 
+def amd_label(label: str, device: str | None) -> str:
+    """ci-infra `amd.get_amd_label`. Pinned by the snapshot suite."""
+    return f"AMD: {label} ({device or ''})"
+
+
 def step_slug_candidates(step) -> list[str]:
     """Every status-context spelling a step can take: its key, the label slug
-    with '+' spelled out or dropped, and for a mirror an amd- prefix and a
-    device suffix."""
+    with '+' spelled out or dropped, and for a mirror both label eras.
+
+    The generator now uses a mirror's own yaml label verbatim; it used to wrap
+    the parent's. We replay revisions from either side, so both are emitted.
+
+    Each spelling is slugged whole, not assembled from slugged parts: `_slug`
+    strips a trailing `-n`, which swallowed the `%N` of a sharded mirror.
+    """
     out = []
     if step.mirror_hw:
+        if step.mirror_label:
+            for pw in (True, False):
+                out.append(_slug(step.mirror_label, pw))
         base_label = step.label.rsplit(" (", 1)[0]
         for pw in (True, False):
-            c = f"amd-{_slug(base_label, pw)}"
-            out.append(c)
+            out.append(_slug(amd_label(base_label, None), pw))
             if step.device:
-                out.append(f"{c}-{step.device.replace('_', '-')}")
+                out.append(_slug(amd_label(base_label, step.device), pw))
     else:
         if step.key:
             out.append(step.key)

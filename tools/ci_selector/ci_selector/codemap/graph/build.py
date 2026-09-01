@@ -10,6 +10,7 @@ from pathlib import Path
 from ...handwritten import CONFTESTS_NOT_ENGINE_STARTING, ENGINE_ENTRY_MODULES
 from ..repo import ModuleIndex, build_module_index
 from .assets import AssetParse, add_asset_edges
+from .cycles import ImportCycle, dominant_cycle
 from .demote import DispatchParse, add_demotion_edges
 from .factories import FactoryParse, add_factory_edges
 from .imports import ImportGraph, build_graph
@@ -49,10 +50,20 @@ class FullGraph:
             | self.dispatch.claims
         )
 
+    def import_cycle(self) -> ImportCycle:
+        """The dominant import cycle, computed once.
+
+        Cached here and not on ImportGraph, whose `add_edge` clears caches on
+        every call; a FullGraph never changes after it is built.
+        """
+        if not hasattr(self, "_import_cycle"):
+            self._import_cycle = dominant_cycle(self.graph)
+        return self._import_cycle
+
     def engine_starting_tests(self) -> set[str]:
         """Tests that actually boot an engine: they import an engine
         entrypoint (LLM, CLI, api_server, engine core) or take the
-        vllm_runner fixture. Gates worker-seam reachability in selection."""
+        vllm_runner fixture. Gates boot-edge reachability in selection."""
         if not hasattr(self, "_engine_tests"):
             entry_files = {
                 f for m in ENGINE_ENTRY_MODULES if (f := self.index.resolve(m))

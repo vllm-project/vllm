@@ -9,7 +9,7 @@ every auto-run step whose test statically imports it survives. Coverage that
 exists only at runtime is pinned by the mistral case below.
 """
 
-from ci_selector.codemap.classify import select
+from ci_selector.codemap.classify import colocation_routes, select
 
 
 def _auto_steps(state):
@@ -27,6 +27,26 @@ def _static_importer_tests(state, target):
                 seen.add(src)
                 stack.append(src)
     return {f for f in seen if f.startswith("tests/")}
+
+
+def _floor_tests(state, target):
+    """The tests a change to `target` may not stop selecting.
+
+    Transitive static reach, except where colocation routes the file -- inside
+    the import cycle that reach has collapsed (`harmony`'s 354 static importers
+    against its siblings' ~23 is the collapse, not coverage it uniquely has),
+    and past the hub gate the swap to test-routing is deliberate. There the
+    floor is the tests importing the file DIRECTLY, which is the claim
+    `colocated-tests` actually makes. `colocation_routes` is the rule's own
+    trigger, so the floor choice here cannot drift from the rule.
+    """
+    if colocation_routes(state, target):
+        return {
+            f
+            for f in state.full.plain_reverse.get(target, ())
+            if f.startswith("tests/")
+        }
+    return _static_importer_tests(state, target)
 
 
 def _steps_running(state, test_files):
@@ -62,7 +82,7 @@ def test_static_floor_no_under_selection(state):
     that statically imports it survives the tightened selection."""
     auto = _auto_steps(state)
     for module in sorted(state.full.factories.parser_engine_entries.values()):
-        floor = _steps_running(state, _static_importer_tests(state, module)) & auto
+        floor = _steps_running(state, _floor_tests(state, module)) & auto
         sel = select(state, [module])
         assert not sel.run_all, module
         missing = floor - set(sel.selected)

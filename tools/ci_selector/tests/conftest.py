@@ -17,6 +17,30 @@ def pytest_addoption(parser):
     )
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_worktree_cache(tmp_path_factory):
+    """Keep the suite out of the real worktree cache.
+
+    Autouse and session-scoped because the leak is indirect and nobody
+    remembers to opt in: a test can stub `state_for` and still reach
+    `worktree_at` through `decide()`, which is how a pytest temp repo ended up
+    registered in the live cache, pinned by a dead process's claim and
+    invisible until someone listed the directory.
+
+    Session-scoped so the trees built here are still shared between tests, and
+    torn down with the session rather than left for the next run to trip over.
+    """
+    import ci_selector.codemap.worktree as wt
+
+    original = wt.WORKTREE_CACHE
+    wt.WORKTREE_CACHE = tmp_path_factory.mktemp("worktree-cache")
+    try:
+        yield wt.WORKTREE_CACHE
+    finally:
+        wt.release_claims()
+        wt.WORKTREE_CACHE = original
+
+
 def pytest_sessionstart(session):
     """Download before collection, not as a test.
 

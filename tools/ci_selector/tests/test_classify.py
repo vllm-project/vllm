@@ -105,11 +105,14 @@ def test_csrc_cpu_routes_to_declarers_plus_cpu_family(state):
 
 
 def test_decorator_registered_member_routes_broad(state):
-    """mm_preprocess feeds minimax's module-level @register_processor, so it genuinely
-    reaches the multimodal tests: route via graph (not demoted), not run-all."""
+    """mm_preprocess feeds minimax's module-level @register_processor, so it
+    really does reach the multimodal tests: route by coverage, not run-all.
+
+    Either reachability rule may answer it. What matters is that the multimodal
+    steps survive whichever one does."""
     sel = select(state, ["vllm/models/minimax_m3/common/mm_preprocess.py"])
     assert "vllm_ci" not in sel.run_all
-    assert any(c.rule == "graph" for c in sel.claims)
+    assert any(c.rule in ("graph", "colocated-tests") for c in sel.claims)
     labels = {
         s.label for p in state.pipelines for s in p.steps if s.step_id in sel.selected
     }
@@ -164,8 +167,8 @@ def test_no_vllm_file_imports_tests(state):
 
 
 def test_engine_gate_on_worker_file_keeps_catching_job(state):
-    """#49364: the engine-starting gate trims non-engine tests reached through the
-    worker seam, but the catching job (V1 Sample + Logits) must survive."""
+    """#49364: the engine-starting gate trims non-engine tests reached through a
+    boot edge, but the catching job (V1 Sample + Logits) must survive."""
     sel = select(state, ["vllm/v1/worker/gpu/cudagraph_utils.py"])
     assert "vllm_ci" not in sel.run_all
     labels = {
@@ -350,11 +353,11 @@ def test_no_classifier_drops_declared_source_deps(state):
     claims; on a graph-known file catch-all (bare `vllm/`) declarers are omitted
     (specific-only)."""
     from ci_selector.codemap.classify import (
-        _DEP_UNION_EXEMPT,
         _classify,
         _graph_known,
         _source_dep_steps,
     )
+    from ci_selector.codemap.unions import _DEP_UNION_EXEMPT
 
     probes: set[str] = set()
     for p in state.pipelines:
@@ -581,35 +584,124 @@ def test_world_policy_members_are_load_bearing_or_provably_not(state):
     )
 
 
-def test_no_rule_above_graph_swallows_a_graph_known_hub(state):
-    """A graph-known file must never be answered more narrowly than its own
-    closure by a rule that runs earlier in the chain.
+# Files the graph rule routes by import closure, where no earlier rule may
+# narrow the answer. Entries must pass `_closure_hub_guards` and sit below the
+# hub gate, since a mirror-holding file above it is colocation's to narrow.
+# Kept out on purpose: `vllm/__init__.py`, a docker image input whose steps
+# arrive whatever claim wins; and `tests/vllm_test_utils/setup.py`, which
+# reaches `rule="graph"` through _nothing_auto_runs's command-text grep.
+CLOSURE_HUBS = ("vllm/v1/attention/ops/paged_attn.py", "vllm/cute_utils/cvt.py")
 
-    This is what the hand list got wrong and why it went: a file matched
-    run-all on one pipeline, so the world rule fired first and returned far
-    fewer steps than the closure had already found. Nothing partial can happen
-    now, but the ordering hazard is structural, so the invariant is pinned
-    rather than the mechanism that used to break it.
+# Files where `colocated-tests` answers narrower than the closure ON PURPOSE:
+# cycle members and, since the hub arm landed, non-cycle files past the size
+# gate. They cannot carry the invariant above, so they are pinned separately
+# with the rule switched off on both ends.
+COLOCATED_HUBS = (
+    "vllm/envs.py",
+    "vllm/lora/layers/base.py",
+    "vllm/compilation/decorators.py",
+    "vllm/model_executor/layers/mla.py",
+)
+
+
+def _closure_hub_guards(state, path):
+    """Why no earlier rule can narrow `path`, asserted rather than trusted.
+
+    Each guard rules out one narrowing rule, so a fixture that stops qualifying
+    fails here with the reason instead of quietly weakening the test.
     """
+    from ci_selector.codemap import hardware
     from ci_selector.codemap.classify import _classify_graph
 
-    hubs = ["vllm/envs.py", "vllm/__init__.py", "tests/vllm_test_utils/setup.py"]
-    checked = 0
-    for path in hubs:
-        graph_claim = _classify_graph(state, path)
-        if graph_claim is None:
-            continue
-        checked += 1
+    assert path not in state.full.import_cycle().reach_blind, (
+        f"{path} joined the import cycle, so `colocated-tests` now answers it "
+        "and narrowing is deliberate. Move it to COLOCATED_HUBS."
+    )
+    assert hardware.exclusive_family_of_path(path) is None, (
+        f"{path} became hardware-exclusive, so `no-hardware` may legitimately "
+        "answer it with nothing. Drop it; see test_tpu_platform_no_hardware_rule."
+    )
+    claim = _classify_graph(state, path)
+    assert claim is not None and claim.rule == "graph", (
+        f"{path}: expected the graph rule, got {claim.rule if claim else None!r}. "
+        "If it is 'colocated-tests' the file crossed the hub gate; move it to "
+        "COLOCATED_HUBS."
+    )
+    # The closure branch specifically. _nothing_auto_runs also returns
+    # rule="graph" from a command-text grep, which would make the assertion
+    # below a lie about closures.
+    assert claim.test_files & state.invoked, (
+        f"{path} no longer routes through the test closure; its claim came "
+        "from _nothing_auto_runs. Pick another hub."
+    )
+    return claim
+
+
+def test_no_rule_above_graph_swallows_a_closure_routed_hub(state):
+    """A file the graph rule routes by closure must never be answered more
+    narrowly by a rule that runs earlier in the chain.
+
+    What the hand list got wrong and why it went. No rule above graph fires on
+    these fixtures today, so this is a canary against a future one.
+
+    The floor is a residual, not a magnitude. The test went partly vacuous when
+    `colocated-tests` shipped and began answering a fixture narrowly, and the
+    old `assert checked` could not see it because it counted claims rather than
+    what they proved.
+    """
+    from ci_selector.codemap.classify import _source_dep_steps
+
+    always_run = {s.step_id for p in state.pipelines for s in p.steps if s.always_runs}
+    for path in CLOSURE_HUBS:
+        claim = _closure_hub_guards(state, path)
         sel = select(state, [path])
-        want = graph_claim.step_ids & state.auto_step_ids
-        missing = want - set(sel.selected)
+        assert not sel.run_all, f"{path} escalated instead of routing"
+        want = claim.step_ids & state.auto_step_ids
+        # Steps selected regardless of which claim won, so containing them
+        # proves nothing about rule ordering.
+        free = (
+            state.artifacts.steps_for_input(path)
+            | _source_dep_steps(state, path, specific_only=True)
+            | always_run
+        ) & state.auto_step_ids
+        residual = want - free
+        assert residual, (
+            f"{path} proves nothing about rule ordering: all {len(want)} of its "
+            "closure steps are supplied by the image union, its declarers or the "
+            "always-run floor. Replace the fixture."
+        )
+        missing = residual - set(sel.selected)
         assert not missing, (
             f"{path}: {len(missing)} steps the import closure reaches are not "
             f"selected, e.g. {sorted(missing)[:3]}"
         )
-    # Detection floor: no graph-known fixture left means every loop body was
-    # skipped and the test would pass against any behaviour at all.
-    assert checked, "no graph-known hub among the fixtures; refresh the paths"
+
+
+def test_colocation_narrows_a_cycle_member_and_only_colocation_does(state):
+    """The other half of the invariant above, for files it cannot cover.
+
+    A cycle member is narrowed on purpose, so it gets two weaker pins:
+    colocation is what narrows it, and with the rule off the closure invariant
+    holds again. If colocation stops firing on one, the first assertion says so
+    rather than the path quietly dropping out of every check.
+    """
+    from ci_selector.codemap.classify import _classify_graph
+
+    for path in COLOCATED_HUBS:
+        claim = _classify_graph(state, path)
+        assert claim is not None and claim.rule == "colocated-tests", (
+            f"{path} is no longer answered by colocation (got "
+            f"{claim.rule if claim else None!r}). Move it to CLOSURE_HUBS."
+        )
+        with_reach = _select_without_colocation(state, path)
+        assert not with_reach.run_all, f"{path} escalated with colocation off"
+        reach_claim = _classify_graph_without_colocation(state, path)
+        want = reach_claim.step_ids & state.auto_step_ids
+        missing = want - set(with_reach.selected)
+        assert not missing, (
+            f"{path}: with colocation off, {len(missing)} closure steps are "
+            f"unselected, e.g. {sorted(missing)[:3]}"
+        )
 
 
 def test_only_the_oracle_may_read_run_all_patterns():
@@ -889,8 +981,8 @@ def test_package_init_routes_to_package_steps(state):
     assert any("basic-correctness" in s for s in _selected(sel))
 
 
-def test_worker_seam_reaches_conftest_server_suites(state):
-    """A worker-seam diff must select suites whose engine boot happens in a
+def test_boot_edge_reaches_conftest_server_suites(state):
+    """A boot-edge diff must select suites whose engine boot happens in a
     conftest server fixture, not just direct entrypoint importers."""
     sel = select(state, ["vllm/v1/worker/gpu_model_runner.py"])
     assert "vllm_ci" not in sel.run_all
@@ -1102,6 +1194,72 @@ def test_referenced_ci_script_selects_its_steps(state):
     assert not sel.run_all
     always = {s.step_id for p in state.pipelines for s in p.steps if s.always_runs}
     assert set(sel.selected) - always
+
+
+def test_lm_eval_harness_routes_to_its_steps_not_run_all(state, vllm_repo):
+    """lm-eval-harness files are not unrecognized CI infra:
+    `test_lm_eval_correctness.py` is a pytest TARGET of the lm_eval steps,
+    reached through their `working_dir`, and the config yamls sit beside it.
+    The referencing leg read only `scripts_seen` and `data_files`, so all of it
+    fell to the terminal run-all.
+    """
+    files = sorted(
+        p.relative_to(vllm_repo).as_posix()
+        for p in (vllm_repo / ".buildkite/lm-eval-harness").rglob("*")
+        if p.is_file()
+    )
+    assert len(files) > 20, "fixture drift: lm-eval-harness shrank"
+    for path in files:
+        sel = select(state, [path])
+        assert not sel.run_all, f"{path} still escalates"
+        assert len(sel.selected) < 60, f"{path} selects {len(sel.selected)}"
+
+
+def test_a_buildkite_script_beside_the_pipeline_yaml_is_not_owned_by_it(state):
+    """The floor for the leg above, and why `.buildkite/` is in
+    `_ROOT_PREFIXES`. Scripts live directly in `.buildkite/`, so without that
+    entry co-location would make every pipeline yaml a dependency of whatever
+    step runs one, and the legacy and inert zero-claims below would never be
+    reached."""
+    for path in (".buildkite/test-amd.yaml", ".buildkite/test-pipeline.yaml"):
+        sel = select(state, [path])
+        non_always = {
+            s.step_id
+            for p in state.pipelines
+            for s in p.steps
+            if s.step_id in sel.selected and not s.always_runs
+        }
+        assert not non_always, f"{path}: {sorted(non_always)[:5]}"
+
+
+def test_a_docker_file_the_build_dag_knows_does_not_run_everything(state):
+    """The terminal fail-open used to set run_all, and the widening rules bail
+    on run_all, so it preempted an image-input answer that existed."""
+    for path in (
+        "docker/versions.json",
+        "docker/Dockerfile.ppc64le",
+        "docker/Dockerfile.s390x",
+        "docker/Dockerfile.tpu",
+        "docker/entrypoints/vllm-nonroot-entrypoint.sh",
+    ):
+        sel = select(state, [path])
+        assert not sel.run_all, f"{path} still escalates"
+        assert sel.selected, f"{path} now selects nothing, which is the unsafe way"
+
+
+def test_an_unclaimed_file_outside_docker_still_fails_open(state):
+    """The floor, and it is about scope rather than about the build graph.
+
+    `docker/` is copied into images wholesale, so the "does the graph know
+    this?" guard is trivially true for every path under it. Elsewhere the
+    escalation has to stay: other files reach that line with an answer too, and
+    letting them defer removes the floor under a run-all only the world rule
+    would then hold up.
+    """
+    from ci_selector.codemap.classify import _classify
+
+    path = "some_unclaimed_top_level_thing.conf"
+    assert _classify(state, path, None).run_all
 
 
 def test_unrecognized_ci_file_runs_all_pipelines(state):
@@ -1695,11 +1853,52 @@ def test_copied_path_routes_via_source(state):
     assert claim.rule == "renamed" and "copied from" in claim.detail
 
 
+def test_a_rename_keeps_the_droppability_it_routed_through(state):
+    """`graph` is the only rule that grants droppability, so a rebuild that
+    forgets to carry it makes the step permanently un-droppable, and nothing
+    reports that it happened."""
+    from ci_selector.codemap.classify import _classify, _classify_graph
+    from ci_selector.codemap.state import DiffContext
+
+    old = "vllm/v1/spec_decode/eagle.py"
+    new = "vllm/v1/spec_decode/eagle_renamed.py"
+    base = _classify_graph(state, old)
+    assert base is not None and base.droppable_step_ids, "fixture no longer droppable"
+
+    ctx = DiffContext(base="b", head="h", status={new: "R"}, renames={new: old})
+    claim = _classify(state, new, ctx)
+    assert claim.droppable_step_ids >= base.droppable_step_ids
+    assert claim.droppable_test_files == base.droppable_test_files
+
+
+def test_a_rename_keeps_its_device_scope(state, vllm_repo):
+    """The unsafe half of the same omission. `device_scope` stops a
+    device-named data file selecting steps no other device can read, so losing
+    it on a rename widens rather than narrows."""
+    from ci_selector.codemap.classify import _classify
+    from ci_selector.codemap.state import DiffContext
+
+    cfgs = sorted(
+        (vllm_repo / "vllm/model_executor/layers/fused_moe/configs").glob(
+            "*device_name=NVIDIA_H*.json"
+        )
+    )
+    assert cfgs, "no H-series tuning config at HEAD to exercise scoping"
+    old = str(cfgs[0].relative_to(vllm_repo))
+    expected = _classify(state, old, None).device_scope
+    assert expected, "fixture is no longer device-scoped"
+
+    # The name carries the device, so the renamed path keeps the same scope.
+    new = str(Path(old).with_name("renamed_" + Path(old).name))
+    ctx = DiffContext(base="b", head="h", status={new: "R"}, renames={new: old})
+    assert _classify(state, new, ctx).device_scope == expected
+
+
 def _head_stub(closure):
     from types import SimpleNamespace
 
     return SimpleNamespace(
-        graph=SimpleNamespace(reverse_closure=lambda files, include_gated=True: closure)
+        graph=SimpleNamespace(reverse_closure=lambda files, include_boot=True: closure)
     )
 
 
@@ -1911,13 +2110,221 @@ def test_a_tools_file_precommit_does_not_name_is_untouched(state):
     assert claim.rule == "fail-open"
 
 
+def test_a_cycle_file_is_routed_by_colocation_and_selects_far_less(state):
+    """The rule's whole point. Inside the cycle every file reaches the same
+    closure, so reach selects near-everything and co-location has to cut it."""
+    path = "vllm/lora/layers/base.py"
+    assert path in state.full.import_cycle().reach_blind
+    on = select(state, [path])
+    assert any(c.rule == "colocated-tests" for c in on.claims)
+    assert not on.run_all
+    with_reach = _select_without_colocation(state, path)
+    assert len(on.selected) < len(with_reach.selected) / 2, (
+        len(on.selected),
+        len(with_reach.selected),
+    )
+
+
+def _without_colocation(call):
+    import os
+
+    from ci_selector.codemap.colocation import ENV_VAR
+
+    previous = os.environ.get(ENV_VAR)
+    os.environ[ENV_VAR] = "off"
+    try:
+        return call()
+    finally:
+        if previous is None:
+            del os.environ[ENV_VAR]
+        else:
+            os.environ[ENV_VAR] = previous
+
+
+def _select_without_colocation(state, path):
+    return _without_colocation(lambda: select(state, [path]))
+
+
+def _classify_graph_without_colocation(state, path):
+    from ci_selector.codemap.classify import _classify_graph
+
+    return _without_colocation(lambda: _classify_graph(state, path))
+
+
+def test_a_cycle_file_with_no_mirror_falls_back_to_the_graph_rule(state):
+    """The fallback is the safety property: declining has to hand the file to
+    reach, not select nothing."""
+    path = "vllm/platforms/interface.py"
+    assert path in state.full.import_cycle().reach_blind
+    sel = select(state, [path])
+    assert not any(c.rule == "colocated-tests" for c in sel.claims)
+    assert sel.selected or sel.run_all
+
+
+def test_a_below_gate_file_outside_the_cycle_is_untouched_by_colocation(state):
+    """Outside the knot a narrow closure is information, so below the size
+    gate the rule must not fire."""
+    from ci_selector.codemap import colocation
+    from ci_selector.codemap.colocation import _pr_auto_selected
+
+    path = "vllm/parser/mistral.py"
+    assert path not in state.full.import_cycle().reach_blind
+    reach_claim = _classify_graph_without_colocation(state, path)
+    assert len(_pr_auto_selected(state, reach_claim)) < colocation.MIN_GRAPH_STEPS, (
+        f"{path} crossed the hub gate; this test needs a below-gate fixture"
+    )
+    assert not any(c.rule == "colocated-tests" for c in select(state, [path]).claims)
+    assert set(select(state, [path]).selected) == set(
+        _select_without_colocation(state, path).selected
+    )
+
+
+def test_an_above_gate_hub_outside_the_cycle_is_routed_by_colocation(state):
+    """The extension's point: a non-cycle file whose closure has gone hub-like
+    is routed by its tests like a cycle member, and the answer must narrow."""
+    path = "vllm/compilation/decorators.py"
+    assert path not in state.full.import_cycle().reach_blind
+    sel = select(state, [path])
+    assert any(c.rule == "colocated-tests" for c in sel.claims)
+    assert not sel.run_all
+    with_reach = _select_without_colocation(state, path)
+    assert len(sel.selected) < len(with_reach.selected) / 2, (
+        len(sel.selected),
+        len(with_reach.selected),
+    )
+
+
+def test_cycle_only_mode_keeps_the_pre_extension_behavior(state, monkeypatch):
+    """cycle-only is the measurement arm: cycle members keep colocation while
+    non-cycle hubs keep the closure. The A/B harnesses ride on this split."""
+    from ci_selector.codemap.colocation import ENV_VAR
+
+    monkeypatch.setenv(ENV_VAR, "cycle-only")
+    hub = select(state, ["vllm/compilation/decorators.py"])
+    assert not any(c.rule == "colocated-tests" for c in hub.claims)
+    member = select(state, ["vllm/lora/layers/base.py"])
+    assert any(c.rule == "colocated-tests" for c in member.claims)
+
+
+def test_an_above_gate_file_without_a_mirror_keeps_the_closure(state, monkeypatch):
+    """The `if colocated` fallback guard holds outside the cycle too. No real
+    file above the gate lacks a mirror at this base, so the guard is exercised
+    by stubbing the mirror away from a real hub."""
+    from ci_selector.codemap import colocation
+    from ci_selector.codemap.classify import _classify_graph
+
+    monkeypatch.setattr(
+        colocation, "implicated_tests", lambda st, p: (frozenset(), None)
+    )
+    claim = _classify_graph(state, "vllm/compilation/decorators.py")
+    assert claim is not None and claim.rule == "graph"
+
+
+def test_a_would_widen_hub_keeps_the_closure(state, monkeypatch):
+    """The strict clamp: a mirror answer no narrower than the graph answer must
+    not fire. Unreachable on a real file at this base, since zero widened files
+    at the gate is how MIN_GRAPH_STEPS was derived, so the widening is
+    manufactured by handing the mirror every invoked test."""
+    from ci_selector.codemap import colocation
+    from ci_selector.codemap.classify import _classify_graph
+
+    path = "vllm/compilation/decorators.py"
+    everything = frozenset(f for f in state.invoked if f.startswith("tests/"))
+    monkeypatch.setattr(
+        colocation, "implicated_tests", lambda st, p: (everything, "tests/")
+    )
+    claim = _classify_graph(state, path)
+    assert claim is not None and claim.rule == "graph"
+
+
+def test_a_hub_claim_carries_the_plain_static_floor(state):
+    """A hub claim must keep every test reaching the file through plain
+    module-level imports. PR 38962's CPU-only breakage was caught by tests that
+    import the file transitively, which no mirror or direct-importer union
+    sees."""
+    from ci_selector.codemap.classify import _classify_graph
+    from ci_selector.codemap.colocation import _plain_static_tests
+
+    path = "vllm/compilation/decorators.py"
+    claim = _classify_graph(state, path)
+    assert claim is not None and claim.rule == "colocated-tests", (
+        "fixture went stale: expected hub routing, got "
+        f"{claim.rule if claim else None!r}"
+    )
+    floor = _plain_static_tests(state, path)
+    assert len(floor) > 20, "fixture went stale: decorators lost its plain fan-in"
+    assert floor <= claim.test_files
+
+
+def test_a_hub_routed_registered_file_keeps_its_own_key_steps(state):
+    """Outside the cycle a file's OWN registered keys are kept: by-name e2e
+    coverage no mirror or importer can see. Only closure-derived keys are
+    dropped."""
+    from ci_selector.codemap.classify import _classify_graph
+
+    path = "vllm/model_executor/models/llama.py"
+    own = state.keys.steps_naming(state.keys.for_file(path))
+    assert len(own) > 10, "fixture went stale: llama.py no longer keys steps"
+    claim = _classify_graph(state, path)
+    assert claim is not None and claim.rule == "colocated-tests", (
+        "fixture went stale: expected hub routing, got "
+        f"{claim.rule if claim else None!r}"
+    )
+    assert own <= claim.step_ids
+
+
+def test_a_cycle_file_that_fails_preflight_still_fails_open(state, monkeypatch):
+    """Both preflight guards say the graph is known-incomplete here. Answering
+    from co-location instead would be trusting it anyway."""
+    from dataclasses import replace
+
+    from ci_selector.codemap.classify import _classify
+
+    path = "vllm/lora/layers/base.py"
+    for field in ("parse_error_paths", "unclassified_sites"):
+        broken = replace(state.preflight, **{field: frozenset({path})})
+        monkeypatch.setattr(state, "preflight", broken)
+        claim = _classify(state, path, None)
+        assert claim.rule == "fail-open", (field, claim.rule)
+        assert claim.run_all
+
+
+def test_colocated_claims_keep_the_droppability_contract(state):
+    """Same contract the graph rule owes: droppables are a subset, and hardware
+    tagging never becomes droppable."""
+    from ci_selector.codemap import hardware
+    from ci_selector.codemap.classify import _classify
+
+    cycle = state.full.import_cycle().reach_blind
+    # Both arms owe the contract, so the sample carries hub-routed files too.
+    # Their liveness floor is the COLOCATED_HUBS test above, which asserts
+    # every member routes here.
+    hubs = [p for p in COLOCATED_HUBS if p not in cycle]
+    assert hubs, "every COLOCATED_HUBS member is in the cycle; add a hub fixture"
+    sample = sorted(cycle)[:400] + hubs
+    claims = [_classify(state, p, None) for p in sample]
+    colocated = [c for c in claims if c is not None and c.rule == "colocated-tests"]
+    assert colocated, "no sampled file routed by co-location; the sample is wrong"
+    for claim in colocated:
+        assert claim.droppable_step_ids <= claim.step_ids
+        assert claim.droppable_test_files
+    rocm = "vllm/platforms/rocm.py"
+    family = hardware.family_of_path(rocm)
+    claim = _classify(state, rocm, None)
+    if family:
+        assert not (claim.droppable_step_ids & state.family_steps(family))
+
+
 def test_declared_deps_are_droppable_but_hardware_tagging_is_not(state):
     from ci_selector.codemap import hardware
     from ci_selector.codemap.classify import _classify, _source_dep_steps
 
+    # Both reachability rules owe the same contract, so assert it on both
+    # rather than on whichever one happens to claim this path today.
+    reach_rules = ("graph", "colocated-tests")
     path = "vllm/v1/attention/selector.py"
     claim = _classify(state, path, None)
-    assert claim.rule == "graph"
+    assert claim.rule in reach_rules
     assert claim.droppable_step_ids <= claim.step_ids
     assert _source_dep_steps(state, path, specific_only=True) <= (
         claim.droppable_step_ids
@@ -1928,7 +2335,7 @@ def test_declared_deps_are_droppable_but_hardware_tagging_is_not(state):
     rocm = "vllm/platforms/rocm.py"
     fam = hardware.family_of_path(rocm)
     hw_claim = _classify(state, rocm, None)
-    if fam and hw_claim.rule == "graph":
+    if fam and hw_claim.rule in reach_rules:
         assert not (hw_claim.droppable_step_ids & state.family_steps(fam))
 
 
@@ -2126,3 +2533,171 @@ def test_the_cited_test_file_does_not_depend_on_set_iteration_order():
     assert _targets_cover(st, hostile) == min(members), (
         "the cited file follows iteration order; two runs will disagree"
     )
+
+
+# ---- rust two-root rule ----------------------------------------------------
+
+
+def test_rust_binary_only_file_stays_off_the_image_union(state):
+    """The whole point of the rust rule: a binary-only crate file keeps its
+    declarers, gate-env steps and hardware-image consumers, and nothing else.
+    Borrowed whole-context images used to balloon it. The ceiling is loose on
+    purpose so pipeline churn does not break the test."""
+    sel = select(state, ["rust/src/server/src/lib.rs"])
+    assert not sel.run_all
+    assert set(sel.selected) >= RUST_DECLARERS
+    vllm_ci = {s for s in sel.selected if s.startswith("vllm_ci:")}
+    assert len(vllm_ci) < 60, sorted(vllm_ci)
+
+
+def test_rust_cdylib_file_carries_the_pyo3_bridge(state):
+    """A parser-closure file affects vllm._rust_tool_parser, which production
+    parsers import with no env gate, so it inherits the bridge file's whole
+    claim on top of the binary route."""
+    bridge = select(state, ["vllm/tool_parsers/rust_tool_parser.py"])
+    sel = select(state, ["rust/src/parser/src/lib.rs"])
+    assert not sel.run_all
+    assert set(sel.selected) >= set(bridge.selected)
+
+
+def test_rust_workspace_root_is_union_of_both_routes(state):
+    """Cargo.lock can change both artifacts, so it takes at least everything
+    either bucket takes."""
+    binary = select(state, ["rust/src/server/src/lib.rs"])
+    cdylib = select(state, ["rust/src/parser/src/lib.rs"])
+    root = select(state, ["rust/Cargo.lock"])
+    assert not root.run_all
+    assert set(root.selected) >= set(binary.selected) | set(cdylib.selected)
+
+
+def test_rust_file_keeps_env_keyed_steps(state):
+    """Leg 1 in isolation: the gate-env search must find the e2e steps and the
+    rule must carry them, so a step that opts in without declaring rust/ still
+    runs on rust changes."""
+    from ci_selector.handwritten import RUST_GATE_ENV_VARS
+
+    gate_steps = state.keys.steps_naming_raw(set(RUST_GATE_ENV_VARS))
+    assert gate_steps, "no step exports the rust gates; leg 1 is dead"
+    sel = select(state, ["rust/src/server/src/lib.rs"])
+    assert gate_steps & state.auto_step_ids <= set(sel.selected)
+
+
+def test_image_union_exempt_membership():
+    """Nothing pinned this set before; every addition is a decision that a
+    rule's own answer beats the build DAG's, so force the re-read."""
+    from ci_selector.codemap.unions import _IMAGE_UNION_EXEMPT
+
+    assert (
+        frozenset(
+            {"no-code", "no-hardware", "legacy-ci", "inert-ci", "release-ci", "rust"}
+        )
+        == _IMAGE_UNION_EXEMPT
+    )
+
+
+def test_rust_reaches_hardware_image_consumers(state):
+    """Leg 2 pinned both ways: the ROCm bake steps and CPU suites compile rust
+    in-step so they stay; the intel test steps only consume a prebuilt image
+    whose rust is inert without the gate, so they go. The derived replacement
+    for rust/ in rocm's run_all_patterns."""
+    sel = select(state, ["rust/src/server/src/lib.rs"])
+    for sid in (
+        "vllm_rocm_ci:CPU-Kernel Tests",
+        "vllm_rocm_ci:image-build-amd",
+        "vllm_rocm_ci:ensure-ci-base-amd",
+        "vllm_intel_ci:image-build-xpu",
+    ):
+        assert sid in sel.selected, sid
+    intel_tests = {
+        s
+        for s in sel.selected
+        if s.startswith("vllm_intel_ci:") and "image-build" not in s
+    }
+    assert not intel_tests, sorted(intel_tests)
+
+
+# ---- requirements Phase A --------------------------------------------------
+
+
+def test_requirements_family_map_pins_the_tree(state):
+    """Drift pin for every requirements/ file's derived family, including the
+    cuda mapping PATH_TOKEN_FAMILIES cannot carry: a global cuda token would
+    misfire on vllm/ paths and on the generic Dockerfile. An unknown-token new
+    file maps to None and keeps the image widening, which fails safe."""
+    from ci_selector.codemap.hardware import requirements_family_of_path
+
+    expected = {
+        "requirements/cuda.txt": "cuda",
+        "requirements/build/cuda.txt": "cuda",
+        "requirements/test/cuda.in": "cuda",
+        "requirements/test/cuda.txt": "cuda",
+        "requirements/rocm.txt": "amd",
+        "requirements/kv_connectors_rocm.txt": "amd",
+        "requirements/cpu.txt": "cpu",
+        "requirements/xpu.txt": "xpu",
+        "requirements/tpu.txt": "tpu",
+        "requirements/common.txt": None,
+        "requirements/lint.txt": None,
+        "requirements/build/rust.txt": None,
+        "requirements/test/nightly-torch.txt": None,
+    }
+    got = {f: requirements_family_of_path(f) for f in expected}
+    assert got == expected
+
+
+def test_requirements_cuda_token_stays_inside_requirements():
+    """The cuda token must not leak into the global tokenizer: vllm/ paths and
+    the generic Dockerfile stay family-less, or the image rules quietly change
+    which files they treat as shared."""
+    from ci_selector.codemap.hardware import (
+        family_of_path,
+        requirements_family_of_path,
+    )
+
+    assert requirements_family_of_path("vllm/cuda_utils.py") is None
+    assert family_of_path("requirements/cuda.txt") is None
+    assert family_of_path("docker/Dockerfile") is None
+
+
+def test_requirements_build_validated_files_select_the_floor(state):
+    """lint.txt and dev.txt exist for tooling no test imports, so their honest
+    reach is the declaring steps plus the always-run builds, not the full
+    docker-image widening."""
+    for path in ("requirements/lint.txt", "requirements/dev.txt"):
+        sel = select(state, [path])
+        assert not sel.run_all, path
+        assert "vllm_ci:ray-dependency-compatibility-check" in sel.selected, path
+        assert len(sel.selected) < 20, (path, len(sel.selected))
+
+
+def test_requirements_build_validated_members_exist(state):
+    from ci_selector.handwritten import REQUIREMENTS_BUILD_VALIDATED
+
+    missing = [
+        p for p in REQUIREMENTS_BUILD_VALIDATED if not (state.repo / p).is_file()
+    ]
+    assert not missing, f"dead entries: {missing}"
+
+
+def test_requirements_cuda_keeps_unlabeled_consumers(state):
+    """The anti-under-selection finding: the image widening's answer for a cuda
+    requirements file includes device-less steps that are real CUDA suites.
+    Family-scoping would drop them, so the widening stays."""
+    sel = select(state, ["requirements/cuda.txt"])
+    assert not sel.run_all
+    assert "vllm_ci:kernels-attention-test" in sel.selected
+
+
+def test_build_validated_manual_only_declarers_fall_open(state):
+    """Same guarantee as the plain requirements rule: if every declarer is
+    manual-only the floor would select nothing real, so fall open."""
+    import dataclasses
+
+    from ci_selector.codemap.classify import _classify, _source_dep_steps
+
+    path = "requirements/lint.txt"
+    declarers = _source_dep_steps(state, path)
+    assert declarers, "fixture drift: nothing declares lint.txt"
+    st2 = dataclasses.replace(state, auto_step_ids=state.auto_step_ids - declarers)
+    claim = _classify(st2, path, None)
+    assert claim.rule == "fail-open" and claim.run_all

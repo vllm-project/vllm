@@ -8,6 +8,7 @@ as a module works until the tree moves."""
 
 from __future__ import annotations
 
+import gzip
 import json
 import subprocess
 from pathlib import Path
@@ -94,13 +95,24 @@ def process_file(
     path.write_text("\n".join(lines) + "\n")
 
 
+# A job log that reads healthy: tests collected and executed, one summary the
+# parser understands. The default, because a job with no log at all is now
+# thin, and without this every fixture in the suite would be.
+HEALTHY_LOG = "collected 3 items\n===== 3 passed in 1.20s =====\n"
+
+# The sentinel is what lets a caller ask for no log file at all, which is a
+# different thing from asking for the default one.
+_DEFAULT_LOG = object()
+
+
 class Build:
     """A sweep build directory: index.json plus jobs/<id>/fnrec/."""
 
-    def __init__(self, root: Path, number: str, commit: str):
+    def __init__(self, root: Path, number: str, commit: str, pipeline: str = "ci"):
         self.root = root
         self.number = number
         self.commit = commit
+        self.pipeline = pipeline
         self.jobs: list[dict] = []
         root.mkdir(parents=True, exist_ok=True)
 
@@ -113,22 +125,41 @@ class Build:
         parallel_index: int | None = None,
         parallel_total: int | None = None,
         recorded: bool = True,
+        state: str = "passed",
+        exit_status: int | None = 0,
+        log: object = _DEFAULT_LOG,
+        started: bool = True,
+        artifact: str | None = None,
     ) -> Path:
         self.jobs.append(
             {
                 "job": job_id,
                 "step_key": step_key,
                 "label": label,
-                "state": "passed",
+                "state": state,
+                "exit_status": exit_status,
                 "parallel_index": parallel_index,
                 "parallel_total": parallel_total,
                 "build": self.number,
                 "commit": self.commit,
+                # `started_at` is how a blocked job is told from one that ran and
+                # recorded nothing, which is what keeps it out of the denominator.
+                "started_at": "2026-08-26T00:00:00Z" if started else None,
+                "finished_at": "2026-08-26T00:10:00Z" if started else None,
+                "artifact": artifact,
                 "n_files": 1 if recorded else 0,
             }
         )
         d = self.root / "jobs" / job_id / "fnrec"
-        d.mkdir(parents=True, exist_ok=True)
+        # Only when something was delivered. Creating it unconditionally hid the
+        # "no directory at all" branch, which is the one 253 real jobs took.
+        if recorded:
+            d.mkdir(parents=True, exist_ok=True)
+        else:
+            d.parent.mkdir(parents=True, exist_ok=True)
+        body = HEALTHY_LOG if log is _DEFAULT_LOG else log
+        if body is not None:
+            (d.parent / "job.log.gz").write_bytes(gzip.compress(body.encode()))
         return d
 
     def finish(self) -> Path:
@@ -137,7 +168,11 @@ class Build:
                 {
                     "build": self.number,
                     "commit": self.commit,
+                    # read_world reads this; without it every fixture row stamps
+                    # an empty slug while every real row carries "ci".
+                    "pipeline": self.pipeline,
                     "n_jobs": len(self.jobs),
+                    "n_with_record": sum(1 for j in self.jobs if j["n_files"]),
                     "jobs": self.jobs,
                 }
             )
@@ -158,8 +193,8 @@ def make_table(
     Saves every test from restating the merge; the merge itself is covered in
     test_merge.py.
     """
-    from ci_selector.coverage.build import merge_build, write_table
     from ci_selector.coverage.table import load
+    from ci_selector.scripts.build import merge_build, write_table
 
     build = Build(tmp_path / f"sweep-{build_no}" / "b", build_no, repo.head())
     for index, (key, entries) in enumerate(jobs.items()):

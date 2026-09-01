@@ -5,7 +5,7 @@
 A model runner imports every plugin class at module top but builds one only
 behind a config guard like `method == "eagle3"`. That import registers the
 plugin, it does not depend on it. Left as an edge, changing one proposer reaches
-nearly every engine test through the worker seam. So the edge is cut and the
+nearly every engine test through a boot edge. So the edge is cut and the
 member is routed by its config key instead, the same way the model registry and
 parser engine work.
 
@@ -28,7 +28,11 @@ from .factories import _leaf_consumer, _leaf_edges, _path_leaf_edges
 from .imports import LITERAL_MIN_LEN, ImportGraph, _from_base, _package_of
 
 CONFIG_DIR = "vllm/config/"
-CONFIG_KEY_MAX_TEST_FILES = 32  # above this a word is ordinary ("auto": 170 files)
+
+# Above this a gating literal is an ordinary word and routes nothing ("auto"
+# reaches 171 leaf files). Free choice: demotion-key fanout jumps 23 -> 41, so
+# anything from 24 to 40 builds the same graph.
+CONFIG_KEY_MAX_TEST_FILES = 32
 
 
 @dataclass

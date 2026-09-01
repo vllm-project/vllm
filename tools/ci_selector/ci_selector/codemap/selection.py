@@ -174,7 +174,8 @@ def _directly_collects(st: StepTargets | None, path: str) -> bool:
     """True when this step's own command loads `path`: a named target, a file
     under a directory target, a scanned script, or a data argument.
 
-    The directory leg is what _direct_step_refs lacks, and they stay separate
+    The directory leg is what `step_refs._direct_step_refs` lacks, and they
+    stay separate
     because this exists to disarm a subtraction, not to add coverage.
 
     --ignore and --deselect are honoured here even though _targets_cover

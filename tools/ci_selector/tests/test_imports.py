@@ -216,3 +216,50 @@ def test_forward_closure_skips_demoted_edges(graph_and_index):
         )
     finally:
         graph.demoted_edges.discard((src, dst))
+
+
+def _mini_repo(tmp_path):
+    from ci_selector.codemap.graph.imports import build_graph
+    from ci_selector.codemap.repo import build_module_index
+
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm/__init__.py").write_text("")
+    (tmp_path / "vllm/user.py").write_text(
+        "import yaml\nfrom transformers import AutoModel\nfrom . import missing\n"
+    )
+    (tmp_path / "vllm/lazy_user.py").write_text("def f():\n    import zmq\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_x.py").write_text("import vllm.not_a_module\n")
+    return build_graph(tmp_path, build_module_index(tmp_path))
+
+
+def test_external_imports_recorded_for_unresolved_absolute(tmp_path):
+    """The requirements channel's foundation: an import that leaves the repo
+    used to vanish without a trace; now the top-level name keeps its
+    importer list, so `pyyaml -> yaml -> vllm/user.py` becomes walkable."""
+    graph = _mini_repo(tmp_path)
+    assert "vllm/user.py" in graph.external_imports.get("yaml", set())
+    assert "vllm/user.py" in graph.external_imports.get("transformers", set())
+
+
+def test_external_imports_skip_repo_toplevel_names(tmp_path):
+    """An unresolvable name under a repo root is a broken repo import, not a
+    third-party package; recording it would route requirements lines to
+    files that never import the package."""
+    graph = _mini_repo(tmp_path)
+    assert "vllm" not in graph.external_imports
+    assert not any(k.startswith("vllm") for k in graph.external_imports)
+
+
+def test_external_imports_include_lazy_imports(tmp_path):
+    """A function-local import still proves the file uses the package;
+    missing an importer under-selects later, so err inclusive."""
+    graph = _mini_repo(tmp_path)
+    assert "vllm/lazy_user.py" in graph.external_imports.get("zmq", set())
+
+
+def test_relative_import_never_external(tmp_path):
+    """`from . import missing` resolves inside the package or not at all; it
+    can never name a distribution."""
+    graph = _mini_repo(tmp_path)
+    assert "missing" not in graph.external_imports

@@ -9,7 +9,7 @@ input that would quietly weaken selection surfaces here with a direction:
 - force one step: unknown step fields, duplicate ids, unparsable commands.
 - run everything: an empty core table or a dead anchor, meaning we are blind to
   a whole coverage channel.
-- degrade one gate: an unresolved engine entry module turns off the worker-seam
+- degrade one gate: an unresolved engine entry module turns off the boot-edge
   gate instead of dropping suites.
 - fail one file open: a changed path that would not parse.
 - distrust the graph: an unmodeled dynamic import means the closure may be
@@ -24,6 +24,7 @@ but people still read its result, so it is forced like any other.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -35,7 +36,7 @@ from .hardware import family_of_device
 class PreflightReport:
     run_all_reasons: list[str] = field(default_factory=list)
     force_select: dict[str, str] = field(default_factory=dict)  # step_id -> why
-    seam_gate_ok: bool = True
+    boot_gate_ok: bool = True
     parse_error_paths: frozenset[str] = frozenset()
     # devices the taxonomy cannot map, which makes family_steps() incomplete
     # and the no-hardware rule unsafe
@@ -46,11 +47,21 @@ class PreflightReport:
     warnings: list[str] = field(default_factory=list)
 
     @property
+    def forced_by_reason(self) -> dict[str, int]:
+        """force_select grouped by reason, most steps first.
+
+        One unknown field forces every step that carries it, and a per-step
+        reason buries that: a new mirror field once taxed every AMD mirror on
+        every PR of a long sweep with nothing on screen.
+        """
+        return dict(Counter(self.force_select.values()).most_common())
+
+    @property
     def clean(self) -> bool:
         return (
             not self.run_all_reasons
             and not self.force_select
-            and self.seam_gate_ok
+            and self.boot_gate_ok
             and not self.parse_error_paths
             and not self.unclassified_sites
             and not self.warnings
@@ -220,10 +231,10 @@ def run_preflight(repo: Path, pipelines, full, load_report) -> PreflightReport:
 
     unresolved = [m for m in ENGINE_ENTRY_MODULES if not full.index.resolve(m)]
     if unresolved:
-        pf.seam_gate_ok = False
+        pf.boot_gate_ok = False
         pf.warnings.append(
             "preflight: engine entry modules unresolved "
-            f"({', '.join(unresolved)}); worker-seam gate disabled "
+            f"({', '.join(unresolved)}); boot-edge gate disabled "
             "(over-selecting)"
         )
     return pf

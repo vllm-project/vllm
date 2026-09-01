@@ -57,6 +57,10 @@ class ImportGraph:
     # Function-local imports, held until the parsers say which targets they
     # route by string key. See finalize_lazy_edges.
     lazy_imports: set[tuple[str, str]] = field(default_factory=set)
+    # External top-level import name -> repo files importing it. The
+    # requirements channel walks this (pyyaml -> yaml -> importers); lazy
+    # imports included, since a function-local import still proves use.
+    external_imports: dict[str, set[str]] = field(default_factory=dict)
     # Lazy edges dropped because a parser claims the target. Never holds one
     # that started at a test or benchmark.
     dropped_lazy: list[tuple[str, str]] = field(default_factory=list)
@@ -73,7 +77,7 @@ class ImportGraph:
     ambiguities: list[tuple[str, str, str, str]] = field(default_factory=list)
     # Edges only taken when an engine boots. Walked by default, but a test
     # reached ONLY through one counts only if it boots an engine.
-    gated_edges: set[tuple[str, str]] = field(default_factory=set)
+    boot_edges: set[tuple[str, str]] = field(default_factory=set)
     # Registration imports cut out of selection: the importer pulls a plugin
     # in at module top but only builds it behind a config guard. The real edge
     # stays in `imports`; selection skips it and routes by config key instead.
@@ -100,11 +104,11 @@ class ImportGraph:
             self._reverse = rev
         return self._reverse
 
-    def add_gated_edge(self, src: str, dst: str) -> None:
+    def add_boot_edge(self, src: str, dst: str) -> None:
         self.add_edge(src, dst)
-        self.gated_edges.add((src, dst))
+        self.boot_edges.add((src, dst))
 
-    def reverse_closure(self, files: set[str], include_gated: bool = True) -> set[str]:
+    def reverse_closure(self, files: set[str], include_boot: bool = True) -> set[str]:
         """All files that (transitively) import any of `files`."""
         seen = set(files)
         stack = list(files)
@@ -113,14 +117,14 @@ class ImportGraph:
             for src in self.reverse.get(cur, ()):
                 if (src, cur) in self.demoted_edges:
                     continue
-                if not include_gated and (src, cur) in self.gated_edges:
+                if not include_boot and (src, cur) in self.boot_edges:
                     continue
                 if src not in seen:
                     seen.add(src)
                     stack.append(src)
         return seen
 
-    def forward_closure(self, files: set[str], include_gated: bool = True) -> set[str]:
+    def forward_closure(self, files: set[str], include_boot: bool = True) -> set[str]:
         """Everything `files` imports, transitively.
 
         `reverse_closure` turned around. Selection asks who reaches a file;
@@ -135,7 +139,7 @@ class ImportGraph:
             for dst in self.imports.get(cur, ()):
                 if (cur, dst) in self.demoted_edges:
                     continue
-                if not include_gated and (cur, dst) in self.gated_edges:
+                if not include_boot and (cur, dst) in self.boot_edges:
                     continue
                 if dst not in seen:
                     seen.add(dst)
@@ -283,7 +287,7 @@ class _FileVisitor(ast.NodeVisitor):
         # Relative levels resolve too: a test doing `from ...utils import
         # RemoteOpenAIServer` binds the same name as the absolute form, and
         # missing it drops the test out of engine_starting_tests, where the
-        # worker-seam gate then subtracts it.
+        # boot-edge gate then subtracts it.
         base_module = _from_base(node, self.package)
         if base_module:
             base_file = self.index.resolve(base_module)
@@ -377,7 +381,12 @@ class _FileVisitor(ast.NodeVisitor):
 
 
 class _LazySink:
-    """Graph facade routing edges into the deferred lazy set."""
+    """Stands in for the graph while the walker is inside a function body.
+
+    Only `add_edge` is diverted: the pair goes to `lazy_imports` for
+    `finalize_lazy_edges` to accept or drop later. The two properties below
+    are what the resolvers ALSO write, and they go straight to the real graph.
+    """
 
     def __init__(self, graph: ImportGraph, file: str):
         self._graph = graph
@@ -389,10 +398,15 @@ class _LazySink:
 
     @property
     def ambiguities(self):
-        """The resolvers take this sink as their `graph` and report bare-name
-        clashes on it. Deferring the EDGE does not defer the clash, which is a
-        fact about the name either way."""
+        """Holding the edge back does not hold back the clash: an ambiguous
+        bare name is ambiguous whether or not the edge survives."""
         return self._graph.ambiguities
+
+    @property
+    def external_imports(self):
+        """Recorded immediately: a function-local import of an external
+        package proves the file uses it just as well as a top-level one."""
+        return self._graph.external_imports
 
 
 def _package_of(module: str, file: str) -> str:
@@ -433,10 +447,17 @@ def _resolve_absolute(
             return
     # `import a.b.c` executes every package __init__ on the way down.
     parts = name.split(".")
+    resolved_any = False
     for depth in range(1, len(parts) + 1):
         target = index.resolve(".".join(parts[:depth]))
         if target:
+            resolved_any = True
             graph.add_edge(file, target)
+    # Nothing resolved, so the name is external. Under a repo root it is a
+    # broken internal import instead, and recording it would route a
+    # requirements line to files that never import the package.
+    if not resolved_any and parts[0] not in PACKAGE_ROOTS:
+        graph.external_imports.setdefault(parts[0], set()).add(file)
 
 
 def _from_base(node: ast.ImportFrom, package: str) -> str | None:

@@ -283,7 +283,7 @@ def test_missing_spawn_entrypoint_escalates():
     assert any("entrypoint" in r for r in pf.run_all_reasons)
 
 
-def test_unresolved_engine_entry_disables_seam_gate():
+def test_unresolved_engine_entry_disables_boot_gate():
     index = ModuleIndex()
     for m in ENGINE_ENTRY_MODULES[1:]:
         index.add(m, m.replace(".", "/") + ".py")
@@ -294,7 +294,7 @@ def test_unresolved_engine_entry_disables_seam_gate():
         _healthy_full(index=index),
         LoadReport(),
     )
-    assert not pf.seam_gate_ok
+    assert not pf.boot_gate_ok
     assert not pf.run_all_reasons
 
 
@@ -332,7 +332,7 @@ def test_preflight_clean_at_head(state):
     )
     assert not pf.run_all_reasons, degraded + f"\nrun-all: {pf.run_all_reasons}"
     assert not pf.force_select, degraded + f"\nforced steps: {pf.force_select}"
-    assert pf.seam_gate_ok, degraded + "\nthe worker-seam gate switched itself off"
+    assert pf.boot_gate_ok, degraded + "\nthe boot-edge gate switched itself off"
     assert not pf.parse_error_paths, (
         degraded + f"\nunparsable: {sorted(pf.parse_error_paths)}"
     )
@@ -487,3 +487,24 @@ def test_unused_entry_check_is_not_a_preflight_escalation():
         LoadReport(),
     )
     assert not pf.run_all_reasons, pf.run_all_reasons
+
+
+def test_forced_steps_are_summarised_by_reason():
+    """One unmodelled field forces every step that carries it, and a per-step
+    reason hides that."""
+    report = LoadReport()
+    steps = [_step(key=f"s{i}") for i in range(3)]
+    for step in steps[:2]:
+        report.record_unknown({"label": "x"}, step.step_id)
+    report.duplicate_ids.append(steps[2].step_id)
+    pf = run_preflight(
+        REPO,
+        [_pipe(steps, {k: v for s in steps for k, v in _covered_targets(s).items()})],
+        _healthy_full(),
+        report,
+    )
+    summary = pf.forced_by_reason
+    assert sum(summary.values()) == len(pf.force_select)
+    # Most costly first, so the expensive one cannot scroll off.
+    assert list(summary.values()) == [2, 1]
+    assert "'label'" in next(iter(summary))

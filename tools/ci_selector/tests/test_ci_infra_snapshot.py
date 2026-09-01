@@ -33,6 +33,11 @@ from helpers import HW, drift_message
 SIGN_OFF = "uv run python tests/ci_infra.py"
 SYNC = "uv run pytest tests --sync -q"
 
+# Every check here reads the downloaded snapshot, which is gitignored. Skip as
+# a module rather than let each one raise FileNotFoundError from a fixture.
+_ABSENT = ci_infra.absent()
+pytestmark = pytest.mark.skipif(bool(_ABSENT), reason=f"{_ABSENT}; run `{SYNC}`")
+
 # Ours -> the constant ci-infra assigns the same value to. Names differ where
 # upstream chose a different one for the same fact.
 SAME_VALUE = {
@@ -403,3 +408,136 @@ def test_our_replica_behaves_like_the_generators_own_rule():
             "ci_selector/validate/generator_replica.py agree with it",
         )
     assert checked > 1000, "the input space collapsed; this proves nothing"
+
+
+# Labels a mirror can carry, including the shapes that broke: emoji, nested
+# parens, a `%N` shard token, and an empty device.
+AMD_LABELS = (
+    "Basic Correctness",
+    ":nvidia: (H200) Basic Correctness",
+    ":nvidia: (H100) V1 Attention Shard %N",
+    "V1 Core + KV + Metrics",
+    "",
+)
+AMD_DEVICES = (None, "", "mi300_1", "mi355_8", "mi250_1")
+
+
+@pytest.mark.drift
+def test_our_amd_label_behaves_like_ci_infras(upstream):
+    """The mirror label is the status context, so a difference here is not
+    cosmetic: it decides whether a real AMD job maps back to a step at all."""
+    from ci_selector.codemap.pipeline.match import amd_label
+
+    theirs = upstream["get_amd_label"]
+    for label in AMD_LABELS:
+        for device in AMD_DEVICES:
+            assert theirs(label, device) == amd_label(label, device), drift_message(
+                "Our amd_label disagrees with ci-infra's get_amd_label on "
+                f"label={label!r}, device={device!r}.",
+                "Mirror job slugs are built from it. When it drifts, every AMD "
+                "job stops matching the step that ran it, and the miss reads "
+                "as coverage we do not have.",
+                "read tests/ci_infra_snapshot/"
+                f"get_amd_label{ci_infra.SUFFIX} and make amd_label in "
+                "ci_selector/codemap/pipeline/match.py agree with it",
+            )
+
+
+STEP_KEY_LABELS = (
+    # A leading separator and two in a row: both survive upstream, and both
+    # were being collapsed.
+    ":nvidia: (H200) Rust Frontend OpenAI Coverage",
+    ":computer: (CPU) Docker Build Metadata",
+    "V1 Core + KV + Metrics",
+    # Every character the function treats specially, together and alone.
+    "Async Engine, Inputs, Utils, Worker",
+    "CPU-Distributed Tests (PP+TP)",
+    "CPU-Qwen2.5-VL Multimodal Tests",
+    "Rust Frontend Serve/Admin Coverage",
+    "Multi-Modal Models (Standard) 3: llava + qwen2_vl",
+    "V1 Attention Shard %N",
+    "Plain Label",
+    "",
+)
+
+
+@pytest.mark.drift
+def test_our_derived_key_behaves_like_ci_infras(upstream):
+    """The key a keyless step gets, which we both emit and look rows up by.
+
+    Drift is silent twice over: rows land under a spelling nothing asks for, and
+    `--emit-keys` names a step the generator cannot resolve. The labels above
+    keep the shapes that broke it.
+    """
+    from ci_selector.codemap.pipeline.step import derive_step_key
+
+    theirs = upstream["_generate_step_key"]
+    for label in STEP_KEY_LABELS:
+        assert theirs(label) == derive_step_key(label), drift_message(
+            "Our derive_step_key disagrees with ci-infra's _generate_step_key "
+            f"on {label!r}: they say {theirs(label)!r}, we say "
+            f"{derive_step_key(label)!r}.",
+            "It is the identity of every step whose yaml omits a key. A "
+            "disagreement loses that step's coverage row and emits a key CI "
+            "cannot resolve, neither of which surfaces as a failure.",
+            "read tests/ci_infra_snapshot/"
+            f"_generate_step_key{ci_infra.SUFFIX} and make derive_step_key in "
+            "ci_selector/codemap/pipeline/step.py agree with it",
+        )
+
+
+@pytest.mark.drift
+def test_every_mirror_key_the_generator_reads_is_modelled():
+    """Upstream types a mirror override as `Dict[str, Any]`, so its `amd[...]`
+    reads are the only schema there is. A key we do not model is force-selected
+    on every step that carries it."""
+    from ci_selector.handwritten import MIRROR_OVERRIDABLE
+
+    keys = ci_infra.mirror_override_keys()
+    # Guard the guard: an upstream rename would empty the scan, and an empty
+    # set is a subset of anything.
+    assert len(keys) >= 15, drift_message(
+        f"Only {len(keys)} mirror override keys found in the snapshot, so the "
+        "check below is comparing against almost nothing.",
+        "An extraction that stopped working reads exactly like a generator "
+        "that stopped adding fields.",
+        "the mirror dict was renamed or the reads moved: check MIRROR_VAR and "
+        f"mirror_override_keys() in tests/ci_infra.py against a fresh `{SYNC}`",
+    )
+    assert not keys - MIRROR_OVERRIDABLE, drift_message(
+        "ci-infra reads mirror override keys we do not model: "
+        f"{sorted(keys - MIRROR_OVERRIDABLE)}.",
+        "Preflight force-selects every step carrying an unmodelled key, and a "
+        "forced step is not droppable, so this is a cost no coverage evidence "
+        "can lift.",
+        f"add them to MIRROR_OVERRIDABLE in {HW}",
+        "if the key changes what the step runs: also teach _expand_mirror in "
+        "ci_selector/codemap/pipeline/buildkite.py to read it",
+    )
+
+
+@pytest.mark.drift
+def test_every_step_field_the_generator_declares_is_modelled():
+    """The top-level half of the mirror check above. This model really is
+    typed, so its annotated fields are the schema outright."""
+    from ci_selector.handwritten import KNOWN_STEP_FIELDS
+
+    fields = ci_infra.upstream_step_fields()
+    assert len(fields) >= 20, drift_message(
+        f"Only {len(fields)} fields found on ci-infra's Step model, so the "
+        "check below is comparing against almost nothing.",
+        "An extraction that stopped working reads exactly like a model that "
+        "stopped growing.",
+        "the model moved or was renamed: check upstream_step_fields() in "
+        f"tests/ci_infra.py against a fresh `{SYNC}`",
+    )
+    assert not fields - KNOWN_STEP_FIELDS, drift_message(
+        "ci-infra's Step model declares fields we do not model: "
+        f"{sorted(fields - KNOWN_STEP_FIELDS)}.",
+        "Preflight force-selects every step carrying an unmodelled field, and "
+        "a forced step is not droppable, so it costs CI time on every PR until "
+        "it is listed.",
+        f"add them to KNOWN_STEP_FIELDS in {HW}",
+        "if the field changes what the step runs: also teach Step in "
+        "ci_selector/codemap/pipeline/step.py to read it",
+    )

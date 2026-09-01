@@ -82,3 +82,18 @@ def test_missing_table_falls_back_to_the_map(tmp_path, monkeypatch):
     table = fetch_table()
     assert not table.available
     assert "Running on the code map alone" in table.unavailable
+
+
+def test_the_table_override_reads_the_path_it_is_given(tmp_path):
+    """`--table` is documented in the README and never once ran end to end: the
+    CLI handed `decide` a Path, which read `.available` off it above its own
+    try block. A crash means run-everything, so it failed safe by luck."""
+    from ci_selector.coverage.source import fetch_table
+
+    override = tmp_path / "elsewhere.json"
+    override.write_text('{"version": 999, "rows": {}}')
+    table = fetch_table(override)
+
+    # Reached the file rather than raising, and judged it on its contents.
+    assert not table.available
+    assert "re-merge" in table.unavailable

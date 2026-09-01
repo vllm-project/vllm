@@ -59,9 +59,9 @@ def test_demoted_edge_cuts_amplifier_keeps_sibling():
 def test_demoted_edge_skipped_in_both_gated_modes():
     g = _wired()
     g.demoted_edges.add(("runner.py", "eagle.py"))
-    for include_gated in (True, False):
+    for include_boot in (True, False):
         assert "tests/test_a.py" not in g.reverse_closure(
-            {"eagle.py"}, include_gated=include_gated
+            {"eagle.py"}, include_boot=include_boot
         )
 
 

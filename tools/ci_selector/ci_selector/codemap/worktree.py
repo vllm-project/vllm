@@ -9,6 +9,7 @@ never depend on the harnesses.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import fcntl
 import os
@@ -24,7 +25,11 @@ from .state import RepoState
 
 T = TypeVar("T")
 
-WORKTREE_CACHE = Path.home() / ".cache" / "vllm-ci-selector" / "worktrees"
+# Overridable so a test run cannot write into the cache a real run reads.
+WORKTREE_CACHE = Path(
+    os.environ.get("CI_SELECTOR_WORKTREE_CACHE")
+    or Path.home() / ".cache" / "vllm-ci-selector" / "worktrees"
+)
 
 # States are ~100s of MB each; cache only what's needed at once. Two suffices:
 # the tablediff tests alternate a base state with a merge/head state (both
@@ -88,7 +93,24 @@ def _worktree_at_locked(repo: Path, oid: str) -> Path:
         if _worktree_valid(target, oid):
             _claim(target)
             return target
+        # Invalid AND claimed by someone else means another process is
+        # mid-create or reading a tree we cannot verify; deleting it hands a
+        # half-populated checkout to a live reader. Our own claim must not
+        # block this, and cannot harm us: `_cached_by_tree` keys on the tree
+        # oid, so a stale entry is never served for the oid we want now.
+        if target.name in _claimed(exclude_self=True):
+            raise RuntimeError(
+                f"worktree {target.name} is claimed by another process but does "
+                f"not validate at {oid}. Refusing to delete a tree in use. "
+                f"If no run is live, remove {WORKTREE_CACHE}/.inuse.* and retry."
+            )
         shutil.rmtree(target)
+        # Prune before re-adding: git still holds the admin entry, and a stale
+        # one makes the next `worktree add` fail with "missing but already
+        # registered", burning one of only two attempts below.
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "prune"], capture_output=True
+        )
     target.parent.mkdir(parents=True, exist_ok=True)
     proc = None
     for _ in range(2):
@@ -108,40 +130,94 @@ def _worktree_at_locked(repo: Path, oid: str) -> Path:
     raise RuntimeError(f"worktree add failed for {oid}: {proc.stderr.strip()}")
 
 
+def _marker() -> Path:
+    return WORKTREE_CACHE / f".inuse.{os.getpid()}"
+
+
+def _proc_started(pid: int) -> str:
+    """A pid's start time, so a recycled pid cannot inherit a dead claim.
+
+    Empty when it cannot be read, which the reader treats as "cannot rule this
+    out" and keeps the claim. Over-claiming wastes disk; under-claiming deletes
+    a tree somebody is reading.
+    """
+    proc = subprocess.run(
+        ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
 def _claim(target: Path) -> None:
     """Record every worktree this process still reads from.
 
-    mtime alone cannot express this. A tree's mtime freezes at creation while
-    the caller spends ~20s building state from it, so a concurrent worker's
-    eviction picks it as the oldest and deletes the files being read. That
-    surfaces as missing files, which fails open to run-everything.
+    mtime cannot express this: a tree's mtime freezes at creation while the
+    caller spends ~20s building state from it, so another worker's eviction
+    picks it as the oldest and deletes files being read.
 
-    All live trees, not just the newest: one PR claims its base tree and then
-    its head tree, because routing an added file needs a graph at head, and a
-    single-slot claim would release the base while its state is still in use.
-    The bound matches what the in-memory caches can hold.
+    All live trees, not just the newest. One PR claims its base tree and then
+    its head tree, and a single-slot claim would release the base while its
+    state is still in use.
 
-    The claim lives beside the worktree, never inside it: a file within would
-    make `_worktree_valid` see a dirty tree and prune it.
+    The claim file sits beside the worktree, never inside it, or
+    `_worktree_valid` sees a dirty tree and prunes it. Names are kept distinct
+    and a cache hit re-claims, so a repeat claim cannot spend a second slot and
+    evict a live tree.
     """
     with contextlib.suppress(OSError):
         os.utime(target)
-    _LIVE.append(target.name)
+    name = target.name
+    if name in _LIVE:
+        _LIVE.remove(name)  # move to newest; a re-claim must not spend a slot
+    _LIVE.append(name)
     while len(_LIVE) > MAX_CACHED_STATES + MAX_CACHED_HEAD_GRAPHS:
         _LIVE.popleft()
+    _write_marker()
+
+
+def _write_marker() -> None:
+    """Publish this process's claims atomically.
+
+    `write_text` truncates in place, so a concurrent `_claimed` could read a
+    half-written file and miss a claim. Temp file plus rename instead, with the
+    process start time on the first line so a recycled pid is detectable.
+    Errors are not suppressed: a lost claim makes a live tree look evictable.
+    """
+    tmp = WORKTREE_CACHE / f".inuse.{os.getpid()}.tmp"
+    body = "\n".join([_proc_started(os.getpid()), *_LIVE])
+    tmp.write_text(body)
+    os.replace(tmp, _marker())
+
+
+def release_claims() -> None:
+    """Drop this process's claims. Registered at exit and safe to call twice."""
+    _LIVE.clear()
     with contextlib.suppress(OSError):
-        (WORKTREE_CACHE / f".inuse.{os.getpid()}").write_text("\n".join(_LIVE))
+        _marker().unlink()
 
 
-def _claimed() -> set[str]:
-    """Worktree names some live process says it is reading."""
+atexit.register(release_claims)
+
+
+def _claimed(exclude_self: bool = False) -> set[str]:
+    """Worktree names some live process says it is reading.
+
+    Liveness is pid AND start time, since pids recycle and a bare pid check
+    lets an unrelated process pin a tree forever. Any doubt keeps the claim.
+
+    `exclude_self` is for the one caller asking "may I delete this". Eviction
+    does not pass it; skipping our own live trees there is the point.
+    """
     out: set[str] = set()
+    mine = _marker()
     for marker in WORKTREE_CACHE.glob(".inuse.*"):
+        if marker.suffix == ".tmp" or (exclude_self and marker == mine):
+            continue
         try:
             pid = int(marker.suffix[1:])
-            names = marker.read_text().split()
+            lines = marker.read_text().split("\n")
         except (OSError, ValueError):
             continue
+        started, names = (lines[0].strip(), lines[1:]) if lines else ("", [])
         try:
             os.kill(pid, 0)  # liveness only; does not signal
         except ProcessLookupError:
@@ -150,19 +226,42 @@ def _claimed() -> set[str]:
             continue
         except PermissionError:
             pass
-        out.update(names)
+        else:
+            # Same pid, different process: the original died and the number
+            # came round again, so its claims are stale.
+            now = _proc_started(pid)
+            if started and now and started != now:
+                with contextlib.suppress(OSError):
+                    marker.unlink()
+                continue
+        out.update(n for n in names if n)
     return out
 
 
 def _evict_old_worktrees(repo: Path, keep: Path) -> None:
+    """Trim the cache to MAX_WORKTREES, never touching a tree someone reads.
+
+    `repo` is protected as well as `keep`, and not defensively: the head-closure
+    rule passes a cached worktree as the repo, so the tree a caller is working
+    from arrives here as an ordinary eviction candidate.
+
+    What is counted against the cap and what is trimmed must be the same
+    population. Mixing them once deleted every unpinned tree on every create,
+    which stops the cache caching.
+    """
+    protect = {keep.resolve(), repo.resolve()}
     claimed = _claimed()
-    others = [d for d in WORKTREE_CACHE.iterdir() if d.is_dir() and d != keep]
-    dirs = [d for d in others if d.name not in claimed]
-    dirs.sort(key=lambda d: d.stat().st_mtime)
-    # Count claimed trees against the cap but never delete them, so the cache
+    evictable = [
+        d
+        for d in WORKTREE_CACHE.iterdir()
+        if d.is_dir() and d.resolve() not in protect and d.name not in claimed
+    ]
+    evictable.sort(key=lambda d: d.stat().st_mtime)
+    # Claimed trees are counted against the cap but never deleted, so the cache
     # can sit above MAX_WORKTREES while readers are live rather than pull a
-    # tree out from under one. Bounded by the number of concurrent workers.
-    for stale in dirs[: max(0, len(others) + 1 - MAX_WORKTREES)]:
+    # tree out from under one. Trim only what is genuinely free.
+    total = sum(1 for d in WORKTREE_CACHE.iterdir() if d.is_dir())
+    for stale in evictable[: max(0, total - MAX_WORKTREES)]:
         shutil.rmtree(stale, ignore_errors=True)
         subprocess.run(
             ["git", "-C", str(repo), "worktree", "prune"],

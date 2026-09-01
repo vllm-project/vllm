@@ -48,6 +48,10 @@ class ArtifactGraph:
     # image INPUT -> the image-definition files it feeds. Exact paths, plus
     # directory prefixes kept with a trailing "/".
     inputs_of: dict[str, set[str]] = field(default_factory=dict)
+    # Same keys, but only images that COPY the source by name. `inputs_of`
+    # also folds in the borrowed whole-context images and cannot be unmixed
+    # afterwards; the rust rule needs "built in on purpose", not "contains it".
+    explicit_inputs_of: dict[str, set[str]] = field(default_factory=dict)
     # image-definition file -> steps that build it in-step instead of depending
     # on a producer. Keyed by Dockerfile, so an xpu edit misses a CPU suite.
     self_builders: dict[str, set[str]] = field(default_factory=dict)
@@ -69,14 +73,23 @@ class ArtifactGraph:
         """Producers whose image `path` feeds, plus everything downstream.
         Exact match first, then directory prefixes, so `csrc/foo.cu` resolves
         through the `csrc/` copy without listing every file."""
-        images = set(self.inputs_of.get(path, ()))
-        for prefix, dfs in self.inputs_of.items():
-            if prefix.endswith("/") and path.startswith(prefix):
-                images |= dfs
         out: set[str] = set()
-        for df in images:
+        for df in self._images_for_input(path, self.inputs_of):
             out |= self.consumers_of_image(df)
         return out
+
+    def explicit_images_of(self, path: str) -> set[str]:
+        """Images that COPY `path` by name, exact or by directory. Excludes the
+        whole-context images that only borrow it."""
+        return self._images_for_input(path, self.explicit_inputs_of)
+
+    @staticmethod
+    def _images_for_input(path: str, table: dict[str, set[str]]) -> set[str]:
+        images = set(table.get(path, ()))
+        for prefix, dfs in table.items():
+            if prefix.endswith("/") and path.startswith(prefix):
+                images |= dfs
+        return images
 
 
 def _resolve(repo: Path, token: str) -> str | None:
@@ -176,6 +189,7 @@ def add_image_inputs(
         return set(dockerfiles) | (blanket if shared else set())
 
     for src, dockerfiles in files.items():
+        graph.explicit_inputs_of.setdefault(src, set()).update(dockerfiles)
         graph.inputs_of.setdefault(src, set()).update(images_for(dockerfiles))
 
     for src, dockerfiles in dirs.items():
@@ -189,6 +203,7 @@ def add_image_inputs(
         known = sum(1 for f in inside if is_graph_known(f))
         if known / len(inside) > GRAPH_BLIND_CEILING:
             continue  # the graph already routes this tree; leave it alone
+        graph.explicit_inputs_of.setdefault(src + "/", set()).update(dockerfiles)
         graph.inputs_of.setdefault(src + "/", set()).update(images_for(dockerfiles))
 
 

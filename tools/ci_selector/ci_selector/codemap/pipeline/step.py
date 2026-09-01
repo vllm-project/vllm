@@ -12,27 +12,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import regex as re
-
 from ...handwritten import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     DEFAULT_WORKING_DIR,
     IMAGE_BUILD_KEY_PREFIX,
 )
 
-# Fitted against the keys real builds published, not copied from the generator,
-# so there is no source to re-read when a label shape changes.
-_KEY_STRIP = re.compile(r"[()%]")
-_KEY_DASH = re.compile(r"[ ,+:./]+")
-_KEY_RUNS = re.compile(r"-+")
+_KEY_DELETE = str.maketrans("", "", "()%")
+_KEY_DASH = str.maketrans(",+:./", "-----")
 
 
 def derive_step_key(label: str) -> str:
-    """Reproduce the key ci-infra mints when the yaml omits one. The whole
-    label is used, `%N` included: a sharded step keeps the literal `-n`, and
-    stripping a trailing number would eat the real digit in other labels."""
-    slug = _KEY_STRIP.sub("", label.lower())
-    return _KEY_RUNS.sub("-", _KEY_DASH.sub("-", slug)).strip("-")
+    """The key ci-infra mints when the yaml omits one.
+
+    Transcribed from `_generate_step_key` in ci-infra's
+    `buildkite/pipeline_generator/buildkite_step.py`, and executed against the
+    real function by the snapshot suite, so drift shows up as a red test.
+    """
+    return label.replace(" ", "-").lower().translate(_KEY_DELETE).translate(_KEY_DASH)
 
 
 @dataclass
@@ -70,7 +67,33 @@ class Step:
     env: dict = field(default_factory=dict)
     mirror_hw: str | None = None  # set on expanded mirror variants, e.g. "amd"
     mirror_of: str | None = None  # parent step id for mirror variants
+    # The mirror's own yaml `label`, kept beside the derived one rather than
+    # replacing it: `step_id` falls back to the label, so overwriting it would
+    # rekey a keyless mirror against every stored table.
+    mirror_label: str | None = None
     extra: dict = field(default_factory=dict)
+
+    @property
+    def identity(self) -> tuple:
+        """What the step IS, for comparing one checkout's steps against
+        another's.
+
+        `step_id` cannot do it: it falls back to the label, so a reword makes
+        one step look like two and a comparison by id deletes the survivor's
+        twin. Every field here survives a reword: where the step is defined,
+        what it runs, which hardware, which mirror.
+
+        `device` is in because without it the same commands from the same file
+        on a100/h100/b200 collide, 11 steps at HEAD. All 11 are explicitly
+        keyed today so nothing breaks, but the next collision may not be.
+        """
+        return (
+            self.pipeline,
+            self.source_file,
+            tuple(self.commands),
+            self.mirror_hw,
+            self.device,
+        )
 
     @property
     def step_id(self) -> str:

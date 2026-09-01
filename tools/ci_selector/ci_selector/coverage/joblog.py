@@ -35,9 +35,12 @@ _OUTCOME = re.compile(r"(\d+) (" + "|".join(_OUTCOMES) + r")\b")
 
 # Counted inside summary lines only, since scanning the whole log double-counts
 # what pytest also prints on the collection line. The elapsed time identifies a
-# summary, because the outcome words vary and an all-skipped run names none. If
-# pytest changes the format this matches nothing, the job reads as having run
-# no tests, and the row is called weak, which is wrong in the safe direction.
+# summary, because the outcome words vary and an all-skipped run names none.
+#
+# If pytest changes this format it matches nothing, and on its own that reads
+# HEALTHY, not weak: every count stays zero, so `ran_nothing` cannot fire. That
+# is why `summary_unparsed` exists and watches `collected` instead, which a
+# separate regex takes off the collection line.
 _SUMMARY = re.compile(r"=+ ([^=\n]*? in \d[\d.]*s[^=\n]*?) =+")
 
 
@@ -66,8 +69,24 @@ class TestCounts:
         collected tests and ran none of them recorded its imports and nothing
         else. Silent when the step is not pytest, since those are mostly shell
         scripts and their rows are not weak for it.
+
+        No `skipped > 0` clause: it used to be here and let two more
+        ran-nothing shapes through, an all-deselected run and pytest's own
+        "no tests ran", both of which report zero skips.
         """
-        return self.invocations > 0 and self.executed == 0 and self.skipped > 0
+        return self.invocations > 0 and self.executed == 0
+
+    @property
+    def summary_unparsed(self) -> bool:
+        """pytest collected tests and printed no summary we could read.
+
+        The witness for `_SUMMARY` drift, and it has to be independent or it
+        cannot see its own parser fail: `collected` comes off the collection
+        line, a different regex. Also catches a job killed mid-run, which
+        prints a collection line and never reaches a summary. Silent on a
+        non-pytest step, which collects nothing.
+        """
+        return self.collected > 0 and self.invocations == 0
 
 
 @dataclass
@@ -84,7 +103,9 @@ def read_counts(path: Path) -> LogSummary:
         raw = path.read_bytes()
         text = gzip.decompress(raw) if path.suffix == ".gz" else raw
         body = _NOISE.sub("", text.decode(errors="ignore"))
-    except OSError:
+    except (OSError, EOFError):
+        # EOFError is not an OSError. A partially uploaded `.gz` raises it, and
+        # uncaught it takes down the whole sweep rather than one job's counts.
         return LogSummary(unreadable=True)
 
     counts = TestCounts()

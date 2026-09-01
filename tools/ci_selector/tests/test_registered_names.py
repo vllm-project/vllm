@@ -269,3 +269,68 @@ def test_parser_key_env_default_context():
     pat = _typed_pattern("openai", "parser")
     assert pat.search('TOOL_CALL_PARSER="${BFCL_TOOL_CALL_PARSER:-openai}"')
     assert not pat.search("pytest entrypoints/openai -v")
+
+
+def test_colliding_parser_key_keeps_all_module_files(state):
+    """kimi_k3 registers as a tool parser AND a tokenizer mode; the merged
+    parser_entries dict is last-wins (tokenizers parse after tool_parsers),
+    which pointed the key at vllm/tokenizers/hf.py alone and silently cut the
+    parser file's key route. Every registering file must keep the key."""
+    parser_file = "vllm/tool_parsers/kimi_k3_tool_parser.py"
+    assert "kimi_k3" in state.keys.for_file(parser_file), (
+        "kimi_k3 no longer keys its parser file; if the collision is gone "
+        "pick a new colliding specimen before deleting this test"
+    )
+    assert "kimi_k3" in state.keys.for_file("vllm/tokenizers/hf.py")
+
+
+def test_directory_targets_fold_test_literals(state):
+    """A step whose pytest target is a DIRECTORY carries the keys its test
+    files pin. entrypoints-integration-api-server-generate runs
+    `pytest tool_use` and declares only bare vllm/ (the B4 shape); without
+    the fold its step_keys were empty and every parser key lost the belt
+    route that survives an import edge going missing."""
+    sid = "vllm_ci:entrypoints-integration-api-server-generate"
+    lits = state.full.graph.string_literals
+    assert "kimi_k3" in lits.get("tests/tool_use/test_kimi_k3_tool_parser.py", set()), (
+        "specimen moved: pick another parser key pinned by a test under a "
+        "directory target"
+    )
+    assert "kimi_k3" in state.keys.step_keys.get(sid, set())
+
+
+def test_directory_fold_excludes_non_test_files(state):
+    """tests/tool_use/utils.py pins the whole parser matrix; helper literals
+    must not join the fold. A helper names parsers the step may never run,
+    and an imported helper is already the graph's job to cover."""
+    sid = "vllm_ci:entrypoints-integration-api-server-generate"
+    assert "internlm" in state.full.graph.string_literals.get(
+        "tests/tool_use/utils.py", set()
+    ), "specimen moved: utils.py no longer pins internlm"
+    assert "internlm" not in state.keys.step_keys.get(sid, set())
+
+
+def test_tool_parser_file_routes_to_steps_running_its_tests(state):
+    """The belt over graph coverage, end to end: changed parser file -> its
+    registered key -> the step whose directory target holds the test pinning
+    that key. Holds even if the test's import edge disappears."""
+    keys = state.keys.for_file("vllm/tool_parsers/kimi_k3_tool_parser.py")
+    steps = state.keys.steps_naming(keys)
+    assert "vllm_ci:entrypoints-integration-api-server-generate" in steps
+
+
+def test_tool_parser_key_routing_floor(state):
+    """Detection floor for the whole parser-key channel: a moved registry
+    table or a broken fold must read as loud failure, not as quietly-empty
+    routing. 47 tool-parser entries and 44/57 merged keys routed at pinning
+    time; the bars sit far below that so ordinary churn passes."""
+    from ci_selector.codemap.graph.factories import TOOL_PARSER_INIT
+
+    counts = state.full.factories.parser_table_counts
+    assert counts.get(TOOL_PARSER_INIT, 0) > 40, counts
+    entries = state.full.factories.parser_entries
+    routed = {key for key in entries if state.keys.steps_naming({key})}
+    assert len(routed) >= 30, (
+        f"only {len(routed)}/{len(entries)} parser keys reach any step; "
+        "the key-routing belt has collapsed"
+    )

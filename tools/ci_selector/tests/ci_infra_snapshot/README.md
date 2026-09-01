@@ -32,3 +32,7 @@ Do not hand-edit. To refresh:
 
     uv run pytest tests --sync -q     # download, then run the checks
     uv run python tests/ci_infra.py   # download only
+
+Nothing in this directory is checked in. It is all gitignored and rebuilt by
+`--sync`; until you run that once, the offline tests skip with a message saying
+so rather than failing.

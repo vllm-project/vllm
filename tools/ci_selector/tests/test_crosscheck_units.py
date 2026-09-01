@@ -6,9 +6,19 @@ import subprocess
 from dataclasses import dataclass
 
 import pytest
-from ci_selector.codemap.pipeline.match import TRUNC_MIN, match_jobs, slug_matches
-from ci_selector.validate.crosscheck import GH_STATE_FAILED, _upstream_remote
+from ci_selector.codemap.pipeline.buildkite import load_pipeline_configs, load_steps
+from ci_selector.codemap.pipeline.match import (
+    TRUNC_MIN,
+    match_jobs,
+    slug_matches,
+    slug_matches_any,
+    step_slug_candidates,
+)
+from ci_selector.codemap.pipeline.step import LoadReport
+from ci_selector.validate.crosscheck import GH_STATE_FAILED, _totals, _upstream_remote
 from helpers import HW, drift_message
+
+MATCH = "ci_selector/codemap/pipeline/match.py"
 
 
 @dataclass
@@ -18,6 +28,7 @@ class FakeStep:
     key: str | None = None
     mirror_hw: str | None = None
     device: str | None = None
+    mirror_label: str | None = None
 
 
 def test_exact_never_absorbs_longer_job():
@@ -193,3 +204,140 @@ def test_amd_native_runtime_dependency_still_exists(vllm_repo):
         "ci-infra changed which files it watches: check amd.py upstream, then "
         f"update {HW}",
     )
+
+
+# Real labels from .buildkite/test_areas against real status contexts. A mirror
+# has two spellings: its own yaml label, used verbatim, and the wrapped form
+# "AMD: <parent> (<device>)" that older revisions carry.
+MIRROR_CASES = [
+    (
+        "declared label",
+        ":amd: (MI300) Basic Correctness",
+        ":nvidia: (H200) Basic Correctness",
+        "amd-mi300-basic-correctness",
+    ),
+    (
+        "wrapped parent label",
+        None,
+        ":nvidia: (H200) Basic Correctness",
+        "amd-nvidia-h200-basic-correctness-mi300-1",
+    ),
+    (
+        # `_slug` strips a trailing `-n`, so assembling the slug from parts ate
+        # the `%N` and these never matched.
+        "sharded %N, wrapped label",
+        None,
+        ":nvidia: (H100) V1 Attention Shard %N",
+        "amd-nvidia-h100-v1-attention-shard-n-mi300-1",
+    ),
+    (
+        "sharded %N, declared",
+        ":amd: (MI300) Attention Kernels Shard %N",
+        ":nvidia: (H100) Attention Kernels Shard %N",
+        "amd-mi300-attention-kernels-shard-3",
+    ),
+    (
+        # Buildkite cut this at exactly 44 characters.
+        "44-char truncation",
+        ":amd: (MI300) Multimodal Models (Standard) 2: qwen3 + gemma",
+        ":nvidia: (H200) Multimodal Models (Standard) 2",
+        "amd-mi300-multimodal-models-standard-2-qwen3",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "case,declared,parent,context", MIRROR_CASES, ids=[c[0] for c in MIRROR_CASES]
+)
+def test_a_mirror_matches_the_context_ci_actually_posted(
+    case, declared, parent, context
+):
+    step = FakeStep(
+        step_id="vllm_ci:x-amd:amd",
+        label=f"{parent} (amd)",
+        key="x-amd",
+        mirror_hw="amd",
+        device="mi300_1",
+        mirror_label=declared,
+    )
+    assert slug_matches_any(context, step_slug_candidates(step)), (
+        f"{case}: no candidate matches {context!r}\n"
+        f"candidates: {step_slug_candidates(step)}"
+    )
+
+
+def test_the_44_char_case_is_really_a_truncation():
+    """Pins TRUNC_MIN's value. If these contexts stop being 44 long the
+    constant should go back up."""
+    assert len("amd-mi300-multimodal-models-standard-2-qwen3") == 44
+    assert TRUNC_MIN == 44
+
+
+def _ambiguous_groups(steps, threshold):
+    """Sets of steps a truncated context of this length cannot tell apart."""
+    owners: dict[str, set[str]] = {}
+    for step in steps:
+        for cand in step_slug_candidates(step):
+            if len(cand) > threshold:
+                owners.setdefault(cand[:threshold], set()).add(step.step_id)
+    return {frozenset(o) for o in owners.values() if len(o) > 1}
+
+
+@pytest.mark.drift
+def test_lowering_the_threshold_bought_no_new_ambiguity(vllm_repo):
+    """What makes TRUNC_MIN safe. Not that nothing is ambiguous.
+
+    Some steps already share a truncated prefix at any threshold in this range,
+    which is structural and predates the constant. The narrower claim worth
+    pinning: the current value leaves no further pair indistinguishable than the
+    one above it does. Comparing two thresholds against each other needs no
+    stored baseline, so it cannot be rubber-stamped.
+    """
+    configs = load_pipeline_configs(vllm_repo)
+    report = LoadReport()
+    steps = [s for c in configs for s in load_steps(vllm_repo, c, report)]
+    here = _ambiguous_groups(steps, TRUNC_MIN)
+    stricter = _ambiguous_groups(steps, TRUNC_MIN + 1)
+    assert here == stricter, drift_message(
+        "Lowering TRUNC_MIN made these steps indistinguishable: "
+        f"{[sorted(g) for g in here - stricter]}",
+        "A job reported under a truncated name would be attributed to "
+        "whichever of them was visited first, and the others would score as "
+        "never run, which reads as a recall miss we did not have.",
+        f"raise TRUNC_MIN in {MATCH} back until the two agree",
+        "if the new context is real and the steps are genuinely distinct, give "
+        "one of them a longer label in .buildkite/test_areas",
+    )
+
+
+def _scored(n, catchall=None):
+    counts = {
+        k: n
+        for k in (
+            "them_steps",
+            "codemap_steps",
+            "final_steps",
+            "them_jobs",
+            "codemap_jobs",
+            "final_jobs",
+        )
+    }
+    counts["missed_failures"] = []
+    if catchall is not None:
+        counts["catchall_only_missed"] = catchall
+    return counts
+
+
+def test_total_block_aggregates_catchall_only_missed():
+    """The counter was emitted per PR and summed nowhere, so contamination
+    could not be told apart from real losses. The total must be the sum, and a
+    result missing the key must raise rather than read as zero."""
+    scored = [
+        _scored(1, catchall=["vllm_ci:a", "vllm_ci:b"]),
+        _scored(2, catchall=["vllm_ci:c"]),
+    ]
+    total = _totals(scored)
+    assert total["catchall_missed"] == 3
+    assert total["them_jobs"] == 3
+    with pytest.raises(KeyError):
+        _totals([_scored(1)])

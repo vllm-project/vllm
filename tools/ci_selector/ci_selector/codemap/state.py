@@ -24,7 +24,8 @@ from .pipeline.scripts import scan_script
 from .pipeline.step import LoadReport, PipelineConfig, Step
 from .pipeline.targets import StepTargets, map_step
 from .registered_names import KeyIndex
-from .repo import test_file_catalog
+from .repo import TestIndex, build_test_index, is_test_file, test_file_catalog
+from .rust_workspace import RustWorkspace
 
 
 @dataclass
@@ -76,6 +77,8 @@ class RepoState:
     docker_inputs: dict[str, str] = field(default_factory=dict)
     # which steps build which container image, and who consumes it
     artifacts: ArtifactGraph = field(default_factory=ArtifactGraph)
+    # crate closures of the two shipped rust artifacts (the rust rule's map)
+    rust_workspace: RustWorkspace = field(default_factory=RustWorkspace)
 
     @classmethod
     def build(cls, repo: Path) -> RepoState:
@@ -128,6 +131,7 @@ class RepoState:
         state.release_refs = release_pipeline_refs(repo)
         state.docker_inputs = docker_image_inputs(repo)
         state.artifacts = build_artifact_graph(repo, pipelines)
+        state.rust_workspace = RustWorkspace.build(repo)
         dockerfiles = {d for fs in state.artifacts.defined_by.values() for d in fs}
         in_files, in_dirs, blanket = copy_inputs(repo, dockerfiles)
         add_image_inputs(
@@ -140,6 +144,43 @@ class RepoState:
             hardware.family_of_path,
         )
         return state
+
+    def test_index(self) -> TestIndex:
+        """Every test file in the tree, by directory and by basename.
+
+        Index and catalog unioned because neither contains the other: the
+        catalog is a `test_*.py` glob that picks up files no module index can
+        name, and the index holds test modules the glob's SKIP_DIRS drop.
+        """
+        if not hasattr(self, "_test_index"):
+            files = frozenset(
+                f
+                for f in set(self.full.index.file_to_module) | set(self.catalog)
+                if is_test_file(f)
+            )
+            self._test_index = build_test_index(files)
+        return self._test_index
+
+    def direct_test_importers(self) -> dict[str, frozenset[str]]:
+        """file -> the test files importing it, depth 1 only.
+
+        Not a closure: inside the import cycle the transitive version reaches
+        everything and says nothing, while a literal `from vllm.x.y import z`
+        edge still names one file.
+
+        Demoted edges are kept, unlike the closure walks. Callers only ever
+        union this in, so an edge selection has disowned can widen the answer
+        and never narrow it.
+        """
+        if not hasattr(self, "_direct_test_importers"):
+            found: dict[str, set[str]] = {}
+            for test in self.test_index().files:
+                for target in self.full.graph.imports.get(test, ()):
+                    found.setdefault(target, set()).add(test)
+            self._direct_test_importers = {
+                target: frozenset(tests) for target, tests in found.items()
+            }
+        return self._direct_test_importers
 
     def family_steps(self, family: str) -> set[str]:
         return {

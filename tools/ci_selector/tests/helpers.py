@@ -100,8 +100,8 @@ def fanout_dropped_literals(
     return losses, len(dropped)
 
 
-def _tests(fg: FullGraph, file: str, include_gated: bool = True) -> set[str]:
-    closure = fg.graph.reverse_closure({file}, include_gated=include_gated)
+def _tests(fg: FullGraph, file: str, include_boot: bool = True) -> set[str]:
+    closure = fg.graph.reverse_closure({file}, include_boot=include_boot)
     return {f for f in closure if is_test_basename(f)}
 
 

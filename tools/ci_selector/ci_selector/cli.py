@@ -129,12 +129,18 @@ def main(argv: list[str] | None = None) -> int:
     pf = state.preflight
     for line in (*pf.run_all_reasons, *pf.warnings):
         print(line, file=sys.stderr)
+    for why, n in pf.forced_by_reason.items():
+        print(f"{why} [{n} steps]", file=sys.stderr)
     sel = select(state, paths, base=base, head=head)
 
     if args._mode != "codemap":
+        from .coverage.source import fetch_table
         from .decide import decide
 
-        d = decide(state, sel, repo, base, head, table=args.table)
+        table = fetch_table(args.table)
+        if table.dead_interpreter:
+            print(f"coverage: {table.dead_interpreter}", file=sys.stderr)
+        d = decide(state, sel, repo, base, head, table=table)
         if d.coverage_note:
             print(f"coverage: {d.coverage_note}", file=sys.stderr)
         else:

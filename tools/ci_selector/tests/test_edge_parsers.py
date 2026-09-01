@@ -31,7 +31,7 @@ def test_single_model_closure_scoped_after_registry(fg):
     """String-keyed registry + lazy finalization scope a single-model file's
     blast radius to its real derived-model tests: dispatch Ext A demotes the
     base proposers' type-only edges, severing their one static bridge to the
-    worker seam. minimax_m3 stays broad via the warmup chain (witness below),
+    boot edge. minimax_m3 stays broad via the warmup chain (witness below),
     a deferred capability-gated cluster and a layering finding for maintainers."""
     for target in (
         "vllm/model_executor/models/mllama4.py",
@@ -252,7 +252,7 @@ def test_root_conftest_exclusion_is_still_load_bearing(fg):
             f"{conftest} is excluded from the engine-starting gate but is not "
             "in the graph at all.",
             "The exclusion protects nothing, and the gate it protects decides "
-            "worker-seam reachability for the whole suite.",
+            "boot-edge reachability for the whole suite.",
             f"the conftest moved: update CONFTESTS_NOT_ENGINE_STARTING in {HW}",
             f"it is gone: delete the entry from {HW}",
         )
@@ -271,7 +271,7 @@ def test_vllm_runner_fixture_channel_populated(fg, vllm_repo):
     """engine_starting_tests has two independent channels. The test above only
     exercises the conftest one, so a rename of the vllm_runner fixture would
     empty this one with the suite green -- and an empty channel over-subtracts
-    at the worker seam."""
+    at a boot edge."""
     fixture_files = fg.graph.engine_fixture_files
     assert len(fixture_files) > 50, len(fixture_files)
     assert fixture_files <= fg.engine_starting_tests()
@@ -283,7 +283,7 @@ def test_vllm_runner_fixture_channel_populated(fg, vllm_repo):
 
 def test_relative_spawner_import_is_engine_starting(fg, vllm_repo):
     """`from ...utils import RemoteOpenAIServer` binds the same name as the
-    absolute form; missing it drops the test out of the seam gate."""
+    absolute form; missing it drops the test out of the boot-edge gate."""
     import ast
 
     relative = []
@@ -403,7 +403,7 @@ def test_engine_entry_modules_resolve(fg):
     for m in ENGINE_ENTRY_MODULES:
         assert fg.index.resolve(m), drift_message(
             f"ENGINE_ENTRY_MODULES names a module that no longer resolves: {m}",
-            "These anchor the worker-seam gate, which decides whether a test "
+            "These anchor the boot-edge gate, which decides whether a test "
             "that only reaches a file through an engine boot really depends on "
             "it. A dead anchor turns the gate off.",
             "the module moved: update ENGINE_ENTRY_MODULES in " + HW,

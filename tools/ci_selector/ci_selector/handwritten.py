@@ -338,6 +338,14 @@ KNOWN_STEP_FIELDS = {
     "agent_pool",
     "concurrency",
     "concurrency_group",
+    # Buildkite built-in, absent from the generator's Step model, so it is
+    # dropped before reaching a command. Governs ordering after a failure.
+    "allow_dependency_failure",
+    # In the generator's Step model but unused by vLLM's yaml, which sets the
+    # group at file level. Both are display or plugin wiring; listed so the
+    # first step to use one is not forced for it.
+    "group",
+    "mount_buildkite_agent",
 }
 
 # mirror.<hw> fields the generator honors (ci-infra buildkite_step.py).
@@ -358,17 +366,67 @@ MIRROR_OVERRIDABLE = {
     "num_gpus",
     "num_nodes",
     "agent_tags",
+    "concurrency",
+    "concurrency_group",
+    # Declared per mirror and used verbatim as the step's Buildkite label, so
+    # it is the spelling real job contexts carry.
+    "label",
+    # Listed, never honored: the generator passes the parent's parallelism, so
+    # a mirror asking for its own is silently ignored upstream.
+    "parallelism",
 }
 
 # The env var the generator reads. Absent means "your rules"; present means
 # "exactly these, plus what they depend on".
 ONLY_STEP_KEYS_ENV = "VLLM_CI_ONLY_STEP_KEYS"
 
-# The one pipeline a PR triggers, which is why the variable above governs it and
-# why the crosscheck scores it. Checked against a real PR: every Buildkite status
-# is `buildkite/ci/pr/...`, and AMD coverage arrives as mirror steps inside it.
-# The ROCm and Intel configs build their own pipelines on their own fleets and a
-# PR never reaches them.
+# The opt-in gates for the rust binary: vllm-rs never launches unless one is
+# set, so a step that exports one runs rust code.
+# Update when: vllm/envs.py renames the gates or grows a third.
+# Guard: tests/test_handwritten.py::test_rust_gate_env_vars_exist.
+RUST_GATE_ENV_VARS = ("VLLM_USE_RUST_FRONTEND", "VLLM_USE_RUST_BENCH")
+
+# The two shipped rust artifacts' crate roots, in (binary, cdylib) order.
+# Update when: build_rust.py adds, drops, or moves an artifact.
+# Guard: tests/test_handwritten.py::test_build_rust_still_builds_exactly_two_artifacts.
+RUST_ARTIFACT_ROOTS = ("rust/src/cmd", "rust/src/parser/python")
+
+# The single vllm/ import site of the PyO3 cdylib. Cdylib rust files borrow
+# this file's whole claim, since that parser is NOT opt-in behind an env gate.
+# Update when: a second file imports vllm._rust_tool_parser.
+# Guard: tests/test_handwritten.py::test_pyo3_bridge_file_is_the_only_import_site.
+RUST_PYO3_BRIDGE_FILE = "vllm/tool_parsers/rust_tool_parser.py"
+
+# Build-defining rust files outside rust/. A change to any can change both
+# artifacts, so they take the widest rust bucket.
+# Update when: the rust build entry points move.
+# Guard: tests/test_handwritten.py::test_rust_toolchain_files_exist.
+RUST_TOOLCHAIN_FILES = ("rust-toolchain.toml", "build_rust.sh", "tools/build_rust.py")
+
+# Family tokens that hold only under requirements/, where the filename names
+# the device. `cuda` cannot join PATH_TOKEN_FAMILIES: it would misfire on vllm/
+# paths and on the generic Dockerfile, which must stay family-less.
+# Update when: a requirements file appears for a family with no global token.
+# Guard: tests/test_classify.py::test_requirements_family_map_pins_the_tree.
+REQUIREMENTS_EXTRA_TOKEN_FAMILIES = ((frozenset({"cuda"}), "cuda"),)
+
+# Requirements files that exist only for tooling no test imports. Their honest
+# reach is the steps that declare them plus the always-run builds, so they skip
+# the docker-image widening.
+# Update when: a new tooling-only requirements file appears.
+# Guard: tests/test_classify.py::test_requirements_build_validated_members_exist.
+REQUIREMENTS_BUILD_VALIDATED = frozenset(
+    {"requirements/lint.txt", "requirements/dev.txt"}
+)
+
+# The pipeline we emit keys for, which is why the variable above governs it and
+# why the crosscheck scores it. AMD coverage arrives as mirror steps inside it.
+#
+# NOT the only pipeline a PR can trigger: a `rocm` or `intel-gpu` label also
+# fires a mirror pipeline. Those are independent builds that subscribe to the
+# repo's webhooks themselves, and the key variable is set per build on one named
+# pipeline, so a mirror build never sees ours. We scope here because it is the
+# only pipeline we emit for, not because the others never run.
 PR_PIPELINE = "vllm_ci"
 
 # =========================================================================

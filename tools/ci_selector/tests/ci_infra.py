@@ -2,25 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Reading vllm-project/ci-infra, which holds the pipeline generator.
 
-We reproduce parts of that generator by hand. Until 2026-08-21 nothing watched
-it, on the belief that a vLLM checkout could not reach it; it is public and
-fetches from `raw.githubusercontent.com` with no auth.
+Six of its functions have a hand-written counterpart here and must agree with
+it; six more we only depend on, and a handful of constants we copy. All of them
+are in ANCHORS. Upstream changing any of them has to become a red test.
 
 Two jobs, and only the first needs network:
 
   download it     `pytest --sync`, which fetches and nothing else
   check it        ordinary offline tests, against what --sync wrote
 
-`sync()` asserts nothing. It refuses to overwrite a good snapshot with a short
-read, and otherwise just writes what it found. Every pass/fail lives offline in
+`sync()` asserts nothing: it refuses to overwrite a good snapshot with a short
+read and otherwise writes what it found. Every pass/fail lives offline in
 `test_ci_infra_snapshot.py`.
 
-The checks compare behaviour, not text. Constants are compared to the value the
-generator assigns, and the functions we reproduce are **executed** out of the
-snapshot and run against ours on generated inputs. That matters because the two
-are written in different names and types, so no textual comparison could ever
-say they agree, and a stored "someone approved this" baseline would need a
-command to update it that could only ever rubber-stamp whatever was on disk.
+The checks compare behaviour, not text. A constant is compared to the value the
+generator assigns; a reproduced function is executed out of the snapshot and run
+against ours on generated inputs. Their names and types differ, so no textual
+comparison could say they agree, and an approval baseline would only ever
+rubber-stamp whatever is on disk.
 """
 
 from __future__ import annotations
@@ -73,8 +72,29 @@ ANCHORS: dict[str, tuple[str, str | None]] = {
     # `--emit-keys` rests on this: we name tests and the generator pulls in
     # their prerequisites. We do not reimplement it, so watch it and no more.
     "select_steps_and_dependencies": ("pipeline_generator.py", None),
+    # The key a keyless step gets. We emit this spelling to CI and look rows
+    # up by it, so a transcription that drifts loses rows AND names steps the
+    # generator cannot resolve.
+    "_generate_step_key": (
+        "buildkite_step.py",
+        "ci_selector.codemap.pipeline.step:derive_step_key",
+    ),
     # Anchored only for the working-dir default it assigns.
     "read_steps_from_job_dir": ("step.py", None),
+    # The AMD mirror's label, the spelling real status contexts carry, so
+    # getting it wrong makes every AMD job unmappable.
+    "get_amd_label": ("amd.py", "ci_selector.codemap.pipeline.match:amd_label"),
+    # Only so `get_amd_label` can run against upstream's own helper instead of
+    # a stub of ours.
+    "_device_value": ("amd.py", None),
+    # Not reimplemented. Anchored because the mirror override dict is typed
+    # `Dict[str, Any]`, so these `amd[...]` reads are the only schema there is
+    # and MIRROR_OVERRIDABLE has to cover them.
+    "convert_group_step_to_buildkite_step": ("buildkite_step.py", None),
+    "_get_amd_mirror_effective_step": ("buildkite_step.py", None),
+    # A class, not a function. This one is really typed, so its annotated
+    # fields are the top-level step schema.
+    "Step": ("step.py", None),
 }
 
 # Anchors whose source runs on its own, so our version can be checked against
@@ -84,6 +104,12 @@ SELF_CONTAINED = (
     "_matches_source_dependency",
     "_source_file_dependencies_match",
     "is_docs_only_change",
+    # Pure string ops, no imports of its own.
+    "_generate_step_key",
+    # Ordered: `get_amd_label` calls `_device_value` and both exec into one
+    # namespace, so upstream's own helper runs, not a stub.
+    "_device_value",
+    "get_amd_label",
 )
 
 # Floors on the fetch. A short read would satisfy every offline check by
@@ -94,13 +120,13 @@ CONTROL_LITERAL = "def _step_should_run"
 
 
 def normalized(source: str, name: str) -> str:
-    """One function's source, reduced to what a logic change would move.
+    """One function or class's source, reduced to what a logic change would move.
 
     Reparsed and unparsed, so formatting, comments and quote style do not
     fire, and docstrings are dropped for the same reason.
     """
     for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             if node.name != name:
                 continue
             body = node.body
@@ -180,6 +206,19 @@ def our_source(target: str) -> str:
 # ---------------------------------------------------------------- reading it
 
 
+def absent() -> str:
+    """Why the offline checks cannot run, or "" when the snapshot is complete.
+
+    The downloaded files are gitignored, so a fresh clone has none of them.
+    That has to read as "not run yet", never as a pass and never as an error
+    about a missing path.
+    """
+    if not MANIFEST.is_file() or not VALUES.is_file():
+        return "no ci-infra snapshot on disk"
+    gone = sorted(n for n in ANCHORS if not (SNAPSHOT / f"{n}{SUFFIX}").is_file())
+    return f"ci-infra snapshot is missing {', '.join(gone)}" if gone else ""
+
+
 def read_manifest() -> dict:
     return json.loads(MANIFEST.read_text())
 
@@ -212,6 +251,56 @@ def literals_in(anchor: str) -> set[str]:
         node.value
         for node in ast.walk(ast.parse(anchor_source(anchor)))
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value
+    }
+
+
+# The name the mirror override dict is bound to in both anchored functions.
+# `step.mirror["amd"]` is an Attribute, not a Name, so the hardware key is
+# excluded and only override keys are collected.
+MIRROR_VAR = "amd"
+
+
+def mirror_override_keys() -> set[str]:
+    """Every key the generator reads out of a `mirror.<hw>` block.
+
+    No upstream model to compare against: `Step.mirror` is loosely typed, so
+    an unknown key is accepted and dropped in silence. These call sites are the
+    whole schema.
+    """
+    keys: set[str] = set()
+    for anchor in (
+        "convert_group_step_to_buildkite_step",
+        "_get_amd_mirror_effective_step",
+    ):
+        for node in ast.walk(ast.parse(anchor_source(anchor))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == MIRROR_VAR
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+            ):
+                keys.add(node.args[0].value)
+            elif (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == MIRROR_VAR
+                and isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, str)
+            ):
+                keys.add(node.slice.value)
+    return keys
+
+
+def upstream_step_fields() -> set[str]:
+    """Every field ci-infra's `Step` model declares."""
+    cls = ast.parse(anchor_source("Step")).body[0]
+    return {
+        node.target.id
+        for node in cls.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
     }
 
 
@@ -350,6 +439,10 @@ def upstream_callables() -> dict:
         alias: getattr(typing, alias)
         for alias in ("List", "Optional", "Dict", "Set", "FrozenSet", "Tuple")
     }
+    # `_device_value` narrows a DeviceType enum to its value, and ours never
+    # is one: `Step.device` comes off yaml, so it is always a str. A class
+    # nothing is an instance of keeps the source compiling without faking it.
+    namespace["DeviceType"] = type("DeviceType", (), {})
     for name in SELF_CONTAINED:
         exec(anchor_source(name), namespace)  # noqa: S102 - see docstring
     return namespace

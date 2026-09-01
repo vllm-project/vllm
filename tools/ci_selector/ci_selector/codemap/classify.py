@@ -2,29 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The rules: a changed path -> the Claim that says which steps it needs.
 
-Reads `state.py` for what is in the tree and hands each finished claim to
-`selection.py`, which is the only thing that writes an answer. Nothing here
-records a step; nothing there decides one.
+Reads `state.py` for what is in the tree; `selection.py` writes the answer.
+Every claim carries its rule name, pinned in claim.RULES, because narrowing
+downstream needs to know which rule selected a step.
 
-Rule names are pinned in claim.RULES and emitted per step in
-Selection.selected_rules, because narrowing downstream only works when every
-rule that selected a step is one the narrower has evidence about.
-
-THE ONE HOME OF RULE ORDER, by name and not by number. A docs-only diff
-short-circuits first, then table claims, then per file the first matching claim
-wins in this order:
+THE ONE HOME OF RULE ORDER. A docs-only diff short-circuits first, then table
+claims, then per file the first matching claim wins:
 
   image-input -> world -> buildkite chain -> no-hardware -> graph -> no-code -> status-A
-  added-file family -> renamed-or-copied -> requirements-file -> release-ci ->
-  exclusive-family scoped fail-open -> target-coverage -> package-data ->
-  declared-deps -> terminal fail-open run-all.
+  (graph answers as colocated-tests inside the import cycle, and outside it for
+  a closure that has gone hub-like)
+  added-file family -> renamed-or-copied -> rust -> requirements-file ->
+  release-ci -> exclusive-family scoped fail-open -> target-coverage ->
+  package-data -> declared-deps -> terminal fail-open run-all.
 
-Preflight escalations apply after the per-file claims.
+Then `unions.py` adds what every path owes, then preflight escalations.
 
-State is built at the diff BASE. At a head-built state the added files are
-already in the graph, so the status-A rules never fire and table scoping reads
-head-side literals. The head-closure rule builds a second graph at the head and
-falls back to the fail-open chain if it cannot.
+State is built at the diff BASE. At head the added files are already in the
+graph, so the status-A rules would never fire.
 """
 
 from __future__ import annotations
@@ -39,17 +34,22 @@ from ..handwritten import (
     INERT_CI_PREFIXES,
     LEGACY_CI_FILES,
     PACKAGE_ROOTS,
+    PR_PIPELINE,
     RELEASE_PIPELINE_FILES,
+    REQUIREMENTS_BUILD_VALIDATED,
+    RUST_GATE_ENV_VARS,
+    RUST_PYO3_BRIDGE_FILE,
 )
-from . import hardware, registry_diff
+from . import colocation, hardware, registry_diff
 from .claim import (
     Claim,
     classify_world,
     docs_only,
     is_no_code,
-    step_declares,
 )
+from .externals import DOCKER_DIR
 from .graph.model_registry import resolve_module_name
+from .pipeline.buildkite import CI_DIR
 from .pipeline.step import PipelineConfig
 from .repo import is_test_basename, is_test_file
 from .selection import (
@@ -66,6 +66,12 @@ from .state import (
     RepoState,
     _graph_known,
 )
+from .step_refs import (
+    _direct_step_refs,
+    _hardware_family_steps,
+    _source_dep_steps,
+)
+from .unions import _apply_declarer_union, _apply_image_input_union
 from .worktree import full_graph_for
 
 PRECOMMIT_CONFIG = ".pre-commit-config.yaml"
@@ -78,6 +84,9 @@ def select(
     base: str | None = None,
     head: str | None = None,
 ) -> Selection:
+    # Read once and discarded, so a typo in CI_SELECTOR_COLOCATION kills the
+    # run instead of changing behaviour on whichever diff first hits the rule.
+    colocation.mode()
     sel = Selection()
     sel.docs_affected, sel.docs_reasons = state.docs_deps.docs_affected(paths)
     if docs_only(paths):
@@ -160,32 +169,64 @@ def _diff_context(
     return DiffContext(base=base, head=head, status=status, renames=renames)
 
 
-def _source_dep_steps(
-    state: RepoState, path: str, specific_only: bool = False
-) -> set[str]:
-    """Steps that declare `path` in their source_file_dependencies. For a file
-    the import graph cannot reach, the declaration is the ground truth, since
-    it is the generator's own mechanism.
+def _classify_rust(state: RepoState, path: str) -> Claim:
+    """rust/ routes by which shipped artifact the file's crate feeds.
 
-    With specific_only, a step counts only when a dep more specific than a
-    catch-all prefix matches. On a file the graph knows, the graph is the
-    better answer and a blanket `vllm/` adds only the CI config's
-    over-declaration, which would cap the saving at zero. Graph-blind files
-    always take the full union, since the declaration is all they have."""
-    return {
-        s.step_id
-        for p in state.pipelines
-        for s in p.steps
-        if step_declares(s.source_file_dependencies, path, specific_only)
-    }
+    Three legs replace the docker-image widening, which this rule opts out of
+    because that widening borrows whole-context images and balloons the answer.
+    The legs are steps opting into the binary via the gate env vars; steps on
+    images that COPY the file in by name; and, for files reaching the PyO3
+    cdylib, the bridge file's whole claim, since that parser is imported with
+    no env gate. Declarers arrive from the declarer union. Never droppable: a
+    coverage row names Python functions and a .rs change is invisible to it.
+    """
+    ws = state.rust_workspace
+    bucket = ws.bucket_of(path) or "root"
+    gate_steps = state.keys.steps_naming_raw(set(RUST_GATE_ENV_VARS))
+    gate_steps &= state.auto_step_ids
+    image_steps: set[str] = set()
+    for df in state.artifacts.explicit_images_of(path):
+        if hardware.family_of_path(df):
+            image_steps |= state.artifacts.self_builders.get(df, set())
+            image_steps |= state.artifacts.producers_of.get(df, set())
+    image_steps -= {s for s in image_steps if s.startswith(f"{PR_PIPELINE}:")}
+    image_steps &= state.auto_step_ids
+    claim = Claim(
+        "rust",
+        f"{path}: {bucket} crate bucket; {len(gate_steps)} gate-env steps + "
+        f"{len(image_steps)} hardware-image steps",
+        step_ids=gate_steps | image_steps,
+    )
+    if bucket in ("cdylib", "root"):
+        bridge = _classify(state, RUST_PYO3_BRIDGE_FILE, None)
+        claim.step_ids |= bridge.step_ids
+        claim.test_files |= bridge.test_files
+        claim.run_all |= bridge.run_all
+        claim.detail += f"; + the PyO3 bridge claim ({RUST_PYO3_BRIDGE_FILE})"
+    return claim
 
 
 def _classify_requirements(state: RepoState, path: str) -> Claim | None:
     """A requirements file: route to the steps that declare it plus its device
     family's jobs, since the filename names the device. A shared file gets its
-    breadth from the image-input seam instead, because every platform's image
-    installs it. No declarer and no family falls through to the fail-open."""
-    family = hardware.family_of_path(path)
+    breadth from the docker-image widening instead, because every platform's
+    image installs it. No declarer and no family falls through to the fail-open.
+
+    A build-validated file (lint, dev) exists for tooling no test imports, so
+    its honest reach is the declarers plus the always-run builds and its claim
+    opts out of that widening. The manual-only fall-through applies there too.
+    """
+    if path in REQUIREMENTS_BUILD_VALIDATED:
+        declarers = _source_dep_steps(state, path)
+        if declarers & state.auto_step_ids:
+            return Claim(
+                "requirements",
+                f"{path}: build-validated, declaring steps only",
+                step_ids=declarers,
+                image_union_exempt=True,
+            )
+        return None
+    family = hardware.requirements_family_of_path(path)
     fam_steps = state.family_steps(family) if family else set()
     step_ids = _source_dep_steps(state, path) | fam_steps
     if step_ids & state.auto_step_ids:
@@ -206,7 +247,12 @@ def _classify_requirements(state: RepoState, path: str) -> Claim | None:
     return None
 
 
-_ROOT_PREFIXES = tuple(f"{root}/" for root in PACKAGE_ROOTS)
+# Directories too shallow and too shared for "sits beside a test target" to
+# mean anything. `.buildkite/` joins the package roots because scripts live
+# directly in it next to every pipeline yaml, and co-location there would make
+# a yaml a dependency of whatever step runs one. Its SUBdirectories are fine
+# and are where the real ownership is.
+_ROOT_PREFIXES = tuple(f"{root}/" for root in PACKAGE_ROOTS) + (CI_DIR + "/",)
 
 
 def _classify_declared_deps(state: RepoState, path: str) -> Claim | None:
@@ -402,7 +448,7 @@ def _classify_package_data(state: RepoState, path: str) -> Claim | None:
     script_files: set[str] = set()
     for f in owning:
         closure = graph.reverse_closure({f})
-        test_files |= _seam_gated_tests(state, f, closure)
+        test_files |= _boot_gated_tests(state, f, closure)
         script_files |= {
             c for c in closure if c.startswith(("examples/", "benchmarks/"))
         }
@@ -492,87 +538,6 @@ def _classify_added_head_closure(
         f"({len(cover)} test/script dependents mapped onto base steps)",
         test_files=cover,
     )
-
-
-# Only the rules that are certain nothing runs are exempt: a doc cannot break a
-# build, and dead hardware runs nothing. release-ci is NOT here, because a
-# release script can also carry a live test, so it must still pick up its
-# genuine declarers.
-_DEP_UNION_EXEMPT = frozenset({"no-code", "no-hardware"})
-
-
-def _apply_declarer_union(state: RepoState, path: str, claim: Claim) -> Claim:
-    """Add the steps that declare `path`, on top of whatever rule fired. Doing
-    it at one seam is what makes it impossible for a classifier to under-select
-    by forgetting declarers, so every claim passes through here, including the
-    ones built outside `_classify`. Idempotent. Skipped for run-all, which is
-    already everything, and for the exempt rules."""
-    if claim.run_all or claim.rule in _DEP_UNION_EXEMPT:
-        return claim
-    # On a file the graph knows, the graph is the better answer, so drop
-    # declarers that matched only through a catch-all prefix. Graph-blind files
-    # keep the full union.
-    #
-    # An unmodeled dynamic import used to put the catch-all deps back, on the
-    # grounds that missing edges undercut the graph. Removed: it leaned on the
-    # very yaml this project exists to delete, and catch-all declarers are a
-    # small slice of the pipeline, so they could not have covered an unknown
-    # edge anyway. What is left is the warning, the fail-open on the site file,
-    # and the check going red.
-    if _graph_known(state, path):
-        declarers = _source_dep_steps(state, path, specific_only=True)
-        omitted = len(_source_dep_steps(state, path) - declarers)
-    else:
-        declarers = _source_dep_steps(state, path)
-        omitted = 0
-    added = declarers - claim.step_ids
-    if added:
-        claim.step_ids |= added
-        claim.detail += f"; +{len(added)} steps declare it as a source dep"
-    if omitted:
-        claim.detail += f"; {omitted} catch-all-only declarers omitted"
-    return claim
-
-
-# Every "nothing to run" rule. The image union must not revive a path a rule
-# has already established runs nothing: a retired yaml, a release-only script
-# and an inert CI tree all get copied into the image, and none can change what
-# a test does. A separate set from _DEP_UNION_EXEMPT on purpose.
-_IMAGE_UNION_EXEMPT = frozenset(
-    {"no-code", "no-hardware", "legacy-ci", "inert-ci", "release-ci"}
-)
-
-
-def _apply_image_input_union(state: RepoState, path: str, claim: Claim) -> Claim:
-    """Add the steps that run on an image this file is built into.
-
-    A seam and not a rule, and that distinction is the design. Claiming these
-    paths would run before every rule below and would override hardware scoping
-    and the `no-code` answer, both of which are right today. Adding leaves
-    those decisions alone and puts what the build DAG knows on top.
-
-    This carries the whole build layer now that `run_all_patterns` is unread:
-    the C++, cmake and shared requirements files reach the AMD and Intel
-    pipelines through here and nowhere else.
-
-    Never droppable: a coverage row says which functions a step ran and
-    nothing about which image it ran on, so no evidence could overturn it.
-    """
-    if claim.run_all or claim.rule in _IMAGE_UNION_EXEMPT:
-        return claim
-    steps = state.artifacts.steps_for_input(path) & state.auto_step_ids
-    # A family-exclusive file cannot affect another family's jobs even though
-    # its tree is copied into that family's image. Scope rather than skip, so a
-    # CPU-only source still reaches the CPU suites. Without this the union
-    # brings back the very over-selection the exclusive-family rule exists for.
-    family = hardware.exclusive_family_of_path(path)
-    if family and path not in state.exclusive_disabled:
-        steps &= state.family_steps(family)
-    added = steps - claim.step_ids
-    if added:
-        claim.step_ids |= added
-        claim.detail += f"; +{len(added)} steps run on an image this file is built into"
-    return claim
 
 
 def _classify(state: RepoState, path: str, ctx: DiffContext | None) -> Claim:
@@ -735,11 +700,19 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
                 run_all=set(sub.run_all),
                 step_ids=set(sub.step_ids),
                 test_files=set(sub.test_files),
+                device_scope=sub.device_scope,
+                droppable_step_ids=set(sub.droppable_step_ids),
+                droppable_test_files=sub.droppable_test_files,
+                image_union_exempt=sub.image_union_exempt,
             )
             family = hardware.family_of_path(path)
             if family:
+                # Hardware tagging is not function-attributable, so these stay
+                # out of `droppable_step_ids`.
                 claim.step_ids |= state.family_steps(family)
             return claim
+    if state.rust_workspace.owns(path):
+        return _classify_rust(state, path)
     if path.startswith("requirements/"):
         req = _classify_requirements(state, path)
         if req is not None:
@@ -788,6 +761,18 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
     declared = _classify_declared_deps(state, path)
     if declared is not None:
         return declared
+    # Last chance to ask the build graph before escalating: the image union
+    # bails on a run_all claim, so escalating here would pre-empt an answer it
+    # had. Scoped to `docker/` because almost every other path reaching this
+    # line has an empty union anyway.
+    if path.startswith(DOCKER_DIR + "/") and (
+        state.artifacts.steps_for_input(path) & state.auto_step_ids
+    ):
+        return Claim(
+            "fail-open",
+            f"{path} is unclaimed by any rule, but the build DAG knows which "
+            "images it is copied into; deferring to the image-input union",
+        )
     src = state.docker_inputs.get(path)
     detail = (
         f"{path} is a docker-image build input ({src} COPY); the CI image is "
@@ -816,12 +801,11 @@ def _classify_buildkite(
     }
     if step_ids:
         return Claim("buildkite", f"{path} defines these steps", step_ids=step_ids)
-    referencing = {
-        sid
-        for p in state.pipelines
-        for sid, st in p.targets.items()
-        if path in st.scripts_seen or path in st.data_files
-    }
+    # `_steps_targeting`, not a scripts_seen/data_files check: this leg used to
+    # miss a file that is a step's pytest TARGET, reached through its
+    # `working_dir`, and everything it missed fell to the terminal run-all. The
+    # same helper covers the config yamls beside such a target.
+    referencing = _steps_targeting(state, path)
     if referencing:
         return Claim(
             "buildkite",
@@ -856,6 +840,16 @@ def _classify_buildkite(
     )
 
 
+def colocation_routes(state: RepoState, path: str) -> bool:
+    """Whether selection answers `path` with a colocated-tests claim.
+
+    The one home of that question for callers outside the rule, so their floor
+    and this rule cannot drift apart.
+    """
+    claim = _classify_graph(state, path)
+    return claim is not None and claim.rule == "colocated-tests"
+
+
 def _classify_graph(state: RepoState, path: str) -> Claim | None:
     """The graph rule: four separate lookups so each stays checkable. Direct
     step references, the test closure, registered-key routing, and hardware
@@ -884,6 +878,11 @@ def _classify_graph(state: RepoState, path: str) -> Claim | None:
             "unknowable, running everything",
             run_all={p.config.name for p in state.pipelines},
         )
+    # After the two guards above, never before: both say the graph is known to
+    # be incomplete here, and co-location would be trusting it anyway.
+    colocated = colocation._classify_colocated_tests(state, path)
+    if colocated is not None:
+        return colocated
     direct_steps = _direct_step_refs(state, path)
     graph = state.full.graph
     known = _graph_known(state, path)
@@ -891,7 +890,7 @@ def _classify_graph(state: RepoState, path: str) -> Claim | None:
         return None
 
     closure = graph.reverse_closure({path})
-    test_files = _seam_gated_tests(state, path, closure)
+    test_files = _boot_gated_tests(state, path, closure)
     # Steps run example and benchmark scripts as test bodies too, so a closure
     # member there counts as coverage.
     script_files = {f for f in closure if f.startswith(("examples/", "benchmarks/"))}
@@ -922,17 +921,10 @@ def _classify_graph(state: RepoState, path: str) -> Claim | None:
         detail += (
             f"; registered key(s) {sorted(keys)[:3]} name it in {len(key_steps)} steps"
         )
-    # Tagging by name exists for a source file whose compiled kernels reach a
-    # family's jobs invisibly. A test, benchmark or example has no such reach,
-    # since nothing under vllm/ imports them, so their steps are exactly their
-    # own coverage. A cpu-named test cannot affect an AMD job that never runs
-    # it.
-    family = hardware.family_of_path(path)
+    family, hw_steps = _hardware_family_steps(state, path)
     # Pinned before the hw union below, which is not droppable.
     inferred_steps = direct_steps | key_steps
-    hw_steps: set[str] = set()
-    if family and not path.startswith(("tests/", "benchmarks/", "examples/")):
-        hw_steps = state.family_steps(family)
+    if family:
         key_steps = key_steps | hw_steps
         detail += f"; {family} hardware-convention tagging adds {len(hw_steps)} steps"
     # A step declaring this path through a specific prefix runs on its change
@@ -942,7 +934,7 @@ def _classify_graph(state: RepoState, path: str) -> Claim | None:
     dep_steps = _source_dep_steps(state, path, specific_only=True)
     if dep_steps:
         detail += f"; {len(dep_steps)} steps declare it as a source dep"
-    return Claim(
+    claim = Claim(
         "graph",
         detail,
         test_files=test_files | script_files,
@@ -952,6 +944,9 @@ def _classify_graph(state: RepoState, path: str) -> Claim | None:
         droppable_step_ids=(inferred_steps | dep_steps) - hw_steps,
         droppable_test_files=True,
     )
+    # Here and not earlier, so _nothing_auto_runs claims (rule "graph" but
+    # grep-built, not closure-built) can never reach the hub gate.
+    return colocation._colocated_hub(state, path, claim) or claim
 
 
 def _nothing_auto_runs(
@@ -1060,6 +1055,7 @@ def _classify_table(
 
     covered_added: set[str] = set()
     added_paths = {p for p, s in ctx.status.items() if s == "A"}
+    held: set[str] = set()
     for change in diff.changes:
         keys = {change.key}
         for parse in (diff.base, diff.head):
@@ -1069,8 +1065,9 @@ def _classify_table(
         for test_file, literals in graph.string_literals.items():
             if is_test_basename(test_file) and not keys.isdisjoint(literals):
                 claim.test_files.add(test_file)
-        claim.step_ids |= state.keys.steps_naming(keys)
-        claim.step_ids |= state.keys.steps_naming_raw(keys)
+        named = state.keys.steps_naming(keys) | state.keys.steps_naming_raw(keys)
+        claim.step_ids |= named
+        held |= named
         if change.kind != "models":
             continue
         if change.change in ("removed", "modified"):
@@ -1083,11 +1080,17 @@ def _classify_table(
                 if sub is not None:
                     claim.test_files |= sub.test_files
                     claim.step_ids |= sub.step_ids
+                    claim.droppable_step_ids |= sub.droppable_step_ids
+                    held |= sub.step_ids - sub.droppable_step_ids
                     claim.run_all |= sub.run_all  # empty-closure propagates
         if change.change in ("added", "modified"):
             mod = diff.head.modules.get(change.key)
             if mod:
                 covered_added |= _added_module_paths(mod, added_paths)
+
+    # A step another leg kept without droppability must not become droppable
+    # through a sibling arch's closure.
+    claim.droppable_step_ids -= held
 
     summary = (
         ", ".join(f"{c.change} {c.key}" for c in diff.changes[:4])
@@ -1137,7 +1140,11 @@ def _lint_only_files(state: RepoState) -> frozenset[str]:
                     if (state.repo / token).is_file():
                         found.add(token)
     except Exception:
-        found = set()
+        # Do NOT memoize a failure. The key is the repo path, and a cached
+        # worktree reuses its path for a different commit after eviction, so one
+        # unreadable config would pin "no lint-only files" for every later tree
+        # there.
+        return frozenset()
     _LINT_ONLY[state.repo] = frozenset(found)
     return _LINT_ONLY[state.repo]
 
@@ -1182,21 +1189,8 @@ def _classify_lint_only(state: RepoState, path: str) -> Claim | None:
     )
 
 
-def _direct_step_refs(state: RepoState, path: str) -> set[str]:
-    """Steps naming the file itself: as a target, a scanned script, or a data
-    file."""
-    return {
-        sid
-        for p in state.pipelines
-        for sid, st in p.targets.items()
-        if path in st.data_files
-        or path in st.scripts_seen
-        or any(t.path == path for t in st.targets)
-    }
-
-
-def _seam_gated_tests(state: RepoState, path: str, closure: set[str]) -> set[str]:
-    """Test files in the closure with the worker-seam gate applied: a test
+def _boot_gated_tests(state: RepoState, path: str, closure: set[str]) -> set[str]:
+    """Test files in the closure with the boot-edge gate applied: a test
     reached only by crossing a gated platform edge depends on the file only if
     it boots an engine."""
 
@@ -1205,13 +1199,13 @@ def _seam_gated_tests(state: RepoState, path: str, closure: set[str]) -> set[str
 
     graph = state.full.graph
     test_files = _tests(closure)
-    if not graph.gated_edges or not state.preflight.seam_gate_ok:
+    if not graph.boot_edges or not state.preflight.boot_gate_ok:
         return test_files
-    base_closure = graph.reverse_closure({path}, include_gated=False)
-    seam_only = test_files - _tests(base_closure)
-    if not seam_only:
+    base_closure = graph.reverse_closure({path}, include_boot=False)
+    boot_only = test_files - _tests(base_closure)
+    if not boot_only:
         return test_files
-    return _tests(base_closure) | (seam_only & state.full.engine_starting_tests())
+    return _tests(base_closure) | (boot_only & state.full.engine_starting_tests())
 
 
 def _key_routed_steps(

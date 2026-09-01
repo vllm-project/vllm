@@ -8,6 +8,8 @@ dependencies = ["pyyaml>=6.0", "regex"]
 [project.scripts]
 ci-select = "ci_selector.cli:main"
 ci-validate = "ci_selector.validate.__main__:main"
+ci-fetch-build = "ci_selector.scripts.fetch:main"
+ci-build-table = "ci_selector.scripts.build:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

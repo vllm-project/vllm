@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .changed_funcs import Query
+from .phase import DEFAULT_MODE, PhaseMode, row_shows_use
 from .table import Table
 
 
@@ -57,19 +58,16 @@ def newest_commit(table: Table, repo: Path) -> str:
 class RowKeys:
     """Which steps a table is entitled to answer for.
 
-    Recordings carry no pipeline, and a bare key is not unique across configs:
-    a couple of dozen are defined by two at once. So the owner is derived,
-    whichever config's keys explain the most rows, and steps from any other get
-    no row. Nothing is named or curated, so a sweep of a different pipeline
-    resolves on its own.
+    Recordings carry no pipeline and a bare key is not unique across configs,
+    so the owner is derived: whichever config's keys explain the most rows
+    wins, and steps from any other get no row. Nothing is curated, so a sweep
+    of a different pipeline resolves itself.
 
-    The ambiguity is unreachable today, since only `vllm_ci` is ever emitted.
-    TODO: if a second config runs on a PR, the shared keys go live and this
-    needs a real tie-break rather than "whoever explains the most".
+    Identity comes from the resolved step, not its printed id, since the
+    generator spells a mirror the other way round from us.
 
-    Row identity comes from the resolved step and not its printed id, because
-    the generator spells a mirror the other way round from us. A step the
-    checkout does not explain reads no row at all.
+    TODO: only `vllm_ci` is emitted today, so shared keys never collide. A
+    second config on a PR would need a real tie-break.
     """
 
     def __init__(
@@ -86,6 +84,9 @@ class RowKeys:
         # needs the step objects to ask `match_jobs` whether an added step
         # covers a failure, and a raw key lookup would miss every sharded job.
         self.steps = steps or {}
+        # Filled by `restrict_to`; read into the reason histogram so a lost
+        # add candidate is visible rather than merely absent.
+        self.restricted_away: list[str] = []
 
     @classmethod
     def resolve(cls, table: Table, repo: Path, ref: str) -> RowKeys:
@@ -140,6 +141,36 @@ class RowKeys:
             # object that cannot answer the question is not addable.
             if self.key_for(sid) is not None and not getattr(step, "manual_only", True)
         ]
+
+    def restrict_to(
+        self,
+        step_ids: frozenset[str],
+        identities: frozenset[tuple] = frozenset(),
+    ) -> None:
+        """Drop addable steps that do not exist at the PR's base.
+
+        Two clocks: these ids come from the TABLE's commit while the emitter
+        names steps from the base. Naming a step that is not there makes the
+        emitter omit the variable, and that runs everything.
+
+        A step survives if its `step_id` OR its rename-tolerant `Step.identity`
+        is at base. Id alone was the defect, since it falls back to the label
+        and a reword gives one step two ids.
+
+        An empty id set means we could not read the base pipeline, which is not
+        the same as "no step is there", so it changes nothing.
+        """
+        if not step_ids:
+            return
+        kept = {
+            k: v
+            for k, v in self.steps.items()
+            if k in step_ids or getattr(v, "identity", None) in identities
+        }
+        # Counted, not just dropped. This stage used to lose candidates with no
+        # trace in the reason histogram, which is how 118 went unnoticed.
+        self.restricted_away = sorted(set(self.steps) - set(kept))
+        self.steps = kept
 
     def key_for(self, step_id: str) -> str | None:
         """The row this step may consult, or None when it may consult none."""
@@ -205,6 +236,7 @@ def read_pr(
     keys: RowKeys,
     stale: frozenset[str] = frozenset(),
     *,
+    mode: PhaseMode = DEFAULT_MODE,
     failed_ran: dict[str, str] | None = None,
     matched_slugs: dict[str, list[str]] | None = None,
     failed_missed: dict[str, str] | None = None,
@@ -240,14 +272,14 @@ def read_pr(
         # any narrowing. A row that plainly runs a changed function makes its
         # step relevant whatever path the map happened to cite.
         #
-        # `names`, not `function_names`: an import counts as use. Excluding the
-        # import-time frames is the stricter reading, and it is defensible in
-        # the abstract, since every importer runs them so they separate
-        # nothing. But a step that imports a file it never otherwise touches
-        # can still break when that file changes, and that is what this buys.
+        # What counts as "runs" is `mode`. Under OFF an import counts as use: a
+        # step that imports a file it never otherwise touches can still break
+        # when that file changes. The stricter modes require a call frame.
+        # `look_up` re-makes this exact match one rung lower, so both read the
+        # same predicate or neither moves.
         row = table.row(key)
         if row is not None and any(
-            row.contains(f.path, name) for f in query.files for name in f.names
+            row_shows_use(row, f, name, mode) for f in query.files for name in f.names
         ):
             reading.kept.append(step_id)
             reading.reasons["row-executes-a-changed-function"] += 1
@@ -294,7 +326,7 @@ def read_pr(
             reading.reasons["unknown-code-blocks-narrowing"] += 1
             continue
 
-        evidence = table.look_up(key, scoped).evidence
+        evidence = table.look_up(key, scoped, mode).evidence
         if evidence.authorizes_drop and local:
             # The file projection the design specifies under an unknown
             # function: a step whose row touches a file carrying unknown code
@@ -330,24 +362,20 @@ def _add_from_rows(
     only removes.
 
     A row showing a step ran a changed file proves relevance whatever the map
-    thought, so this walks every step the table can answer for rather than the
-    map's selection. No completeness or freshness gate, on purpose: presence
-    needs one observation where absence needs the whole recording.
+    thought, so this walks every step the table can answer for. No completeness,
+    freshness or row gate at all: presence needs one observation where absence
+    needs the whole recording, so even a thin or stale row adds. Safe, because
+    adding only over-selects.
 
-    `unresolved` brackets this as it does the drop side. Our table postdates
-    every measured PR, so it holds functions those PRs added, while in
-    production such a name has never been recorded and no row could show it.
-    Matching them anyway would credit an addition production could not make, so
-    the pessimistic pass declines them and `added` is a bracket, not a figure.
+    The one gate judges the evidence rather than the row. `Table.discriminates`
+    refuses a name nearly every row holds, which says only "the step imported
+    the file" and would hand back most of a narrower map's saving.
 
-    Measured: that bracket is inert, because most adds fire on an import-time
-    frame, which is old code by definition. Which also says what this half
-    mostly asserts, that the step imports the changed file. Weak, and the
-    likeliest reason it costs something and catches nothing.
+    `unresolved` brackets the result: our table postdates the measured PRs, so
+    it holds functions production could never have recorded.
 
-    Scored against the failures the map's selection did not cover, through the
-    crosscheck's own matcher, since job slugs carry shard suffixes a raw key
-    comparison misses.
+    Failures match through the crosscheck's own matcher, since job slugs carry
+    shard suffixes a raw key comparison misses.
     """
     already = set(selection.selected)
     for step_id in keys.candidates():
@@ -358,7 +386,7 @@ def _add_from_rows(
         if row is None:
             continue  # no row: the map decides, and the map did not pick it
         if any(
-            row.contains(f.path, name)
+            row.contains_call(f.path, name) and table.discriminates(f.path, name)
             for f in query.files
             for name in f.names - set(unresolved.get(f.path, ()))
         ):
@@ -369,6 +397,10 @@ def _add_from_rows(
     # also had an uncovered failure, which is almost none, so the histogram
     # read as though the half never ran.
     reading.reasons["row-adds-a-step-the-map-missed"] += len(reading.added)
+    # Candidates `restrict_to` removed before this loop could see them. They
+    # never enter `candidates()`, so without this they are invisible: not a
+    # zero in the histogram, an absence from it.
+    reading.reasons["candidate-absent-at-base"] += len(keys.restricted_away)
 
     missed = failed_missed or {}
     if not (missed and reading.added):
@@ -378,9 +410,3 @@ def _add_from_rows(
     steps = [keys.steps[s] for s in reading.added if s in keys.steps]
     _, _, by_step = match_jobs(dict(missed), steps)
     reading.added_and_failed = sorted(by_step)
-
-
-def _mark(query: Query, table: Table) -> Query:
-    from ci_selector.coverage.changed_funcs import mark_unfaithful
-
-    return mark_unfaithful(query, table.unfaithful_paths)

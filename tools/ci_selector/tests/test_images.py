@@ -214,6 +214,90 @@ def test_image_inputs_include_the_compiled_trees_only(state, vllm_repo):
         )
 
 
+_FROM = re.compile(r"^\s*FROM\s+\S+(?:\s+AS\s+(\S+))?", re.I)
+_COPY = re.compile(r"^\s*(?:COPY|ADD)\s+(.*)$", re.I)
+_COPY_FROM = re.compile(r"--from=(\S+)")
+
+
+def _oracle_build_stage_files(vllm_repo, dockerfiles):
+    """Exact-file COPY sources landing in a stage some later `--from=` consumes.
+
+    Independent of the parser under test: a line scanner over the Dockerfiles,
+    not `copy_inputs`. Nothing in the tool is stage-aware, so a build input is
+    indistinguishable from runtime payload anywhere else.
+    """
+    build: set[str] = set()
+    for rel in dockerfiles:
+        text = (vllm_repo / rel).read_text() if (vllm_repo / rel).is_file() else ""
+        stage, per_stage, consumed = None, {}, set()
+        for raw in text.replace("\\\n", " ").splitlines():
+            line = raw.split("#", 1)[0].rstrip()
+            begins = _FROM.match(line)
+            if begins:
+                stage = begins.group(1)
+                continue
+            copies = _COPY.match(line)
+            if not copies:
+                continue
+            body = copies.group(1)
+            staged = _COPY_FROM.search(body)
+            if staged:
+                consumed.add(staged.group(1))
+                continue
+            tokens = [t for t in body.split() if not t.startswith("--")]
+            for src in tokens[:-1]:
+                path = src.lstrip("./").rstrip("/")
+                if path and (vllm_repo / path).is_file():
+                    per_stage.setdefault(stage, set()).add(path)
+        for name, files in per_stage.items():
+            if name in consumed:
+                build |= files
+    return build
+
+
+@pytest.mark.drift
+def test_a_build_stage_input_keeps_its_image_union(state, vllm_repo):
+    """A file the wheel is compiled from must keep its image routing.
+
+    `vllm/envs.py` is the case worth naming: setup.py path-loads it for the
+    build variables, and `docker/Dockerfile` copies it into the compile stage
+    beside CMakeLists.txt, cmake/ and csrc/. A path-load is not an import and
+    setup.py is not a graph node, so the import graph structurally cannot see
+    that edge; the image rule is the only place it is encoded.
+    """
+    built = {f for files in state.artifacts.defined_by.values() for f in files}
+    assert built, "no image-definition files at HEAD"
+    build_stage = _oracle_build_stage_files(vllm_repo, built)
+    assert len(build_stage) >= 5 and "vllm/envs.py" in build_stage, drift_message(
+        f"the build-stage scanner found {len(build_stage)} files and "
+        f"{'kept' if 'vllm/envs.py' in build_stage else 'lost'} vllm/envs.py",
+        "the guard below stops covering compiled inputs",
+        "check whether docker/Dockerfile still uses `COPY --from=<stage>`",
+    )
+    missing = sorted(f for f in build_stage if f not in state.artifacts.inputs_of)
+    assert not missing, (
+        f"{len(missing)} files the wheel is compiled from lost their image "
+        f"routing: {missing[:3]}"
+    )
+
+    # Stage-ness alone does not produce envs.py's breadth; the borrowed
+    # whole-context images do. Its literal copiers are Dockerfile and
+    # Dockerfile.rocm, so anything beyond them is borrowed.
+    envs = state.artifacts.inputs_of["vllm/envs.py"]
+    literal = {"docker/Dockerfile", "docker/Dockerfile.rocm"}
+    assert envs > literal, (
+        f"vllm/envs.py stopped borrowing the shared images (got {sorted(envs)}); "
+        "its union collapses to the two Dockerfiles that name it"
+    )
+
+    # Control, so this is not "everything is wide": a runtime-stage COPY is not
+    # a compiled input and must not be dragged in by the assertions above.
+    assert "vllm/collect_env.py" not in build_stage, (
+        "collect_env.py is a runtime-stage COPY (docker/Dockerfile:852); the "
+        "scanner has stopped distinguishing build stages from payload"
+    )
+
+
 def test_image_input_union_does_not_resurrect_a_zero_claim(state):
     """A rule that positively established "nothing to run" must win.
 

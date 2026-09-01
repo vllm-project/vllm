@@ -1,0 +1,6 @@
+# Everything `pytest tests --sync` downloads from vllm-project/ci-infra. All of
+# it is regenerable, so none of it is carried in the repo; a fresh clone syncs
+# once and the offline tests skip until it does.
+*.py.txt
+manifest.json
+values.json

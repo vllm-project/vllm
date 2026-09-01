@@ -202,6 +202,7 @@ def _expand_mirror(parent: Step, hw: str, overrides: dict, report: LoadReport) -
         env=env,
         mirror_hw=hw,
         mirror_of=parent.step_id,
+        mirror_label=overrides.get("label"),
     )
     unknown = {k: v for k, v in overrides.items() if k not in MIRROR_OVERRIDABLE}
     if unknown:

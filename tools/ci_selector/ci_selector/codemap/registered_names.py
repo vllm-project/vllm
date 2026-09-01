@@ -18,6 +18,7 @@ import regex as re
 
 from .graph.build import FullGraph
 from .graph.model_registry import resolve_module_name
+from .repo import is_test_basename
 
 PARSER_SELECTING_FLAGS = (
     "--tool-call-parser",
@@ -108,6 +109,15 @@ class KeyIndex:
             if module_file.endswith("/__init__.py"):
                 pkg = module_file[: -len("__init__.py")]
                 index.keyed_modules.setdefault(pkg, set()).add(key)
+        # The merged parser table is last-wins, but a name registered by
+        # several families (kimi_k3: tool parser AND tokenizer mode) keys code
+        # in every registering file; restore the losers' file->key routes.
+        for key, files in full.factories.parser_entry_files.items():
+            for module_file in files:
+                index.keyed_modules.setdefault(module_file, set()).add(key)
+                if module_file.endswith("/__init__.py"):
+                    pkg = module_file[: -len("__init__.py")]
+                    index.keyed_modules.setdefault(pkg, set()).add(key)
         # Severed (claimed) demoted members route by their gating literals:
         # eval/PD-accuracy configs select `method: eagle` by string without
         # importing, and the member's deflated closure no longer reaches those
@@ -141,13 +151,32 @@ class KeyIndex:
             for key in untyped - substring_keys
         }
         literals = full.graph.string_literals
+        dir_literal_cache: dict[str, set[str]] = {}
+
+        def _dir_test_literals(dir_path: str) -> set[str]:
+            """Literals of test files under a directory target. Test files
+            only: a shared helper like tests/tool_use/utils.py names every
+            parser at once, and the graph already covers imported helpers."""
+            prefix = dir_path.rstrip("/") + "/"
+            if prefix not in dir_literal_cache:
+                dir_literal_cache[prefix] = {
+                    lit
+                    for f, lits in literals.items()
+                    if f.startswith(prefix) and is_test_basename(f)
+                    for lit in lits
+                }
+            return dir_literal_cache[prefix]
+
         for pdata in pipelines:
             steps_by_id = {s.step_id: s for s in pdata.steps}
             for sid, st in pdata.targets.items():
                 target_literals: set[str] = set()
+                dir_literals: set[str] = set()
                 for t in st.targets:
                     if t.path.endswith(".py"):
                         target_literals |= literals.get(t.path, set())
+                    else:
+                        dir_literals |= _dir_test_literals(t.path)
                 haystack = st.haystack
                 step = steps_by_id.get(sid)
                 if step and step.env:
@@ -158,13 +187,20 @@ class KeyIndex:
                     haystack += _config_text(repo, data_file, full.graph.parse_errors)
                 stripped = _strip_comment_lines(haystack)
                 hits = match_keys(
-                    substring_keys, patterns, typed, target_literals, stripped
+                    substring_keys,
+                    patterns,
+                    typed,
+                    target_literals | dir_literals,
+                    stripped,
                 )
                 if hits:
                     index.step_keys[sid] = hits
                 # Store the comment-stripped text: steps_naming_raw searches
                 # this, so a model id or package name living only in a shell
                 # comment must not route a step (as step_keys also uses `stripped`).
+                # Directory literals stay out: `searchable` also feeds
+                # table-diff's raw substring search, which a whole directory of
+                # test literals would blow wide open.
                 index.searchable[sid] = (
                     stripped + "\n" + "\n".join(sorted(target_literals))
                 )

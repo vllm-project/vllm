@@ -30,10 +30,19 @@ import json
 import sys
 from dataclasses import dataclass
 from enum import Enum
+from functools import cached_property
 from pathlib import Path
 
 from .changed_funcs import FileQuery, Query, mark_unfaithful
-from .model import TABLE_VERSION, Row, Stamp, digest_of
+from .model import (
+    MAX_ADD_ROW_SHARE,
+    MIN_ROWS_FOR_BREADTH,
+    TABLE_VERSION,
+    Row,
+    Stamp,
+    digest_of,
+)
+from .phase import DEFAULT_MODE, PhaseMode, row_shows_use
 
 
 class Evidence(str, Enum):
@@ -51,10 +60,11 @@ class Evidence(str, Enum):
     NAMELESS_IN_SCOPE = "changed-file-has-no-names-to-match"
     EXECUTES_CHANGE = "row-contains-a-changed-function"
     ABSENT_FROM_ROW = "row-contains-none-of-them"
+    NOTHING_CALLABLE = "diff-named-no-callable-function"
 
     @property
     def authorizes_drop(self) -> bool:
-        return self is Evidence.ABSENT_FROM_ROW
+        return self in (Evidence.ABSENT_FROM_ROW, Evidence.NOTHING_CALLABLE)
 
 
 @dataclass
@@ -89,6 +99,30 @@ class Table:
         return len(self._rows)
 
     @property
+    def dead_interpreter(self) -> str:
+        """Set when every row was recorded by a Python whose names ours cannot
+        be compared against, so nothing can be dropped.
+
+        The per-row version of this check is silent, which is fine until it
+        disqualifies all of them: zero drops then looks exactly like a quiet PR.
+        Not `unavailable`, since the add side reads rows directly and works.
+        """
+        if not self._rows:
+            return ""
+        reasons = {_interpreter_mismatch(row.stamp) for row in self._rows.values()}
+        if "" in reasons:
+            return ""
+        recorded = sorted(
+            {v for row in self._rows.values() for v in row.stamp.interpreters if v}
+        )
+        return (
+            f"every one of {len(self._rows)} rows was recorded by another Python "
+            f"({', '.join(recorded)}) and this is {sys.version_info.major}."
+            f"{sys.version_info.minor}. No step can be dropped. The additive half "
+            "still works. Re-record, or read the table with the recording Python."
+        )
+
+    @property
     def unfaithful_paths(self) -> set[str]:
         """Files whose recorded names their source cannot produce, over all
         rows. A union on purpose: if one step's recording of a file is wrong,
@@ -96,13 +130,56 @@ class Table:
         everywhere."""
         return {p for row in self._rows.values() for p in row.stamp.unfaithful_files}
 
+    @cached_property
+    def _breadth(self) -> dict[str, dict[str, int]]:
+        """path -> name -> how many rows recorded it.
+
+        Cached rather than eager: `Table` is constructed on every failure path
+        in `load`, and none of those will ever ask. Keyed path-then-name to
+        share the path strings already interned in `row.functions` and to match
+        how `contains` is called.
+        """
+        counts: dict[str, dict[str, int]] = {}
+        for row in self._rows.values():
+            for path, names in row.functions.items():
+                per_path = counts.setdefault(path, {})
+                at_import = row.import_time.get(path, frozenset())
+                for name in names:
+                    # Call frames only. The add side is the sole reader and it
+                    # already refuses import-time matches, so counting them here
+                    # would inflate the denominator for names that cannot add.
+                    if name not in at_import:
+                        per_path[name] = per_path.get(name, 0) + 1
+        return counts
+
+    def discriminates(self, path: str, name: str) -> bool:
+        """Whether observing this pair in a row tells you anything about that row.
+
+        A name nearly every row holds separates nothing, so seeing it is not
+        evidence that a step is relevant. `Row.contains` cannot know this: it is
+        a membership test, so 194 of 196 rows reads exactly like 1 of 196.
+
+        Only the add side consults this. On the drop side the same breadth
+        argues the other way and is deliberately not applied; see `rules.py`.
+        """
+        if len(self._rows) < MIN_ROWS_FOR_BREADTH:
+            return True
+        held_by = self._breadth.get(path, {}).get(name, 0)
+        return held_by <= MAX_ADD_ROW_SHARE * len(self._rows)
+
     def row(self, step: str) -> Row | None:
         return self._rows.get(step)
 
-    def look_up(self, step: str, query: Query) -> Verdict:
+    def look_up(
+        self, step: str, query: Query, mode: PhaseMode = DEFAULT_MODE
+    ) -> Verdict:
         """What the table can say about one step, given a diff. Not the drop
         rule itself: no completeness check, no caller walk, no file-level
-        fallback. This is the reading those are built on."""
+        fallback. This is the reading those are built on.
+
+        `mode` must be whatever the keep rung in `rules.py` used. The match
+        below is the same one it makes, so the two disagreeing means one of
+        them decides nothing."""
         if not self.available:
             return Verdict(step, Evidence.NO_TABLE, self.unavailable)
         if step in self.rejected:
@@ -174,9 +251,20 @@ class Table:
                 f"{len(answerable)} changed files, none of them naming a function",
             )
 
+        # On a file whose changed names all run at import, STRICT can match no
+        # row at all, so label the drop instead of counting it as evidence.
+        if mode is PhaseMode.STRICT and not any(
+            changed.function_names for changed in answerable
+        ):
+            return Verdict(
+                step,
+                Evidence.NOTHING_CALLABLE,
+                f"{len(answerable)} changed files, none naming a callable function",
+            )
+
         for changed in answerable:
             for name in changed.names:
-                if row.contains(changed.path, name):
+                if row_shows_use(row, changed, name, mode):
                     return Verdict(
                         step, Evidence.EXECUTES_CHANGE, f"{changed.path}::{name}"
                     )
@@ -193,6 +281,13 @@ def _why_thin(stamp: Stamp) -> str:
         return "no build recorded every declared shard"
     if stamp.lost_lines:
         return "a contributing process lost lines"
+    if stamp.logs_unreadable:
+        return f"{stamp.logs_unreadable} contributing job log(s) could not be read"
+    if stamp.jobs_summary_unparsed:
+        return (
+            f"{stamp.jobs_summary_unparsed} contributing job(s) collected tests "
+            "and printed no summary we could read"
+        )
     return f"{stamp.jobs_ran_no_tests} contributing job(s) executed no test"
 
 
@@ -211,6 +306,7 @@ def _verify(key: str, blob: dict) -> tuple[Row | None, str]:
     try:
         stamp = Stamp(**blob["stamp"])
         functions = {p: frozenset(n) for p, n in blob["functions"].items()}
+        import_time = {p: frozenset(n) for p, n in blob["import_time"].items()}
     except (KeyError, TypeError) as exc:
         return None, f"unreadable row: {exc}"
 
@@ -219,10 +315,29 @@ def _verify(key: str, blob: dict) -> tuple[Row | None, str]:
     total = sum(len(v) for v in functions.values())
     if total != stamp.n_functions:
         return None, f"function count {total} != stamp {stamp.n_functions}"
-    if stamp.digest and digest_of(functions, stamp) != stamp.digest:
+    at_import = sum(len(v) for v in import_time.values())
+    if at_import != stamp.n_import_time:
+        return None, f"import-time count {at_import} != stamp {stamp.n_import_time}"
+    # Import-time names the row never recorded belong to some other row. Cheap,
+    # and the only structural tie between the two dicts.
+    if any(
+        not names <= functions.get(path, frozenset())
+        for path, names in import_time.items()
+    ):
+        return None, "import-time names absent from the row's functions"
+    # Not `if stamp.digest and ...`: an empty digest used to skip the check and
+    # admit the row, which is the exact hole signing was built to close. Every
+    # writer sets one unconditionally, so leniency here protects nothing.
+    if not stamp.digest:
+        return None, "unsigned row"
+    if digest_of(functions, stamp, import_time) != stamp.digest:
         return None, "digest mismatch"
     return Row(
-        key=key, keyed=bool(blob.get("keyed")), functions=functions, stamp=stamp
+        key=key,
+        keyed=bool(blob.get("keyed")),
+        functions=functions,
+        stamp=stamp,
+        import_time=import_time,
     ), ""
 
 

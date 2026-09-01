@@ -134,6 +134,25 @@ def _jobs(steps) -> int:
     return sum(step.parallelism or 1 for step in steps)
 
 
+def _totals(scored: list[dict]) -> dict:
+    """Sums for the TOTAL block. Indexes directly on purpose: a missing key is
+    a harness bug and must raise, not read as zero."""
+    total = {
+        k: sum(r[k] for r in scored)
+        for k in (
+            "them_steps",
+            "codemap_steps",
+            "final_steps",
+            "them_jobs",
+            "codemap_jobs",
+            "final_jobs",
+        )
+    }
+    total["missed"] = sum(len(r["missed_failures"]) for r in scored)
+    total["catchall_missed"] = sum(len(r["catchall_only_missed"]) for r in scored)
+    return total
+
+
 def crosscheck_pr(repo: Path, pr: int, remote: str | None = None, table=None) -> dict:
     data = _gh_pr(pr)
     ran = {}
@@ -304,6 +323,10 @@ def crosscheck_pr(repo: Path, pr: int, remote: str | None = None, table=None) ->
         "coverage_added": len(decision.added_by_coverage),
         "coverage_dropped": len(decision.dropped_by_coverage),
         "coverage_stale": decision.stale_steps,
+        # The reason histogram the rule already built. Diagnostic, but the
+        # only per-PR view of a mode-specific verdict, and recomputing it
+        # costs a whole run.
+        "reasons": decision.reasons,
         # Empty when the record was used. Anything here means code map only, so
         # `final` equals `analyzer` and this is not the real comparison.
         "coverage_note": decision.coverage_note,
@@ -321,6 +344,10 @@ def crosscheck_pr(repo: Path, pr: int, remote: str | None = None, table=None) ->
         # Job slugs no step of ours explains. They are missing from
         # `them_steps`, so the win is measured against a partial picture.
         "unmappable_jobs": sorted(unmappable),
+        # What preflight refused to reason about, grouped by why. Forced steps
+        # are non-droppable, so this is a cost floor no coverage evidence can
+        # lift. Per PR, because it moves with the replayed revision.
+        "forced_steps": state.preflight.forced_by_reason,
         # Ran, failed, and we did not pick it. Judge each: relevant to the diff
         # is a real slip, flaky or infra is a correct omission.
         "missed_failures": {r: st for r, st in failed_ran.items() if r in f_unmatched},
@@ -379,7 +406,9 @@ def run(args) -> int:
             f"PR #{pr}  steps {steps}  jobs {jobs}  win {r['win']:+d}  "
             f"missed {len(r['missed_failures'])}"
             # A win earned by bailing out to run-everything is not a win.
-            f"{'  RUN_ALL' if r['a_run_all'] else ''}   {r['title'][:36]}",
+            f"{'  RUN_ALL' if r['a_run_all'] else ''}"
+            f"{f'  catchall {n}' if (n := len(r['catchall_only_missed'])) else ''}"
+            f"   {r['title'][:36]}",
             flush=True,
         )
         if r["unmappable_jobs"]:
@@ -402,23 +431,13 @@ def run(args) -> int:
     # each. NOT gated on missed failures: judging those is a human call.
     scored = [r for r in results if "skip" not in r]
     if scored:
-        total = {
-            k: sum(r[k] for r in scored)
-            for k in (
-                "them_steps",
-                "codemap_steps",
-                "final_steps",
-                "them_jobs",
-                "codemap_jobs",
-                "final_jobs",
-            )
-        }
-        missed = sum(len(r["missed_failures"]) for r in scored)
+        total = _totals(scored)
         ratio = (
             f"   ({total['final_jobs'] / total['them_jobs']:.3f}x of CI)"
             if total["them_jobs"]
             else ""
         )
+        missed = total["missed"]
         print(
             f"\nTOTAL over {len(scored)} PRs"
             f"\n  Steps    CI ran {total['them_steps']:<8} "
@@ -428,6 +447,8 @@ def run(args) -> int:
             f"\n  Win      {total['them_jobs'] - total['final_jobs']:+d} jobs"
             f"\n  Missed   {missed} failed job{'' if missed == 1 else 's'}, "
             "each still to be judged"
+            f"\n  Catchall {total['catchall_missed']} missed steps reached only "
+            "through a blanket dep (B4, not the arm under test)"
         )
     if not any(r.get("ran") for r in results):
         print(

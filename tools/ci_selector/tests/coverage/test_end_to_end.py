@@ -5,7 +5,7 @@
 Every other test here feeds the rule a hand-built `Selection`, which is fast
 and cannot catch the one thing that matters: whether the shape the code map
 really produces is the shape the rule really reads. Hand-written fixtures agree
-with each other and prove nothing about the seam.
+with each other and prove nothing about the real join.
 
 `selected_paths` is the specific hazard, being POSITIONAL: one entry per
 reason, ordered with `selected_rules`, `None` meaning the reason cannot be
@@ -121,3 +121,53 @@ def test_selected_paths_lines_up_with_selected_rules(state):
             assert entry is None or isinstance(entry, list), (
                 f"{step_id}: a path entry is neither None nor a list of paths"
             )
+
+
+def test_every_recorded_module_body_is_marked_import_time(live_table):
+    """The floor under `PhaseMode.CARVED` and `STRICT`.
+
+    `merge_build` writes a file's phase only when its source compiles at the
+    recording commit, and `SourceIndex.import_time_names` returns empty for
+    anything it cannot read. A missing entry makes `contains_call` identical to
+    `contains` for that path, so a stricter mode silently degrades to OFF there
+    and the arm weakens with nothing red anywhere. `_verify` cross-checks the
+    COUNT of phase entries, never their coverage, so this is the only thing
+    watching it.
+    """
+    missing = [
+        (key, path)
+        for key, row in live_table._rows.items()
+        for path, names in row.functions.items()
+        if "<module>" in names and "<module>" not in row.import_time.get(path, ())
+    ]
+    assert missing == [], (
+        f"{len(missing)} (row, path) pairs record <module> with no phase entry, "
+        f"e.g. {missing[:3]}"
+    )
+
+
+def test_every_recorded_row_is_readable_by_some_step(vllm_repo, live_table):
+    """The invariant the key derivation broke, and nothing was watching it.
+
+    A row is filed under the identity Buildkite published. A step reaches it by
+    reconstructing that identity from the yaml. When the two disagree the row is
+    simply never read: no error, no reason code, no drop in any count. Rows
+    carrying thousands of files each sat unreadable because `derive_step_key`
+    collapsed dash runs the generator leaves alone.
+
+    Resolved at the table's OWN commit. Labels move, and asking the working tree
+    whether it can spell a row recorded elsewhere is a different question.
+    """
+    from ci_selector.codemap.worktree import state_for
+
+    state = state_for(vllm_repo, newest_commit(live_table, vllm_repo))
+    idents = {
+        step.buildkite_key or step.label
+        for pipeline in state.pipelines
+        for step in pipeline.steps
+    }
+    orphans = sorted(set(live_table._rows) - idents)
+    assert not orphans, (
+        f"{len(orphans)} recorded row(s) match no step at the recording commit, "
+        f"so nothing can ever read them: {orphans[:6]}"
+    )

@@ -4,9 +4,17 @@
 
 Per changed file F and step S:
 
-    the row shows S ran F     -> select. The map gets no vote.
-    the row shows S ran none  -> drop, if every gate agrees.
-    S has no row              -> the map decides.
+    a USABLE row shows S ran F     -> select. The map gets no vote.
+    a USABLE row shows S ran none  -> drop, if every gate agrees.
+    no usable row                  -> the map decides.
+
+Usable, not merely present. A row that is stale, thin, digest-failed, from a job
+that did not pass, or recorded by another Python minor is not evidence of
+absence, so it takes the third line. Expect that line to be the common case.
+
+Those three describe authority, not order. The map proposes the candidate set
+first and the record adjusts it both ways. Evidence cannot originate a set,
+being silent about new code and untraced trees, and silence is not "not needed".
 
 Per FILE, not per diff. The recorder watches some trees and is blind to others,
 so a diff touching both gets the record's answer for one and the map's for the
@@ -25,13 +33,18 @@ to skip dropping entirely.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .coverage import freshness
+from .coverage.phase import DEFAULT_MODE, PhaseMode, mode_from_env
 from .coverage.rules import RowKeys, newest_commit, read_pr, unknown_names
 from .coverage.source import fetch_table
 from .coverage.table import Table
+
+#: Set to re-enable the freshness gate, which is off by default.
+FRESHNESS_ENV = "CI_SELECTOR_FRESHNESS"
 
 
 @dataclass
@@ -61,12 +74,17 @@ def decide(
     head: str | None,
     *,
     table: Table | None = None,
+    mode: PhaseMode | None = None,
 ) -> Decision:
     """Apply the record to the map's selection.
 
     When coverage cannot be used, for any reason at all, the map's selection
     comes back unchanged with the reason in `coverage_note`.
     """
+    # Resolved above the try on purpose. A bad env value has to kill the run:
+    # below, the broad handler would swallow it, every PR would come back
+    # map-only, and that reads as "the mode does nothing".
+    mode = mode if mode is not None else mode_from_env()
     out = Decision(steps=set(selection.selected), from_map=set(selection.selected))
 
     table = table if table is not None else fetch_table()
@@ -75,7 +93,7 @@ def decide(
         return out
 
     try:
-        _apply_record(out, table, selection, repo, base, head)
+        _apply_record(out, table, selection, repo, base, head, mode)
     except Exception as exc:  # noqa: BLE001 - see the module docstring
         # Broad on purpose. A narrower handler would have to decide what to do
         # with a half-built reading, and the only safe answer is nothing.
@@ -86,6 +104,33 @@ def decide(
     return out
 
 
+def _steps_at(repo: Path, ref: str) -> tuple[frozenset[str], frozenset[tuple]]:
+    """Every step the pipeline yaml declares at `ref`, spelled both ways.
+
+    Both, because neither alone answers "is this step here". `step_id` falls
+    back to the label, so a reword makes one step look like two; `identity` is
+    rename-tolerant but says nothing about a step that was genuinely renamed
+    AND moved. `restrict_to` keeps a candidate matching either.
+
+    Deliberately not `state_for`: that builds an import graph and costs ~17s,
+    and the state cache holds two entries, both already spoken for here. This
+    parses yaml and nothing else, and the identities are free once it has.
+    """
+    from .codemap.pipeline.buildkite import load_pipeline_configs, load_steps
+    from .codemap.worktree import worktree_at
+
+    tree = worktree_at(repo, ref)
+    try:
+        configs = load_pipeline_configs(tree)
+    except FileNotFoundError:
+        # No pipeline at that ref is not an answer about which steps exist,
+        # only that we could not look. Empty means "do not restrict", so the
+        # add side keeps working instead of silently switching itself off.
+        return frozenset(), frozenset()
+    steps = [step for config in configs for step in load_steps(tree, config)]
+    return frozenset(s.step_id for s in steps), frozenset(s.identity for s in steps)
+
+
 def _apply_record(
     out: Decision,
     table: Table,
@@ -93,6 +138,7 @@ def _apply_record(
     repo: Path,
     base: str,
     head: str | None,
+    mode: PhaseMode = DEFAULT_MODE,
 ) -> None:
     from .codemap.worktree import state_for
     from .coverage.changed_funcs import build as build_query
@@ -102,11 +148,15 @@ def _apply_record(
 
     recorded_at = newest_commit(table, repo)
     keys = RowKeys.resolve(table, repo, recorded_at)
+    keys.restrict_to(*_steps_at(repo, base))
 
-    # `RowKeys.resolve` already built and cached this state, so this is cheap.
-    surfaces = freshness.build(state_for(repo, recorded_at), recorded_at)
-    moved = freshness.changed_between(repo, recorded_at, base)
-    stale = frozenset(surfaces.stale_steps(selection.selected, moved))
+    stale: frozenset[str] = frozenset()
+    if os.environ.get(FRESHNESS_ENV):
+        # `RowKeys.resolve` already built and cached this state, so this is
+        # cheap.
+        surfaces = freshness.build(state_for(repo, recorded_at), recorded_at)
+        moved = freshness.changed_between(repo, recorded_at, base)
+        stale = frozenset(surfaces.stale_steps(selection.selected, moved))
 
     union: dict[str, set[str]] = {}
     for row in table._rows.values():
@@ -122,6 +172,7 @@ def _apply_record(
         frozenset(union_names),
         keys,
         stale,
+        mode=mode,
     )
     out.stale_steps = len(stale)
     out.reasons = dict(reading.reasons)

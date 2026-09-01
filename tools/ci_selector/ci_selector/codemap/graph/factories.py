@@ -40,6 +40,9 @@ TOKENIZERS_MODULE_PREFIX = "vllm.tokenizers"
 class FactoryParse:
     register_entries: dict[str, str] = field(default_factory=dict)  # key->file
     parser_entries: dict[str, str] = field(default_factory=dict)
+    # Every file a colliding name registers in (kimi_k3 is a tool parser AND a
+    # tokenizer mode). parser_entries keeps one winner; key routing needs all.
+    parser_entry_files: dict[str, set[str]] = field(default_factory=dict)
     # Per table, because names collide across them (deepseek_v3 is both a
     # reasoning and a tool parser) and the merged dict is last-wins. A dead
     # table would leave that size unchanged, so preflight guards these counts.
@@ -214,6 +217,7 @@ def add_lazy_parser_table_edges(
                 if target is None:
                     continue
                 parse.parser_entries[key] = target
+                parse.parser_entry_files.setdefault(key, set()).add(target)
                 parse.parser_table_counts[init_file] += 1
                 _claim(parse, target)
                 parse.edges_added += _leaf_edges(graph, set(consts), target)

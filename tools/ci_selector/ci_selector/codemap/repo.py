@@ -38,6 +38,33 @@ def test_file_catalog(repo: Path) -> list[str]:
     ]
 
 
+@dataclass(frozen=True)
+class TestIndex:
+    """The test tree, indexed the ways path-based routing asks about it."""
+
+    files: frozenset[str]
+    #: Every directory holding at least one test file, `tests/a/b/` form.
+    #: Membership means "tests live there", which is the question a routing
+    #: rule asks; a directory listing on disk would also count empty ones.
+    dirs: frozenset[str]
+    by_name: dict[str, frozenset[str]]
+
+
+def build_test_index(files: frozenset[str]) -> TestIndex:
+    dirs: set[str] = set()
+    by_name: dict[str, set[str]] = {}
+    for file in files:
+        parts = file.split("/")
+        for depth in range(1, len(parts)):
+            dirs.add("/".join(parts[:depth]) + "/")
+        by_name.setdefault(parts[-1], set()).add(file)
+    return TestIndex(
+        files=files,
+        dirs=frozenset(dirs),
+        by_name={name: frozenset(hits) for name, hits in by_name.items()},
+    )
+
+
 @dataclass
 class ModuleIndex:
     module_to_file: dict[str, str] = field(default_factory=dict)

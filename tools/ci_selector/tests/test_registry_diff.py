@@ -229,7 +229,7 @@ def test_bamba_removal_direction(vllm_repo, bamba_shas):
 
 def test_table_claim_carries_specific_declarers(vllm_repo, bamba_shas):
     """The table-diff claim is built outside _classify, so it used to skip the
-    declarer-union seam: a step naming the registry file specifically, but
+    declarer union: a step naming the registry file specifically, but
     running tests elsewhere, was dropped."""
     from ci_selector.codemap.classify import _source_dep_steps
     from ci_selector.codemap.registry_diff import TABLE_FILES
@@ -246,7 +246,7 @@ def test_table_claim_carries_specific_declarers(vllm_repo, bamba_shas):
     reached = set(sel.selected) | set(sel.manual_hits)
     for table in tables:
         declarers = _source_dep_steps(state, table, specific_only=True)
-        assert declarers, f"{table} has no specific declarers; the seam proves nothing"
+        assert declarers, f"{table} has no specific declarers; nothing is proved"
         assert not declarers - reached, sorted(declarers - reached)[:5]
 
 

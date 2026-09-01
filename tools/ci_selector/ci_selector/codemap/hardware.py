@@ -32,6 +32,9 @@ from ..handwritten import (
 from ..handwritten import (
     PATH_TOKEN_FAMILIES as _PATH_TOKEN_FAMILIES,
 )
+from ..handwritten import (
+    REQUIREMENTS_EXTRA_TOKEN_FAMILIES as _REQUIREMENTS_EXTRA_TOKEN_FAMILIES,
+)
 
 BASENAME_TOKEN_EXTENSIONS: tuple[str, ...] = (".py", ".sh")
 AMD_BASENAME_TOKEN = "rocm"
@@ -54,6 +57,22 @@ def family_of_path(path: str) -> str | None:
     for token_set, family in _PATH_TOKEN_FAMILIES:
         if tokens & token_set:
             return family
+    return None
+
+
+def requirements_family_of_path(path: str) -> str | None:
+    """Family for a requirements file, where the filename names the device.
+    The extra tokens (cuda) hold only under requirements/: globally they would
+    misfire on vllm/ paths and on the generic Dockerfile."""
+    if not path.startswith("requirements/"):
+        return None
+    family = family_of_path(path)
+    if family:
+        return family
+    tokens = set(re.split(r"[/_.]", path.lower()))
+    for token_set, extra in _REQUIREMENTS_EXTRA_TOKEN_FAMILIES:
+        if tokens & token_set:
+            return extra
     return None
 
 

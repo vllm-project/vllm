@@ -9,19 +9,26 @@ something the design assumed. Where that is so, the docstring says which.
 from __future__ import annotations
 
 import dataclasses
+import gzip
 import hashlib
 import inspect
-import json
 from pathlib import Path
 
 import pytest
-from ci_selector.coverage.build import merge_build, merge_builds, union_rows
 from ci_selector.coverage.model import (
     STAMP_SHAPE,
     TABLE_VERSION,
+    Row,
     Stamp,
+    UnresolvableCommit,
     read_process,
     row_key,
+)
+from ci_selector.scripts.build import (
+    BuildCensus,
+    merge_build,
+    merge_builds,
+    union_rows,
 )
 
 from .helpers import ROOT, Build, Repo, process_file
@@ -188,7 +195,7 @@ class TestMergeBuild:
             "vllm/mod.py": frozenset({"plain", "Holder.method"})
         }
         assert rows["lora"].stamp.processes == 4
-        assert rows["lora"].stamp.shards_seen == {"1": 2}
+        assert rows["lora"].stamp.shards_seen == {"1": [0, 1]}
         assert rows["lora"].stamp.shards_complete
 
     def test_a_missing_shard_shows_as_short(self, build: Build, tmp_repo: Repo):
@@ -199,9 +206,102 @@ class TestMergeBuild:
         )
         rows = merge_build(build.finish(), tmp_repo.root)
 
-        assert rows["lora"].stamp.shards_seen == {"1": 1}
+        assert rows["lora"].stamp.shards_seen == {"1": [0]}
         assert rows["lora"].stamp.shards_expected == {"1": 3}
         assert not rows["lora"].stamp.shards_complete
+
+    def test_a_retried_shard_does_not_stand_in_for_a_missing_one(
+        self, build: Build, tmp_repo: Repo
+    ):
+        # The live route is a manual retry: Buildkite returns both attempts, and
+        # counting jobs read two attempts of shard 0 as "both shards recorded",
+        # so a function only shard 1 would have run became droppable.
+        for job_id in ("j0", "j0-retry"):
+            d = build.job(job_id, step_key="lora", parallel_index=0, parallel_total=2)
+            process_file(d / "fn.a.txt", [("mod.py", "plain")])
+        rows = merge_build(build.finish(), tmp_repo.root)
+
+        assert rows["lora"].stamp.shards_seen == {"1": [0]}
+        assert not rows["lora"].stamp.shards_complete
+
+    def test_a_job_that_did_not_pass_disqualifies_the_row(
+        self, build: Build, tmp_repo: Repo
+    ):
+        # Nothing held this in place before: deleting the check left the suite
+        # green.
+        d = build.job("j0", step_key="lora", state="broken", exit_status=1)
+        process_file(d / "fn.a.txt", [("mod.py", "plain")])
+        rows = merge_build(build.finish(), tmp_repo.root)
+
+        assert rows["lora"].stamp.failed_jobs == ["j0"]
+
+    def test_a_bad_exit_status_disqualifies_even_when_state_says_passed(
+        self, build: Build, tmp_repo: Repo
+    ):
+        # Two fields, so neither one being wrong, absent or newly spelled by
+        # Buildkite can promote a partial recording on its own.
+        d = build.job("j0", step_key="lora", state="passed", exit_status=2)
+        process_file(d / "fn.a.txt", [("mod.py", "plain")])
+        rows = merge_build(build.finish(), tmp_repo.root)
+
+        assert rows["lora"].stamp.failed_jobs == ["j0"]
+
+    def test_a_healthy_job_is_not_disqualified(self, build: Build, tmp_repo: Repo):
+        # The floor for the two above, so they cannot pass by condemning
+        # everything.
+        d = build.job("j0", step_key="lora")
+        process_file(d / "fn.a.txt", [("mod.py", "plain")])
+        rows = merge_build(build.finish(), tmp_repo.root)
+
+        assert rows["lora"].stamp.failed_jobs == []
+        assert not rows["lora"].stamp.thin
+
+    def test_an_unreadable_log_makes_the_row_thin(self, build: Build, tmp_repo: Repo):
+        # Without this the log-derived health counters are simply absent, and
+        # absent reads identically to healthy.
+        d = build.job("j0", step_key="lora", log=None)
+        process_file(d / "fn.a.txt", [("mod.py", "plain")])
+        rows = merge_build(build.finish(), tmp_repo.root)
+
+        assert rows["lora"].stamp.logs_unreadable == 1
+        assert rows["lora"].stamp.thin
+
+    def test_a_truncated_log_does_not_kill_the_merge(
+        self, build: Build, tmp_repo: Repo
+    ):
+        # A partially uploaded .gz raises EOFError, not an OSError, so one bad
+        # log used to take down the whole sweep.
+        d = build.job("j0", step_key="lora")
+        (d.parent / "job.log.gz").write_bytes(
+            gzip.compress(b"collected 3 items\n")[:12]
+        )
+        process_file(d / "fn.a.txt", [("mod.py", "plain")])
+        rows = merge_build(build.finish(), tmp_repo.root)
+
+        assert rows["lora"].stamp.logs_unreadable == 1
+
+    def test_a_commit_the_repo_cannot_see_is_fatal(self, build: Build, tmp_repo: Repo):
+        # Not tolerated, because every symptom is a lie: each file reads as
+        # absent at that commit, so the build merges to nothing while still
+        # lending a unioned row its completeness and its vintage.
+        build.commit = "0" * 40
+        d = build.job("j0", step_key="lora")
+        process_file(d / "fn.a.txt", [("mod.py", "plain")])
+        with pytest.raises(UnresolvableCommit):
+            merge_build(build.finish(), tmp_repo.root)
+
+    def test_an_unread_world_is_counted_not_silently_empty(
+        self, build: Build, tmp_repo: Repo
+    ):
+        # No build.json, so build_env is unknown. That has to be told apart
+        # from a build where every variable was genuinely unset, since
+        # "no NIGHTLY" separates a hand-triggered sweep from a production one.
+        d = build.job("j0", step_key="lora")
+        process_file(d / "fn.a.txt", [("mod.py", "plain")])
+        rows = merge_build(build.finish(), tmp_repo.root)
+
+        assert rows["lora"].stamp.worlds_unread == 1
+        assert rows["lora"].stamp.build_env == {}
 
     def test_a_step_that_enters_no_vllm_code_still_gets_a_row(
         self, build: Build, tmp_repo: Repo
@@ -219,6 +319,111 @@ class TestMergeBuild:
     def test_a_job_with_no_recording_gets_no_row(self, build: Build, tmp_repo: Repo):
         build.job("j0", step_key="never-instrumented", recorded=False)
         assert merge_build(build.finish(), tmp_repo.root) == {}
+
+    def test_a_build_that_recorded_nothing_is_counted_not_silent(
+        self, build: Build, tmp_repo: Repo
+    ):
+        """A build can lose most of its jobs and still merge into a table that
+        looks structurally fine. The skip is per job and was two bare
+        `continue`s, so nothing held the denominator."""
+        for i in range(4):
+            build.job(f"j{i}", step_key=f"step-{i}", recorded=False)
+        census = BuildCensus()
+        assert merge_build(build.finish(), tmp_repo.root, census=census) == {}
+
+        assert (census.recorded, census.attempted) == (0, 4)
+        assert census.rate == 0.0
+        assert census.collapsed
+        assert len(census.no_dir) == 4
+
+    def test_the_three_no_recording_causes_are_told_apart(
+        self, build: Build, tmp_repo: Repo
+    ):
+        """They mean different things: nothing delivered, a failed install, and
+        our own parser. Lumping them together is how the second one hid."""
+        build.job("j0", step_key="nothing-delivered", recorded=False)
+
+        installer_failed = build.job("j1", step_key="install-failed")
+        (installer_failed / "install.err").write_text("boom\n")
+
+        no_root = build.job("j2", step_key="no-root")
+        (no_root / "fn.a.txt").write_text("#start\tpid=1\n")
+
+        good = build.job("j3", step_key="fine")
+        process_file(good / "fn.a.txt", [("mod.py", "plain")])
+
+        census = BuildCensus()
+        rows = merge_build(build.finish(), tmp_repo.root, census=census)
+
+        assert set(rows) == {"fine"}
+        assert census.recorded == 1
+        assert len(census.no_dir) == 1
+        assert len(census.no_record_files) == 1
+        assert len(census.no_resolvable_root) == 1
+
+    def test_a_job_that_never_started_is_not_counted_against_the_build(
+        self, build: Build, tmp_repo: Repo
+    ):
+        """A blocked job could not have recorded, so counting it would
+        understate the rate."""
+        good = build.job("j0", step_key="fine")
+        process_file(good / "fn.a.txt", [("mod.py", "plain")])
+        build.job(
+            "j1", step_key="blocked", recorded=False, started=False, state="blocked"
+        )
+
+        census = BuildCensus()
+        merge_build(build.finish(), tmp_repo.root, census=census)
+
+        assert (census.recorded, census.attempted) == (1, 1)
+        assert not census.collapsed
+
+    def test_reading_the_index_after_the_shard_loop_still_works(
+        self, build: Build, tmp_repo: Repo
+    ):
+        """`index` used to be rebound to an int by the shard accounting, so any
+        post-loop read raised TypeError on every sharded build -- which no
+        fixture without shards would catch."""
+        for i in range(2):
+            d = build.job(f"j{i}", step_key="lora", parallel_index=i, parallel_total=2)
+            process_file(d / "fn.a.txt", [("mod.py", "plain")])
+        census = BuildCensus()
+        merge_build(build.finish(), tmp_repo.root, census=census)
+        assert census.n_jobs == 2
+
+    def test_the_census_is_not_a_stamp_field(self, build: Build, tmp_repo: Repo):
+        """It is never stored, which is why no TABLE_VERSION bump was needed.
+
+        A version pin exists to stop an older stored table reading healthier
+        than recorded, since `load` fills a missing field with its healthy
+        default. Nothing here is stored, so no older table can be missing it.
+        """
+        names = {f.name for f in dataclasses.fields(Stamp)}
+        assert not names & {f.name for f in dataclasses.fields(BuildCensus)}
+
+    def test_the_breadth_index_is_derived_and_never_stored(
+        self, tmp_path: Path, tmp_repo: Repo
+    ):
+        """Same argument as the census, for `Table._breadth`.
+
+        Recomputed from rows already stored, so no older table can be missing it.
+        Three things would invert that: writing it in `write_table`, making it a
+        `Stamp` field, or feeding it into the digest. This pins the first two;
+        the third has no path, since `digest_of` signs functions and stamp
+        fields only.
+        """
+        from ci_selector.coverage.table import Table
+
+        assert "_breadth" not in {f.name for f in dataclasses.fields(Stamp)}
+        row = Row(
+            key="a",
+            keyed=True,
+            functions={"vllm/mod.py": frozenset({"plain"})},
+            stamp=Stamp(),
+        )
+        assert Table({"a": row})._breadth == {"vllm/mod.py": {"plain": 1}}
+        # An empty table has no share to read, so the gate cannot fire on it.
+        assert Table({}).discriminates("vllm/mod.py", "plain")
 
     def test_files_absent_at_the_commit_are_dropped(self, build: Build, tmp_repo: Repo):
         # _version.py and third_party/** are generated at build time, so no diff
@@ -259,7 +464,7 @@ class TestUnionCoversEveryStampField:
     the counts and the digest from whatever it was handed.
     """
 
-    RECOMPUTED = frozenset({"n_files", "n_functions", "digest"})
+    RECOMPUTED = frozenset({"n_files", "n_functions", "n_import_time", "digest"})
 
     def test_union_rows_carries_every_field(self):
         source = inspect.getsource(union_rows)
@@ -356,49 +561,110 @@ class TestCrossBuild:
             union_rows(rows["a"], rows["b"])
 
 
-SWEEPS = Path(__file__).resolve().parents[2] / "covspike" / "sweeps"
+# The cross-build path, synthetically. It replaced a test that read real
+# recordings from a git-excluded directory, which made it unrunnable: its path
+# was wrong for months and the skip read as normal on a machine without the
+# data. It also earned little, since both sides of its comparison read the SAME
+# bytes, so a parse bug cancels out. This asserts strictly more, adding the
+# shard bookkeeping and the absent-file asymmetry the original ran past.
+SHARDS = {
+    0: [("mod.py", "plain")],
+    1: [("mod.py", "plain"), ("gone.py", "<module>")],
+    2: [("mod.py", "Holder.method"), ("gone.py", "<module>")],
+    3: [("other.py", "elsewhere")],
+    4: [("mod.py", "Holder.method")],
+}
 
 
-@pytest.mark.skipif(not SWEEPS.is_dir(), reason="raw sweeps not present")
-class TestAgainstRealRecordings:
-    """The cross-build path on real bytes, by splitting one sharded step's five
-    shards into two pretend builds. Union of the halves must equal the whole."""
+def _sharded(root: Path, number: str, commit: str, indexes) -> Path:
+    """One build carrying a chosen subset of a five-shard step's jobs."""
+    build = Build(root, number, commit)
+    for i in indexes:
+        d = build.job(
+            f"j{i}",
+            step_key="moe",
+            label=f"Kernels MoE Test {i + 1}",
+            parallel_index=i,
+            parallel_total=5,
+        )
+        process_file(d / "fn.a.txt", SHARDS[i])
+        process_file(d / "fn.b.txt", [("other.py", "elsewhere")])
+    return build.finish()
 
-    def test_kernels_moe_shards_split_across_builds_rejoin(self, tmp_path: Path):
-        source = SWEEPS / "vllm-ci-82772"
-        index = json.loads((source / "index.json").read_text())
-        shards = [j for j in index["jobs"] if j.get("step_key") == "kernels-moe-test"]
-        assert len(shards) == 5
 
-        tmp_repo = Path(__file__).resolve().parents[4]
-        whole = _stage(tmp_path / "whole", "1", index["commit"], shards, source)
-        left = _stage(tmp_path / "left", "1", index["commit"], shards[:2], source)
-        right = _stage(tmp_path / "right", "2", index["commit"], shards[2:], source)
+class TestCrossBuildShards:
+    """Splitting a sharded step across two builds must lose nothing.
 
-        one = merge_build(whole, tmp_repo)["kernels-moe-test"]
-        split = merge_builds([left, right], tmp_repo)["kernels-moe-test"]
+    Shard contents are deliberately asymmetric across the split, `plain` only
+    on the left and `Holder.method` only on the right, so a merge that replaces
+    instead of unioning cannot pass by coincidence.
+    """
+
+    def test_union_of_halves_equals_the_whole(self, tmp_path: Path, tmp_repo: Repo):
+        commit = tmp_repo.head()
+        whole = _sharded(tmp_path / "w", "1", commit, range(5))
+        left = _sharded(tmp_path / "l", "1", commit, [0, 1])
+        right = _sharded(tmp_path / "r", "2", commit, [2, 3, 4])
+
+        one = merge_build(whole, tmp_repo.root)["moe"]
+        split = merge_builds([left, right], tmp_repo.root)["moe"]
 
         assert split.functions == one.functions
-        assert split.stamp.n_functions == one.stamp.n_functions
+        assert split.functions == {
+            "vllm/mod.py": frozenset({"plain", "Holder.method"}),
+            "vllm/other.py": frozenset({"elsewhere"}),
+        }
+        assert split.stamp.n_functions == one.stamp.n_functions == 3
         assert sorted(split.stamp.jobs) == sorted(one.stamp.jobs)
         assert split.stamp.builds == ["1", "2"]
+        assert split.stamp.processes == one.stamp.processes == 10
 
+    def test_the_split_is_visibly_short_of_shards(self, tmp_path: Path, tmp_repo: Repo):
+        """Where "union equals the whole" stops being true, and it stops on the
+        fields that authorize a drop. Each half declares five shards and holds
+        two or three, so neither is complete and the merged row is THIN even
+        though its functions match the whole exactly."""
+        commit = tmp_repo.head()
+        whole = _sharded(tmp_path / "w", "1", commit, range(5))
+        left = _sharded(tmp_path / "l", "1", commit, [0, 1])
+        right = _sharded(tmp_path / "r", "2", commit, [2, 3, 4])
 
-def _stage(
-    root: Path, number: str, commit: str, jobs: list[dict], source: Path
-) -> Path:
-    """A build directory pointing at real recordings, without copying 2GB."""
-    import os
+        one = merge_build(whole, tmp_repo.root)["moe"]
+        split = merge_builds([left, right], tmp_repo.root)["moe"]
 
-    build = Build(root, number, commit)
-    for job in jobs:
-        target = build.job(
-            job["job"],
-            step_key=job["step_key"],
-            label=job["label"],
-            parallel_index=job["parallel_index"],
-            parallel_total=job["parallel_total"],
-        )
-        for src in (source / "jobs" / job["job"] / "fnrec").glob("fn.*.txt"):
-            os.symlink(src, target / src.name)
-    return build.finish()
+        assert one.stamp.shards_seen == {"1": [0, 1, 2, 3, 4]}
+        assert split.stamp.shards_seen == {"1": [0, 1], "2": [2, 3, 4]}
+        # Both builds must carry the expectation. Keeping only the left one
+        # survives the whole suite otherwise.
+        assert split.stamp.shards_expected == {"1": 5, "2": 5}
+        assert one.stamp.shards_complete and not split.stamp.shards_complete
+        assert not one.stamp.thin and split.stamp.thin
+
+    def test_a_file_absent_at_the_commit_is_counted_once_per_build(
+        self, tmp_path: Path, tmp_repo: Repo
+    ):
+        """`gone.py` is recorded but never existed, so each build drops it. The
+        count is per build and does not deduplicate, which is why the whole
+        reports one and the split two. Pinned as a known asymmetry."""
+        commit = tmp_repo.head()
+        whole = _sharded(tmp_path / "w", "1", commit, range(5))
+        left = _sharded(tmp_path / "l", "1", commit, [0, 1])
+        right = _sharded(tmp_path / "r", "2", commit, [2, 3, 4])
+
+        one = merge_build(whole, tmp_repo.root)["moe"]
+        split = merge_builds([left, right], tmp_repo.root)["moe"]
+        assert one.stamp.dropped_absent_files == 1
+        assert split.stamp.dropped_absent_files == 2
+
+    def test_two_directories_reporting_one_build_keep_both_shard_sets(
+        self, tmp_path: Path, tmp_repo: Repo
+    ):
+        """What `_union_shards` exists for. A plain dict merge lets the second
+        row's indexes replace the first's, and the row then reads complete on
+        half the shards."""
+        commit = tmp_repo.head()
+        a = _sharded(tmp_path / "a", "1", commit, [0, 1, 2])
+        b = _sharded(tmp_path / "b", "1", commit, [3, 4])
+        row = merge_builds([a, b], tmp_repo.root)["moe"]
+        assert row.stamp.shards_seen == {"1": [0, 1, 2, 3, 4]}
+        assert row.stamp.shards_complete

@@ -38,7 +38,7 @@ class FakeTargets:
 class FakeGraph:
     imports: dict = field(default_factory=dict)
 
-    def forward_closure(self, files, include_gated=True):
+    def forward_closure(self, files, include_boot=True):
         seen = set(files)
         stack = list(files)
         while stack:

@@ -82,3 +82,37 @@ class TestRanNothing:
     def test_errors_count_as_executed(self, tmp_path: Path):
         log = write(tmp_path / "job.log", "=== 2 errors, 3 skipped in 1.0s ===\n")
         assert not read_counts(log).counts.ran_nothing
+
+    def test_all_deselected_ran_nothing_too(self, tmp_path: Path):
+        # Zero skips, so the old `skipped > 0` clause read this as healthy.
+        log = write(tmp_path / "job.log", "=== 12 deselected in 0.4s ===\n")
+        assert read_counts(log).counts.ran_nothing
+
+    def test_no_tests_ran_is_not_a_healthy_row(self, tmp_path: Path):
+        # pytest's own wording when a filter matches nothing. Also zero skips.
+        log = write(tmp_path / "job.log", "=== no tests ran in 0.1s ===\n")
+        assert read_counts(log).counts.ran_nothing
+
+
+class TestSummaryUnparsed:
+    """The witness for `_SUMMARY` drift, which `ran_nothing` structurally
+    cannot be: if the summary regex matches nothing then every count it feeds
+    is zero, which is indistinguishable from a healthy quiet step."""
+
+    def test_a_collection_line_with_no_summary_is_caught(self, tmp_path: Path):
+        # What a job killed mid-run leaves behind, and what a pytest release
+        # that changes its summary format would leave on EVERY job at once.
+        log = write(tmp_path / "job.log", "collected 40 items\ntest_a.py .\n")
+        counts = read_counts(log).counts
+        assert counts.invocations == 0 and counts.summary_unparsed
+
+    def test_a_step_that_is_not_pytest_stays_silent(self, tmp_path: Path):
+        # The floor. Collecting nothing means there was no pytest output to misread.
+        log = write(tmp_path / "job.log", "building wheel\ndone\n")
+        assert not read_counts(log).counts.summary_unparsed
+
+    def test_a_readable_summary_is_not_drift(self, tmp_path: Path):
+        log = write(
+            tmp_path / "job.log", "collected 3 items\n=== 3 passed in 1.0s ===\n"
+        )
+        assert not read_counts(log).counts.summary_unparsed

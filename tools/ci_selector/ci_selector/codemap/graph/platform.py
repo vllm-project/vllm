@@ -5,8 +5,8 @@
 For every get_* method across the platform classes, union every string literal
 returned in the body (no dataflow) and edge each `X.get_<method>()` call site to
 all candidate modules. A method with any non-literal return falls back to edges
-onto all platform modules (small, bounded). C-extension imports (the CMake seam)
-are recorded, not edged.
+onto all platform modules (small, bounded). C-extension imports, which cross
+into compiled code, are recorded rather than edged.
 """
 
 from __future__ import annotations
@@ -108,7 +108,7 @@ def add_platform_qualname_edges(
     claims (attention backends, models) are SKIPPED: their coverage routes
     through leaf test edges, and an import edge here would re-amplify them
     (found by the #49364 revert replay: test_logprobs -> engine ->
-    worker_cls seam -> cudagraph_utils was unreachable)."""
+    worker_cls boot edge -> cudagraph_utils was unreachable)."""
     qualname_re = re.compile(r"^vllm\.[\w.]+$")
     base = repo / PLATFORMS_DIR
     init_file = f"{PLATFORMS_DIR}/__init__.py"
@@ -138,7 +138,7 @@ def add_platform_qualname_edges(
             ):
                 # Gated: worker_cls etc. resolve only when an engine boots, so
                 # tests reached only via them are limited to engine-starting ones.
-                graph.add_gated_edge(rel, target)
+                graph.add_boot_edge(rel, target)
                 parse.edges_added += 1
 
 

@@ -11,8 +11,12 @@ from pathlib import Path
 
 import pytest
 import regex as re
-from ci_selector.codemap.pipeline.buildkite import load_pipeline_configs, load_steps
-from ci_selector.codemap.pipeline.step import DEFAULT_WORKING_DIR, LoadReport
+from ci_selector.codemap.pipeline.buildkite import (
+    _expand_mirror,
+    load_pipeline_configs,
+    load_steps,
+)
+from ci_selector.codemap.pipeline.step import DEFAULT_WORKING_DIR, LoadReport, Step
 from ci_selector.handwritten import AMD_ALWAYS_RUN_STEP_KEYS
 from helpers import HW, drift_message
 
@@ -100,50 +104,6 @@ def test_lora_step_shapes(loaded):
     assert ".buildkite/test_areas/lora.yaml" in amd.source_file_dependencies
     assert amd.depends_on == ["image-build-amd"]
     assert amd.commands == parent.commands  # not overridden in the mirror
-
-
-SWEEPS = Path(__file__).resolve().parents[3] / "zzzzz/auto-test/covspike/sweeps"
-
-
-@pytest.mark.skipif(not SWEEPS.is_dir(), reason="raw sweeps not present")
-def test_derived_step_keys_match_what_buildkite_published(loaded):
-    """The key rule was fitted against real builds, so pin it against them.
-
-    Most steps carry an author-written key. When the yaml omits one the
-    generator derives it from the label, and we have to reproduce that or the
-    step cannot be named -- which under an exhaustive-whitelist emission means
-    it silently does not run.
-    """
-    import json
-
-    from ci_selector.codemap.pipeline.step import derive_step_key
-
-    published: dict[str, str] = {}
-    for build in sorted(SWEEPS.glob("vllm-ci-*")):
-        index = build / "index.json"
-        if not index.is_file():
-            continue
-        for job in json.loads(index.read_text())["jobs"]:
-            if job.get("step_key") and job.get("label"):
-                published.setdefault(job["label"], job["step_key"])
-
-    _, steps, _ = loaded
-    checked = []
-    for step in (s for group in steps.values() for s in group):
-        if step.key or step.mirror_hw:
-            continue
-        # Runtime labels carry the shard number the yaml writes as %N.
-        stem = re.sub(r"\s+\d+$", "", step.label)
-        for label, key in published.items():
-            if re.sub(r"\s+\d+$", "", label) in (stem, step.label):
-                checked.append((step.label, key, derive_step_key(step.label)))
-                break
-
-    assert len(checked) > 30, f"oracle collapsed: only {len(checked)} pairs matched"
-    wrong = [(lbl, real, got) for lbl, real, got in checked if real != got]
-    assert not wrong, "\n".join(
-        f"{lbl!r}: published {real!r}, derived {got!r}" for lbl, real, got in wrong
-    )
 
 
 def test_a_mirror_publishes_the_hardware_as_a_prefix(loaded):
@@ -295,8 +255,10 @@ def test_no_duplicate_step_ids_at_head(loaded):
         "Step ids key the target map, so one silently overwrites the other and "
         "whatever the loser tested stops being selectable.",
         "the yaml really has two steps with one key: give one a distinct key",
-        "they differ but our id derivation collapses them: fix derive_step_key "
-        "in ci_selector/codemap/pipeline/step.py",
+        "two steps share a LABEL and neither carries a key, so `key or label` "
+        "gives them one id: give one a key in the yaml. Note this is step_id, "
+        "not derive_step_key -- the derivation feeds buildkite_key and has no "
+        "say in step identity",
     )
 
 
@@ -364,3 +326,44 @@ def test_no_orphan_step_shaped_yaml(vllm_repo, loaded):
         "a new pipeline landed: add its config so load_pipeline_configs finds it",
         f"nothing runs it: add it to LEGACY_CI_FILES or INERT_CI_PREFIXES in {HW}",
     )
+
+
+def _parent_step(**kw):
+    base = dict(
+        pipeline="vllm_ci",
+        source_file=".buildkite/test_areas/x.yaml",
+        label="Basic Correctness",
+        key="basic-correctness",
+        group=None,
+        commands=["pytest -v tests/basic_correctness"],
+        source_file_dependencies=None,
+    )
+    return Step(**{**base, **kw})
+
+
+def test_a_stray_mirror_key_is_recorded_against_the_mirror_not_the_parent():
+    """`_expand_mirror` files unknown keys under the variant's id, so an AMD-only
+    typo forces the AMD step and leaves its NVIDIA parent free."""
+    report = LoadReport()
+    parent = _parent_step()
+    variant = _expand_mirror(
+        parent, "amd", {"device": "mi300_1", "gpu_kind": "wat"}, report
+    )
+    assert report.unknown_fields == {"gpu_kind": [variant.step_id]}
+    assert variant.step_id == "vllm_ci:basic-correctness-amd:amd"
+    assert parent.step_id not in report.unknown_fields["gpu_kind"]
+
+
+def test_a_declared_mirror_label_is_modelled_rather_than_flagged():
+    """Every mirror carries its own label, so leaving that field unmodelled
+    force-selected all of them, and a forced step is not droppable. Kept beside
+    the derived label because `step_id` falls back to the label."""
+    report = LoadReport()
+    declared = ":amd: (MI300) Basic Correctness"
+    variant = _expand_mirror(
+        _parent_step(), "amd", {"device": "mi300_1", "label": declared}, report
+    )
+    assert report.unknown_fields == {}
+    assert variant.mirror_label == declared
+    assert variant.label == "Basic Correctness (amd)"
+    assert variant.step_id == "vllm_ci:basic-correctness-amd:amd"
