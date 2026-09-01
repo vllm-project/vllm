@@ -99,6 +99,8 @@ class RequestFuncOutput:
     prompt_len: int = 0
     error: str = ""
     start_time: float = 0.0
+    # Time spent awaiting the benchmark client concurrency semaphore.
+    client_queue_time: float = 0.0
     input_audio_duration: float = 0.0  # in seconds
     num_input_sequences: int = 1
 
