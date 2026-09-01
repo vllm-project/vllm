@@ -22,13 +22,13 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.fusion.quant_activation import (
-    QuantizedActivation,
-    expose_input_quant_key,
-)
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
+)
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    expose_input_quant_key,
 )
 from vllm.model_executor.layers.linear import (
     LinearMethodBase,
