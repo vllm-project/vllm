@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
+
+from opentelemetry.sdk.trace import SpanLimits
 
 from vllm.tracing import HIDE_TOKEN_IDS
 from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput
 from vllm.v1.outputs import IterStats
+
+_MAX_EVENTS = SpanLimits().max_events
 
 
 @dataclass(slots=True)
@@ -21,14 +26,14 @@ class Event:
 
 @dataclass
 class ObservableContext:
-    token_related_events: list[Event]
+    token_related_events: deque[Event]
     engine_core_events: list[EngineCoreEvent]
     not_empty: bool = False
 
     @classmethod
     def from_new_request(cls):
         return cls(
-            token_related_events=[],
+            token_related_events=deque(maxlen=_MAX_EVENTS),
             engine_core_events=[],
         )
 

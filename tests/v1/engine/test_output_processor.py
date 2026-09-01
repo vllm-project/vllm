@@ -25,9 +25,29 @@ from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
+    observable_context,
 )
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.outputs import IterStats
+
+
+def test_token_events_respect_otel_span_event_limit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(observable_context, "_MAX_EVENTS", 2)
+    context = observable_context.ObservableContext.from_new_request()
+
+    for timestamp in (1.0, 2.0):
+        context._update_iter_stats(
+            IterStats(
+                token_scheduled_time=timestamp,
+                token_output_time=timestamp,
+            ),
+            [1],
+        )
+
+    assert [event.timestamp for event in context.token_related_events] == [2.0, 2.0]
 
 
 def _ref_convert_id_to_token(
