@@ -570,15 +570,20 @@ def resolve_chat_template_content_format(
     *,
     model_config: ModelConfig,
 ) -> ChatTemplateContentFormat:
-    if given_format != "auto":
-        return given_format
-
     detected_format = _resolve_chat_template_content_format(
         chat_template,
         tools,
         tokenizer,
         model_config=model_config,
     )
+
+    if given_format != "auto":
+        _log_chat_template_content_format(
+            chat_template,
+            given_format=given_format,
+            detected_format=detected_format,
+        )
+        return given_format
 
     _log_chat_template_content_format(
         chat_template,
@@ -789,6 +794,14 @@ def safe_apply_chat_template(
             tokenize=tokenize,
             **resolved_kwargs,
         )
+    except TypeError as e:
+        logger.exception(
+            "A TypeError occurred while applying the chat template. "
+            "This often means the chat template is incompatible with "
+            "the chosen --chat-template-content-format (e.g. 'openai' "
+            "passes list content but the template expects strings)."
+        )
+        raise ValueError(str(e)) from e
     except Exception as e:
         logger.exception(
             "An error occurred in `transformers` while applying chat template"
