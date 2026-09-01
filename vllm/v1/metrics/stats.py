@@ -9,6 +9,10 @@ from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.v1.cache_hit_source import (
+    CacheHitSource,
+    normalize_cache_hit_source,
+)
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -286,7 +290,8 @@ class PrefillStats:
         num_prompt_tokens: int,
         num_local_cached_tokens: int,
         num_external_cached_tokens: int,
-        external_cached_token_sources: Sequence[tuple[str, int]] | None = None,
+        external_cached_token_sources: Sequence[tuple[str | CacheHitSource, int]]
+        | None = None,
     ):
         num_cached_tokens = num_local_cached_tokens + num_external_cached_tokens
         assert num_cached_tokens <= num_prompt_tokens
@@ -305,14 +310,15 @@ class PrefillStats:
                 assert num_tokens >= 0
                 if num_tokens == 0:
                     continue
-                if sources and sources[-1][0] == source:
+                normalized_source = normalize_cache_hit_source(source).value
+                if sources and sources[-1][0] == normalized_source:
                     previous_source, previous_tokens = sources[-1]
                     sources[-1] = (
                         previous_source,
                         previous_tokens + num_tokens,
                     )
                 else:
-                    sources.append((source, num_tokens))
+                    sources.append((normalized_source, num_tokens))
         assert sum(num_tokens for _, num_tokens in sources) == (
             num_external_cached_tokens
         )
@@ -450,12 +456,8 @@ class PromptTokenStats:
         "local_cache_hit",
         "external_kv_transfer",
     )
-    BUILTIN_CACHED_SOURCES: tuple[str, ...] = (
-        "device",
-        "cpu",
-        "disk",
-        "mixed",
-        "external",
+    BUILTIN_CACHED_SOURCES: tuple[str, ...] = tuple(
+        source.value for source in CacheHitSource
     )
 
     computed: int = 0

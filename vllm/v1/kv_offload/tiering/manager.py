@@ -32,6 +32,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.logger import init_logger
+from vllm.v1.cache_hit_source import (
+    CacheHitSource,
+    normalize_cache_hit_source,
+)
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
@@ -229,7 +233,7 @@ class TieringOffloadingManager(OffloadingManager):
         # in the CPU primary tier. This is separate from _req_state because
         # lookup() is also a valid standalone manager operation in which
         # on_new_request() has not established lifecycle state.
-        self._request_load_sources: dict[str, dict[OffloadKey, str]] = {}
+        self._request_load_sources: dict[str, dict[OffloadKey, CacheHitSource]] = {}
 
         # Cached ParentManager wrappers for each secondary tier.
         self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {
@@ -291,7 +295,9 @@ class TieringOffloadingManager(OffloadingManager):
 
         load_sources = self._request_load_sources.get(transfer_job.req_context.req_id)
         if load_sources is not None:
-            tier_type = self.secondary_tiers[job_metadata.tier_idx].tier_type
+            tier_type = normalize_cache_hit_source(
+                self.secondary_tiers[job_metadata.tier_idx].tier_type
+            )
             for key in failed_keys:
                 if load_sources.get(key) == tier_type:
                     del load_sources[key]
@@ -431,7 +437,9 @@ class TieringOffloadingManager(OffloadingManager):
         return LookupResult.MISS
 
     @override
-    def get_load_source(self, key: OffloadKey, req_context: ReqContext) -> str:
+    def get_load_source(
+        self, key: OffloadKey, req_context: ReqContext
+    ) -> CacheHitSource:
         load_sources = self._request_load_sources.get(req_context.req_id)
         if load_sources is not None and key in load_sources:
             return load_sources[key]
@@ -475,7 +483,7 @@ class TieringOffloadingManager(OffloadingManager):
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
         load_sources = self._request_load_sources.setdefault(req_context.req_id, {})
-        tier_type = self.secondary_tiers[tier_idx].tier_type
+        tier_type = normalize_cache_hit_source(self.secondary_tiers[tier_idx].tier_type)
         for promoted_key in primary_write_result.keys_to_store:
             load_sources[promoted_key] = tier_type
         # Defer submit_load to on_schedule_end(). Group by (tier, request) so
