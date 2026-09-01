@@ -428,6 +428,9 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         # Per-token defers input quant to _invoke_kernel, so a1q_scale is None.
         assert a1q_scale is not None or self.per_token_activation
 
+        # DeepEP produces int64 indexes.
+        topk_ids = topk_ids.to(dtype=torch.int32)
+
         M = hidden_states.shape[0]
         chunk_size = self._get_chunk_size()
 
