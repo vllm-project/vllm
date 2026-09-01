@@ -40,6 +40,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -183,7 +184,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         request: "Request",
         num_external_tokens: int,
-    ) -> list[tuple[str, int]]:
+    ) -> list[tuple[CacheHitSource, int]]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_external_cache_hit_sources(
             request, num_external_tokens

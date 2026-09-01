@@ -720,17 +720,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             name="vllm:prompt_tokens_cached_by_source",
             documentation=(
                 "Number of cached prompt tokens by the cache tier that "
-                "supplied their KV. Sources include device, cpu, disk, a "
-                "configured secondary tier type, mixed, and external when "
-                "finer attribution is unavailable."
+                "supplied their KV. Sources are device, cpu, disk, p2p, and "
+                "external."
             ),
             labelnames=labelnames + ["source"],
         )
         # Register built-in sources at zero before the first request. A
         # Prometheus scraper that establishes its baseline at server startup
         # must not lose the first counter increment when a labeled series is
-        # created lazily during warmup. Connector-defined custom sources stay
-        # dynamic and are registered when first observed.
+        # created lazily during warmup.
         for source in PromptTokenStats.BUILTIN_CACHED_SOURCES:
             for labelvalues in per_engine_labelvalues.values():
                 self.counter_prompt_tokens_cached_by_source.labels(*labelvalues, source)

@@ -50,7 +50,7 @@ from vllm.v1.request import Request
 from .data import MooncakeStoreConnectorMetadata
 from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
-from .worker import MooncakeStoreConfig, MooncakeStoreWorker
+from .worker import MooncakeStoreWorker
 
 logger = init_logger(__name__)
 
@@ -185,19 +185,11 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.connector_scheduler: MooncakeStoreScheduler | None = None
         self.connector_worker: MooncakeStoreWorker | None = None
-        self._cache_source = "external"
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakeStoreScheduler(
                 vllm_config, kv_cache_config
             )
-            try:
-                store_config = MooncakeStoreConfig.load_from_config()
-                self._cache_source = "mixed" if store_config.enable_offload else "cpu"
-            except (OSError, ValueError):
-                # Config validation remains the worker's responsibility. Keep
-                # metrics usable during scheduler-only tests and partial setup.
-                pass
         else:
             self.connector_worker = MooncakeStoreWorker(vllm_config, kv_cache_config)
 
@@ -229,15 +221,6 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens
         )
-
-    def get_external_cache_hit_sources(
-        self,
-        request: Request,
-        num_external_tokens: int,
-    ) -> list[tuple[str, int]]:
-        if num_external_tokens == 0:
-            return []
-        return [(self._cache_source, num_external_tokens)]
 
     def update_state_after_alloc(
         self,
