@@ -5,6 +5,7 @@
 import contextlib
 import ctypes
 import errno
+import glob
 import mmap
 import os
 import uuid
@@ -378,8 +379,26 @@ def test_stale_ec_file_with_same_engine_id_does_not_wedge_restart():
     engine_id = str(uuid.uuid4())
     path = f"/dev/shm/vllm_ec_{engine_id}.mmap"
     _write_orphan(path, 8 * 64)
-    r = ECSharedRegion(engine_id=engine_id, num_blocks=8, block_size_bytes=64)
     try:
-        assert r._is_creator is True
+        r = ECSharedRegion(engine_id=engine_id, num_blocks=8, block_size_bytes=64)
+        try:
+            assert r._is_creator is True
+        finally:
+            r.cleanup()
     finally:
-        r.cleanup()
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_constructor_failure_releases_the_region(monkeypatch):
+    """The fd holds the flock that marks a region live, so a constructor that
+    fails after creating the file must release it — otherwise the file is
+    unreclaimable for the life of the process."""
+    engine_id = str(uuid.uuid4())
+    path = f"/dev/shm/vllm_ec_{engine_id}.mmap"
+    monkeypatch.setattr(
+        "torch.frombuffer", MagicMock(side_effect=RuntimeError("frombuffer"))
+    )
+    with pytest.raises(RuntimeError, match="frombuffer"):
+        ECSharedRegion(engine_id=engine_id, num_blocks=8, block_size_bytes=64)
+    assert not glob.glob(f"{path}*")
