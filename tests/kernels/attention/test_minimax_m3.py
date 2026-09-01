@@ -353,7 +353,6 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
     balanced_score.fill_(float("nan"))
     launch_deployed()
     launch_balanced()
-    torch.accelerator.synchronize()
     assert_exact(uniform)
 
     graph = torch.cuda.CUDAGraph()
@@ -371,7 +370,6 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
         balanced_score.fill_(float("nan"))
         launch_deployed()
         graph.replay()
-        torch.accelerator.synchronize()
         assert_exact(pattern)
         assert addresses == (
             seq_lens.data_ptr(),
