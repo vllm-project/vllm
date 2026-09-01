@@ -89,14 +89,6 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        extra_config = self._kv_transfer_config.kv_connector_extra_config
-        return (
-            str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
-            == "true"
-        )
-
     @staticmethod
     def _validate_kv_cache_config(
         vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
@@ -105,7 +97,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         unsupported: list[str] = []
         cache_block_size = vllm_config.cache_config.block_size
-        for g_idx, g in enumerate(kv_cache_config.kv_cache_groups):
+        for g_idx, g in enumerate(kv_cache_config.transfer_groups):
             spec = g.kv_cache_spec
             if isinstance(spec, CrossAttentionSpec):
                 unsupported.append(f"group {g_idx}: CrossAttentionSpec")
@@ -117,11 +109,8 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
                     f"{cache_block_size} (mamba_cache_mode != 'align')"
                 )
         pcp = vllm_config.parallel_config.prefill_context_parallel_size
-        dcp = vllm_config.parallel_config.decode_context_parallel_size
-        if len(kv_cache_config.kv_cache_groups) > 1 and pcp * dcp > 1:
-            unsupported.append(
-                f"PCP/DCP > 1 (pcp={pcp}, dcp={dcp}) with hybrid attention"
-            )
+        if len(kv_cache_config.transfer_groups) > 1 and pcp > 1:
+            unsupported.append(f"PCP > 1 (pcp={pcp}) with hybrid attention")
         if unsupported:
             raise ValueError(
                 "MooncakeStoreConnector does not support: " + "; ".join(unsupported)
@@ -141,12 +130,14 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert vllm_config.kv_transfer_config is not None
         assert kv_cache_config is not None, "kv_cache_config is required"
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        save_decode_cache = extra_config.get("save_decode_cache", False)
         # Capacity-only: contributes its segment to the store pool but transfers
         # no KV, so the KV-cache-shape invariants below cannot be reached.
-        self._capacity_only = self.kv_role == "kv_consumer" and not (
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "enable_lookup", True
-            )
+        self._capacity_only = (
+            self.kv_role == "kv_consumer"
+            and not extra_config.get("enable_lookup", True)
+            and not save_decode_cache
         )
         if not self._capacity_only:
             self._validate_kv_cache_config(vllm_config, kv_cache_config)
@@ -288,19 +279,11 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type
-    ):
-        assert self.connector_worker is not None
-        assert (
-            self._kv_cache_config is not None
-            and len(self._kv_cache_config.kv_cache_groups) == 1
-        ), "Cross-layer KV cache does not supported with hybrid models"
-        self.connector_worker.register_cross_layers_kv_caches(kv_cache)
-
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
-        # No-op: loads are issued in get_finished() for compute overlap.
-        pass
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        self.connector_worker.start_load_kv(metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         # No layerwise support - no-op
@@ -317,8 +300,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return
 
     def wait_for_save(self):
-        # No-op: stores are issued in get_finished() for compute overlap.
-        pass
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        self.connector_worker.wait_for_save(metadata)
 
     def get_finished(
         self, finished_req_ids: set[str]
