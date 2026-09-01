@@ -25,7 +25,7 @@ ZMQ Path (small metadata only):
 [API Server] --ZMQ IPC--> [GPU Worker]  (metadata, no tensor data)
 
 Shared Memory Path (tensor data):
-[API Server] --SHM write--> [PagedShmServer] --SHM read--> [GPU Worker] --H2D--> [GPU]
+[API Server] --SHM write--> [Paged Shared Memory Storage] --SHM read--> [GPU Worker] --H2D--> [GPU]
 ```
 
 The actual tensor bytes are **offloaded** from the ZMQ hot path, eliminating serialization and large‑message overhead.
