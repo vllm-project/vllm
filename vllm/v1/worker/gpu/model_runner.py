@@ -382,9 +382,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model_loader = get_model_loader(self.vllm_config.load_config)
             logger.info_once("Loading model from scratch...")
 
-            self.model = model_loader.load_model(
-                vllm_config=self.vllm_config, model_config=self.vllm_config.model_config
-            )
+            # Capture warmup providers selected while constructing the model.
+            with self.jit_warmup_registry.activate():
+                self.model = model_loader.load_model(
+                    vllm_config=self.vllm_config,
+                    model_config=self.vllm_config.model_config,
+                )
             if self.lora_config:
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
@@ -668,15 +671,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         self.kv_caches: list[torch.Tensor] = []
-        kv_caches_dict = init_kv_cache(
-            self.kv_caches,
-            self.compilation_config.static_forward_context,
-            self.kv_cache_config,
-            self.device,
-            self.kernel_block_sizes,
-            self.vllm_config,
-            kv_cache_allocation_context=kv_cache_allocation_context,
-        )
+        # Capture warmup providers that depend on allocated KV-cache strides.
+        with self.jit_warmup_registry.activate():
+            kv_caches_dict = init_kv_cache(
+                self.kv_caches,
+                self.compilation_config.static_forward_context,
+                self.kv_cache_config,
+                self.device,
+                self.kernel_block_sizes,
+                self.vllm_config,
+                kv_cache_allocation_context=kv_cache_allocation_context,
+            )
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
