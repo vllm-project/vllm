@@ -80,7 +80,7 @@ def test_concat_and_cache_mla_rope_fused(
 ) -> None:
     set_random_seed(seed)
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     rope = RotaryEmbedding(
         qk_rope_head_dim,
