@@ -78,7 +78,7 @@ logger = init_logger(__name__)
 class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
 
-    cache_hit_source = CacheHitSource.P2P
+    _cache_hit_source = CacheHitSource.P2P
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
