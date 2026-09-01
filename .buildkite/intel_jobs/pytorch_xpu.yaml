@@ -94,7 +94,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests && 
     find compile/ -maxdepth 1 -name '\''test_*.py'\'' -not -name '\''test_dynamic_shapes_compilation.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true'
-- label: PyTorch Compilation Unit Tests (H100)
+- label: ':nvidia: (H200 MIG 18GB) PyTorch Compilation H100 Cases'
   device: intel_gpu
   timeout_in_minutes: 30
   working_dir: .
@@ -140,9 +140,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     find compile/h100/ -name '\''test_*.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true'
-- label: PyTorch Compilation Passes Unit Tests
+- label: ':nvidia: (L4) PyTorch Compilation Passes'
   device: intel_gpu
   timeout_in_minutes: 45
+  num_devices: 1
   working_dir: .
   no_plugin: true
   env:
@@ -186,7 +187,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -s -v compile/passes --ignore compile/passes/distributed || true'
-- label: PyTorch Fullgraph Test
+- label: ':nvidia: (H200 MIG 35GB) PyTorch Fullgraph'
   device: intel_gpu
   timeout_in_minutes: 90
   working_dir: .
@@ -232,9 +233,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     find compile/fullgraph/ -name '\''test_*.py'\'' -not -name '\''test_full_cudagraph.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true'
-- label: PyTorch Fullgraph CUDAGraph (L4 Compatibility)
+- label: ':nvidia: (L4) PyTorch Fullgraph CUDAGraph Compatibility'
   device: intel_gpu
   timeout_in_minutes: 60
+  num_devices: 1
   working_dir: .
   no_plugin: true
   env:
@@ -278,7 +280,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -s -v compile/fullgraph/test_full_cudagraph.py || true'
-- label: Pytorch Nightly Dependency Override Check
+- label: ':nvidia: (H200 MIG 18GB) PyTorch Nightly Dependency Override Check'
   device: intel_gpu
   soft_fail: true
   working_dir: .

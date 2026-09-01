@@ -2,7 +2,7 @@ group: Quantization XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: Quantization %N
+- label: ':nvidia: (H200 MIG 35GB) Quantization Shard %N'
   device: intel_gpu
   timeout_in_minutes: 40
   parallelism: 4
@@ -30,7 +30,7 @@ steps:
     uv pip install conch-triton-kernels || true &&
     cd tests &&
     VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k not test_compressed_tensors_w4a8_fp8 --ignore quantization/test_quark.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT || true'
-- label: Quantized Fusions
+- label: ':nvidia: (H200 MIG 35GB) Quantized Fusions'
   device: intel_gpu
   timeout_in_minutes: 20
   working_dir: .
@@ -55,7 +55,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s fusion/ || true'
-- label: Quantized MoE Test (B200)
+- label: ':nvidia: (B200) Quantized MoE'
   device: intel_gpu
   timeout_in_minutes: 120
   working_dir: .
@@ -83,7 +83,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -s -v tests/quantization/test_blackwell_moe.py || true'
-- label: Quantized Models Test
+- label: ':nvidia: (H200 MIG 35GB) Quantized Models'
   device: intel_gpu
   timeout_in_minutes: 65
   working_dir: .
