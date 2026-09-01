@@ -256,8 +256,18 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 f"> S={capacity}."
             )
         a1 = a1.contiguous()
-        topk_ids = topk_ids.to(dtype=torch.int32).contiguous()
-        topk_weights = topk_weights.to(dtype=torch.float32).contiguous()
+        topk_ids = topk_ids.to(dtype=torch.int32)
+        topk_weights = topk_weights.to(dtype=torch.float32)
+        # MoonEP's planner has no sentinel for invalid expert ids, so map
+        # negative ids (padded/invalid slots from the engine) to expert 0
+        # with zero route weight — the same convention as the capacity
+        # padding rows below. Wasted compute, never wrong output.
+        invalid = topk_ids < 0
+        topk_ids = torch.where(invalid, torch.zeros_like(topk_ids), topk_ids)
+        topk_weights = torch.where(
+            invalid, torch.zeros_like(topk_weights), topk_weights
+        ).contiguous()
+        topk_ids = topk_ids.contiguous()
         if num_tokens == capacity:
             return a1, topk_ids, topk_weights, num_tokens
         pad = capacity - num_tokens
