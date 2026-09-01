@@ -239,3 +239,33 @@ class TestValidationErrorBodyIsBounded:
 
         assert "not-a-list" in message
         assert "[truncated]" not in message
+
+    @pytest.mark.asyncio
+    async def test_union_loc_is_cleaned_in_the_message(self):
+        """A union-typed field spells every branch out in `loc`.
+
+        Left raw, that is ~800 characters of type names per entry and it
+        dominates the bounded message. `param` is already cleaned this way.
+        """
+        loc = (
+            "body",
+            "input",
+            "list[union[EasyInputMessageParam,Message,ResponseOutputMessageParam]]",
+            0,
+            "content",
+        )
+        errors = [
+            {
+                "type": "string_type",
+                "loc": loc,
+                "msg": "Input should be a valid string",
+                "input": 12345,
+            }
+        ]
+        exc = RequestValidationError(errors)
+
+        response = await validation_exception_handler(_fake_request(), exc)
+        message = json.loads(response.body)["error"]["message"]
+
+        assert "'loc': 'body.input.0.content'" in message
+        assert "EasyInputMessageParam" not in message

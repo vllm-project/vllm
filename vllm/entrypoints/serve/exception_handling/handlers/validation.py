@@ -108,8 +108,16 @@ def _summarize_error_input(value: object) -> object:
 
 def _format_error(err: object) -> str:
     """Render one validation error, bounded in size."""
-    if isinstance(err, dict) and "input" in err:
-        err = {**err, "input": _summarize_error_input(err["input"])}
+    if isinstance(err, dict):
+        err = dict(err)
+        if "input" in err:
+            err["input"] = _summarize_error_input(err["input"])
+        loc = err.get("loc")
+        if isinstance(loc, (tuple, list)):
+            # For a union-typed field pydantic spells every branch out in
+            # `loc`, which is ~800 characters of type names per entry here.
+            # `param` is already cleaned this way.
+            err["loc"] = clean_loc_for_param(tuple(loc))
     text = str(err)
     if len(text) > _MAX_ERROR_CHARS:
         text = text[:_MAX_ERROR_CHARS] + "...[truncated]"
