@@ -36,7 +36,13 @@ def _write_sharegpt(path: Path, n_convs: int, turns_per_conv: int) -> None:
     path.write_text(json.dumps(data))
 
 
-def _args(dataset_path: str, multi_turn: bool, max_turns: int | None = None):
+def _args(
+    dataset_path: str,
+    multi_turn: bool,
+    max_turns: int | None = None,
+    max_prompt_len: int = 1024,
+    max_total_len: int = 2048,
+):
     return argparse.Namespace(
         dataset_name="sharegpt",
         dataset_path=dataset_path,
@@ -49,6 +55,8 @@ def _args(dataset_path: str, multi_turn: bool, max_turns: int | None = None):
         request_id_prefix="",
         include_multi_turn=multi_turn,
         sharegpt_max_turns=max_turns,
+        sharegpt_max_prompt_len=max_prompt_len,
+        sharegpt_max_total_len=max_total_len,
     )
 
 
@@ -119,3 +127,30 @@ def test_include_multi_turn_yields_more_requests(
         for earlier, later in zip(prompts, prompts[1:]):
             assert later.startswith(earlier)
         assert group[0].prompt_len < group[-1].prompt_len
+
+
+@pytest.mark.benchmark
+def test_prompt_len_limits_are_configurable(
+    hf_tokenizer: PreTrainedTokenizerBase, tmp_path: Path
+) -> None:
+    """The prompt-length limits gate which multi-turn requests survive.
+
+    Multi-turn prompts grow with conversation depth, so a low limit drops the tail of
+    every conversation. Long conversations are used so that later prompts clear the
+    limit under test.
+    """
+    path = tmp_path / "sharegpt.json"
+    _write_sharegpt(path, n_convs=4, turns_per_conv=20)
+
+    generous = get_samples(
+        _args(str(path), multi_turn=True, max_prompt_len=1024, max_total_len=2048),
+        hf_tokenizer,
+    )
+    strict = get_samples(
+        _args(str(path), multi_turn=True, max_prompt_len=32, max_total_len=64),
+        hf_tokenizer,
+    )
+
+    assert len(strict) < len(generous)
+    assert all(s.prompt_len <= 32 for s in strict)
+    assert any(s.prompt_len > 32 for s in generous)
