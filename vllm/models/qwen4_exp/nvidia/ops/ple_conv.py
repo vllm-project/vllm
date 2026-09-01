@@ -148,7 +148,7 @@ def _ple_conv_kernel(
     )
 
 
-@triton.jit(do_not_specialize=["num_reqs", "has_token_map"])
+@triton.jit(do_not_specialize=["has_token_map"])
 def _ple_conv_writeback_kernel(
     x_ptr,
     state_ptr,
@@ -158,7 +158,6 @@ def _ple_conv_writeback_kernel(
     has_init_ptr,
     token_idx_ptr,
     has_token_map,
-    num_reqs,
     state_bs,
     state_ws,
     state_cs,
@@ -298,7 +297,6 @@ def ple_conv(
     if mode == "decode":
         num_reqs = T
         binary_search_iters = 1
-        num_writeback_reqs = T
         has_initial_states_arg = has_initial_states is not None
     elif mode == "spec":
         if query_start_loc is None or num_accepted_tokens is None:
@@ -307,7 +305,6 @@ def ple_conv(
             )
         num_reqs = state_indices.numel()
         binary_search_iters = max(num_reqs, 1).bit_length()
-        num_writeback_reqs = num_reqs
         has_initial_states_arg = False
     elif mode == "prefill":
         if query_start_loc is None or has_initial_states is None:
@@ -316,7 +313,6 @@ def ple_conv(
             )
         num_reqs = state_indices.numel()
         binary_search_iters = max(num_reqs, 1).bit_length()
-        num_writeback_reqs = num_reqs
         has_initial_states_arg = True
     else:
         raise ValueError(f"Unsupported short-conv mode: {mode}")
@@ -348,7 +344,7 @@ def ple_conv(
         HAS_INIT=has_initial_states_arg,
         num_warps=NUM_WARPS,
     )
-    _ple_conv_writeback_kernel[(num_writeback_reqs, triton.cdiv(C, BLOCK_C))](
+    _ple_conv_writeback_kernel[(num_reqs, triton.cdiv(C, BLOCK_C))](
         inputs,
         conv_state,
         state_indices,
@@ -357,7 +353,6 @@ def ple_conv(
         has_initial_states,
         token_indices if token_indices is not None else state_indices,
         token_indices is not None,
-        num_reqs,
         state_bs,
         state_ws,
         state_cs,
