@@ -217,22 +217,65 @@ def test_fused_post_conv_l0():
 
 
 @pytest.mark.parametrize(
-    "tp_size,query_lengths,state_dtype,norm_dtype",
+    "head_ratio,tp_size,query_lengths,state_dtype,norm_dtype",
     [
-        pytest.param(16, (4, 4), torch.bfloat16, torch.bfloat16, id="tp16-bf16"),
-        pytest.param(4, (4, 4), torch.float32, torch.float32, id="tp4-fp32"),
-        pytest.param(16, (4, 2, 0), torch.bfloat16, torch.float32, id="tp16-ragged"),
-        pytest.param(4, (4, 2, 0), torch.float32, torch.bfloat16, id="tp4-ragged"),
-        pytest.param(16, (8,), torch.float32, torch.bfloat16, id="tp16-max"),
-        pytest.param(4, (8,), torch.bfloat16, torch.float32, id="tp4-max"),
+        pytest.param(8, 16, (4, 4), torch.bfloat16, torch.bfloat16, id="tp16-bf16"),
+        pytest.param(8, 4, (4, 4), torch.float32, torch.float32, id="tp4-fp32"),
+        pytest.param(8, 16, (4, 2, 0), torch.bfloat16, torch.float32, id="tp16-ragged"),
+        pytest.param(8, 4, (4, 2, 0), torch.float32, torch.bfloat16, id="tp4-ragged"),
+        pytest.param(8, 16, (8,), torch.float32, torch.bfloat16, id="tp16-max"),
+        pytest.param(8, 4, (8,), torch.bfloat16, torch.float32, id="tp4-max"),
+        pytest.param(
+            1,
+            1,
+            (4, 4),
+            torch.float32,
+            torch.bfloat16,
+            id="ratio1-tp1-fp32",
+        ),
+        pytest.param(
+            2,
+            1,
+            (4, 2, 0),
+            torch.bfloat16,
+            torch.bfloat16,
+            id="ratio2-tp1-ragged-bf16",
+        ),
+        pytest.param(
+            2,
+            4,
+            (8,),
+            torch.float32,
+            torch.float32,
+            id="ratio2-tp4-max-fp32",
+        ),
+        pytest.param(
+            3,
+            2,
+            (4, 2, 0),
+            torch.float32,
+            torch.float32,
+            id="ratio3-tp2-ragged-fp32",
+        ),
+        pytest.param(
+            4,
+            4,
+            (8,),
+            torch.float32,
+            torch.bfloat16,
+            id="ratio4-tp4-max-fp32",
+        ),
     ],
 )
+@pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
 @torch.inference_mode()
-def test_fused_gdn_decode_post_conv_mtp_ratio8(
+def test_fused_gdn_decode_post_conv_mtp_head_ratios(
+    head_ratio: int,
     tp_size: int,
     query_lengths: tuple[int, ...],
     state_dtype: torch.dtype,
     norm_dtype: torch.dtype,
+    output_gate_activation: str,
 ) -> None:
     if torch.cuda.get_device_capability() < (8, 0):
         pytest.skip("fused GDN decode MTP requires compute capability 8.0+")
@@ -242,7 +285,7 @@ def test_fused_gdn_decode_post_conv_mtp_ratio8(
     torch.manual_seed(0)
     device = "cuda"
     H = 16 // tp_size
-    HV = 128 // tp_size
+    HV = head_ratio * H
     K = V = 128
     num_reqs = len(query_lengths)
     state_width = max(query_lengths)
@@ -316,7 +359,7 @@ def test_fused_gdn_decode_post_conv_mtp_ratio8(
             z=output_gate,
             eps=eps,
             norm_before_gate=True,
-            activation="silu",
+            activation=output_gate_activation,
         )
         actual = ops.fused_gdn_decode_post_conv_mtp(
             mixed_qkv=mixed_qkv,
@@ -333,6 +376,7 @@ def test_fused_gdn_decode_post_conv_mtp_ratio8(
             out=torch.empty_like(output_gate),
             scale=scale,
             norm_eps=eps,
+            output_gate_activation=output_gate_activation,
         )
 
         output_error = (actual.float() - expected.float()).norm()
