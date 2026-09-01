@@ -732,11 +732,20 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
+        # If the connector provides a custom memory pool (e.g. Mooncake
+        # NVLink/BAREX), use it for KV cache allocation; otherwise fall
+        # back to the standard CuMem pool.
+        mem_pool_context = (
+            get_kv_transfer_group().get_mem_pool_context()
+            if has_kv_transfer_group()
+            else None
+        )
+        if mem_pool_context is None:
+            mem_pool_context = self._maybe_get_memory_pool_context(tag="kv_cache")
+
         self.model_runner.initialize_kv_cache(
             kv_cache_config,
-            kv_cache_allocation_context=self._maybe_get_memory_pool_context(
-                tag="kv_cache"
-            ),
+            kv_cache_allocation_context=mem_pool_context,
         )
 
         if self.model_config.enable_return_routed_experts:
