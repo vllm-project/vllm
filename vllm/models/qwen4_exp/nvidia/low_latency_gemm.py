@@ -78,10 +78,69 @@ QWEN4_EXP_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
     },
 }
 
-# H200 plans measured under CUDA graph replay. Only M=1 is enabled so larger
-# batches retain the standard linear implementation and its GEMM heuristics.
+# H200 plans selected by exhaustive CUDA graph replay measurements over
+# M={1, 2, 4, 8, 16}. Only points that beat the standard linear implementation
+# in both hot-cache and L2-flush measurements are retained; other token counts
+# keep the standard implementation and its GEMM heuristics.
 QWEN4_EXP_SM90_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
-    shape: {1: plans[1]} for shape, plans in QWEN4_EXP_GEMM_PLANS.items()
+    # GDN fused QKVZ projection, TP=4.
+    (4096, 2560): {
+        1: SkinnyGemmConfig(1, 128, 2, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 64, 4, vector_width=4, static_k=2560),
+    },
+    # GDN and QSA output projections, TP=4.
+    (2560, 1536): {
+        1: SkinnyGemmConfig(1, 128, 4, vector_width=2, static_k=1536),
+        2: SkinnyGemmConfig(2, 128, 4, vector_width=4, static_k=1536),
+        4: SkinnyGemmConfig(4, 64, 4, k_unroll=6, vector_width=4),
+    },
+    # GDN fused B/A projection, TP=4.
+    (24, 2560): {
+        1: SkinnyGemmConfig(1, 128, 3, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 64, 2, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 64, 1, static_k=2560),
+        8: SkinnyGemmConfig(8, 128, 1, vector_width=4, static_k=2560),
+        16: SkinnyGemmConfig(16, 128, 1, vector_width=4, static_k=2560),
+    },
+    # QSA fused QKV/gate projection, TP=4.
+    (3584, 2560): {
+        1: SkinnyGemmConfig(1, 128, 4, vector_width=2, static_k=2560),
+        2: SkinnyGemmConfig(2, 64, 4, k_unroll=5),
+    },
+    # QSA indexer Q/K projection, replicated in a TP=4 deployment.
+    (640, 2560): {
+        1: SkinnyGemmConfig(1, 256, 2, vector_width=2, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 128, 1, vector_width=2, static_k=2560),
+        8: SkinnyGemmConfig(8, 128, 2, vector_width=4, static_k=2560),
+    },
+    # Shared-expert fused gate/up projection, TP=4.
+    (320, 2560): {
+        1: SkinnyGemmConfig(1, 64, 2, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 4, k_unroll=5, vector_width=4),
+        4: SkinnyGemmConfig(4, 160, 1, k_unroll=2),
+        8: SkinnyGemmConfig(8, 128, 1, vector_width=4, static_k=2560),
+        16: SkinnyGemmConfig(16, 128, 1, vector_width=4, static_k=2560),
+    },
+    # LM head, TP=4.
+    (62080, 2560): {
+        1: SkinnyGemmConfig(1, 64, 2, vector_width=2, static_k=2560),
+        2: SkinnyGemmConfig(2, 64, 2, vector_width=2, static_k=2560),
+    },
+    # HC merged down/injection projection, replicated in a TP=4 deployment.
+    (336, 10240): {
+        1: SkinnyGemmConfig(1, 256, 1, k_unroll=5),
+        2: SkinnyGemmConfig(2, 256, 3, static_k=10240),
+        4: SkinnyGemmConfig(4, 256, 3, static_k=10240),
+        8: SkinnyGemmConfig(8, 256, 3, static_k=10240),
+    },
+    # Final HC down projection, replicated in a TP=4 deployment.
+    (320, 10240): {
+        1: SkinnyGemmConfig(1, 256, 1, static_k=10240),
+        2: SkinnyGemmConfig(2, 128, 1, k_unroll=10),
+        4: SkinnyGemmConfig(4, 128, 1, k_unroll=10),
+        8: SkinnyGemmConfig(8, 128, 1, k_unroll=10),
+    },
 }
 
 
