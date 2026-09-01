@@ -124,14 +124,14 @@ See [vllm complete](./complete.md) for the full reference of all available argum
 
 ## bench
 
-Run benchmark tests for latency online serving throughput and offline inference throughput.
+Run benchmark tests for latency, online serving throughput, offline inference throughput, startup time, multimodal processor latency, and parameter sweeps.
 
 To use benchmark commands, please install with extra dependencies using `pip install vllm[bench]`.
 
 Available Commands:
 
 ```bash
-vllm bench {latency, serve, throughput}
+vllm bench {latency, serve, throughput, startup, mm-processor, sweep}
 ```
 
 ### latency
@@ -179,6 +179,55 @@ vllm bench throughput \
 ```
 
 See [vllm bench throughput](./bench/throughput.md) for the full reference of all available arguments.
+
+### startup
+
+Benchmark the startup time of vLLM models.
+
+```bash
+vllm bench startup \
+    --model meta-llama/Llama-3.2-1B-Instruct
+```
+
+See [vllm bench startup](./bench/startup.md) for the full reference of all available arguments.
+
+### mm-processor
+
+Benchmark multimodal processor latency across different configurations.
+
+```bash
+vllm bench mm-processor \
+    --model Qwen/Qwen2-VL-7B-Instruct \
+    --dataset-name random-mm \
+    --num-prompts 50 \
+    --random-input-len 300 \
+    --random-output-len 40 \
+    --random-mm-base-items-per-request 2 \
+    --random-mm-limit-mm-per-prompt '{"image": 3, "video": 0}' \
+    --random-mm-bucket-config '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}'
+```
+
+See [vllm bench mm-processor](./bench/mm-processor.md) for the full reference of all available arguments.
+
+### sweep
+
+Benchmark for a parameter sweep.
+
+Available Commands:
+
+```bash
+vllm bench sweep {serve, serve_workload, startup, plot, plot_pareto}
+```
+
+```bash
+vllm bench sweep serve \
+    --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
+    --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
+    --output-dir benchmarks/results \
+    --experiment-name demo
+```
+
+See [vllm bench sweep](./bench/sweep.md) for the full reference of all available arguments.
 
 ## collect-env
 
