@@ -455,6 +455,7 @@ def _topk(
     block_indices: torch.Tensor,
     topk_workspace: torch.Tensor,
 ) -> None:
+    # similar dispatch logic as DeepSeek indexer
     block_topk = token_topk // compress_ratio
     use_cooperative_topk = (
         logits.shape[0] <= 64
@@ -577,6 +578,8 @@ def qsa_select_paged_prefill(
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     rows = q.shape[0]
     columns = page_table.shape[1] * k_cache.shape[1]
+
+    # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
     max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
     rows_per_chunk = max(1, max_logits_bytes // (columns * 4))
     topk_workspace = torch.empty(
