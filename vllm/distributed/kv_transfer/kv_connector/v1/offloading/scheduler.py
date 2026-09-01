@@ -28,6 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
@@ -1098,12 +1099,12 @@ class OffloadingConnectorScheduler:
         self,
         request: Request,
         num_external_tokens: int,
-    ) -> list[tuple[str, int]]:
+    ) -> list[tuple[CacheHitSource, int]]:
         """Return ordered token counts by the tier that supplied each hit.
 
         Full-attention groups provide a direct token-to-offload-key mapping.
         When several such groups back the same token range, disagreement is
-        reported as ``mixed`` instead of crediting one tier arbitrarily.
+        reported as ``external`` instead of crediting one tier arbitrarily.
         Models without a full-attention group retain the conservative
         ``external`` fallback because a sliding-window state can represent
         more tokens than the chunks physically loaded.
@@ -1111,7 +1112,7 @@ class OffloadingConnectorScheduler:
         if num_external_tokens == 0:
             return []
         if not self._full_attention_groups:
-            return [("external", num_external_tokens)]
+            return [(CacheHitSource.EXTERNAL, num_external_tokens)]
 
         req_status = self._req_status[request.request_id]
         start = req_status.num_locally_computed_tokens
@@ -1125,11 +1126,11 @@ class OffloadingConnectorScheduler:
                 boundary += tokens_per_chunk
 
         ordered_boundaries = sorted(boundaries)
-        segments: list[tuple[str, int]] = []
+        segments: list[tuple[CacheHitSource, int]] = []
         for segment_start, segment_end in zip(
             ordered_boundaries, ordered_boundaries[1:]
         ):
-            sources: set[str] = set()
+            sources: set[CacheHitSource] = set()
             for group_idx in self._full_attention_groups:
                 group_config = self.config.kv_group_configs[group_idx]
                 partial_boundary = req_status.partial_tail_boundary
@@ -1141,16 +1142,15 @@ class OffloadingConnectorScheduler:
                     chunk_idx = segment_start // group_config.tokens_per_chunk
                     group_keys = req_status.group_states[group_idx].offload_keys
                     if chunk_idx >= len(group_keys):
-                        sources.add("external")
+                        sources.add(CacheHitSource.EXTERNAL)
                         continue
                     key = group_keys[chunk_idx]
 
-                source = self.manager.get_load_source(key, req_status.req_context)
-                sources.add(
-                    source if isinstance(source, str) and source else "external"
-                )
+                sources.add(self.manager.get_load_source(key, req_status.req_context))
 
-            source = next(iter(sources)) if len(sources) == 1 else "mixed"
+            source = (
+                next(iter(sources)) if len(sources) == 1 else CacheHitSource.EXTERNAL
+            )
             num_tokens = segment_end - segment_start
             if segments and segments[-1][0] == source:
                 previous_source, previous_tokens = segments[-1]

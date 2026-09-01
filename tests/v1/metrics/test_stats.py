@@ -384,6 +384,26 @@ def test_prefill_stats_normalizes_external_source_segments():
     assert prefill_stats.num_computed_tokens == 12
 
 
+def test_prefill_stats_canonicalizes_connector_tier_names():
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=16,
+        num_local_cached_tokens=0,
+        num_external_cached_tokens=16,
+        external_cached_token_sources=[
+            ("fs", 4),
+            ("disk", 4),
+            ("obj", 4),
+            ("custom", 4),
+        ],
+    )
+
+    assert prefill_stats.external_cached_token_sources == [
+        ("disk", 8),
+        ("external", 8),
+    ]
+
+
 @pytest.mark.parametrize(
     "sources",
     [

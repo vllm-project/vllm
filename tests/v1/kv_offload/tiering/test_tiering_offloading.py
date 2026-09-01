@@ -527,7 +527,7 @@ class TestTieringOffloadingManager:
 
         # The request that caused the promotion retains the secondary origin.
         assert all(
-            self.manager.get_load_source(block, _CTX) == "example" for block in blocks
+            self.manager.get_load_source(block, _CTX) == "external" for block in blocks
         )
 
         # A later request sees the blocks as ordinary CPU-primary hits.

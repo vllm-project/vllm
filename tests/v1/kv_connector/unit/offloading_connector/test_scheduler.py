@@ -597,7 +597,7 @@ def test_external_cache_hit_sources_preserve_partial_tail_origin():
     ]
 
 
-def test_external_cache_hit_sources_report_mixed_full_attention_groups(
+def test_external_cache_hit_sources_fall_back_for_conflicting_groups(
     request_runner,
 ):
     block_size = 4
@@ -638,7 +638,7 @@ def test_external_cache_hit_sources_report_mixed_full_attention_groups(
     )
 
     assert scheduler.get_external_cache_hit_sources(request, 2 * block_size) == [
-        ("mixed", 2 * block_size)
+        ("external", 2 * block_size)
     ]
 
 

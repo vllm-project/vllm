@@ -49,6 +49,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -513,7 +514,7 @@ class KVConnectorBase_V1(ABC):
         self,
         request: "Request",
         num_external_tokens: int,
-    ) -> list[tuple[str, int]]:
+    ) -> list[tuple[CacheHitSource, int]]:
         """Describe the source of externally cached prompt tokens.
 
         The returned segments must be in prompt-token order, contain stable,
@@ -528,7 +529,7 @@ class KVConnectorBase_V1(ABC):
         """
         if num_external_tokens == 0:
             return []
-        return [("external", num_external_tokens)]
+        return [(CacheHitSource.EXTERNAL, num_external_tokens)]
 
     @abstractmethod
     def update_state_after_alloc(
