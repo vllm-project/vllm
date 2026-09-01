@@ -11,6 +11,13 @@ import torch
 from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup import replayssm_warmup as warmup
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_flashinfer(),
+    reason="FlashInfer ReplaySSM warmup tests require CUDA and FlashInfer",
+)
 
 PREFILL_KWARGS = {
     "num_tokens": 128,
