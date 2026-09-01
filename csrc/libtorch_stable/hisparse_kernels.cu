@@ -212,17 +212,13 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     const int32_t source_block_size, const int64_t resident_bt_stride,
     const int32_t resident_num_reqs, const int32_t resident_num_blocks,
     const int32_t resident_block_size, const int32_t resident_null_block,
-    const int64_t input_row_stride, const int64_t input_row_offset,
-    const int64_t output_row_stride, const int64_t output_row_offset) {
+    const int64_t input_row_stride, const int64_t attention_row_stride,
+    const int64_t valid_count_stride) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const int num_token_chunks = (top_k + kWarpSize - 1) / kWarpSize;
 
   const int batch_row = blockIdx.x;
-  const int64_t input_row =
-      static_cast<int64_t>(batch_row) * input_row_stride + input_row_offset;
-  const int64_t output_row =
-      static_cast<int64_t>(batch_row) * output_row_stride + output_row_offset;
   const int state_row = request_state_indices != nullptr
                             ? request_state_indices[batch_row]
                             : batch_row;
@@ -232,14 +228,16 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       const int64_t index = static_cast<int64_t>(batch_row) * top_k + i;
       hot_indices[index] = -1;
       if (attention_indices != nullptr) {
-        attention_indices[output_row * top_k + i] = -1;
+        attention_indices[static_cast<int64_t>(batch_row) *
+                              attention_row_stride +
+                          i] = -1;
       }
       if (resolved_global_indices != nullptr) {
         resolved_global_indices[index] = -1;
       }
     }
     if (valid_counts != nullptr && threadIdx.x == 0) {
-      valid_counts[output_row] = 0;
+      valid_counts[static_cast<int64_t>(batch_row) * valid_count_stride] = 0;
     }
     if (swap_counts != nullptr && threadIdx.x == 0) {
       swap_counts[batch_row] = 0;
@@ -251,11 +249,14 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   const int lane_id = tid % kWarpSize;
   const unsigned int lanes_before = ((unsigned int)1 << lane_id) - 1;
 
-  const int32_t* row_topk = global_indices + input_row * top_k;
+  const int32_t* row_topk =
+      global_indices + static_cast<int64_t>(batch_row) * input_row_stride;
   int32_t* row_out = hot_indices + static_cast<int64_t>(batch_row) * top_k;
-  int32_t* row_attention = attention_indices != nullptr
-                               ? attention_indices + output_row * top_k
-                               : nullptr;
+  int32_t* row_attention =
+      attention_indices != nullptr
+          ? attention_indices +
+                static_cast<int64_t>(batch_row) * attention_row_stride
+          : nullptr;
   int32_t* row_miss = (miss_mask != nullptr)
                           ? miss_mask + static_cast<int64_t>(batch_row) * top_k
                           : nullptr;
@@ -338,7 +339,8 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   }
   __syncthreads();
   if (valid_counts != nullptr && tid == 0) {
-    valid_counts[output_row] = s_counters[2];
+    valid_counts[static_cast<int64_t>(batch_row) * valid_count_stride] =
+        s_counters[2];
   }
   // Fully resident rows need only request-relative page translation. Avoid
   // scanning or rewriting the hot LRU when no selected row can consult it.
@@ -783,9 +785,7 @@ void hisparse_resolve_residency(
     std::optional<torch::stable::Tensor> const& swap_device_physical_rows,
     std::optional<torch::stable::Tensor> const& swap_counts,
     std::optional<torch::stable::Tensor> const& resident_block_table,
-    int64_t resident_block_size, int64_t resident_null_block, int64_t num_rows,
-    int64_t input_row_stride, int64_t input_row_offset,
-    int64_t output_row_stride, int64_t output_row_offset) {
+    int64_t resident_block_size, int64_t resident_null_block) {
   STD_TORCH_CHECK(
       host_cache.device().is_cpu() && is_pinned_cpu_tensor(host_cache),
       "host_cache must be pinned CPU memory");
@@ -808,18 +808,11 @@ void hisparse_resolve_residency(
   STD_TORCH_CHECK(
       lru_slots.scalar_type() == torch::headeronly::ScalarType::Short,
       "lru_slots must be int16");
-  STD_TORCH_CHECK(global_indices.dim() == 2 && global_indices.is_contiguous(),
-                  "global_indices must be contiguous 2D");
-  if (num_rows == 0) num_rows = global_indices.size(0);
+  STD_TORCH_CHECK(global_indices.dim() == 2 && global_indices.stride(1) == 1,
+                  "global_indices must be row-major 2D");
+  const int64_t num_rows = global_indices.size(0);
   STD_TORCH_CHECK(num_rows >= 0 && num_rows <= INT32_MAX,
                   "num_rows must fit the CUDA grid");
-  STD_TORCH_CHECK(input_row_stride > 0 && input_row_offset >= 0 &&
-                      output_row_stride > 0 && output_row_offset >= 0,
-                  "input/output row mappings must be non-negative");
-  const int64_t max_input_row =
-      num_rows == 0 ? 0 : (num_rows - 1) * input_row_stride + input_row_offset;
-  STD_TORCH_CHECK(num_rows == 0 || max_input_row < global_indices.size(0),
-                  "input row mapping exceeds global_indices");
   STD_TORCH_CHECK(hot_indices.size(0) == num_rows &&
                       hot_indices.size(1) == global_indices.size(1) &&
                       hot_indices.is_contiguous(),
@@ -933,11 +926,8 @@ void hisparse_resolve_residency(
     STD_TORCH_CHECK(
         counts.is_cuda() &&
             counts.scalar_type() == torch::headeronly::ScalarType::Int &&
-            (launch_rows == 0 ||
-             counts.numel() >
-                 (launch_rows - 1) * output_row_stride + output_row_offset) &&
-            counts.is_contiguous(),
-        "valid_counts must be contiguous int32 on CUDA with one entry per row");
+            counts.dim() == 1 && counts.size(0) == launch_rows,
+        "valid_counts must be int32 on CUDA with one entry per row");
     valid_counts_ptr = counts.mutable_data_ptr<int32_t>();
   }
 
@@ -1001,12 +991,9 @@ void hisparse_resolve_residency(
     STD_TORCH_CHECK(
         indices.is_cuda() &&
             indices.scalar_type() == torch::headeronly::ScalarType::Int &&
-            indices.dim() == 2 && indices.is_contiguous() &&
-            (launch_rows == 0 ||
-             indices.size(0) >
-                 (launch_rows - 1) * output_row_stride + output_row_offset) &&
-            indices.size(1) == global_indices.size(1),
-        "attention_indices must cover the mapped output rows");
+            indices.dim() == 2 && indices.size(0) == launch_rows &&
+            indices.stride(1) == 1 && indices.size(1) == global_indices.size(1),
+        "attention_indices must be row-major int32 matching global_indices");
     STD_TORCH_CHECK(attention_block_stride >= hot_block_size,
                     "attention block stride must cover one hot block");
     attention_indices_ptr = indices.mutable_data_ptr<int32_t>();
@@ -1026,6 +1013,10 @@ void hisparse_resolve_residency(
   const torch::stable::accelerator::DeviceGuard device_guard(
       hot_cache.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
+  const int64_t attention_row_stride =
+      attention_indices.has_value() ? attention_indices.value().stride(0) : 0;
+  const int64_t valid_count_stride =
+      valid_counts.has_value() ? valid_counts.value().stride(0) : 0;
   auto kernel = hisparse_resolve_residency_kernel;
   if (smem_bytes > 48 * 1024) {
     const cudaError_t attribute_error = cudaFuncSetAttribute(
@@ -1049,8 +1040,8 @@ void hisparse_resolve_residency(
       source_num_blocks, static_cast<int32_t>(source_block_size),
       resident_bt_stride, resident_num_reqs, resident_num_blocks,
       static_cast<int32_t>(resident_block_size),
-      static_cast<int32_t>(resident_null_block), input_row_stride,
-      input_row_offset, output_row_stride, output_row_offset);
+      static_cast<int32_t>(resident_null_block), global_indices.stride(0),
+      attention_row_stride, valid_count_stride);
   const cudaError_t launch_error = cudaGetLastError();
   STD_TORCH_CHECK(launch_error == cudaSuccess,
                   "HiSparse residency kernel launch failed: ",
