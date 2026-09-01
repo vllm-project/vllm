@@ -350,7 +350,6 @@ def test_modelopt_nvfp4_mega_moe_uses_cached_inverse_activation_global_scale():
     method._deep_gemm = MagicMock()
     gscale = torch.tensor(8.0)
     layer = SimpleNamespace(
-        _deep_gemm_mega_a1_scale=torch.tensor(0.125),
         _deep_gemm_mega_a1_gscale=gscale,
         _deep_gemm_mega_l1_weights=MagicMock(),
         _deep_gemm_mega_l2_weights=MagicMock(),
