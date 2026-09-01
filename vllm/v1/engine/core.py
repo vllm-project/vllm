@@ -639,7 +639,7 @@ class EngineCore:
             scheduler_output, model_output
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
-        self._flush_notifications(engine_core_outputs)
+        self._collect_step_notifications(model_output, engine_core_outputs)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -743,7 +743,7 @@ class EngineCore:
             scheduler_output, model_output
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
-        self._flush_notifications(engine_core_outputs)
+        self._collect_step_notifications(model_output, engine_core_outputs)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -784,6 +784,16 @@ class EngineCore:
             engine_core_outputs[0] = eco = EngineCoreOutputs()
         eco.engine_notifications = self._pending_notifications
         self._pending_notifications = []
+
+    def _collect_step_notifications(
+        self,
+        model_output: ModelRunnerOutput,
+        engine_core_outputs: dict[int, EngineCoreOutputs],
+    ) -> None:
+        """Gather when the output rank rang the doorbell, then flush."""
+        if model_output.worker_notifications_pending:
+            self.gather_worker_notifications()
+        self._flush_notifications(engine_core_outputs)
 
     def gather_worker_notifications(self) -> None:
         """Collect and publish every rank's notifications; an rpc round trip,
@@ -1001,16 +1011,22 @@ class EngineCore:
         self.model_executor.execute_dummy_batch()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_executor.add_lora(lora_request)
+        added = self.model_executor.add_lora(lora_request)
+        self.gather_worker_notifications()
+        return added
 
     def remove_lora(self, lora_id: int) -> bool:
-        return self.model_executor.remove_lora(lora_id)
+        removed = self.model_executor.remove_lora(lora_id)
+        self.gather_worker_notifications()
+        return removed
 
     def list_loras(self) -> set[int]:
         return self.model_executor.list_loras()
 
     def pin_lora(self, lora_id: int) -> bool:
-        return self.model_executor.pin_lora(lora_id)
+        pinned = self.model_executor.pin_lora(lora_id)
+        self.gather_worker_notifications()
+        return pinned
 
     def save_sharded_state(
         self,

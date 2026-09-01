@@ -5,6 +5,25 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// The set of loaded LoRA adapters changed.
+///
+/// A full snapshot of the worker's adapter caches, so consumers replace their
+/// state rather than merge. Python encodes it with `omit_defaults=True`, so
+/// every field needs `#[serde(default)]`. Mirrors `LoRALoadEvent` in
+/// vllm/v1/notifications.py.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LoraLoadEvent {
+    /// Adapters activated into GPU slots (sorted).
+    #[serde(default)]
+    pub gpu_adapters: Vec<String>,
+    /// Adapters resident in the CPU cache (sorted, superset of `gpu_adapters`).
+    #[serde(default)]
+    pub cpu_adapters: Vec<String>,
+    /// Adapters pinned in the caches (sorted).
+    #[serde(default)]
+    pub pinned_adapters: Vec<String>,
+}
+
 /// Open escape hatch for out-of-tree producers.
 ///
 /// Plugins namespace under `key`; frontends ignore keys they don't know.
@@ -24,6 +43,7 @@ pub struct CustomNotification {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EngineNotification {
+    LoraLoadEvent(LoraLoadEvent),
     Custom(CustomNotification),
 }
 
@@ -34,6 +54,46 @@ mod tests {
 
     fn hex_bytes(hex: &str) -> Vec<u8> {
         hex::decode(hex).unwrap()
+    }
+
+    /// Python: `encode(LoRALoadEvent(gpu_adapters=["alpha"],
+    /// cpu_adapters=["alpha", "beta"], pinned_adapters=["alpha"]))`
+    const PYTHON_LORA_LOAD_EVENT: &str = "84a474797065af6c6f72615f6c6f61645f6576656e74ac6770755f616461707465727391a5616c706861ac6370755f616461707465727392a5616c706861a462657461af70696e6e65645f616461707465727391a5616c706861";
+
+    /// Python: `encode(LoRALoadEvent())`, where `omit_defaults=True` strips
+    /// everything but the tag.
+    const PYTHON_LORA_LOAD_EVENT_EMPTY: &str = "81a474797065af6c6f72615f6c6f61645f6576656e74";
+
+    #[test]
+    fn engine_event_decodes_python_lora_load_event() {
+        let event: EngineNotification = decode_msgpack(&hex_bytes(PYTHON_LORA_LOAD_EVENT)).unwrap();
+        expect_test::expect![[r#"
+            LoraLoadEvent(
+                LoraLoadEvent {
+                    gpu_adapters: [
+                        "alpha",
+                    ],
+                    cpu_adapters: [
+                        "alpha",
+                        "beta",
+                    ],
+                    pinned_adapters: [
+                        "alpha",
+                    ],
+                },
+            )
+        "#]]
+        .assert_debug_eq(&event);
+    }
+
+    #[test]
+    fn engine_event_decodes_lora_load_event_omitted_defaults() {
+        let event: EngineNotification =
+            decode_msgpack(&hex_bytes(PYTHON_LORA_LOAD_EVENT_EMPTY)).unwrap();
+        assert_eq!(
+            event,
+            EngineNotification::LoraLoadEvent(LoraLoadEvent::default())
+        );
     }
 
     /// Python: `encode(CustomNotification(key="my_plugin",

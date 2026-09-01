@@ -102,6 +102,16 @@ class EngineCoreOutput(
     new_sampling_mask: object | None = None
 
 
+class LoRALoadEvent(
+    msgspec.Struct,
+    tag="lora_load_event",
+    omit_defaults=True,
+):
+    gpu_adapters: list[str] = []
+    cpu_adapters: list[str] = []
+    pinned_adapters: list[str] = []
+
+
 class CustomNotification(
     msgspec.Struct,
     tag="custom",
@@ -112,7 +122,7 @@ class CustomNotification(
 
 
 # Union of engine-level event types; mirrors vllm/v1/notifications.py.
-EngineNotification = CustomNotification
+EngineNotification = LoRALoadEvent | CustomNotification
 
 
 class EngineCoreOutputs(
@@ -218,6 +228,7 @@ outputs = EngineCoreOutputs(
     ],
     finished_requests={"req-1"},
     engine_notifications=[
+        LoRALoadEvent(gpu_adapters=["alpha"], cpu_adapters=["alpha", "beta"]),
         CustomNotification(key="my_plugin", payload={"count": 5}),
     ],
 )
