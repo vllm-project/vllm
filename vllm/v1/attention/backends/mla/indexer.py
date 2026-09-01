@@ -1177,6 +1177,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
         if self.compress_ratio > 1:
             seq_lens = seq_lens // self.compress_ratio
+        if decode.seq_lens.dim() == 2 and seq_lens.dim() == 1:
+            # copy_ does not broadcast (B,) over (B, 1); unsqueeze instead.
+            seq_lens = seq_lens.unsqueeze(-1)
         decode.seq_lens.copy_(seq_lens)
         if current_platform.is_cuda() and has_deep_gemm():
             # A stale captured schedule can deadlock the paged MQA logits
