@@ -182,6 +182,10 @@ class KVConnectorBase_V1(ABC):
 
         Connectors that only move KV within the same DCP rank (e.g. CPU
         offloading) should return False.
+
+        Args:
+            kv_transfer_config: The connector's own config. Composite
+                connectors use this to inspect their children.
         """
         return True
 

@@ -54,6 +54,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def requires_dcp_block_aligned_interleave(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> bool:
+        """Rank-local transfer only; KV never crosses DCP ranks."""
         return False
 
     @property

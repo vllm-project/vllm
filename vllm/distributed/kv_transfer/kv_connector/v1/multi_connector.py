@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -151,17 +151,23 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return False
 
     @classmethod
-    def all_children_support_hma(cls, kv_transfer_config: "KVTransferConfig") -> bool:
-        """Return True only if every configured child connector supports HMA."""
-        connectors_config = kv_transfer_config.kv_connector_extra_config.get(
+    def _iter_child_configs(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> Iterator["KVTransferConfig"]:
+        for conn_config in kv_transfer_config.kv_connector_extra_config.get(
             "connectors", []
-        )
-        if not connectors_config:
-            return False
-        for conn_config in connectors_config:
-            child_config = KVTransferConfig(
+        ):
+            yield KVTransferConfig(
                 **{"engine_id": kv_transfer_config.engine_id, **conn_config}
             )
+
+    @classmethod
+    def all_children_support_hma(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        """Return True only if every configured child connector supports HMA."""
+        child_configs = tuple(cls._iter_child_configs(kv_transfer_config))
+        if not child_configs:
+            return False
+        for child_config in child_configs:
             if not KVConnectorFactory.supports_hma_config(child_config):
                 return False
         return True
@@ -170,16 +176,16 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def requires_dcp_block_aligned_interleave(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> bool:
-        """Return True if any configured child requires block alignment."""
-        connectors_config = kv_transfer_config.kv_connector_extra_config.get(
-            "connectors", []
-        )
-        if not connectors_config:
+        """Return True if any child requires block alignment.
+
+        An unconfigured MultiConnector conservatively requires alignment. This
+        is the opposite of the HMA default above, but both defaults choose the
+        stricter behavior for their respective capabilities.
+        """
+        child_configs = tuple(cls._iter_child_configs(kv_transfer_config))
+        if not child_configs:
             return True
-        for conn_config in connectors_config:
-            child_config = KVTransferConfig(
-                **{"engine_id": kv_transfer_config.engine_id, **conn_config}
-            )
+        for child_config in child_configs:
             child_cls = KVConnectorFactory.get_connector_class(child_config)
             if child_cls.requires_dcp_block_aligned_interleave(child_config):
                 return True

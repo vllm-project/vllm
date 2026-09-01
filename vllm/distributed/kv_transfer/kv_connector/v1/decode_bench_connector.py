@@ -92,6 +92,7 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
     def requires_dcp_block_aligned_interleave(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> bool:
+        """Fills scheduler-allocated local blocks; no cross-rank KV transfer."""
         return False
 
     def __init__(
