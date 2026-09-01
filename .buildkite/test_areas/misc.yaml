@@ -27,11 +27,14 @@ steps:
     - tests/v1/test_outputs.py
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s v1/sample --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-    - pytest -v -s v1/logits_processors --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-    - pytest -v -s v1/test_oracle.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-    - pytest -v -s v1/test_request.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-    - pytest -v -s v1/test_outputs.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    # Collect the whole group once before partitioning. Sharding each small file
+    # separately makes a shard with no nodes exit 5 even when the full partition
+    # is valid.
+    - >-
+      pytest -v -s v1/sample v1/logits_processors v1/test_oracle.py
+      v1/test_request.py v1/test_outputs.py
+      --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
       label: ":amd: (MI300) V1 Sample + Logits Shard %N"
