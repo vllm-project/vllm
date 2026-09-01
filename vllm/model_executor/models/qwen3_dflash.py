@@ -3,7 +3,7 @@
 
 import io
 from collections.abc import Iterable
-from contextlib import nullcontext
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -32,6 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.reload import make_deferred_module_factory
 from vllm.multimodal.inputs import NestedTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
@@ -47,42 +48,11 @@ from .utils import (
     WeightsMapper,
     get_draft_quant_config,
     maybe_prefix,
-    process_eagle_weight,
 )
 
 logger = init_logger(__name__)
 
-
 _SLIDING_ATTENTION = "sliding_attention"
-
-
-def _materialize_vocab_module(module: nn.Module) -> None:
-    from vllm.model_executor.model_loader.reload.layerwise import (
-        get_layerwise_info,
-    )
-    from vllm.model_executor.model_loader.reload.meta import materialize_layer
-
-    materialize_layer(module, get_layerwise_info(module))
-
-
-_VOCAB_LOADING_BYPASS_FORMATS = frozenset(
-    {"modelexpress", "runai_streamer_sharded", "sharded_state", "tensorizer"}
-)
-
-
-def _defer_vocab_module_allocation(vllm_config: VllmConfig) -> bool:
-    """Whether the loader delegates checkpoint ownership to model.load_weights."""
-    load_config = getattr(vllm_config, "load_config", None)
-    load_format = getattr(load_config, "load_format", "auto")
-    return load_format not in _VOCAB_LOADING_BYPASS_FORMATS
-
-
-def _vocab_module_init_context(vllm_config: VllmConfig):
-    return (
-        torch.device("meta")
-        if _defer_vocab_module_allocation(vllm_config)
-        else nullcontext()
-    )
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
@@ -429,12 +399,15 @@ class DFlashQwen3Model(nn.Module):
 
         current_vllm_config = get_current_vllm_config()
 
-        with _vocab_module_init_context(vllm_config):
-            self.embed_tokens = VocabParallelEmbedding(
+        self.embed_tokens: VocabParallelEmbedding | None = None
+        self._embed_tokens_factory = make_deferred_module_factory(
+            partial(
+                VocabParallelEmbedding,
                 self.config.vocab_size,
                 self.config.hidden_size,
                 prefix=maybe_prefix(prefix, "embed_tokens"),
-            )
+            ),
+        )
 
         # Masked query slots are fed to the draft as `mask_token_id`. Most DFlash
         # checkpoints will have the mask embedding in the vocabulary embedding table
@@ -484,7 +457,13 @@ class DFlashQwen3Model(nn.Module):
             eps=self.config.rms_norm_eps,
         )
 
+    def initialize_embed_tokens(self) -> VocabParallelEmbedding:
+        if self.embed_tokens is None:
+            self.embed_tokens = self._embed_tokens_factory()
+        return self.embed_tokens
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        assert self.embed_tokens is not None
         embeds = self.embed_tokens(input_ids)
         if self.has_separate_mask_embedding and self.mask_token_id is not None:
             # Replace masked slots with the dedicated mask embedding.
@@ -734,16 +713,18 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             start_layer_id=target_layer_num,
         )
 
-        defer_vocab_allocation = _defer_vocab_module_allocation(vllm_config)
-        self.has_own_embed_tokens = not defer_vocab_allocation
-        self.has_own_lm_head = not defer_vocab_allocation
+        self.has_own_embed_tokens = False
+        self.has_own_lm_head = False
         logit_scale = getattr(self.config, "logit_scale", 1.0)
-        with _vocab_module_init_context(vllm_config):
-            self.lm_head = ParallelLMHead(
+        self.lm_head: ParallelLMHead | None = None
+        self._lm_head_factory = make_deferred_module_factory(
+            partial(
+                ParallelLMHead,
                 self.config.draft_vocab_size,
                 self.config.hidden_size,
                 prefix=maybe_prefix(prefix, "lm_head"),
-            )
+            ),
+        )
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size, scale=logit_scale
         )
@@ -755,6 +736,11 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             )
         else:
             self.draft_id_to_target_id = None
+
+    def initialize_lm_head(self) -> ParallelLMHead:
+        if self.lm_head is None:
+            self.lm_head = self._lm_head_factory()
+        return self.lm_head
 
     def embed_input_ids(
         self,
@@ -784,6 +770,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        assert self.lm_head is not None
         logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
             return logits
@@ -853,14 +840,13 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             if "lm_head" in name:
                 includes_lm_head = True
             model_weights[name] = loaded_weight
-            process_eagle_weight(self, name)
+
         self.has_own_embed_tokens = includes_embed_tokens
         self.has_own_lm_head = includes_lm_head
-
         if includes_embed_tokens:
-            _materialize_vocab_module(self.model.embed_tokens)
+            self.model.initialize_embed_tokens()
         if includes_lm_head:
-            _materialize_vocab_module(self.lm_head)
+            self.initialize_lm_head()
 
         # Route the separately-trained mask embedding (if shipped) through the
         # standard weight loader alongside the rest of the draft weights.
@@ -881,11 +867,6 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items(), mapper=mapper)
-        if not includes_embed_tokens:
-            self.model.embed_tokens = None
-        if not includes_lm_head:
-            self.lm_head = None
-
         self.model._build_fused_kv_buffers()
 
     def _read_mask_embedding(self) -> torch.Tensor | None:

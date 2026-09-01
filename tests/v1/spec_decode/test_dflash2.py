@@ -7,13 +7,10 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.models import qwen3_dflash
-from vllm.model_executor.models.qwen3_dflash import (
-    DFlashQwen3ForCausalLM,
-    DFlashQwen3Model,
-)
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
-from vllm.v1.worker.gpu.spec_decode.dflash import utils as dflash_utils
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
@@ -246,7 +243,7 @@ class _VocabModule(nn.Module):
         self.weight = nn.Parameter(torch.empty(vocab_size, hidden_size))
 
 
-def test_dflash_vocab_modules_start_on_meta(monkeypatch, default_vllm_config):
+def _dflash_vocab_test_config(default_vllm_config):
     hf_config = SimpleNamespace(
         vocab_size=8,
         draft_vocab_size=8,
@@ -255,7 +252,7 @@ def test_dflash_vocab_modules_start_on_meta(monkeypatch, default_vllm_config):
         rms_norm_eps=1e-6,
         eagle_config={"use_aux_hidden_state": False},
     )
-    vllm_config = SimpleNamespace(
+    return SimpleNamespace(
         speculative_config=SimpleNamespace(
             draft_model_config=SimpleNamespace(hf_config=hf_config)
         ),
@@ -266,135 +263,57 @@ def test_dflash_vocab_modules_start_on_meta(monkeypatch, default_vllm_config):
         ),
         parallel_config=SimpleNamespace(),
         compilation_config=default_vllm_config.compilation_config,
-        load_config=SimpleNamespace(load_format="auto"),
     )
+
+
+def _patch_dflash_vocab_modules(monkeypatch):
     monkeypatch.setattr(qwen3_dflash, "get_draft_quant_config", lambda _: None)
-    monkeypatch.setattr(
-        qwen3_dflash,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(cache_config=None),
-    )
+    monkeypatch.setattr(qwen3_dflash, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(qwen3_dflash, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(qwen3_dflash, "VocabParallelEmbedding", _VocabModule)
-
-    model = DFlashQwen3Model(vllm_config=vllm_config)
-
-    assert model.embed_tokens.weight.is_meta
-
-    class DraftModel(nn.Module):
-        def __init__(self, **_kwargs):
-            super().__init__()
-
-    monkeypatch.setattr(DFlashQwen3ForCausalLM, "model_cls", DraftModel)
     monkeypatch.setattr(qwen3_dflash, "ParallelLMHead", _VocabModule)
-    monkeypatch.setattr(qwen3_dflash, "LogitsProcessor", lambda *_args, **_kwargs: None)
-
-    model = DFlashQwen3ForCausalLM(vllm_config=vllm_config)
-
-    assert model.lm_head.weight.is_meta
-    assert not model.has_own_embed_tokens
-    assert not model.has_own_lm_head
-
-    vllm_config.load_config.load_format = "sharded_state"
-    inner_model = DFlashQwen3Model(vllm_config=vllm_config)
-    model = DFlashQwen3ForCausalLM(vllm_config=vllm_config)
-
-    assert not inner_model.embed_tokens.weight.is_meta
-    assert not model.lm_head.weight.is_meta
-    assert model.has_own_embed_tokens
-    assert model.has_own_lm_head
 
 
 @pytest.mark.parametrize(
     ("has_embed_tokens", "has_lm_head"),
     [(False, False), (True, False), (False, True), (True, True)],
 )
-def test_dflash_materializes_only_checkpoint_vocab_modules(
-    monkeypatch, has_embed_tokens: bool, has_lm_head: bool
+def test_dflash_initializes_only_checkpoint_owned_vocab_modules(
+    monkeypatch,
+    default_vllm_config,
+    has_embed_tokens: bool,
+    has_lm_head: bool,
 ):
-    draft = DFlashQwen3ForCausalLM.__new__(DFlashQwen3ForCausalLM)
-    nn.Module.__init__(draft)
+    _patch_dflash_vocab_modules(monkeypatch)
+    vllm_config = _dflash_vocab_test_config(default_vllm_config)
+    model = DFlashQwen3ForCausalLM(vllm_config=vllm_config)
+    model.model._build_fused_kv_buffers = lambda: None
+
+    assert model.model.embed_tokens is None
+    assert model.lm_head is None
+    assert not model.has_own_embed_tokens
+    assert not model.has_own_lm_head
+
+    weights = []
+    if has_embed_tokens:
+        weights.append(("embed_tokens.weight", torch.full((8, 4), 2.0)))
+    if has_lm_head:
+        weights.append(("lm_head.weight", torch.full((8, 4), 3.0)))
+
     with torch.device("meta"):
-        draft.model = nn.Module()
-        draft.model.embed_tokens = _VocabModule(8, 4)
-        draft.lm_head = _VocabModule(8, 4)
-    draft.model.use_aux_hidden_state = False
-    draft.model.has_separate_mask_embedding = False
-    draft.model._build_fused_kv_buffers = lambda: None
-    draft.config = SimpleNamespace(vocab_size=8, draft_vocab_size=8)
-    draft._read_mask_embedding = lambda: None
+        model.load_weights(weights)
 
-    weights = [("layers.0.weight", torch.empty(1))]
-    if has_embed_tokens:
-        weights.append(("embed_tokens.weight", torch.empty(8, 4)))
-    if has_lm_head:
-        weights.append(("lm_head.weight", torch.empty(8, 4)))
-
-    class Loader:
-        def __init__(self, model):
-            assert model is draft
-
-        def load_weights(self, weights, mapper):
-            list(weights)
-            assert draft.model.embed_tokens.weight.is_meta is not has_embed_tokens
-            assert draft.lm_head.weight.is_meta is not has_lm_head
-
-    monkeypatch.setattr(qwen3_dflash, "AutoWeightsLoader", Loader)
-    monkeypatch.setattr(qwen3_dflash, "process_eagle_weight", lambda *_: None)
-
-    draft.load_weights(weights)
-
-    assert draft.has_own_embed_tokens is has_embed_tokens
-    assert draft.has_own_lm_head is has_lm_head
-    assert (draft.model.embed_tokens is not None) is has_embed_tokens
-    assert (draft.lm_head is not None) is has_lm_head
-    if has_embed_tokens:
-        assert not draft.model.embed_tokens.weight.is_meta
-    if has_lm_head:
-        assert not draft.lm_head.weight.is_meta
-
-    target = nn.Module()
-    target.model = nn.Module()
-    target.model.embed_tokens = _VocabModule(8, 4)
-    target.lm_head = _VocabModule(8, 4)
-    target.model.embed_tokens.weight.data.fill_(1)
-    target.lm_head.weight.data.fill_(1)
-    if has_embed_tokens:
-        draft.model.embed_tokens.weight.data.fill_(2)
-        draft_embed_tokens = draft.model.embed_tokens
-    else:
-        draft_embed_tokens = None
-    if has_lm_head:
-        draft.lm_head.weight.data.fill_(2)
-        draft_lm_head = draft.lm_head
-    else:
-        draft_lm_head = None
-
-    def replace(config, **changes):
-        values = vars(config).copy()
-        values.update(changes)
-        return SimpleNamespace(**values)
-
-    draft_model_config = SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=0))
-    speculative_config = SimpleNamespace(
-        draft_model_config=draft_model_config,
-        attention_backend=None,
-        kv_cache_dtype=None,
-    )
-    vllm_config = SimpleNamespace(
-        speculative_config=speculative_config,
-        attention_config=SimpleNamespace(),
-        cache_config=SimpleNamespace(),
-    )
-    monkeypatch.setattr(dflash_utils, "replace", replace)
-    monkeypatch.setattr(dflash_utils, "get_model", lambda **_: draft)
-    monkeypatch.setattr(
-        dflash_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1)
-    )
-
-    loaded = dflash_utils.load_dflash_model(target, vllm_config)
-
-    assert loaded is draft
-    assert draft.model.embed_tokens is (
-        draft_embed_tokens if has_embed_tokens else target.model.embed_tokens
-    )
-    assert draft.lm_head is draft_lm_head if has_lm_head else target.lm_head
+    assert model.has_own_embed_tokens is has_embed_tokens
+    assert model.has_own_lm_head is has_lm_head
+    assert (model.model.embed_tokens is not None) is has_embed_tokens
+    assert (model.lm_head is not None) is has_lm_head
+    if model.model.embed_tokens is not None:
+        assert (
+            "weight" in get_layerwise_info(model.model.embed_tokens).restore_metadata[0]
+        )
+        torch.testing.assert_close(
+            model.model.embed_tokens.weight, torch.full((8, 4), 2.0)
+        )
+    if model.lm_head is not None:
+        assert "weight" in get_layerwise_info(model.lm_head).restore_metadata[0]
+        torch.testing.assert_close(model.lm_head.weight, torch.full((8, 4), 3.0))
