@@ -427,6 +427,7 @@ def _bind_hisparse_kv_caches(
     source_group_id = get_unique_kv_cache_group_id(
         kv_cache_config, KVCacheGroupRole.HISPARSE_SOURCE
     )
+    source_block_table = block_tables.input_block_tables[source_group_id]
     source_slot_mapping = block_tables.slot_mappings[source_group_id]
     resident = cache_handles[0].view
     assert resident is not None
@@ -447,6 +448,7 @@ def _bind_hisparse_kv_caches(
         max_num_batched_tokens, dtype=torch.int64, device=hot_backing.device
     )
     for layer_index, cache_handle in enumerate(cache_handles):
+        cache_handle.source_block_table = source_block_table
         cache_handle.mirror_slot_mapping = source_slot_mapping
         cache_handle.mirror_staging_cache = mirror_staging_caches[layer_index]
         cache_handle.mirror_staging_slots = mirror_staging_slots

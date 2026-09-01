@@ -286,6 +286,10 @@ def attach_hisparse_connector(
     kv_cache_config: KVCacheConfig,
     coordinator: HiSparseCoordinator | None = None,
 ) -> KVConnectorBase_V1:
+    if coordinator is not None and connector is not None:
+        coordinator.external_import_populates_resident_cache = getattr(
+            connector, "populates_hisparse_resident_cache", True
+        )
     hisparse_connector = HiSparseConnector(
         vllm_config, role, kv_cache_config, coordinator
     )

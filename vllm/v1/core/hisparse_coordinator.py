@@ -168,6 +168,7 @@ class HiSparseCoordinator:
         self.pending_spills: dict[int, _PendingSpill] = {}
         self.request_states: dict[str, _HiSparseRequestState] = {}
         self.next_spill_id = 0
+        self.external_import_populates_resident_cache = True
         # host block id -> pinned GPU copies of its pages; lets a prefix hit on
         # host blocks come back GPU-resident instead of null (FIFO-evicted
         # first under pool pressure, so pinning never causes an OOM the
