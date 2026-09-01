@@ -523,6 +523,18 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             lambda c: c.request_finished(request, blocks),
         )
 
+    def register_finished_partial_tail(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        accepted = [
+            c.register_finished_partial_tail(request, block_ids, partial_tail_offloads)
+            for c in self._connectors
+        ]
+        return any(accepted)
+
     def request_finished_all_groups(
         self,
         request: "Request",
