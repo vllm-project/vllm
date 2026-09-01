@@ -28,6 +28,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
+use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
@@ -167,6 +168,22 @@ fn sse_json_payloads(text: &str) -> Vec<serde_json::Value> {
         .filter(|payload| *payload != "[DONE]")
         .map(|payload| serde_json::from_str(payload).expect("sse json payload"))
         .collect()
+}
+
+fn assert_shared_openai_stream_envelope(payloads: &[serde_json::Value], object: &str, model: &str) {
+    let first = payloads.first().expect("at least one SSE JSON payload");
+    assert!(first["id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(first["created"].is_u64());
+    assert_eq!(first["object"], object);
+    assert_eq!(first["model"], model);
+
+    for payload in payloads {
+        assert_eq!(payload["id"], first["id"]);
+        assert_eq!(payload["object"], first["object"]);
+        assert_eq!(payload["created"], first["created"]);
+        assert_eq!(payload["model"], first["model"]);
+        assert!(payload.get("envelope").is_none());
+    }
 }
 
 type TestFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -836,13 +853,27 @@ async fn test_admin_app_with_engine_script<F>(script: F) -> (axum::Router, MockE
 where
     F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
 {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    test_admin_app_with_ready_and_engine_script(ready, script).await
+}
+
+async fn test_admin_app_with_ready_and_engine_script<F>(
+    ready: EngineCoreReadyResponse,
+    script: F,
+) -> (axum::Router, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-admin".to_vec();
 
-    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
         engine_id.clone(),
+        ready,
         move |dealer, push| script(dealer, push),
     ));
 
@@ -2702,6 +2733,11 @@ async fn happy_path_returns_sse_stream() {
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let after = METRICS.render().unwrap();
 
+    assert_shared_openai_stream_envelope(
+        &sse_json_payloads(&text),
+        "chat.completion.chunk",
+        "Qwen/Qwen1.5-0.5B-Chat",
+    );
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
     assert!(text.starts_with("data: "), "{text}");
     assert_eq!(
@@ -3639,7 +3675,10 @@ async fn non_stream_completions_include_prompt_logprobs() {
     );
     assert_eq!(
         json["choices"][0]["prompt_logprobs"][1],
-        json!({"a": -0.5, "e": -0.3})
+        json!({
+            "97": {"logprob": -0.5, "rank": 1, "decoded_token": "a"},
+            "101": {"logprob": -0.3, "rank": 1, "decoded_token": "e"},
+        })
     );
 }
 
@@ -4318,6 +4357,36 @@ async fn raw_generate_rejects_empty_token_ids() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn raw_generate_rejects_parallel_sampling() {
+    let mut app = test_app().await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "token_ids": [11, 22],
+                        "sampling_params": {"n": 4}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["param"], "n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn raw_generate_rejects_streaming_prompt_logprobs() {
     let mut app = test_app().await;
 
@@ -4417,6 +4486,11 @@ async fn completions_happy_path_returns_sse_stream() {
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
     let payloads = sse_data_payloads(&text);
+    assert_shared_openai_stream_envelope(
+        &sse_json_payloads(&text),
+        "text_completion",
+        "Qwen/Qwen1.5-0.5B-Chat",
+    );
     let usage_index = payloads
         .iter()
         .position(|payload| payload.contains("\"usage\":"))

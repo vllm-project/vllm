@@ -11,6 +11,7 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionRequest,
@@ -20,7 +21,7 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionStreamResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
@@ -124,6 +125,7 @@ class GenerateRequest(BaseModel):
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "

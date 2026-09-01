@@ -604,3 +604,24 @@ def test_online_mxfp4_dense_matches_quark(
         keys=("weight", "weight_scale"),
         packed_weight_keys=("weight",),
     )
+
+
+def test_quark_ocp_mx_dense_rejects_unaligned_input_partition():
+    scheme = object.__new__(QuarkOCP_MX)
+    layer = torch.nn.Module()
+    layer.prefix = "model.layers.0.mlp.shared_expert.down_proj"
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "input size per partition of 80, which must be divisible by "
+            "the OCP MX group size 32"
+        ),
+    ):
+        scheme.create_weights(
+            layer=layer,
+            output_partition_sizes=[2560],
+            input_size_per_partition=80,
+            params_dtype=torch.bfloat16,
+            weight_loader=lambda *_: None,
+        )
