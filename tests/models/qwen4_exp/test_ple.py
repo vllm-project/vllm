@@ -72,7 +72,7 @@ def _make_fp8_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
     )
     embedding.register_parameter(
         "weight_scale",
-        nn.Parameter(torch.zeros(1, dtype=torch.bfloat16), requires_grad=False),
+        nn.Parameter(torch.zeros(1, dtype=torch.float32), requires_grad=False),
     )
     _set_test_embedding_weight_loader(embedding)
     module.ngram_embedding = embedding
@@ -156,11 +156,17 @@ def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
         module.ngram_embedding.weight.float(),
         torch.cat((shard_0[2:4], shard_1[0:2])).float(),
     )
-    assert torch.equal(module.ngram_embedding.weight_scale, weight_scale)
+    assert module.ngram_embedding.weight_scale.dtype == torch.float32
+    torch.testing.assert_close(
+        module.ngram_embedding.weight_scale,
+        weight_scale.float(),
+    )
 
 
 def _make_fp8_embedding_layer(
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    load_scale: bool = True,
 ) -> embedding_module.VocabParallelEmbedding:
     monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
@@ -180,12 +186,14 @@ def _make_fp8_embedding_layer(
     )
     weight = torch.tensor([[1.0, 2.0], [4.0, 8.0], [16.0, 32.0]])
     layer.weight.data.copy_(weight.to(torch.float8_e4m3fn))
-    layer.weight_scale.data.copy_(torch.tensor([0.25], dtype=torch.bfloat16))
+    if load_scale:
+        layer.weight_scale.data.copy_(torch.tensor([0.25], dtype=torch.bfloat16))
     return layer
 
 
 def test_ple_fp8_embedding_dequantizes_in_ple_layer(monkeypatch) -> None:
     layer = _make_fp8_embedding_layer(monkeypatch)
+    layer.quant_method.process_weights_after_loading(layer)
     quantized_output = layer(torch.tensor([2, 0]))
     ple_layer = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
     nn.Module.__init__(ple_layer)
@@ -198,11 +206,18 @@ def test_ple_fp8_embedding_dequantizes_in_ple_layer(monkeypatch) -> None:
     )
 
     assert layer.weight.dtype == torch.float8_e4m3fn
-    assert layer.weight_scale.dtype == torch.bfloat16
+    assert layer.weight_scale.dtype == torch.float32
     assert quantized_output.dtype == torch.float8_e4m3fn
     assert output.dtype == torch.bfloat16
     weight = torch.tensor([[1.0, 2.0], [4.0, 8.0], [16.0, 32.0]])
     torch.testing.assert_close(output, (weight[[2, 0]] * 0.25).bfloat16())
+
+
+def test_ple_fp8_embedding_rejects_missing_global_scale(monkeypatch) -> None:
+    layer = _make_fp8_embedding_layer(monkeypatch, load_scale=False)
+
+    with pytest.raises(ValueError, match="missing its global scale"):
+        layer.quant_method.process_weights_after_loading(layer)
 
 
 def test_ple_fp8_embedding_uses_int8_for_tp_reduce(monkeypatch) -> None:
