@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Songlin Yang, Yu Zhang
+# mypy: ignore-errors
 #
 # This file contains code copied from the flash-linear-attention project.
 # The original source code was licensed under the MIT license and included
@@ -10,20 +11,20 @@
 
 
 import torch
-import torch.nn as nn
 
-from vllm.model_executor.custom_op import CustomOp
+from vllm.third_party.flash_linear_attention.ops.chunk_delta_h import (
+    chunk_gated_delta_rule_fwd_h,
+)
+from vllm.third_party.flash_linear_attention.ops.cumsum import chunk_local_cumsum
+from vllm.third_party.flash_linear_attention.ops.index import prepare_chunk_indices
+from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+from vllm.third_party.flash_linear_attention.ops.op import exp2, log
+from vllm.third_party.flash_linear_attention.ops.solve_tril import solve_tril
+from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE, is_amd
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import RCP_LN2, cdiv, next_power_of_2
 
-from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
-from .cumsum import chunk_local_cumsum
 from .fused_recurrent import fused_recurrent_gated_delta_rule_fwd_kernel
-from .index import prepare_chunk_indices
-from .l2norm import l2norm_fwd
-from .op import exp2, log
-from .solve_tril import solve_tril
-from .utils import FLA_CHUNK_SIZE, is_amd
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
@@ -42,6 +43,12 @@ def fused_recurrent_kda_fwd(
     ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
+    out: torch.Tensor | None = None,
+    sigmoid_beta: bool = False,
+    a_log: torch.Tensor | None = None,
+    g_bias: torch.Tensor | None = None,
+    compute_gate: bool = False,
+    lower_bound: float | None = -5.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -52,7 +59,24 @@ def fused_recurrent_kda_fwd(
     num_stages = 3
     num_warps = 1
 
-    o = torch.empty_like(k)
+    if compute_gate:
+        assert a_log is not None and g_bias is not None, (
+            "compute_gate requires a_log and g_bias"
+        )
+        assert lower_bound is not None, (
+            "compute_gate implements the bounded (safe_gate) branch only"
+        )
+        a_log = a_log.reshape(-1).contiguous()
+        g_bias = g_bias.reshape(-1).contiguous()
+
+    if out is None:
+        o = torch.empty_like(k)
+    else:
+        # Caller-provided output buffer; must be layout-compatible with the
+        # tensor the kernel indexes (contiguous, same shape/dtype as k).
+        assert out.shape == k.shape and out.dtype == k.dtype
+        assert out.is_contiguous()
+        o = out
     if inplace_final_state:
         final_state = initial_state
     else:
@@ -99,6 +123,12 @@ def fused_recurrent_kda_fwd(
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
         IS_KDA=True,
+        SIGMOID_BETA=sigmoid_beta,
+        a_log=a_log,
+        g_bias=g_bias,
+        COMPUTE_GATE=compute_gate,
+        SAFE_GATE=True,
+        LOWER_BOUND=lower_bound if lower_bound is not None else -5.0,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -118,6 +148,13 @@ def fused_recurrent_kda(
     use_qk_l2norm_in_kernel: bool = True,
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.LongTensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
+    sigmoid_beta: bool = False,
+    a_log: torch.Tensor | None = None,
+    g_bias: torch.Tensor | None = None,
+    compute_gate: bool = False,
+    lower_bound: float | None = -5.0,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if cu_seqlens is not None and q.shape[0] != 1:
@@ -139,395 +176,16 @@ def fused_recurrent_kda(
         inplace_final_state=inplace_final_state,
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
-        num_accepted_tokens=None,
+        num_accepted_tokens=num_accepted_tokens,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        out=out,
+        sigmoid_beta=sigmoid_beta,
+        a_log=a_log,
+        g_bias=g_bias,
+        compute_gate=compute_gate,
+        lower_bound=lower_bound,
     )
     return o, final_state
-
-
-@triton.heuristics(
-    {
-        "STORE_RESIDUAL_OUT": lambda args: args["residual_out"] is not None,
-        "HAS_RESIDUAL": lambda args: args["residual"] is not None,
-        "HAS_WEIGHT": lambda args: args["w"] is not None,
-        "HAS_BIAS": lambda args: args["b"] is not None,
-    }
-)
-@triton.jit
-def layer_norm_gated_fwd_kernel(
-    x,  # pointer to the input
-    g,  # pointer to the gate
-    y,  # pointer to the output
-    w,  # pointer to the weights
-    b,  # pointer to the biases
-    residual,  # pointer to the residual
-    residual_out,  # pointer to the residual
-    mean,  # pointer to the mean
-    rstd,  # pointer to the 1/std
-    eps,  # epsilon to avoid division by zero
-    T,  # number of rows in x
-    H: tl.constexpr,  # number of heads
-    g_stride_n: tl.constexpr,
-    D: tl.constexpr,  # number of columns in x
-    BT: tl.constexpr,
-    BD: tl.constexpr,
-    ACTIVATION: tl.constexpr,
-    IS_RMS_NORM: tl.constexpr,
-    STORE_RESIDUAL_OUT: tl.constexpr,
-    HAS_RESIDUAL: tl.constexpr,
-    HAS_WEIGHT: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
-):
-    i_t = tl.program_id(0)
-
-    o_d = tl.arange(0, BD)
-    m_d = o_d < D
-
-    p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
-    if HAS_RESIDUAL:
-        p_res = tl.make_block_ptr(
-            residual, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
-        )
-        b_x += tl.load(p_res, boundary_check=(0, 1)).to(tl.float32)
-    if STORE_RESIDUAL_OUT:
-        p_res_out = tl.make_block_ptr(
-            residual_out, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
-        )
-        tl.store(p_res_out, b_x.to(p_res_out.dtype.element_ty), boundary_check=(0, 1))
-    if not IS_RMS_NORM:
-        b_mean = tl.sum(b_x, axis=1) / D
-        p_mean = tl.make_block_ptr(mean, (T,), (1,), (i_t * BT,), (BT,), (0,))
-        tl.store(p_mean, b_mean.to(p_mean.dtype.element_ty), boundary_check=(0,))
-        b_xbar = tl.where(m_d[None, :], b_x - b_mean[:, None], 0.0)
-        b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
-    else:
-        b_xbar = tl.where(m_d[None, :], b_x, 0.0)
-        b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
-    b_rstd = 1 / tl.sqrt(b_var + eps)
-
-    p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
-    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
-
-    if HAS_WEIGHT:
-        b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
-    if HAS_BIAS:
-        b_b = tl.load(b + o_d, mask=m_d).to(tl.float32)
-    b_x_hat = (
-        (b_x - b_mean[:, None]) * b_rstd[:, None]
-        if not IS_RMS_NORM
-        else b_x * b_rstd[:, None]
-    )
-    b_y = b_x_hat * b_w[None, :] if HAS_WEIGHT else b_x_hat
-    if HAS_BIAS:
-        b_y = b_y + b_b[None, :]
-
-    # swish/sigmoid output gate
-    o_t = i_t * BT + tl.arange(0, BT)
-    o_g = (o_t // H) * g_stride_n + (o_t % H) * D
-    b_g = tl.load(
-        g + o_g[:, None] + o_d[None, :],
-        mask=(o_t[:, None] < T) & m_d[None, :],
-        other=0.0,
-    ).to(tl.float32)
-    if ACTIVATION == "swish" or ACTIVATION == "silu":
-        b_y = b_y * b_g * tl.sigmoid(b_g)
-    elif ACTIVATION == "sigmoid":
-        b_y = b_y * tl.sigmoid(b_g)
-
-    # Write output
-    p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
-
-
-@triton.heuristics(
-    {
-        "STORE_RESIDUAL_OUT": lambda args: args["residual_out"] is not None,
-        "HAS_RESIDUAL": lambda args: args["residual"] is not None,
-        "HAS_WEIGHT": lambda args: args["w"] is not None,
-        "HAS_BIAS": lambda args: args["b"] is not None,
-    }
-)
-@triton.jit
-def layer_norm_gated_fwd_kernel1(
-    x,  # pointer to the input
-    g,  # pointer to the gate
-    y,  # pointer to the output
-    w,  # pointer to the weights
-    b,  # pointer to the biases
-    residual,  # pointer to the residual
-    residual_out,  # pointer to the residual
-    mean,  # pointer to the mean
-    rstd,  # pointer to the 1/std
-    eps,  # epsilon to avoid division by zero
-    D: tl.constexpr,  # number of columns in x
-    BD: tl.constexpr,
-    ACTIVATION: tl.constexpr,
-    IS_RMS_NORM: tl.constexpr,
-    STORE_RESIDUAL_OUT: tl.constexpr,
-    HAS_RESIDUAL: tl.constexpr,
-    HAS_WEIGHT: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
-):
-    i_t = tl.program_id(0)
-    x += i_t * D
-    y += i_t * D
-    g += i_t * D
-    if HAS_RESIDUAL:
-        residual += i_t * D
-    if STORE_RESIDUAL_OUT:
-        residual_out += i_t * D
-
-    o_d = tl.arange(0, BD)
-    m_d = o_d < D
-    b_x = tl.load(x + o_d, mask=m_d, other=0.0).to(tl.float32)
-    if HAS_RESIDUAL:
-        b_x += tl.load(residual + o_d, mask=m_d, other=0.0).to(tl.float32)
-    if STORE_RESIDUAL_OUT:
-        tl.store(residual_out + o_d, b_x, mask=m_d)
-    if not IS_RMS_NORM:
-        b_mean = tl.sum(b_x, axis=0) / D
-        tl.store(mean + i_t, b_mean)
-        b_xbar = tl.where(m_d, b_x - b_mean, 0.0)
-        b_var = tl.sum(b_xbar * b_xbar, axis=0) / D
-    else:
-        b_xbar = tl.where(m_d, b_x, 0.0)
-        b_var = tl.sum(b_xbar * b_xbar, axis=0) / D
-    b_rstd = 1 / tl.sqrt(b_var + eps)
-    tl.store(rstd + i_t, b_rstd)
-
-    if HAS_WEIGHT:
-        b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
-    if HAS_BIAS:
-        b_b = tl.load(b + o_d, mask=m_d).to(tl.float32)
-    b_x_hat = (b_x - b_mean) * b_rstd if not IS_RMS_NORM else b_x * b_rstd
-    b_y = b_x_hat * b_w if HAS_WEIGHT else b_x_hat
-    if HAS_BIAS:
-        b_y = b_y + b_b
-
-    # swish/sigmoid output gate
-    b_g = tl.load(g + o_d, mask=m_d, other=0.0).to(tl.float32)
-    if ACTIVATION == "swish" or ACTIVATION == "silu":
-        b_y = b_y * b_g * tl.sigmoid(b_g)
-    elif ACTIVATION == "sigmoid":
-        b_y = b_y * tl.sigmoid(b_g)
-
-    # Write output
-    tl.store(y + o_d, b_y, mask=m_d)
-
-
-def layer_norm_gated_fwd(
-    x: torch.Tensor,
-    g: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    activation: str = "swish",
-    eps: float = 1e-5,
-    residual: torch.Tensor = None,
-    out_dtype: torch.dtype = None,
-    residual_dtype: torch.dtype = None,
-    is_rms_norm: bool = False,
-    H: int = 1,
-    g_stride_n: int | None = None,
-):
-    if residual is not None:
-        residual_dtype = residual.dtype
-    T, D = x.shape
-    if g_stride_n is None:
-        g_stride_n = D
-    assert T % H == 0
-    if residual is not None:
-        assert residual.shape == (T, D)
-    if weight is not None:
-        assert weight.shape == (D,)
-    if bias is not None:
-        assert bias.shape == (D,)
-    # allocate output
-    y = x if out_dtype is None else torch.empty_like(x, dtype=out_dtype)
-    if residual is not None or (
-        residual_dtype is not None and residual_dtype != x.dtype
-    ):
-        residual_out = torch.empty(T, D, device=x.device, dtype=residual_dtype)
-    else:
-        residual_out = None
-    mean = (
-        torch.empty((T,), dtype=torch.float, device=x.device)
-        if not is_rms_norm
-        else None
-    )
-    rstd = torch.empty((T,), dtype=torch.float, device=x.device)
-    # Less than 64KB per feature: enqueue fused kernel
-    MAX_FUSED_SIZE = 65536 // x.element_size()
-    BD = min(MAX_FUSED_SIZE, next_power_of_2(D))
-    if D > BD:
-        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    if D <= 512:
-        BT = 16
-        layer_norm_gated_fwd_kernel[(cdiv(T, BT),)](
-            x=x,
-            g=g,
-            y=y,
-            w=weight,
-            b=bias,
-            residual=residual,
-            residual_out=residual_out,
-            mean=mean,
-            rstd=rstd,
-            eps=eps,
-            T=T,
-            H=H,
-            g_stride_n=g_stride_n,
-            D=D,
-            BD=BD,
-            BT=BT,
-            ACTIVATION=activation,
-            IS_RMS_NORM=is_rms_norm,
-            num_warps=8,
-        )
-    else:
-        layer_norm_gated_fwd_kernel1[(T,)](
-            x=x,
-            g=g,
-            y=y,
-            w=weight,
-            b=bias,
-            residual=residual,
-            residual_out=residual_out,
-            mean=mean,
-            rstd=rstd,
-            eps=eps,
-            D=D,
-            BD=BD,
-            ACTIVATION=activation,
-            IS_RMS_NORM=is_rms_norm,
-            num_warps=4,
-        )
-    # residual_out is None if residual is None and residual_dtype == input_dtype
-    return y, mean, rstd, residual_out if residual_out is not None else x
-
-
-def rms_norm_gated(
-    x: torch.Tensor,
-    g: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    activation: str = "swish",
-    residual: torch.Tensor | None = None,
-    prenorm: bool = False,
-    residual_in_fp32: bool = False,
-    eps: float = 1e-6,
-):
-    x_shape_og = x.shape
-    # reshape input data into 2D tensor
-    x = x.contiguous().reshape(-1, x.shape[-1])
-    D = x.shape[-1]
-    # The tiled kernel supports row-strided gates; kernel1 does not.
-    if D <= 512:
-        H = 1 if g.ndim == 2 else g.shape[-2]
-        g = g.view(-1, H, D)
-        g_stride_n = g.stride(0)
-    else:
-        g = g.contiguous()
-        H = 1
-        g_stride_n = D
-    if residual is not None:
-        assert residual.shape == x_shape_og
-        residual = residual.contiguous().reshape(-1, residual.shape[-1])
-    residual_dtype = (
-        residual.dtype
-        if residual is not None
-        else (torch.float if residual_in_fp32 else None)
-    )
-    y, _, _, residual_out = layer_norm_gated_fwd(
-        x=x,
-        g=g,
-        weight=weight,
-        bias=bias,
-        activation=activation,
-        eps=eps,
-        residual=residual,
-        residual_dtype=residual_dtype,
-        is_rms_norm=True,
-        H=H,
-        g_stride_n=g_stride_n,
-    )
-    y = y.reshape(x_shape_og)
-    return y if not prenorm else (y, residual_out.reshape(x_shape_og))
-
-
-@CustomOp.register("fused_rms_norm_gated")
-class FusedRMSNormGated(CustomOp):
-    def __init__(
-        self,
-        hidden_size: int,
-        elementwise_affine: bool = True,
-        eps: float = 1e-5,
-        activation: str = "swish",
-        device: torch.device | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> None:
-        factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
-
-        self.hidden_size = hidden_size
-        self.elementwise_affine = elementwise_affine
-        self.eps = eps
-        self.activation = activation
-
-        if self.activation not in ["swish", "silu", "sigmoid"]:
-            raise ValueError(f"Unsupported activation: {self.activation}")
-
-        if elementwise_affine:
-            self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
-        else:
-            self.register_parameter("weight", None)
-        self.register_parameter("bias", None)
-
-    def forward_native(
-        self,
-        x: torch.Tensor,
-        g: torch.Tensor,
-        residual: torch.Tensor | None = None,
-        prenorm: bool = False,
-        residual_in_fp32: bool = False,
-    ) -> torch.Tensor:
-        """Decomposed PyTorch ops for torch.compile/inductor fusion."""
-        # TODO(https://github.com/vllm-project/vllm/issues/36175): implement
-        # native residual/prenorm path and unify with RMSNormGated.
-        # For now, fall back to the triton kernel.
-        if residual is not None or prenorm:
-            return self.forward_cuda(x, g, residual, prenorm, residual_in_fp32)
-        x_float = x.float()
-        variance = x_float.pow(2).mean(dim=-1, keepdim=True)
-        x_normed = x_float * torch.rsqrt(variance + self.eps)
-        if self.weight is not None:
-            x_normed = x_normed * self.weight.float()
-        g_float = g.float()
-        if self.activation in ("swish", "silu"):
-            out = x_normed * g_float * torch.sigmoid(g_float)
-        else:  # sigmoid
-            out = x_normed * torch.sigmoid(g_float)
-        return out.to(x.dtype)
-
-    def forward_cuda(
-        self,
-        x: torch.Tensor,
-        g: torch.Tensor,
-        residual: torch.Tensor | None = None,
-        prenorm: bool = False,
-        residual_in_fp32: bool = False,
-    ) -> torch.Tensor:
-        return rms_norm_gated(
-            x,
-            g,
-            self.weight,
-            self.bias,
-            self.activation,
-            residual=residual,
-            eps=self.eps,
-            prenorm=prenorm,
-            residual_in_fp32=residual_in_fp32,
-        )
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -1210,9 +868,10 @@ def kda_gate_cumsum_fwd_kernel(
     cu_seqlens,
     chunk_indices,
     cumsum_scale,
-    lower_bound,
     beta,
     threshold,
+    SAFE_GATE: tl.constexpr,
+    LOWER_BOUND: tl.constexpr,
     T,
     H: tl.constexpr,
     D: tl.constexpr,
@@ -1220,7 +879,6 @@ def kda_gate_cumsum_fwd_kernel(
     BD: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_LOWER_BOUND: tl.constexpr,
 ):
     i_d, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -1260,9 +918,12 @@ def kda_gate_cumsum_fwd_kernel(
         b_bias = tl.load(g_bias + i_h * D + o_d, mask=o_d < D, other=0.0).to(tl.float32)
         b_g = b_g + b_bias[None, :]
 
-    b_a = tl.exp(tl.load(A + i_h).to(tl.float32))
-    if USE_LOWER_BOUND:
-        b_gate = lower_bound * tl.sigmoid(b_a * b_g)
+    b_a = tl.load(A + i_h).to(tl.float32)
+    b_a = tl.exp(b_a) if SAFE_GATE else -tl.exp(b_a)
+    if SAFE_GATE:
+        # y = lower_bound * sigmoid(exp(A) * (g + g_bias)), bounded to
+        # (lower_bound, 0) for safe-gate checkpoints.
+        b_gate = LOWER_BOUND / (1.0 + tl.exp(-(b_a * b_g)))
     else:
         b_g_scaled = b_g * beta
         b_softplus = tl.where(
@@ -1270,7 +931,7 @@ def kda_gate_cumsum_fwd_kernel(
             b_g,
             (1.0 / beta) * log(1.0 + tl.exp(b_g_scaled)),
         )
-        b_gate = -b_a * b_softplus
+        b_gate = b_a * b_softplus
 
     # Out-of-bounds rows (load returns 0, but softplus/bias can still make
     # b_gate non-zero) participate in the dot product. They only contribute to
@@ -1288,11 +949,12 @@ def fused_kda_gate_chunk_cumsum(
     g_bias: torch.Tensor | None = None,
     beta: float = 1.0,
     threshold: float = 20.0,
-    lower_bound: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_size: int = FLA_CHUNK_SIZE,
     output_dtype: torch.dtype | None = torch.float,
+    safe_gate: bool = False,
+    lower_bound: float = -5.0,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
         assert raw_g.shape[0] == 1, (
@@ -1322,16 +984,17 @@ def fused_kda_gate_chunk_cumsum(
         # exp2-based kernels reproduce exp(g). Keep this in sync with the
         # `use_exp2=True` path in `_chunk_kda_fwd_with_cumulative_g`.
         cumsum_scale=RCP_LN2,
-        lower_bound=lower_bound or 0.0,
         beta=beta,
         threshold=threshold,
+        SAFE_GATE=safe_gate,
+        LOWER_BOUND=lower_bound,
         T=T,
         H=H,
         D=D,
         BT=chunk_size,
-        USE_LOWER_BOUND=lower_bound is not None,
     )
     return y
+
 
 def _chunk_kda_fwd_with_cumulative_g(
     q: torch.Tensor,
@@ -1454,8 +1117,9 @@ def chunk_kda_with_fused_gate_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    lower_bound: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    safe_gate: bool = False,
+    lower_bound: float = -5.0,
 ):
     chunk_size = FLA_CHUNK_SIZE
     chunk_indices = (
@@ -1470,6 +1134,7 @@ def chunk_kda_with_fused_gate_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_size=chunk_size,
+        safe_gate=safe_gate,
         lower_bound=lower_bound,
     )
     return _chunk_kda_fwd_with_cumulative_g(
@@ -1532,9 +1197,10 @@ def chunk_kda_with_fused_gate(
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    lower_bound: float | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.Tensor | None = None,
+    safe_gate: bool = False,
+    lower_bound: float = -5.0,
     **kwargs,
 ):
     """Run chunk KDA from raw gate projection using fused gate+cumsum."""
@@ -1556,8 +1222,9 @@ def chunk_kda_with_fused_gate(
         scale=scale,
         initial_state=initial_state.contiguous() if initial_state is not None else None,
         output_final_state=output_final_state,
-        lower_bound=lower_bound,
         cu_seqlens=cu_seqlens,
+        safe_gate=safe_gate,
+        lower_bound=lower_bound,
     )
     return o, final_state
 
@@ -1577,21 +1244,22 @@ def kda_gate_fwd_kernel(
     A,
     y,
     g_bias,
-    lower_bound,
     beta: tl.constexpr,
     threshold: tl.constexpr,
+    SAFE_GATE: tl.constexpr,
+    LOWER_BOUND: tl.constexpr,
     T,
     H,
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
     HAS_BIAS: tl.constexpr,
-    USE_LOWER_BOUND: tl.constexpr,
 ):
     i_t, i_h = tl.program_id(0), tl.program_id(1)
     n_t = i_t * BT
 
-    b_a = tl.exp(tl.load(A + i_h).to(tl.float32))
+    b_a = tl.load(A + i_h).to(tl.float32)
+    b_a = tl.exp(b_a) if SAFE_GATE else -tl.exp(b_a)
 
     stride_row = H * D
     stride_col = 1
@@ -1624,13 +1292,18 @@ def kda_gate_fwd_kernel(
         )
         b_g = b_g + b_bias[None, :]
 
-    if USE_LOWER_BOUND:
-        b_y = lower_bound * tl.sigmoid(b_a * b_g)
+    if SAFE_GATE:
+        # y = lower_bound * sigmoid(exp(A) * (g + g_bias)), bounded to
+        # (lower_bound, 0) for safe-gate checkpoints.
+        b_y = LOWER_BOUND / (1.0 + tl.exp(-(b_a * b_g)))
     else:
+        # softplus(x, beta) = (1/beta) * log(1 + exp(beta * x))
+        # When beta * x > threshold, use linear approximation x
+        # Use threshold to switch to linear when beta*x > threshold
         g_scaled = b_g * beta
         use_linear = g_scaled > threshold
         sp = tl.where(use_linear, b_g, (1.0 / beta) * log(1.0 + tl.exp(g_scaled)))
-        b_y = -b_a * sp
+        b_y = b_a * sp
 
     tl.store(y_ptr, b_y.to(y.dtype.element_ty), boundary_check=(0, 1))
 
@@ -1642,14 +1315,18 @@ def fused_kda_gate(
     g_bias: torch.Tensor | None = None,
     beta: float = 1.0,
     threshold: float = 20.0,
-    lower_bound: float | None = None,
+    safe_gate: bool = False,
+    lower_bound: float | None = -5.0,
 ) -> torch.Tensor:
     """
     Forward pass for KDA gate:
       input g: [..., H*D]
       param A: [H] or [1, 1, H, 1]
-      beta: softplus beta parameter
-      threshold: softplus threshold parameter
+      beta: softplus beta parameter (softplus branch only)
+      threshold: softplus threshold parameter (softplus branch only)
+      safe_gate: when False (default) compute y = -exp(A)*softplus(g+g_bias);
+        when True compute the bounded y = lower_bound*sigmoid(exp(A)*(g+g_bias))
+      lower_bound: floor for the safe_gate branch (default -5.0)
       return  : [..., H, D]
     """
     orig_shape = g.shape[:-1]
@@ -1670,15 +1347,15 @@ def fused_kda_gate(
         A,
         y,
         g_bias,
-        lower_bound or 0.0,
         beta,
         threshold,
+        safe_gate,
+        lower_bound if lower_bound is not None else -5.0,
         T,
         H,
         head_k_dim,
         BD=next_power_of_2(head_k_dim),
         HAS_BIAS=g_bias is not None,
-        USE_LOWER_BOUND=lower_bound is not None,
     )
 
     y = y.view(*orig_shape, H, head_k_dim)

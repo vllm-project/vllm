@@ -33,12 +33,12 @@ from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
     set_weight_attrs,
 )
-from vllm.platforms import current_platform
-from vllm.third_party.flash_linear_attention.ops.kda import (
-    FusedRMSNormGated,
+from vllm.models.glm5next.nvidia.ops.third_party.kda import (
     chunk_kda_with_fused_gate,
     fused_recurrent_kda,
 )
+from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
