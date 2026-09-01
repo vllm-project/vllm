@@ -516,7 +516,10 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
             generators.append(generator)
 
-        assert len(generators) == 1
+        if len(generators) != 1:
+            raise RuntimeError(
+                f"Expected exactly 1 generator, got {len(generators)}"
+            )
         (result_generator,) = generators
 
         # Store the input messages.
@@ -854,8 +857,15 @@ class OpenAIServingResponses(GenerateBaseServing):
             assert isinstance(context, SimpleContext)
             # Use final_output which has accumulated text/token_ids/logprobs
             final_res = context.final_output
-            assert final_res is not None
-            assert len(final_res.outputs) == 1
+            if final_res is None:
+                raise RuntimeError(
+                    "Final output is None for completed request"
+                )
+            if len(final_res.outputs) != 1:
+                raise RuntimeError(
+                    f"Expected exactly 1 output, got "
+                    f"{len(final_res.outputs)}"
+                )
             final_output = final_res.outputs[0]
 
             # finish_reason='error' indicates retryable internal error

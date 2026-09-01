@@ -1083,9 +1083,11 @@ class MambaSpecDecodeGPUContext:
             f"expected {self.num_groups} block tables, got {len(block_tables)}"
         )
         strides = {bt.stride(0) for bt in block_tables}
-        assert len(strides) == 1, (
-            f"all mamba block tables must share stride(0), got {strides}"
-        )
+        if len(strides) != 1:
+            raise ValueError(
+                "all mamba block tables must share stride(0), "
+                f"got {strides}"
+            )
         self.block_table_stride_req = int(next(iter(strides)))
         for i, bt in enumerate(block_tables):
             self.block_table_ptrs[i] = _reinterpret_u64_as_i64(bt.data_ptr())
@@ -1556,7 +1558,11 @@ def postprocess_mamba_all(
         return
     mamba_groups = get_mamba_groups(kv_cache_config)
     block_sizes = {mamba_spec.block_size for mamba_spec in mamba_groups}
-    assert len(block_sizes) == 1, "all mamba groups must share block_size"
+    if len(block_sizes) != 1:
+        raise ValueError(
+            "all mamba groups must share block_size, "
+            f"got {block_sizes}"
+        )
     block_size = next(iter(block_sizes))
     full_decode_len = 1 + num_spec_tokens
     scheduled = scheduler_output.num_scheduled_tokens
