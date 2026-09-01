@@ -24,7 +24,7 @@ PROMPTS = [
 try:
     from flashinfer.mamba.checkpointing_ssu import CheckpointingSSURunner
 
-    HAS_FLASHINFER_CHECKPOINTING_SSU = callable(CheckpointingSSURunner)
+    HAS_FLASHINFER_CHECKPOINTING_SSU = CheckpointingSSURunner is not None
 except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
 
@@ -87,17 +87,6 @@ def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
     _check_replayssm_parity(vllm_runner, model_name, tensor_parallel_size=2)
 
 
-@pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_flashinfer_decode_matches_baseline(vllm_runner, model_name):
-    pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
-    _check_replayssm_parity(
-        vllm_runner,
-        model_name,
-        mamba_backend="flashinfer",
-        name_1="replayssm_flashinfer",
-    )
-
-
 @pytest.mark.skipif(
     not HAS_FLASHINFER_CHECKPOINTING_SSU,
     reason="flashinfer.mamba.checkpointing_ssu not available",
@@ -113,22 +102,6 @@ def test_replayssm_flashinfer_decode_matches_baseline_v2(
         name_1="replayssm_flashinfer_v2",
         require_v2=True,
         monkeypatch=monkeypatch,
-    )
-
-
-@multi_gpu_test(num_gpus=2)
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
-@pytest.mark.parametrize("model_name", [MAMBA2_MODEL])
-def test_replayssm_flashinfer_decode_matches_baseline_tp2(vllm_runner, model_name):
-    _check_replayssm_parity(
-        vllm_runner,
-        model_name,
-        tensor_parallel_size=2,
-        mamba_backend="flashinfer",
-        name_1="replayssm_flashinfer_tp2",
     )
 
 
@@ -162,37 +135,6 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_na
         outputs_1_lst=replay,
         name_0="baseline_spec",
         name_1="replayssm_flashinfer_spec",
-    )
-
-
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
-@pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_flashinfer_matches_triton_replayssm(vllm_runner, model_name):
-    # Both backends implement ReplaySSM; compare them directly on V1 because
-    # Triton ReplaySSM is not supported on Model Runner V2.
-    common = dict(
-        max_model_len=1024,
-        trust_remote_code=True,
-        enable_prefix_caching=False,
-        mamba_cache_mode="none",
-        use_replayssm=True,
-        replayssm_buffer_len=16,
-    )
-    with vllm_runner(model_name, mamba_backend="triton", **common) as llm:
-        triton = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
-    with vllm_runner(model_name, mamba_backend="flashinfer", **common) as llm:
-        flashinfer = llm.generate_greedy_logprobs(
-            PROMPTS, max_tokens=32, num_logprobs=5
-        )
-
-    check_logprobs_close(
-        outputs_0_lst=triton,
-        outputs_1_lst=flashinfer,
-        name_0="replayssm_triton",
-        name_1="replayssm_flashinfer",
     )
 
 

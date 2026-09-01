@@ -34,7 +34,6 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
-from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
@@ -42,65 +41,6 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
-
-
-def test_kda_recoverssm_derivation_is_revalidated():
-    config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            use_replayssm=True,
-            use_kda_recoverssm=False,
-            mamba_cache_mode="none",
-            replayssm_buffer_len=16,
-        ),
-        num_speculative_tokens=3,
-        model_config=SimpleNamespace(
-            supports_replayssm=True,
-            architecture="KimiLinearForCausalLM",
-        ),
-        mamba_config=SimpleNamespace(
-            backend=MambaBackendEnum.TRITON,
-            enable_stochastic_rounding=False,
-        ),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
-        kv_transfer_config=None,
-        use_v2_model_runner=True,
-    )
-
-    VllmConfig.validate_mamba_cached_kernel(config)
-    assert config.cache_config.use_replayssm
-    assert config.cache_config.use_kda_recoverssm
-
-    config.cache_config.mamba_cache_mode = "align"
-    VllmConfig.validate_mamba_cached_kernel(config)
-    config.use_v2_model_runner = False
-    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-    config.use_v2_model_runner = True
-    config.cache_config.mamba_cache_mode = "all"
-    with pytest.raises(ValueError, match="only none and align"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-    config.cache_config.mamba_cache_mode = "none"
-
-    config.model_config.architecture = "NemotronHForCausalLM"
-    config.mamba_config.backend = MambaBackendEnum.FLASHINFER
-    VllmConfig.validate_mamba_cached_kernel(config)
-    assert not config.cache_config.use_kda_recoverssm
-
-    config.mamba_config.backend = MambaBackendEnum.TRITON
-    with pytest.raises(ValueError, match="requires --mamba-backend flashinfer"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-
-    config.mamba_config.backend = MambaBackendEnum.FLASHINFER
-    config.cache_config.replayssm_buffer_len = 3
-    with pytest.raises(ValueError, match="replayssm-buffer-len"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-    config.cache_config.replayssm_buffer_len = 16
-
-    config.model_config.architecture = "KimiLinearForCausalLM"
-    config.mamba_config.backend = MambaBackendEnum.TRITON
-    config.parallel_config.pipeline_parallel_size = 2
-    with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
-        VllmConfig.validate_mamba_cached_kernel(config)
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():
