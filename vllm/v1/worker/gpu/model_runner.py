@@ -705,6 +705,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn: bool = False,
         uniform_decode: bool = False,
         context_len: int = 0,
+        num_scheduled_tokens_per_req: list[int] | None = None,
+        num_context_reqs: int | None = None,
         skip_eplb: bool = False,
         is_profile: bool = False,
         **kwargs,
@@ -717,6 +719,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Create a dummy scheduler output.
         num_reqs = min(num_tokens, self.max_num_reqs)
         if uniform_decode:
+            assert num_scheduled_tokens_per_req is None
             # HACK(lucas): for now since the worker is shared between MRV1 and MRV2,
             # and for spec-decode with MTP we want to make sure the dummy runs use
             # 1+num_speculative_tokens we use max here, this will likely be eventually
@@ -724,12 +727,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_tokens = max(num_tokens, self.decode_query_len)
             num_reqs = num_tokens // self.decode_query_len
             assert num_tokens % self.decode_query_len == 0
-        # Distribute the remainder evenly so no dummy request exceeds
-        # ceil(num_tokens / num_reqs) <= max_model_len tokens.
-        num_tokens_per_request = [
-            num_tokens // num_reqs + (i >= num_reqs - num_tokens % num_reqs)
-            for i in range(num_reqs)
-        ]
+        if num_scheduled_tokens_per_req is None:
+            # Distribute the remainder evenly so no dummy request exceeds
+            # ceil(num_tokens / num_reqs) <= max_model_len tokens.
+            num_tokens_per_request = [
+                num_tokens // num_reqs + (i >= num_reqs - num_tokens % num_reqs)
+                for i in range(num_reqs)
+            ]
+        else:
+            assert num_context_reqs is not None
+            num_tokens_per_request = num_scheduled_tokens_per_req
+            num_reqs = len(num_tokens_per_request)
+            assert 0 < num_reqs <= self.max_num_reqs
+            assert all(n > 0 for n in num_tokens_per_request)
 
         assert sum(num_tokens_per_request) == num_tokens
         num_scheduled_tokens = {
@@ -764,6 +774,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_attn_for_dummy_run=skip_attn,
                 is_profile=is_profile,
                 context_len=context_len,
+                num_context_reqs=num_context_reqs,
             )
         self.kv_connector.set_disabled(False)
 
@@ -1525,6 +1536,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
         context_len: int = 0,
+        num_context_reqs: int | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
@@ -1617,21 +1629,33 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             dummy_num_reqs = batch_desc.num_reqs or num_reqs
+            dummy_num_scheduled_tokens = None
+            if num_context_reqs is not None:
+                if batch_desc.num_tokens == num_toks and dummy_num_reqs == num_reqs:
+                    dummy_num_scheduled_tokens = np.fromiter(
+                        scheduler_output.num_scheduled_tokens.values(),
+                        dtype=np.int32,
+                        count=num_reqs,
+                    )
+                else:
+                    num_context_reqs = None
             input_batch = InputBatch.make_dummy(
                 dummy_num_reqs,
                 batch_desc.num_tokens,
                 self.input_buffers,
                 max_query_len=batch_desc.max_query_len,
+                num_scheduled_tokens=dummy_num_scheduled_tokens,
             )
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
-                if context_len:
+                if context_len or num_context_reqs is not None:
                     set_dummy_context(
                         input_batch,
                         self.block_tables,
                         context_len,
                         self.kv_cache_config.num_blocks,
                         self.max_model_len,
+                        num_context_reqs=num_context_reqs,
                     )
             else:
                 assert batch_desc.cg_mode != CUDAGraphMode.FULL, (

@@ -116,6 +116,7 @@ class InputBatch:
         num_tokens: int,
         input_buffers: InputBuffers,
         max_query_len: int | None = None,
+        num_scheduled_tokens: np.ndarray | None = None,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -126,21 +127,25 @@ class InputBatch:
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
-        # Distribute the remainder evenly so that no dummy request exceeds
-        # ceil(num_tokens / num_reqs) <= max_model_len tokens. Varlen graphs
-        # accept any split with non-empty slots, so this shape works for them
-        # too; attention metadata is built from the promised max_query_len.
-        base_tokens = num_tokens // num_reqs
-        num_extra = num_tokens % num_reqs
-        assert max_query_len is None or base_tokens + (num_extra > 0) <= max_query_len
-        num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
-        if num_extra > 0:
-            num_scheduled_tokens[-num_extra:] += 1
+        if num_scheduled_tokens is None:
+            # Distribute the remainder evenly so that no dummy request exceeds
+            # ceil(num_tokens / num_reqs) <= max_model_len tokens. Varlen graphs
+            # accept any split with non-empty slots, so this shape works for them
+            # too; attention metadata is built from the promised max_query_len.
+            base_tokens = num_tokens // num_reqs
+            num_extra = num_tokens % num_reqs
+            num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
+            if num_extra > 0:
+                num_scheduled_tokens[-num_extra:] += 1
+        else:
+            num_scheduled_tokens = np.asarray(num_scheduled_tokens, dtype=np.int32)
+            assert num_scheduled_tokens.shape == (num_reqs,)
+            assert np.all(num_scheduled_tokens > 0)
         assert int(num_scheduled_tokens.sum()) == num_tokens
+        assert max_query_len is None or num_scheduled_tokens.max() <= max_query_len
 
         # seq_len equals to query_len
-        input_buffers.seq_lens[: num_reqs - num_extra] = base_tokens
-        input_buffers.seq_lens[num_reqs - num_extra : num_reqs] = base_tokens + 1
+        input_buffers.seq_lens[:num_reqs].copy_(torch.from_numpy(num_scheduled_tokens))
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
@@ -209,29 +214,61 @@ def set_dummy_context(
     context_len: int,
     num_kv_blocks: int,
     max_model_len: int,
+    num_context_reqs: int | None = None,
 ) -> None:
-    """Give each dummy request context_len of context, used when profiling step cost."""
-    if not block_tables.input_block_tables:
-        # Attention-free models have no KV context to fabricate.
-        return
+    """Give leading dummy requests context, used when profiling step cost."""
     num_reqs = input_batch.num_reqs
-    query_len = input_batch.max_query_len or int(input_batch.num_scheduled_tokens.max())
+    explicit_context_reqs = num_context_reqs is not None
+    if not explicit_context_reqs and not block_tables.input_block_tables:
+        # Preserve the existing attention-free dummy path.
+        return
+    if num_context_reqs is None:
+        num_context_reqs = num_reqs
+    assert 0 <= num_context_reqs <= num_reqs
+    query_len = 0
+    if num_context_reqs:
+        query_len = (
+            input_batch.max_query_len
+            if num_context_reqs == num_reqs and input_batch.max_query_len is not None
+            else int(input_batch.num_scheduled_tokens[:num_context_reqs].max())
+        )
     context_len = max(min(context_len, max_model_len - query_len), 0)
-    if not context_len:
+    if not context_len and not explicit_context_reqs:
         return
 
-    # Decode-like shape: each request continues after context_len
+    # Decode-like rows continue after context_len
     # already-computed tokens.
-    input_batch.seq_lens += context_len
-    input_batch.seq_lens_cpu_upper_bound += context_len
-    input_batch.num_computed_tokens_np.fill(context_len)
-    input_batch.num_computed_prefill_tokens_np.fill(context_len)
+    input_batch.seq_lens[:num_context_reqs] += context_len
+    input_batch.seq_lens_cpu_upper_bound[:num_context_reqs] += context_len
+    input_batch.num_computed_tokens_np[:num_context_reqs].fill(context_len)
+    input_batch.num_computed_prefill_tokens_np[:num_context_reqs].fill(context_len)
+
+    if num_context_reqs < num_reqs:
+        input_batch.prefill_len_np[num_context_reqs:] = (
+            input_batch.num_scheduled_tokens[num_context_reqs:]
+        )
+        input_batch.is_prefilling_np[num_context_reqs:] = True
+        input_batch.has_prefill = True
+
     local_pos = np.arange(input_batch.num_tokens, dtype=np.int64) - np.repeat(
         input_batch.query_start_loc_np[:-1], input_batch.num_scheduled_tokens
     )
-    input_batch.positions.copy_(torch.from_numpy(local_pos + context_len))
+    context_offsets = np.zeros(num_reqs, dtype=np.int64)
+    context_offsets[:num_context_reqs] = context_len
+    input_batch.positions.copy_(
+        torch.from_numpy(
+            local_pos + np.repeat(context_offsets, input_batch.num_scheduled_tokens)
+        )
+    )
 
-    seq_len = context_len + query_len
+    if not block_tables.input_block_tables:
+        # Attention-free models have no KV context to fabricate.
+        return
+
+    seq_len = max(
+        context_len + query_len,
+        int(input_batch.seq_lens_cpu_upper_bound.max()),
+    )
     for block_table, block_size, bpk in zip(
         block_tables.input_block_tables,
         block_tables.kernel_block_sizes,
