@@ -27,7 +27,7 @@ def next_power_of_2(n: int) -> int:
 
 @triton.jit
 def eagle_step_slot_mapping_metadata_kernel(
-    positions_ptr,  # [batch_size] - current positions (1D view for M-RoPE)
+    positions_ptr,  # [batch_size] - current absolute sequence positions
     block_table_ptr,  # [batch_size, n_blocks_per_req]
     block_table_stride,  # stride for block_table dim 1
     seq_lens_ptr,  # [batch_size] - read and write
@@ -103,7 +103,7 @@ def eagle_step_update_slot_mapping_and_metadata(
     PADDING_SLOT_ID to out_slot_mapping for cudagraph padding.
 
     Args:
-        positions_1d: [batch_size] current positions (use positions[0] for M-RoPE)
+        positions_1d: [batch_size] current absolute sequence positions
         block_table_tensor: [batch_size, n_blocks_per_req]
         seq_lens: [batch_size] updated in place
         block_size: KV cache block size
