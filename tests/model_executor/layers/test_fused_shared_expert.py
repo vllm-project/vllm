@@ -646,6 +646,24 @@ def test_quark_shared_expert_fse_exclude_is_scoped_to_the_layer() -> None:
     )
 
 
+def test_quark_shared_expert_fse_rejects_partially_excluded_packed_projection() -> None:
+    """Packed shared-expert projections require consistent shard exclusions."""
+    shared_expert_prefix = "model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig(
+        {
+            "exclude": [f"{shared_expert_prefix}.gate_proj"],
+            "global_quant_config": {},
+            "layer_quant_config": {},
+        }
+    )
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    with pytest.raises(ValueError, match="different quantization schemes"):
+        is_shared_expert_quant_fse_compatible(
+            quant_config, "model.layers.0.mlp.experts", shared_expert_prefix
+        )
+
+
 def test_quark_shared_expert_fse_ignores_sibling_gate_exclusions() -> None:
     """Gates beside a shared expert must not disable FSE.
 

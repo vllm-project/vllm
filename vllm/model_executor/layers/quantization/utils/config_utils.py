@@ -147,19 +147,17 @@ def is_shared_expert_quant_fse_compatible(
         assert "global_quant_config" in quant_config.quant_config
 
         exclude = quant_config.quant_config["exclude"]
-        try:
-            is_excluded = any(
-                should_ignore_layer(
-                    f"{shared_expert_prefix}.{projection_name}",
-                    ignore=exclude,
-                    fused_mapping=quant_config.packed_modules_mapping,
-                )
-                for projection_name in projection_names
+
+        # should_ignore_layer raises a rightful ValueError in case different shards
+        # have a different ignore policy, as unsupported.
+        is_excluded = any(
+            should_ignore_layer(
+                f"{shared_expert_prefix}.{projection_name}",
+                ignore=exclude,
+                fused_mapping=quant_config.packed_modules_mapping,
             )
-        except ValueError:
-            # Raised when the shards of a packed projection disagree, which
-            # rules out fusing the shared expert either way.
-            is_excluded = True
+            for projection_name in projection_names
+        )
         if is_excluded:
             return False, f"Quark excludes shared experts at {shared_expert_prefix}"
 
