@@ -12,6 +12,7 @@ from __future__ import annotations
 import errno
 import gc
 import inspect
+import json
 import logging
 import os
 import warnings
@@ -158,6 +159,13 @@ def _write_ple_layer(
     return full
 
 
+def _write_safetensors_index(directory: Path, weight_map: dict[str, str]) -> None:
+    (directory / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {}, "weight_map": weight_map}),
+        encoding="utf-8",
+    )
+
+
 def _attached_embedding(
     directory: Path, layer_idx: int, vocab: int, parts: int, cols: int, scale: float
 ) -> ple_mmap.MmapNgramEmbedding:
@@ -287,6 +295,124 @@ def test_discover_shards_separates_multiple_ple_layers(tmp_path: Path) -> None:
         {p for p, _o, _r in result[1].shards.values()}
     )
     assert not full0.equal(full1[:10])  # fixtures are genuinely distinct
+
+
+def test_discover_shards_honors_the_safetensors_index(tmp_path: Path) -> None:
+    prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
+    full = _write_ple_layer(tmp_path, layer_idx=0, vocab=4, parts=1, cols=2, scale=0.5)
+    indexed_name = "model-ple-0-00000.safetensors"
+    excluded = torch.ones((4, 2), dtype=torch.float32).to(torch.float8_e4m3fn)
+    safetensors.torch.save_file(
+        {
+            f"{prefix}.shard_0.weight": excluded,
+            f"{prefix}.weight_scale": torch.tensor([9.0], dtype=torch.bfloat16),
+        },
+        str(tmp_path / "model.safetensors"),
+    )
+    _write_safetensors_index(
+        tmp_path,
+        {
+            f"{prefix}.shard_0.weight": indexed_name,
+            f"{prefix}.weight_scale": indexed_name,
+        },
+    )
+
+    layer_shards = ple_mmap.discover_shards(str(tmp_path))[0]
+    assert {
+        Path(path).name for path, _offset, _rows in layer_shards.shards.values()
+    } == {indexed_name}
+
+    embedding = ple_mmap.MmapNgramEmbedding(4, 2)
+    ple_mmap._attach_table(
+        embedding,
+        layer_shards,
+        split_ngram_parts=1,
+        layer_idx=0,
+        model_path=str(tmp_path),
+    )
+    actual = embedding(torch.arange(4, dtype=torch.long))
+    assert torch.equal(actual, full)
+    assert embedding.table is not None
+    embedding.table.close()
+
+
+def test_discover_shards_refreshes_when_the_index_changes(tmp_path: Path) -> None:
+    prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
+    shard_name = f"{prefix}.shard_0.weight"
+    scale_name = f"{prefix}.weight_scale"
+    scale = torch.tensor([0.5], dtype=torch.bfloat16)
+    rows_a = torch.zeros((4, 2), dtype=torch.float32).to(torch.float8_e4m3fn)
+    rows_b = torch.ones((4, 2), dtype=torch.float32).to(torch.float8_e4m3fn)
+    for filename, rows in (
+        ("a.safetensors", rows_a),
+        ("b.safetensors", rows_b),
+    ):
+        safetensors.torch.save_file(
+            {shard_name: rows, scale_name: scale},
+            str(tmp_path / filename),
+        )
+
+    _write_safetensors_index(
+        tmp_path, {shard_name: "a.safetensors", scale_name: "a.safetensors"}
+    )
+    first = ple_mmap.discover_shards(str(tmp_path))[0]
+    assert Path(first.shards[0][0]).name == "a.safetensors"
+
+    _write_safetensors_index(
+        tmp_path, {shard_name: "b.safetensors", scale_name: "b.safetensors"}
+    )
+    second = ple_mmap.discover_shards(str(tmp_path))[0]
+    assert Path(second.shards[0][0]).name == "b.safetensors"
+
+    embedding = ple_mmap.MmapNgramEmbedding(4, 2)
+    ple_mmap._attach_table(
+        embedding,
+        second,
+        split_ngram_parts=1,
+        layer_idx=0,
+        model_path=str(tmp_path),
+    )
+    assert torch.equal(embedding(torch.arange(4, dtype=torch.long)), rows_b)
+    assert embedding.table is not None
+    embedding.table.close()
+
+
+def test_discover_shards_rejects_duplicate_logical_shards(tmp_path: Path) -> None:
+    name = (
+        "model.language_model.layers.0.ple.ple_embedding.ngram_embedding.shard_0.weight"
+    )
+    tensor = torch.zeros((4, 2), dtype=torch.float32).to(torch.float8_e4m3fn)
+    for filename in ("a.safetensors", "b.safetensors"):
+        safetensors.torch.save_file({name: tensor}, str(tmp_path / filename))
+    _write_safetensors_index(
+        tmp_path, {"include.a": "a.safetensors", "include.b": "b.safetensors"}
+    )
+
+    with pytest.raises(ValueError, match="duplicate shard 0"):
+        ple_mmap.discover_shards(str(tmp_path))
+
+
+def test_discover_shards_rejects_duplicate_logical_scales(tmp_path: Path) -> None:
+    prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
+    shard = torch.zeros((4, 2), dtype=torch.float32).to(torch.float8_e4m3fn)
+    scale = torch.tensor([0.5], dtype=torch.bfloat16)
+    safetensors.torch.save_file(
+        {
+            f"{prefix}.shard_0.weight": shard,
+            f"{prefix}.weight_scale": scale,
+        },
+        str(tmp_path / "a.safetensors"),
+    )
+    safetensors.torch.save_file(
+        {f"{prefix}.weight_scale": scale},
+        str(tmp_path / "b.safetensors"),
+    )
+    _write_safetensors_index(
+        tmp_path, {"include.a": "a.safetensors", "include.b": "b.safetensors"}
+    )
+
+    with pytest.raises(ValueError, match="duplicate weight_scale"):
+        ple_mmap.discover_shards(str(tmp_path))
 
 
 def test_discover_shards_rejects_mixed_dtype_within_a_layer(tmp_path: Path) -> None:
@@ -5004,6 +5130,63 @@ def test_preflight_reload_check_rejects_a_same_shape_fp8_reload_missing_weight_s
         )
 
 
+def test_preflight_reload_check_rejects_unsupported_scale_dtype(
+    tmp_path: Path,
+) -> None:
+    _write_ple_layer(
+        tmp_path,
+        layer_idx=0,
+        vocab=8,
+        parts=2,
+        cols=2,
+        scale=1.0,
+        scale_dtype=torch.int32,
+    )
+    embedding = ple_mmap.MmapNgramEmbedding(8, 2)
+    staging = torch.zeros((4, 3, 2), dtype=torch.float8_e4m3fn)
+    cc = SimpleNamespace(
+        static_forward_context={
+            "a.ple": _fake_ple_layer(0, embedding, 2, mmap_staging=staging)
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="weight_scale has unsupported dtype"):
+        ple_mmap.preflight_reload_check(
+            cc, weights_path=str(tmp_path), is_checkpoint_format=True
+        )
+
+
+def test_preflight_reload_check_refreshes_replaced_scale_metadata(
+    tmp_path: Path,
+) -> None:
+    _write_ple_layer(tmp_path, layer_idx=0, vocab=8, parts=2, cols=2, scale=0.5)
+    embedding = ple_mmap.MmapNgramEmbedding(8, 2)
+    staging = torch.zeros((4, 3, 2), dtype=torch.float8_e4m3fn)
+    cc = SimpleNamespace(
+        static_forward_context={
+            "a.ple": _fake_ple_layer(0, embedding, 2, mmap_staging=staging)
+        }
+    )
+    ple_mmap.preflight_reload_check(
+        cc, weights_path=str(tmp_path), is_checkpoint_format=True
+    )
+
+    prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
+    full = _synthetic_weight(8, 2)
+    safetensors.torch.save_file(
+        {
+            f"{prefix}.shard_0.weight": full[:4],
+            f"{prefix}.weight_scale": torch.tensor([1], dtype=torch.int32),
+        },
+        str(tmp_path / "model-ple-0-00000.safetensors"),
+    )
+
+    with pytest.raises(RuntimeError, match="weight_scale has unsupported dtype"):
+        ple_mmap.preflight_reload_check(
+            cc, weights_path=str(tmp_path), is_checkpoint_format=True
+        )
+
+
 def test_preflight_reload_check_rejects_staged_reload_with_no_weights_path() -> None:
     """No path at all means nothing to prove compatibility against --
     reject rather than optimistically attach."""
@@ -5296,6 +5479,45 @@ def test_reload_weights_rejects_a_same_shape_fp8_reload_missing_scale(
     assert model.load_weights_calls == 0  # model.load_weights was never called
     assert embedding.table is None  # no table ever attached to the backbone
     assert not hasattr(model, ple_mmap._RELOAD_APPROVAL_ATTR)  # no approval left
+
+
+def test_reload_weights_rejects_unsupported_scale_dtype_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_ple_layer(
+        tmp_path,
+        layer_idx=0,
+        vocab=8,
+        parts=2,
+        cols=2,
+        scale=1.0,
+        scale_dtype=torch.int32,
+    )
+    embedding = ple_mmap.MmapNgramEmbedding(8, 2)
+    staging = torch.zeros((4, 3, 2), dtype=torch.float8_e4m3fn)
+    ple_layer = _fake_ple_layer(0, embedding, 2, mmap_staging=staging)
+    cc = SimpleNamespace(static_forward_context={"a.ple": ple_layer})
+    model = _ReloadApprovalModel(cc)
+    runner = _reload_runner(monkeypatch, model)
+    consumed: list[str] = []
+
+    def weights_iterator() -> Iterable[tuple[str, torch.Tensor]]:
+        consumed.append("advanced")
+        yield "sentinel.weight", torch.tensor([1.0])
+
+    _stub_model_loader(monkeypatch, weights_iterator)
+
+    with pytest.raises(RuntimeError, match="weight_scale has unsupported dtype"):
+        runner.reload_weights(
+            weights_iterator=None,
+            weights_path=str(tmp_path),
+            is_checkpoint_format=True,
+        )
+
+    assert consumed == []
+    assert model.load_weights_calls == 0
+    assert embedding.table is None
+    assert not hasattr(model, ple_mmap._RELOAD_APPROVAL_ATTR)
 
 
 # --------------------------------------------------------------------------- #

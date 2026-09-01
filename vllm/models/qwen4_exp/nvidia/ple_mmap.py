@@ -77,9 +77,13 @@ import regex as re
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch import nn
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.weight_utils import (
+    filter_duplicate_safetensors_files,
+)
 from vllm.utils.torch_utils import get_dtype_size
 
 if TYPE_CHECKING:
@@ -142,8 +146,7 @@ def enabled() -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# safetensors header parsing. No model.safetensors.index.json exists for this
-# checkpoint, so raw file offsets come from the header directly.
+# Safetensors header parsing. File selection follows the loader's index.
 # --------------------------------------------------------------------------- #
 def parse_safetensors_header(path: str) -> tuple[dict, int]:
     """Parse one safetensors file's header.
@@ -203,15 +206,13 @@ class _LayerShards:
     scale_entry: tuple[str, int, int, str] | None  # (path, offset, nbytes, dtype)
 
 
-@functools.cache
 def discover_shards(model_path: str) -> dict[int, _LayerShards]:
     """Parse every safetensors header under ``model_path`` for PLE tensors.
 
     Header-only reads (a few KB per file), never the multi-GiB tensor data;
-    cheap enough to run once per load regardless of checkpoint size — and
-    memoized by ``model_path`` since ``validate_shards_for`` calls this once
-    per PLE layer (construction happens per-layer), which would otherwise
-    re-glob and re-parse every checkpoint file's header once per layer.
+    cheap enough to run once per load regardless of checkpoint size. Parsed
+    headers are cached by the loader-selected file identities and metadata,
+    so replacing an index or checkpoint in place invalidates stale entries.
 
     Args:
         model_path: local directory holding the checkpoint's safetensors
@@ -223,13 +224,40 @@ def discover_shards(model_path: str) -> dict[int, _LayerShards]:
     Raises:
         ValueError: a shard's on-disk size does not match its declared
             shape/dtype, or shards for one layer disagree on dtype/width.
+        FileNotFoundError: the safetensors index references a missing file.
+        OSError: a selected checkpoint file cannot be inspected.
     """
+    paths = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
+    paths = filter_duplicate_safetensors_files(
+        paths, model_path, SAFE_WEIGHTS_INDEX_NAME
+    )
+    fingerprints = []
+    for path in paths:
+        stat = os.stat(path)
+        fingerprints.append(
+            (
+                path,
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_size,
+                stat.st_mtime_ns,
+                stat.st_ctime_ns,
+            )
+        )
+    return _discover_shards_cached(model_path, tuple(fingerprints))
+
+
+@functools.cache
+def _discover_shards_cached(
+    model_path: str,
+    file_fingerprints: tuple[tuple[str, int, int, int, int, int], ...],
+) -> dict[int, _LayerShards]:
     per_layer: dict[int, dict[int, tuple[str, int, int]]] = {}
     cols_by_layer: dict[int, int] = {}
     dtype_by_layer: dict[int, str] = {}
     scale_by_layer: dict[int, tuple[str, int, int, str]] = {}
 
-    for path in sorted(glob.glob(os.path.join(model_path, "*.safetensors"))):
+    for path, _dev, _ino, _size, _mtime_ns, _ctime_ns in file_fingerprints:
         header, data_start = parse_safetensors_header(path)
         for name, meta in header.items():
             shard_match = _SHARD_RE.search(name)
@@ -263,7 +291,14 @@ def discover_shards(model_path: str) -> dict[int, _LayerShards]:
                         f"PLE layer {layer_idx}: mixed shard widths "
                         f"{prev_cols} vs {cols}"
                     )
-                per_layer.setdefault(layer_idx, {})[shard_idx] = (
+                layer_shards = per_layer.setdefault(layer_idx, {})
+                if shard_idx in layer_shards:
+                    previous_path = layer_shards[shard_idx][0]
+                    raise ValueError(
+                        f"PLE layer {layer_idx}: duplicate shard {shard_idx} "
+                        f"in {previous_path!r} and {path!r}"
+                    )
+                layer_shards[shard_idx] = (
                     path,
                     data_start + start,
                     rows,
@@ -272,6 +307,12 @@ def discover_shards(model_path: str) -> dict[int, _LayerShards]:
             scale_match = _SCALE_RE.search(name)
             if scale_match:
                 layer_idx = int(scale_match.group(1))
+                if layer_idx in scale_by_layer:
+                    previous_path = scale_by_layer[layer_idx][0]
+                    raise ValueError(
+                        f"PLE layer {layer_idx}: duplicate weight_scale "
+                        f"in {previous_path!r} and {path!r}"
+                    )
                 start, end = meta["data_offsets"]
                 scale_by_layer[layer_idx] = (
                     path,
@@ -1238,15 +1279,20 @@ def _validate_layer_shards(
         )
     _scale_path, _scale_offset, scale_nbytes, scale_dtype_str = layer_shards.scale_entry
     scale_torch_dtype = _SCALE_TORCH_DTYPES.get(scale_dtype_str)
-    if scale_torch_dtype is not None:
-        expected_nbytes = get_dtype_size(scale_torch_dtype)
-        if scale_nbytes != expected_nbytes:
-            raise RuntimeError(
-                f"PLE mmap: layer {layer_idx} weight_scale is {scale_nbytes} "
-                f"bytes, expected {expected_nbytes} for a single "
-                f"{scale_dtype_str} scalar — per-channel PLE scales are "
-                "unsupported; export a single global scale for this layer"
-            )
+    if scale_torch_dtype is None:
+        raise RuntimeError(
+            f"PLE mmap: layer {layer_idx} weight_scale has unsupported dtype "
+            f"{scale_dtype_str!r}; supported dtypes are "
+            f"{sorted(_SCALE_TORCH_DTYPES)}"
+        )
+    expected_nbytes = get_dtype_size(scale_torch_dtype)
+    if scale_nbytes != expected_nbytes:
+        raise RuntimeError(
+            f"PLE mmap: layer {layer_idx} weight_scale is {scale_nbytes} "
+            f"bytes, expected {expected_nbytes} for a single "
+            f"{scale_dtype_str} scalar — per-channel PLE scales are "
+            "unsupported; export a single global scale for this layer"
+        )
     return layer_shards.scale_entry
 
 
