@@ -19,9 +19,10 @@ import functools
 import torch
 
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import on_gfx950, on_mi3xx
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
+from vllm.utils.platform_utils import num_compute_units
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
@@ -29,10 +30,46 @@ SPARSE_BLOCK_SIZE = 128
 # The fp8 index cache is implemented and measured on gfx950 only.
 TRITON_INDEXER_KV_DTYPES = ("bf16", "fp8", "fp8_e4m3") if on_gfx950() else ("bf16",)
 
-# Query rows per program in the prefill scorer. 128 is swept on gfx950; other
+# Query rows per program in the prefill scorer. 128 is swept on MI3xx; other
 # archs keep the original 64 until they are (cf. _SPARSE_ATTN_SUB_K in
 # sparse_attn.py). Sets grid dim 0, so it cannot be an autotune key.
-PREFILL_BLOCK_SIZE_Q = 128 if on_gfx950() else 64
+PREFILL_BLOCK_SIZE_Q = 128 if on_mi3xx() else 64
+
+# Prefill scorer split-K. Named apart from the decode scorer, which targets a
+# much smaller grid of its own (see minimax_m3_index_decode).
+PREFILL_SCORE_TARGET_GRID = 4096
+PREFILL_SCORE_MAX_KV_CHUNKS = 32
+# Each chunk re-reads the query tile, so a chunk covering fewer blocks than this
+# spends more on setup than the parallelism it buys back. Divided into
+# max_block, roughly twice the mean causal depth, so the mean chunk is half this.
+PREFILL_SCORE_MIN_BLOCKS_PER_CHUNK = 8
+
+
+def _score_kv_chunks(
+    num_q_blocks: int, batch: int, num_idx_heads: int, max_block: int
+) -> int:
+    """Number of KV chunks the prefill scorer splits each causal scan into.
+
+    The target grid and the per-chunk block floor cap the split. The occupancy
+    floor then overrides both when the unsplit grid cannot fill the device even
+    once, since there is no query-tile reuse to protect there; rounding down to
+    a power of two can still leave it up to half a wave short.
+    """
+    ctas_per_chunk = max(1, num_q_blocks * batch * num_idx_heads)
+    target = min(
+        PREFILL_SCORE_MAX_KV_CHUNKS,
+        max(1, max_block // PREFILL_SCORE_MIN_BLOCKS_PER_CHUNK),
+        max(1, PREFILL_SCORE_TARGET_GRID // ctas_per_chunk),
+    )
+    target = max(
+        target,
+        min(
+            PREFILL_SCORE_MAX_KV_CHUNKS,
+            max_block,
+            triton.cdiv(num_compute_units(), ctas_per_chunk),
+        ),
+    )
+    return 1 << (target.bit_length() - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -863,20 +900,7 @@ def minimax_m3_index_score(
         device=idx_q.device,
     )
     num_q_blocks = triton.cdiv(max_query_len, PREFILL_BLOCK_SIZE_Q)
-    # split-K over seq blocks, capped by the deepest possible scan so short
-    # prefills do not launch chunks that can only early-return.
-    TARGET_GRID = 4096
-    MAX_NUM_KV_CHUNKS = 32
-    score_ctas_per_chunk = num_q_blocks * batch * num_idx_heads
-    target = max(
-        1,
-        min(
-            MAX_NUM_KV_CHUNKS,
-            max_block,
-            TARGET_GRID // max(1, score_ctas_per_chunk),
-        ),
-    )
-    num_kv_chunks = 1 << (target.bit_length() - 1)
+    num_kv_chunks = _score_kv_chunks(num_q_blocks, batch, num_idx_heads, max_block)
     grid_score = (num_q_blocks, batch * num_idx_heads, num_kv_chunks)
     _index_block_score_kernel[grid_score](
         idx_q,

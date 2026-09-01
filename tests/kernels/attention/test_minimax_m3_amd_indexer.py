@@ -20,6 +20,7 @@ from vllm.models.minimax_m3.amd.ops.index_topk import (
     SPARSE_BLOCK_SIZE,
     TOPK_QUERY_TILE,
     TOPK_QUERY_TILE_SMALL,
+    _min_topk_programs,
     _topk_query_tile,
     minimax_m3_index_decode,
     minimax_m3_index_score,
@@ -199,14 +200,49 @@ def test_query_tile_always_leaves_a_usable_config():
     assert _topk_query_tile(1024, 1, 1, 16) == TOPK_QUERY_TILE_SMALL
 
 
-@pytest.mark.parametrize("q_len", [8192, 8225])
-def test_prefill_topk_wide_query_tile(q_len):
+def test_score_kv_chunks_invariants(monkeypatch):
+    """The split the scorer picks must be launchable for any shape and device.
+
+    The kernel divides its causal scan by this count and shifts by its bit
+    length, so a zero or a non-power-of-two is a launch failure rather than a
+    slow kernel. The CU count is patched so the sweep covers parts this test is
+    not running on.
+    """
+    from vllm.models.minimax_m3.amd.ops import index_topk as ops
+
+    for cus in (64, 80, 128, 256, 304, 1024):
+        monkeypatch.setattr(ops, "num_compute_units", lambda _c=cus: _c)
+        for num_q_blocks in (1, 2, 7, 64, 512, 1024):
+            for batch in (1, 2, 8, 64, 512):
+                for heads in (1, 2):
+                    for max_block in (0, 1, 2, 7, 8, 63, 64, 1024, 100000):
+                        n = ops._score_kv_chunks(num_q_blocks, batch, heads, max_block)
+                        assert n >= 1
+                        assert n & (n - 1) == 0, f"{n} is not a power of two"
+                        assert n <= max(1, max_block)
+                        assert n <= ops.PREFILL_SCORE_MAX_KV_CHUNKS
+
+
+def _wide_tile_query_len() -> int:
+    """Shortest single-request prefill that still selects the wide top-k tile.
+
+    The tile widens once the grid can fill the device, so the threshold is a
+    property of the GPU rather than a constant: hard-coding a length picks the
+    narrow tile on any part with more CUs than the one it was written on.
+    """
+    return _min_topk_programs() * TOPK_QUERY_TILE
+
+
+@pytest.mark.parametrize("tail", [0, 33])
+def test_prefill_topk_wide_query_tile(tail):
     """Exercise the 32-row tile, which needs a launch big enough to fill the device.
 
     Every other prefill test here is small enough to fall through to the 8-row
-    tile, so without this the shipping configuration is never compiled.
+    tile, so without this the shipping configuration is never compiled. ``tail``
+    adds rows that do not divide the tile.
     """
     topk = 16
+    q_len = _wide_tile_query_len() + tail
     t = _build([q_len], [0], 1, torch.bfloat16, seed=3)
     assert _topk_query_tile(q_len, 1, 1, topk) == TOPK_QUERY_TILE
     score = minimax_m3_index_score(
