@@ -520,10 +520,8 @@ class ModelCudaGraphManager(CudaGraphManager):
         if self.use_breakable_cg:
             self.init_breakable_cg_runner(model)
 
-        if (
-            self.cudagraph_mode.has_piecewise_cudagraphs()
-            and not self.use_breakable_cg
-            and not has_compiled_submodule(model)
+        if self.cudagraph_mode.has_piecewise_cudagraphs() and not (
+            self.use_breakable_cg or has_compiled_submodule(model)
         ):
             raise RuntimeError(
                 f"{type(model).__name__}: piecewise CUDA graphs "
