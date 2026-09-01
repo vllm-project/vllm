@@ -52,7 +52,8 @@ DSML_PARAM_CLOSE = f"</{_DSML}parameter>"
 _ESCAPED_DSML = re.escape(_DSML)
 _PARAM_RE = re.compile(
     rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">'
-    rf"(.*?)</{_ESCAPED_DSML}parameter>",
+    rf"(.*?)"
+    rf"(?:</{_ESCAPED_DSML}parameter>|(?=<{_ESCAPED_DSML}parameter\s+name=))",
     re.DOTALL,
 )
 _PARTIAL_PARAM_RE = re.compile(
