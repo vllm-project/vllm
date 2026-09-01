@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_CACHE_MAX_SIZE_MB: int = 5120
     VLLM_MEDIA_CACHE_TTL_HOURS: float = 24
     VLLM_MEDIA_FETCH_MAX_RETRIES: int = 3
+    VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
@@ -90,8 +91,6 @@ if TYPE_CHECKING:
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
-    # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
-    VLLM_TRITON_ATTN_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
@@ -143,7 +142,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
-    VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
@@ -266,6 +264,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
+    VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -317,12 +316,14 @@ if TYPE_CHECKING:
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
+    VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
+    VLLM_ENABLE_HPC_OPS: bool = False
 
 
 def get_default_cache_root():
@@ -562,19 +563,6 @@ def get_env_or_set_default(
 logger = logging.getLogger(__name__)
 
 
-def _deprecated_triton_attn_use_td() -> None:
-    """Warn that VLLM_TRITON_ATTN_USE_TD was renamed to VLLM_TRITON_USE_TD.
-
-    The old name is ignored; VLLM_TRITON_USE_TD is the supported variable.
-    """
-    if "VLLM_TRITON_ATTN_USE_TD" in os.environ:
-        logger.warning(
-            "VLLM_TRITON_ATTN_USE_TD is deprecated and will be removed in "
-            "v0.25. Use VLLM_TRITON_USE_TD instead."
-        )
-    return None
-
-
 def _resolve_rust_cli_path() -> str | None:
     """Resolve the vllm-rs binary path.
 
@@ -650,10 +638,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GPU_SYNC_CHECK": env_with_choices(
         "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"]
     ),
-    # Deprecated: renamed to VLLM_TRITON_USE_TD.  Kept registered so it does
-    # not trip the unknown-env-var check; warns on use and is otherwise
-    # ignored.
-    "VLLM_TRITON_ATTN_USE_TD": lambda: _deprecated_triton_attn_use_td(),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
@@ -988,6 +972,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEDIA_FETCH_MAX_RETRIES": lambda: int(
         os.getenv("VLLM_MEDIA_FETCH_MAX_RETRIES", "3")
     ),
+    # Maximum size in MB for a single remote media download. The limit is
+    # enforced while streaming the response body so oversized or infinite
+    # responses cannot grow the API server heap without bound. Default is 256.
+    "VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB": lambda: int(
+        os.getenv("VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB", "256")
+    ),
     # Whether to allow HTTP redirects when fetching from media URLs.
     # Default to True
     "VLLM_MEDIA_URL_ALLOW_REDIRECTS": lambda: bool(
@@ -999,9 +989,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEDIA_LOADING_THREAD_COUNT": lambda: int(
         os.getenv("VLLM_MEDIA_LOADING_THREAD_COUNT", "8")
     ),
-    # Maximum filesize in MB for a single audio file when processing
-    # speech-to-text requests. Files larger than this will be rejected.
-    # Default is 25 MB
+    # Maximum filesize in MB for a single audio file. Enforced on all
+    # audio inputs (multimodal chat, speech-to-text uploads, data: URLs,
+    # and local file:// paths). Files larger than this will be rejected
+    # before decoding. Default is 25 MB.
     "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", "25")
     ),
@@ -1310,11 +1301,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
-    ),
-    # Whether to use aiter fp4 gemm asm.
-    # By default is disabled.
-    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter rope.
     # By default is disabled.
@@ -1861,7 +1847,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_RESPONSES_API_STORE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))
     ),
-    # If set to 1, expose the Cohere Chat v2 API at ``POST /cohere/v2/chat``.
+    # If set to 1, expose the Cohere Chat v2 API at ``POST /cohere/v2/chat``
+    # and its render endpoint at ``POST /cohere/v2/chat/render``.
     # Default off
     "VLLM_ENABLE_COHERE_API": lambda: bool(
         int(os.getenv("VLLM_ENABLE_COHERE_API", "0"))
@@ -1877,6 +1864,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use FlashInfer allreduce
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "1"))
+    ),
+    # Whether to use FlashInfer's single-node PCIe CUDA-IPC all-reduce.
+    # This backend has a strict single-stream contract and is opt-in while its
+    # integration is being qualified.
+    "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC": lambda: bool(
+        int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0"))
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
@@ -2127,6 +2120,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
     ),
+    # Force N-contiguous weight layout for all XPU unquantized linears.
+    "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
+        int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))
+    ),
     # whether use xpu specific sample kernel
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
         int(os.getenv("VLLM_XPU_USE_SAMPLER_KERNEL", "1"))
@@ -2171,6 +2168,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each entry is VAR_NAME or VAR_NAME:<suffix> (suffix appended to
     # RDMA device name). Must be set together with VLLM_GPU_NIC_PCIE_MAPPING.
     "VLLM_NIC_SELECTION_VARS": lambda: os.getenv("VLLM_NIC_SELECTION_VARS", ""),
+    # If set to 1, enable the HPC fused kernels (requires the hpc package
+    # (.so) and an sm100/sm103 device). Covers:
+    #   * the HY V4 iHC ops -- each of the eager HYV4HCPreLayer /
+    #     HYV4HCPostLayer / HYV4HCHeadLayer bodies becomes one kernel launch;
+    #   * the gated-MLA output gating (attn_out * sigmoid(gate projection)),
+    #     fused into gated_mla_gemm; elementwise gating only.
+    # Each op additionally checks its own shape / dtype constraints and falls
+    # back to the eager path when they do not hold.
+    "VLLM_ENABLE_HPC_OPS": lambda: bool(int(os.getenv("VLLM_ENABLE_HPC_OPS", "0"))),
 }
 
 
@@ -2280,6 +2286,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
+        "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH",
         "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",
         "S3_SECRET_ACCESS_KEY",

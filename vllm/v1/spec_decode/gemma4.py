@@ -17,6 +17,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -117,7 +118,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         """Capture CUDA graphs for centroids get_top_tokens at key sizes."""
         masked_emb = self.model.masked_embedding
         lm_head_weight = self.model._get_full_lm_head_weight()
-        capture_stream = torch.cuda.Stream(device=self.device)
+        capture_stream = current_stream()
 
         for size in [1, 2, 4, 8, 16, 32, 64]:
             static_input = torch.zeros(
@@ -126,22 +127,16 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
                 dtype=self.dtype,
                 device=self.device,
             )
-            capture_stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(capture_stream):
-                for _ in range(3):
-                    masked_emb.get_top_tokens(static_input, lm_head_weight)
-            capture_stream.synchronize()
+            for _ in range(3):
+                masked_emb.get_top_tokens(static_input, lm_head_weight)
+            torch.accelerator.synchronize()
 
             g = torch.cuda.CUDAGraph()
-            # HIP, like CUDA, requires graph capture on a non-default stream.
-            # Supplying it explicitly also avoids depending on the platform's
-            # implicit stream selection in torch.cuda.graph.
             with torch.cuda.graph(g, stream=capture_stream):
                 static_output = masked_emb.get_top_tokens(
                     static_input,
                     lm_head_weight,
                 )
-            torch.cuda.current_stream().wait_stream(capture_stream)
             self._centroids_graphs[size] = g
             self._centroids_inputs[size] = static_input
             self._centroids_outputs[size] = static_output

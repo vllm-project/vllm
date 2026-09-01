@@ -88,7 +88,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
     ResolvedPromptUpdate,
-    _seq2text,
+    cached_encode,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -611,22 +611,24 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
-    def get_hf_processor(self, **kwargs: object):
+    def _get_checkpoint_image_processor(self, **kwargs: object):
         model_config = self.ctx.model_config
         processor_cls = self._image_processor_cls
         merged_kwargs = _merge_mm_kwargs(model_config, processor_cls, **kwargs)
 
-        # AutoProcessor only for tokenizer; its image_processor is resolved by
-        # class name and can pick the wrong checkpoint across MiniCPM-V versions.
-        hf_processor = self.ctx.get_hf_processor(**kwargs)
-
-        image_processor = cached_get_image_processor(
+        return cached_get_image_processor(
             model_config.model,
             revision=model_config.revision,
             trust_remote_code=model_config.trust_remote_code,
             processor_cls_overrides=processor_cls,
             **merged_kwargs,
         )
+
+    def get_hf_processor(self, **kwargs: object):
+        # AutoProcessor only for tokenizer; its image_processor is resolved by
+        # class name and can pick the wrong MiniCPM checkpoint.
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
+        image_processor = self._get_checkpoint_image_processor(**kwargs)
 
         from vllm.transformers_utils.processors.minicpmv import MiniCPMVProcessor
 
@@ -938,30 +940,24 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         """Apply multi-modal prompt updates to token IDs."""
-        tokenizer = self.info.get_tokenizer()
-
         new_token_ids, match_result = self._apply_token_matches(
             token_ids,
             mm_prompt_updates,
         )
 
-        # If the search text does not represent a special token,
-        # it may have different token IDs in the prompt, because
-        # the tokens may go across the boundaries of the search text.
-        # ----
-        # e.g. when searching for "foo" in "food", if "food" itself makes
-        # up a token, then the token ID of "foo" will not appear at all
-        # ----
-        # Since it is inefficient to search for all possible tokenizations
-        # of the search text in the prompt, we instead perform string-based
-        # updates on the decoded token IDs, then encode them back.
+        # If the target does not consist of special tokens, it may be
+        # tokenized differently inside the prompt, so fall back to
+        # performing the updates on the decoded text, then encoding the
+        # result back. The segments are encoded separately to avoid BPE
+        # merges across segment boundaries.
         if not all(
             all(update_idx is not None for update_idx in update_idxs)
             for update_idxs in match_result.values()
         ):
-            new_token_ids, match_result = self._apply_text_matches_as_segmented_tokens(
-                _seq2text(tokenizer, token_ids, use_cache=False),
+            new_token_ids, match_result = self._apply_prompt_updates_via_text(
+                token_ids,
                 mm_prompt_updates,
+                encode_segments_separately=True,
             )
 
         matched_updates = defaultdict[str, list[Sequence[ResolvedPromptUpdate]]](list)
@@ -1056,11 +1052,14 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         tokenizer = self.info.get_tokenizer()
         for modality, pattern in placeholders:
             sub_pattern = tokenizer.decode(
-                tokenizer.encode(pattern, add_special_tokens=False)
+                cached_encode(tokenizer, pattern, add_special_tokens=False)
             )
             if sub_pattern != pattern:
                 additional_placeholders.append((modality, sub_pattern))
         placeholders += additional_placeholders
+
+        vocab = tokenizer.get_vocab()
+        unk_token_ids = [vocab["<unk>"]]
 
         def get_image_replacement(item_idx: int):
             images = mm_items.get_items(
@@ -1069,9 +1068,13 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             image_size = images.get_image_size(item_idx)
 
-            return PromptUpdateDetails.select_text(
-                self.get_image_prompt_texts(image_size, item_idx),
-                "<unk>",
+            return PromptUpdateDetails.select_token_ids(
+                cached_encode(
+                    tokenizer,
+                    self.get_image_prompt_texts(image_size, item_idx),
+                    add_special_tokens=False,
+                ),
+                unk_token_ids,
             )
 
         def get_video_replacement(item_idx: int):
@@ -1082,9 +1085,13 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             frame_size = videos.get_frame_size(item_idx)
             num_frames = videos.get_num_frames(item_idx)
 
-            return PromptUpdateDetails.select_text(
-                self.get_video_prompt_texts(frame_size, num_frames),
-                "<unk>",
+            return PromptUpdateDetails.select_token_ids(
+                cached_encode(
+                    tokenizer,
+                    self.get_video_prompt_texts(frame_size, num_frames),
+                    add_special_tokens=False,
+                ),
+                unk_token_ids,
             )
 
         get_replacement = {
@@ -1094,7 +1101,9 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         return [
             PromptReplacement(
-                modality=modality, target=pattern, replacement=get_replacement[modality]
+                modality=modality,
+                target=cached_encode(tokenizer, pattern, add_special_tokens=False),
+                replacement=get_replacement[modality],
             )
             for modality, pattern in placeholders
         ]
@@ -1114,7 +1123,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             image_processor = self.info.get_image_processor()
             version = self.info.get_model_version()
 
-            text = _seq2text(tokenizer, cached_update.content.full)
+            text = tokenizer.decode(cached_update.content.full)
             prev_item_idx = cached_update.item_idx
 
             if version == (2, 0) or version == (2, 5):
@@ -1130,13 +1139,17 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             embed_text = getattr(tokenizer, "image_token", "<unk>")
             new_update = new_update.with_content(
-                PromptUpdateDetails.select_text(
-                    text.replace(
-                        f"{im_start}{prev_item_idx}{im_end}",
-                        f"{im_start}{new_item_idx}{im_end}",
-                        1,
+                PromptUpdateDetails.select_token_ids(
+                    cached_encode(
+                        tokenizer,
+                        text.replace(
+                            f"{im_start}{prev_item_idx}{im_end}",
+                            f"{im_start}{new_item_idx}{im_end}",
+                            1,
+                        ),
+                        add_special_tokens=False,
                     ),
-                    embed_text,
+                    cached_encode(tokenizer, embed_text, add_special_tokens=False),
                 )
             )
 
