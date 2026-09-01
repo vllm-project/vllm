@@ -182,3 +182,31 @@ def test_mixed_block_strides_commit_per_layer(vmm):
             assert torch.all(view[:3] == float(i + 1))
     finally:
         kv_cache.free()
+
+
+@requires_cuda
+def test_release_and_recommit_for_sleep(vmm):
+    """Sleep drops the pages; wake maps fresh zeroed pages for the same block
+    count under the same addresses, so existing views keep working."""
+    config, _ = _make_config(KVCacheLayout.LBNHC)
+    device = torch.device("cuda")
+    kv_cache = ExtensibleKVCache(config, device)
+    try:
+        views = list(
+            allocate_kv_cache(
+                config, device, KVCacheLayout.LBNHC, allocate=kv_cache.allocate
+            ).values()
+        )
+        kv_cache.commit(NUM_BLOCKS)
+        views[0].fill_(3.0)
+        torch.accelerator.synchronize()
+
+        kv_cache.release_physical()
+        assert kv_cache.physical_bytes == 0
+        assert kv_cache.num_committed_blocks == NUM_BLOCKS
+
+        kv_cache.recommit()
+        assert kv_cache.physical_bytes >= kv_cache.size
+        assert torch.count_nonzero(views[0]) == 0
+    finally:
+        kv_cache.free()
