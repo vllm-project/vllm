@@ -218,6 +218,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         kv_indptr_cpu: torch.Tensor,
         seq_lens_cpu: torch.Tensor,
         is_causal: bool,
+        need_lse: bool,
         device: torch.device,
         max_qlen: int,
     ) -> dict:
@@ -284,13 +285,14 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             kvlen_granularity=_KVLEN_GRANULARITY,
             block_size=1,
             is_causal=is_causal,
+            need_lse=need_lse,
         )
 
         # The actual number of partial tiles emitted by the scheduler.
         # Required for correctly sizing the (partial) logits/attn_lse buffers that we
         # reduce over.
         num_partial_tiles = int(reduce_indptr[-1].item())
-        assert num_partial_tiles > 0
+        assert num_partial_tiles > 0 or not need_lse
 
         return {
             "work_indptr": work_indptr,
@@ -314,12 +316,16 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         total_q = int(qo_indptr_cpu[-1].item())
         max_query_len = prefill_metadata.max_query_len
 
+        cc = prefill_metadata.chunked_context
+        has_context = cc is not None
+
         # 1. Prep buffers for new-tokens chunk (causal)
         ps = self._build_ps_metadata_for_chunk(
             qo_indptr_cpu=qo_indptr_cpu,
             kv_indptr_cpu=qo_indptr_cpu,
             seq_lens_cpu=q_seq_lens_cpu,
             is_causal=True,
+            need_lse=has_context,
             device=device,
             max_qlen=max_query_len,
         )
@@ -333,7 +339,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         # carries its own request-local query and context offsets; the query
         # tensor is sliced to the chunk's tokens by the caller.
         self._context_ps = []
-        cc = prefill_metadata.chunked_context
         if cc is not None:
             for chunk in cc.chunks:
                 chunk_qo_indptr = chunk.query_start_loc
@@ -349,6 +354,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
                     kv_indptr_cpu=kv_indptr_cpu,
                     seq_lens_cpu=k_seq_lens_cpu,
                     is_causal=False,
+                    need_lse=True,
                     device=device,
                     max_qlen=chunk.max_query_len,
                 )
@@ -384,7 +390,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         assert out_dtype is not None
 
         # Partial/scratch buffers for the PS kernels.
-        partial_q = num_partial_tiles * _FP8_PREFILL_TILE_Q
+        partial_q = max(num_partial_tiles, 1) * _FP8_PREFILL_TILE_Q
         logits, attn_lse, final_lse = current_workspace_manager().get_simultaneous(
             ((partial_q, self.num_heads, self.v_head_dim), torch.float32),
             ((partial_q, self.num_heads), torch.float32),
@@ -420,17 +426,18 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             one_scale,
             one_scale,
         )
-        self._mla_reduce_v1(
-            logits,
-            attn_lse,
-            ps["reduce_indptr"],
-            ps["reduce_final_map"],
-            ps["reduce_partial_map"],
-            _FP8_PREFILL_TILE_Q,
-            0,
-            out,
-            final_lse,
-        )
+        if num_partial_tiles > 0:
+            self._mla_reduce_v1(
+                logits,
+                attn_lse,
+                ps["reduce_indptr"],
+                ps["reduce_final_map"],
+                ps["reduce_partial_map"],
+                _FP8_PREFILL_TILE_Q,
+                0,
+                out,
+                final_lse,
+            )
 
         # mla_reduce_v1 writes final_lse as (total_q, num_heads), but
         # triton_merge_attn_states wants it as (num_heads, total_q)
