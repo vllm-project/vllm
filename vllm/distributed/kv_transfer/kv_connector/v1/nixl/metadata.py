@@ -24,6 +24,14 @@ GET_META_MSG = b"get_meta_msg"
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
+
+_REQUIRED_RECV_FIELDS = (
+    "remote_block_ids",
+    "remote_engine_id",
+    "remote_request_id",
+    "remote_host",
+    "remote_port",
+)
 #
 # NIXL Connector Version
 #
@@ -298,6 +306,16 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
     ):
+        missing = [f for f in _REQUIRED_RECV_FIELDS if f not in kv_transfer_params]
+        if missing:
+            logger.warning(
+                "Skipping recv registration for %s: "
+                "kv_transfer_params missing required fields %s",
+                request_id,
+                missing,
+            )
+            return
+
         req = self._add_new_req(
             local_block_ids, kv_transfer_params, local_num_computed_blocks
         )

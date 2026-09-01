@@ -224,6 +224,18 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
+            # However, if the required remote fields are absent (e.g. the
+            # request was rejected before prefill produced any transfer
+            # metadata), there is no remote P-node to notify.
+            if not params.get("remote_engine_id"):
+                logger.debug(
+                    "Skipping recv cleanup for %s: no remote transfer "
+                    "metadata (request was likely rejected before prefill "
+                    "completed).",
+                    request.request_id,
+                )
+                params["do_remote_prefill"] = False
+                return False, None
             self._reqs_need_recv[request.request_id] = (request, [], ())
             params["do_remote_prefill"] = False
             return False, None
