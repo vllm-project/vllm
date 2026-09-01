@@ -275,7 +275,7 @@ class MultiModalRegistry:
     def _get_cache_type(
         self,
         vllm_config: "VllmConfig",
-    ) -> Literal[None, "processor_only", "lru", "shm"]:
+    ) -> Literal[None, "processor_only", "lru", "shm", "paged_shm"]:
         model_config = vllm_config.model_config
         if not self.supports_multimodal_inputs(model_config):
             return None

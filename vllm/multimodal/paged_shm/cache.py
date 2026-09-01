@@ -8,8 +8,6 @@ This module provides sender (P0) and receiver (P1) cache implementations
 that use a shared memory server managed by PagedShmServer.
 """
 
-from typing import override
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.cache import (
@@ -78,7 +76,6 @@ class PagedShmSenderCache(BaseMultiModalProcessorCache):
             info = info_delta
         return info
 
-    @override
     def is_cached_item(self, mm_hash: str) -> bool:
         """Check if an item exists in the shared memory cache."""
         try:
@@ -87,7 +84,6 @@ class PagedShmSenderCache(BaseMultiModalProcessorCache):
         except RuntimeError:
             return False
 
-    @override
     def get_and_update_item(
         self,
         mm_item: MultiModalProcessorCacheInItem,
@@ -108,6 +104,7 @@ class PagedShmSenderCache(BaseMultiModalProcessorCache):
                 self._hits += 1
                 return None, prompt_updates
             finally:
+                assert alloc.read_token is not None
                 self._client.close_read(alloc.read_token)
         except Exception:
             # Any error (item missing, timeout, etc.) is treated as a miss.
@@ -145,22 +142,20 @@ class PagedShmSenderCache(BaseMultiModalProcessorCache):
         # Return the original item (will be sent to P1)
         return kwargs_item, prompt_updates
 
-    @override
     def touch_sender_cache_item(self, mm_hash: str) -> None:
         """Update the cache eviction order for a multi-modal item."""
         try:
             alloc = self._client.open_read(mm_hash, timeout=0.1)
+            assert alloc.read_token is not None
             self._client.close_read(alloc.read_token)
         except Exception:
             pass
 
-    @override
     def clear_cache(self) -> None:
         self._hits = 0
         self._total = 0
         self._last_info = CacheInfo(hits=0, total=0)
 
-    @override
     def invalidate(self, mm_hash: str) -> None:
         """Delete the item from SHM."""
         try:
@@ -168,11 +163,9 @@ class PagedShmSenderCache(BaseMultiModalProcessorCache):
         except Exception as e:
             logger.debug("Failed to invalidate %s: %s", mm_hash, e)
 
-    @override
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         return self._stat(delta=delta)
 
-    @override
     def close(self) -> None:
         self._client.close()
 
@@ -206,7 +199,6 @@ class PagedShmReceiverCache(BaseMultiModalReceiverCache):
         self.open_read_timeout = open_read_timeout
         self._decoder = MsgpackDecoder(ShmItem)
 
-    @override
     def get_and_update_item(
         self,
         mm_item: MultiModalKwargsItem | None,
@@ -228,11 +220,11 @@ class PagedShmReceiverCache(BaseMultiModalReceiverCache):
                 )
                 return kwargs_item
             finally:
+                assert alloc.read_token is not None
                 self._client.close_read(alloc.read_token)
         except Exception as e:
             raise MultiModalCacheMissError([mm_hash]) from e
 
-    @override
     def touch_receiver_cache_item(
         self,
         mm_hash: str,
@@ -241,10 +233,10 @@ class PagedShmReceiverCache(BaseMultiModalReceiverCache):
         """Update the cache eviction order for a multi-modal item."""
         try:
             alloc = self._client.open_read(mm_hash, timeout=0.1)
+            assert alloc.read_token is not None
             self._client.close_read(alloc.read_token)
         except Exception:
             pass
 
-    @override
     def clear_cache(self) -> None:
         pass

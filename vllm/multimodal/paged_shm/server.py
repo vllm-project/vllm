@@ -956,8 +956,8 @@ def _zmq_server(
             if command == DELETE:
                 payload = payloads[0].decode() if payloads else ""
                 try:
-                    result = server._handle_delete(payload, identity, socket)
-                    server._send_response(socket, identity, OK, result)
+                    result_del = server._handle_delete(payload, identity, socket)
+                    server._send_response(socket, identity, OK, result_del)
                     # After deletion, attempt to process pending memory requests
                     server._defer_memory_requests(socket)
                 except ValueError as e:

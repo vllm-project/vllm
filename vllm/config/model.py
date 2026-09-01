@@ -783,6 +783,7 @@ class ModelConfig:
             )
 
             if mm_processor_cache_type == "paged_shm":
+                assert mm_processor_cache_gb is not None
                 paged_shm_size = mm_processor_cache_gb * GiB_bytes
             else:
                 paged_shm_size = 0
