@@ -901,7 +901,7 @@ def test_fused_gate_correctness(num_tokens: int, strided_kv: bool) -> None:
     )
     expected_gated = (gate * value.unsqueeze(-2)).flatten(-2)
     expected_normed = grouped_norm(expected_gated, norm_conv)
-    torch.testing.assert_close(gated, expected_gated, atol=1e-2, rtol=1e-2)
+    assert torch.equal(gated, expected_gated)
     torch.testing.assert_close(normed, expected_normed, atol=1e-2, rtol=1e-2)
 
 

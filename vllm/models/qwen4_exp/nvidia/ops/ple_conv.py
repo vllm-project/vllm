@@ -274,11 +274,6 @@ def ple_conv(
     state_bs, state_ws, state_cs = _get_conv_state_strides(conv_state, C, state_width)
 
     if mode == "decode":
-        query_start_loc_ptr = state_indices
-        num_accepted_tokens_ptr = state_indices
-        has_initial_states_ptr = (
-            has_initial_states if has_initial_states is not None else state_indices
-        )
         num_reqs = T
         binary_search_iters = 1
         num_writeback_reqs = T
@@ -288,9 +283,6 @@ def ple_conv(
             raise ValueError(
                 "query_start_loc and num_accepted_tokens are required for spec decode"
             )
-        query_start_loc_ptr = query_start_loc
-        num_accepted_tokens_ptr = num_accepted_tokens
-        has_initial_states_ptr = query_start_loc
         num_reqs = state_indices.numel()
         binary_search_iters = max(num_reqs, 1).bit_length()
         num_writeback_reqs = num_reqs
@@ -300,9 +292,6 @@ def ple_conv(
             raise ValueError(
                 "query_start_loc and has_initial_states are required for prefill"
             )
-        query_start_loc_ptr = query_start_loc
-        num_accepted_tokens_ptr = query_start_loc
-        has_initial_states_ptr = has_initial_states
         num_reqs = state_indices.numel()
         binary_search_iters = max(num_reqs, 1).bit_length()
         num_writeback_reqs = num_reqs
@@ -316,9 +305,9 @@ def ple_conv(
         conv_weights,
         residual,
         state_indices,
-        query_start_loc_ptr,
-        num_accepted_tokens_ptr,
-        has_initial_states_ptr,
+        query_start_loc,
+        num_accepted_tokens,
+        has_initial_states,
         num_reqs,
         binary_search_iters,
         state_bs,
@@ -338,9 +327,9 @@ def ple_conv(
         inputs,
         conv_state,
         state_indices,
-        query_start_loc_ptr,
-        num_accepted_tokens_ptr,
-        has_initial_states_ptr,
+        query_start_loc,
+        num_accepted_tokens,
+        has_initial_states,
         num_reqs,
         state_bs,
         state_ws,

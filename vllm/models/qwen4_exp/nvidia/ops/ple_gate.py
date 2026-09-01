@@ -64,7 +64,8 @@ def _ple_gate_kernel(
     d = d.to(tl.bfloat16).to(tl.float32)
     sign = tl.where(d < 0, -1.0, 0.0)
     sign = tl.where(d > 0, 1.0, sign)
-    g = tl.sigmoid(sign * tl.sqrt(tl.maximum(tl.abs(d), 1e-6)))
+    magnitude = tl.sqrt(tl.maximum(tl.abs(d), 1e-6)).to(tl.bfloat16)
+    g = tl.sigmoid(sign * magnitude)
     g = g.to(tl.bfloat16).to(tl.float32)
 
     v = tl.load(value_ptr + t * value_rs + lanes, mask=mask, other=0.0).to(tl.float32)

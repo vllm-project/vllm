@@ -653,12 +653,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             num_spec=self.num_spec_tokens,
         )
 
-    def _short_conv_fallback(self, inputs: torch.Tensor) -> torch.Tensor:
-        # Profiling / CUDA graph capture only; conv state is not updated.
-        inputs_t = inputs.transpose(0, 1).unsqueeze(0)
-        output = self.conv1d(inputs_t)[..., : inputs_t.size(-1)]
-        return F.silu(output).squeeze(0).transpose(0, 1)
-
     def _short_conv_dilated_decode_batched(
         self,
         x_d: torch.Tensor,
@@ -1078,6 +1072,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         conv_state: torch.Tensor,
         conv_weights: torch.Tensor,
     ) -> None:
+        """PyTorch reference for fused short-convolution dispatch."""
         num_prefills = metadata.num_prefills
         num_decodes = metadata.num_decodes
         num_decode_tokens = metadata.num_decode_tokens
@@ -1307,7 +1302,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
-            residual.add_(self._short_conv_fallback(inputs))
             return
 
         if not isinstance(attn_metadata, dict):
@@ -1318,8 +1312,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
 
         layer_attn_metadata = attn_metadata.get(self.prefix)
         if layer_attn_metadata is None:
-            # MRV2 omits Mamba-family metadata during profile warmup.
-            residual.add_(self._short_conv_fallback(inputs))
             return
         if not isinstance(layer_attn_metadata, PleShortConvAttentionMetadata):
             raise TypeError(
@@ -1391,6 +1383,7 @@ def qwen4_exp_compute_ple_ngram_ids(
     layer_name: str,
 ) -> torch.Tensor:
     """Compute request-dependent PLE n-gram IDs outside piecewise graphs."""
+    # The fake implementation uses ngram_heads to define the output shape.
     del ngram_heads
     layer = get_forward_context().no_compile_layers[layer_name]
     return layer.ple_embedding.compute_ngram_ids(
