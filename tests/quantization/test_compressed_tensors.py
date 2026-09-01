@@ -289,15 +289,6 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
             None,
             8,
             True,
-            False,
-        ),
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder",
-            "group",
-            128,
-            8,
-            False,
-            True,
         ),
     ],
 )
@@ -305,7 +296,7 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
     not current_platform.is_cuda(), reason="The tests are skipped on non-CUDA platform."
 )
 def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
-    model, strategy, group, pack_factor, symmetric, has_g_idx = wNa16_args
+    model, strategy, group, pack_factor, symmetric = wNa16_args
     with vllm_runner(model, enforce_eager=True) as llm:
 
         def check_model(model):
@@ -320,7 +311,6 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
 
             assert qkv_proj.scheme.pack_factor == pack_factor
             assert qkv_proj.scheme.symmetric == symmetric
-            assert qkv_proj.scheme.has_g_idx == has_g_idx
 
         llm.apply_model(check_model)
 
@@ -965,24 +955,18 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
 
 
 @pytest.mark.parametrize(
-    "actorder,group_size,part,full,expected",
+    "part,expected",
     [
-        # "static"/"weight" reorder at quant time -> shard normally + k_full.
-        # Regression: static actorder under TP must keep is_k_full=True so the
-        # Marlin kernel never gets the invalid (group_size=16, is_k_full=0).
-        ("static", 32, 64, 128, (False, 64, True)),
-        ("weight", 32, 64, 128, (False, 64, True)),
-        (None, 32, 64, 128, (False, 64, True)),
+        (64, (False, 64, True)),
+        (128, (False, 128, True)),
     ],
 )
-def test_wna16_moe_w2_scale_sharding(actorder, group_size, part, full, expected):
+def test_wna16_moe_w2_scale_sharding(part, expected):
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
         CompressedTensorsWNA16MoEMethod,
     )
 
-    result = CompressedTensorsWNA16MoEMethod._w2_scale_sharding(
-        actorder, group_size, part, full
-    )
+    result = CompressedTensorsWNA16MoEMethod._w2_scale_sharding(part)
     assert result == expected
 
 

@@ -541,8 +541,8 @@ def _process_weights_marlin(
     w2_qweight: torch.Tensor,
     w13_scales: torch.Tensor,
     w2_scales: torch.Tensor,
-    w13_g_idx: torch.Tensor,
-    w2_g_idx: torch.Tensor,
+    w13_g_idx: torch.Tensor | None,
+    w2_g_idx: torch.Tensor | None,
     w13_qzeros: torch.Tensor | None = None,
     w2_qzeros: torch.Tensor | None = None,
     w13_bias: torch.Tensor | None = None,
@@ -569,7 +569,7 @@ def _process_weights_marlin(
     Steps
     -----
     1. Optional FP8 preprocessing of packed weights / scales.
-    2. Sort / reset g_idx tensors for act-order handling.
+    2. Create empty g_idx tensors required by the Marlin repack kernels.
     3. Repack weights via ``gptq_marlin_moe_repack``.
     4. Permute scales (and optionally extract INT8 global scales).
     5. Permute bias tensors.
@@ -602,13 +602,9 @@ def _process_weights_marlin(
 
     # --- Pad the intermediate size to a valid Marlin thread tile ---
     # GPTQ packs along K: w13's N is in the (shard) columns, w2's N in the rows.
-    # Act-order keeps the strict shape and is never padded.
     N = layer.intermediate_size_per_partition
     padded_N = marlin_moe_padded_intermediate(N, group_size)
     if padded_N != N:
-        assert actorder != "group", (
-            "Marlin MoE thread-tile padding is unsupported with act-order"
-        )
         marlin_w13_qweight = _pad_w13_shard_cols(marlin_w13_qweight, N, padded_N)
         marlin_w2_qweight = _pad_rows(marlin_w2_qweight, padded_N // pack_factor)
         marlin_w13_scales = _pad_w13_shard_cols(marlin_w13_scales, N, padded_N)
@@ -623,39 +619,24 @@ def _process_weights_marlin(
         if w13_bias is not None:
             w13_bias = _pad_w13_bias(w13_bias, N, padded_N)
 
-    # --- Process act_order (g_idx) ---
-    if actorder == "group":
-        num_experts = w13_g_idx.shape[0]
-        w13_g_idx_sort_indices = torch.empty_like(w13_g_idx)
-        w2_g_idx_sort_indices = torch.empty_like(w2_g_idx)
-        w13_sorted_g_idx = torch.empty_like(w13_g_idx)
-        w2_sorted_g_idx = torch.empty_like(w2_g_idx)
-        for e in range(num_experts):
-            w13_g_idx_sort_indices[e] = torch.argsort(w13_g_idx[e]).to(torch.int32)
-            w2_g_idx_sort_indices[e] = torch.argsort(w2_g_idx[e]).to(torch.int32)
-            w13_sorted_g_idx[e] = w13_g_idx[e][w13_g_idx_sort_indices[e]]
-            w2_sorted_g_idx[e] = w2_g_idx[e][w2_g_idx_sort_indices[e]]
-        w13_g_idx = w13_sorted_g_idx
-        w2_g_idx = w2_sorted_g_idx
-    else:
-        num_experts = w13_g_idx.shape[0]
-        device = w13_g_idx.device
-        w13_g_idx = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-            requires_grad=False,
-        )
-        w2_g_idx = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-            requires_grad=False,
-        )
-        w13_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-            requires_grad=False,
-        )
-        w2_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-            requires_grad=False,
-        )
+    num_experts = marlin_w13_qweight.shape[0]
+    device = marlin_w13_qweight.device
+    w13_g_idx = torch.nn.Parameter(
+        torch.empty((num_experts, 0), dtype=torch.int32, device=device),
+        requires_grad=False,
+    )
+    w2_g_idx = torch.nn.Parameter(
+        torch.empty((num_experts, 0), dtype=torch.int32, device=device),
+        requires_grad=False,
+    )
+    w13_g_idx_sort_indices = torch.nn.Parameter(
+        torch.empty((num_experts, 0), dtype=torch.int32, device=device),
+        requires_grad=False,
+    )
+    w2_g_idx_sort_indices = torch.nn.Parameter(
+        torch.empty((num_experts, 0), dtype=torch.int32, device=device),
+        requires_grad=False,
+    )
 
     # --- Repack weights ---
     marlin_w13_qweight = ops.gptq_marlin_moe_repack(
@@ -1505,7 +1486,7 @@ def convert_to_wna16_moe_kernel_format(
             num_bits = quant_config.quant_type.size_bits
             pack_factor = quant_config.pack_factor
             group_size = quant_config.group_size
-            actorder = "group" if quant_config.desc_act else None
+            actorder = None
         elif isinstance(quant_config, QuantizationArgs):
             num_bits = quant_config.num_bits
             pack_factor = 32 // quant_config.num_bits
@@ -1537,9 +1518,6 @@ def convert_to_wna16_moe_kernel_format(
                 w2_bias,
             )
         else:
-            if w13_g_idx is None or w2_g_idx is None:
-                raise ValueError("GPTQ Marlin MoE requires g_idx tensors.")
-
             return _process_weights_marlin(
                 layer,
                 input_dtype,

@@ -127,7 +127,6 @@ def test_kernel_selection_with_disabled_machete(monkeypatch):
     "model_name",
     [
         "nm-testing/tinyllama-oneshot-w4a16-channel-v2",
-        "nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder",
     ],
 )
 def test_w4a16_machete_e2e(vllm_runner, model_name):

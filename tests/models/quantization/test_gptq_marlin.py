@@ -22,11 +22,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 MAX_MODEL_LEN = 1024
 
 MODELS = [
-    # act_order==True, group_size=128
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "main"),
-    # 8-bit, act_order==True, group_size=channelwise
-    ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit--1g-actorder_True"),
-    # 4-bit, act_order==True, group_size=128
     ("TechxGenus/gemma-1.1-2b-it-GPTQ", "main"),
 ]
 

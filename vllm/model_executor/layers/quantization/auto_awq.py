@@ -672,10 +672,10 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             w2,
             w13_scale,
             w2_scale,
-            w13_g_idx,
-            w2_g_idx,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
+            _,  # w13_g_idx
+            _,  # w2_g_idx
+            _,  # w13_g_idx_sort_indices
+            _,  # w2_g_idx_sort_indices
             w13_qzeros,
             w2_qzeros,
             w13_input_global_scale,
@@ -696,14 +696,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
 
         replace_parameter(layer, "w13_scales", w13_scale)
         replace_parameter(layer, "w2_scales", w2_scale)
-        _replace_or_register_parameter(
-            layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices
-        )
-        _replace_or_register_parameter(
-            layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices
-        )
-        _replace_or_register_parameter(layer, "w13_g_idx", w13_g_idx)
-        _replace_or_register_parameter(layer, "w2_g_idx", w2_g_idx)
         _replace_or_register_parameter(layer, "w13_qzeros", w13_qzeros)
         _replace_or_register_parameter(layer, "w2_qzeros", w2_qzeros)
         _replace_or_register_parameter(
@@ -727,10 +719,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             backend=self.wna16_moe_backend,
             is_k_full=self.is_k_full,
-            w13_g_idx=getattr(layer, "w13_g_idx", None),
-            w2_g_idx=getattr(layer, "w2_g_idx", None),
-            w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None),
-            w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None),
             routing_tables=layer._expert_routing_tables(),
         )
 

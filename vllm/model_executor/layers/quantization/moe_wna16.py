@@ -351,7 +351,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         if self.quant_config.linear_quant_method == "gptq":
             # some param are unused, but we need to init them in order to
             # load weights
-            invalid_param_keys = ["w13_g_idx", "w2_g_idx"]
+            invalid_param_keys: list[str] = []
             if not self.quant_config.has_zp:
                 invalid_param_keys += ["w13_qzeros", "w2_qzeros"]
             for key in invalid_param_keys:

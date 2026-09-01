@@ -42,13 +42,11 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
         num_bits: int,
         group_size: int | None = None,
         symmetric: bool | None = True,
-        actorder: str | None = None,
     ):
         self.pack_factor = 32 // num_bits
         self.strategy = strategy
         self.symmetric = symmetric
         self.group_size = -1 if group_size is None else group_size
-        self.has_g_idx = False
 
         if self.group_size != 128 or self.strategy != "group":
             raise ValueError(
@@ -91,7 +89,7 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
             act_type=torch.float8_e4m3fn,  # always use fp8(e4m3)
             group_size=self.group_size,
             zero_points=not self.symmetric,
-            has_g_idx=self.has_g_idx,
+            has_g_idx=False,
             out_type=params_dtype,
         )
 
@@ -105,7 +103,7 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
         group_size = self.group_size if self.group_size != -1 else input_size
         row_parallel = input_size != input_size_per_partition
         partition_scales = not marlin_repeat_scales_on_all_ranks(
-            self.has_g_idx, self.group_size, row_parallel
+            False, self.group_size, row_parallel
         )
 
         scales_and_zp_size = input_size // group_size
@@ -161,7 +159,6 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
             w_q_param_name="weight_packed",
             w_s_param_name="weight_scale",
             w_zp_param_name="weight_zero_point",
-            w_gidx_param_name="weight_g_idx",
         )
 
     # Checkpoints are serialized in compressed-tensors format, which is
