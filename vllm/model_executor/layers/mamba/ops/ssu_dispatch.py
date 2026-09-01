@@ -12,7 +12,6 @@ the backend defaults to 'cpu'.
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import cache
-from inspect import signature
 
 import torch
 
@@ -467,10 +466,12 @@ _flashinfer_replayssm_kernel: Callable[..., torch.Tensor] | None = None
 def flashinfer_replayssm_autotune_supported() -> bool:
     """Return True when FlashInfer exposes ReplaySSM autotuning."""
     try:
-        from flashinfer.mamba.checkpointing_ssu import CheckpointingSSURunner
+        from flashinfer.mamba.checkpointing_ssu import (  # noqa: F401
+            CheckpointingSSURunner,
+        )
     except ImportError:
         return False
-    return callable(CheckpointingSSURunner)
+    return True
 
 
 def selective_state_update_replayssm_flashinfer(
@@ -616,25 +617,11 @@ def initialize_mamba_ssu_backend(
     _flashinfer_replayssm_kernel = None
     if use_replayssm and backend == MambaBackendEnum.FLASHINFER:
         try:
-            from flashinfer.mamba.checkpointing_ssu import (
-                CheckpointingSSURunner,
-                checkpointing_ssu,
-            )
+            from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
         except ImportError as e:
             raise ImportError(
                 "FlashInfer ReplaySSM requires a compatible flashinfer-python package"
             ) from e
-        if not callable(CheckpointingSSURunner):
-            raise ImportError("FlashInfer ReplaySSM requires native autotuning support")
-        required_parameters = {"cu_seqlens", "max_seqlen", "enable_pdl"}
-        missing_parameters = (
-            required_parameters - signature(checkpointing_ssu).parameters.keys()
-        )
-        if missing_parameters:
-            raise ImportError(
-                "FlashInfer ReplaySSM requires native MTP and PDL support; missing "
-                + ", ".join(sorted(missing_parameters))
-            )
         _flashinfer_replayssm_kernel = checkpointing_ssu
     if use_replayssm:
         logger.info("Using %s ReplaySSM backend.", backend.value)
