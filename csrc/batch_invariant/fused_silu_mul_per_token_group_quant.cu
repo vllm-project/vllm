@@ -235,7 +235,7 @@ struct NaiveScheduler {
       int threads_per_subwarp,
       int num_local_experts,
       int hidden_dim_num_groups,
-      int num_groups,
+      int64_t num_groups,
       int& subwarps_per_block,
       dim3& grid,
       dim3& block) {
@@ -298,7 +298,7 @@ struct MaskedLayoutScheduler {
       int threads_per_subwarp,
       int num_local_experts,
       int hidden_dim_num_groups,
-      int num_groups,
+      int64_t num_groups,
       int& subwarps_per_block,
       dim3& grid,
       dim3& block) {
@@ -523,7 +523,8 @@ __global__ void per_token_group_quant_8bit_kernel(
         }
 
         st_global(
-            reinterpret_cast<int4*>(output_q + offset_num_groups * GROUP_SIZE + lane_id * INPUT_PRIMARY_VEC_SIZE),
+            reinterpret_cast<int4*>(
+                output_q + static_cast<int64_t>(offset_num_groups) * GROUP_SIZE + lane_id * INPUT_PRIMARY_VEC_SIZE),
             output_buf);
       });
 
@@ -555,7 +556,7 @@ void fused_silu_mul_per_token_group_quant(
   TORCH_CHECK(std::abs(LOCAL_ABSMAX_ABS - eps) < 1e-13);
 
   CHECK_EQ(input.numel() % group_size, 0);
-  const int num_groups = static_cast<int>(input.numel()) / group_size / (fuse_silu_and_mul ? 2 : 1);
+  const int64_t num_groups = input.numel() / group_size / (fuse_silu_and_mul ? 2 : 1);
 
   const bool masked_layout = masked_m.has_value();
   TORCH_CHECK(output_s.dim() == (masked_layout ? 3 : 2));
