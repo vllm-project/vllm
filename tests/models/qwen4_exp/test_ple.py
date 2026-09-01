@@ -255,7 +255,6 @@ def test_ple_fp8_embedding_uses_int8_for_tp_reduce(monkeypatch) -> None:
 def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
     prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
     quant_config = Fp8Config(
-        is_checkpoint_fp8_serialized=True,
         ignored_layers=[],
         weight_block_size=[128, 128],
     )

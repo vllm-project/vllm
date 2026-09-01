@@ -640,7 +640,7 @@ def make_shared_experts_with_weights(
         if quant_dtype == torch.float8_e4m3fn:
             from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
-            quant_config = Fp8Config(True)
+            quant_config = Fp8Config()
         else:
             quant_config = None
 

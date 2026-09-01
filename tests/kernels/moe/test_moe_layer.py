@@ -793,11 +793,11 @@ def make_quant_config(
         return None, QuantizedWeights(w13_weight=w1, w2_weight=w2)
 
     if quantization == "fp8":
-        return Fp8Config(True), _quantize_fp8_halves(w1, w2)
+        return Fp8Config(), _quantize_fp8_halves(w1, w2)
 
     if quantization == "fp8_blocked":
         block_shape = [128, 128]
-        return Fp8Config(True, weight_block_size=block_shape), _quantize_fp8_halves(
+        return Fp8Config(weight_block_size=block_shape), _quantize_fp8_halves(
             w1, w2, block_shape
         )
 

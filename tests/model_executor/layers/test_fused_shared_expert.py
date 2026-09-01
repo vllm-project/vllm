@@ -795,7 +795,6 @@ def test_non_quark_shared_expert_fse_is_incompatible() -> None:
 
 def _fp8_config(**kwargs: Any) -> Fp8Config:
     return Fp8Config(
-        is_checkpoint_fp8_serialized=True,
         activation_scheme="dynamic",
         weight_block_size=[128, 128],
         **kwargs,
@@ -816,7 +815,7 @@ def test_block_fp8_shared_expert_fse_is_compatible() -> None:
 def test_per_tensor_fp8_shared_expert_fse_is_incompatible() -> None:
     """Per-tensor scales are 0-D, so the shared-expert chunker cannot slice them."""
     compatible, reason = is_shared_expert_quant_fse_compatible(
-        Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="dynamic"),
+        Fp8Config(activation_scheme="dynamic"),
         "model.layers.0.mlp.experts",
         "model.layers.0.mlp.shared_experts",
     )

@@ -93,7 +93,7 @@ class Fp8Config(QuantizationConfig):
 
     def __init__(
         self,
-        is_checkpoint_fp8_serialized: bool = False,
+        is_checkpoint_fp8_serialized: bool = True,
         activation_scheme: str = "dynamic",
         ignored_layers: list[str] | None = None,
         weight_block_size: list[int] | None = None,

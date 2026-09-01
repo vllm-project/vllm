@@ -70,7 +70,7 @@ def test_legacy_fp8_online_quantization_prompts_new_interface() -> None:
         ValueError,
         match="--quantization fp8_per_tensor.*online/",
     ):
-        Fp8Config()
+        Fp8Config(is_checkpoint_fp8_serialized=False)
 
 
 def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
