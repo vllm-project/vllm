@@ -152,9 +152,7 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def input_quant_key(self) -> QuantKey | None:
-        # Advertise per-token FP8 so KDA gated-RMSNorm fusion can skip
-        # in-kernel quant. Do not return kMxfp4Dynamic: that is a different
-        # GEMM family. Do not call get_output_padding() - torch fallbacks
+        # Does not call get_output_padding() - torch fallbacks
         # resolve padding from compilation_config, which is unset in
         # profile_run. This kernel does not pad activations.
         return kFp8DynamicTokenSym
@@ -252,8 +250,8 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def input_quant_key(self) -> QuantKey | None:
-        # Same PTPC consume ABI as the bpreshuffle kernel. HIPBMM stays off
-        # in this harness unless a bench enables it.
+        # Same per-token FP8 consume path as
+        # AiterPreshuffledPerTokenFp8ScaledMMLinearKernel.
         return kFp8DynamicTokenSym
 
     @classmethod
