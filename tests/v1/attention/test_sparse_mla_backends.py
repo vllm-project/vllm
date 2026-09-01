@@ -40,6 +40,9 @@ if not current_platform.is_cuda():
         allow_module_level=True,
     )
 
+from vllm.model_executor.layers.attention.mla_attention import (
+    _canonicalize_sparse_mla_kv_cache_dtype,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseTRTLLMBackend,
@@ -184,13 +187,89 @@ def _quantize_dequantize_fp8_ds_mla(
     return dequant_kv_c, dequant_k_pe
 
 
+_E2M1_TABLE = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+def _quantize_dequantize_nvfp4_ds_mla(
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    block_size: int,
+    kv_cache_dtype: str,
+    scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Round-trip kv_c/k_pe through the nvfp4_ds_mla cache layout.
+
+    Layout (per token, uint8): [e2m1-packed NoPE | unscaled e4m3 RoPE |
+    per-16 e4m3 NoPE SFs]. The SF bytes are stored permuted (an 8x4 -> 4x8
+    transpose: the scale for element block s lives at byte 8 * (s & 3) +
+    (s >> 2)) so that the 8 scales one FlashMLA dequant thread needs are
+    contiguous. Dequant: x = value * float(sf), which is exact in bf16, so
+    this python dequant matches the kernels bit-for-bit.
+    """
+    if kv_c.numel() == 0:
+        return kv_c.clone(), k_pe.clone()
+
+    kv_lora_rank = kv_c.shape[-1]
+    rope_dim = k_pe.shape[-1]
+    num_tokens = kv_c.shape[0]
+    num_blocks = max(1, math.ceil(num_tokens / block_size))
+    entry_size = (
+        math.ceil((kv_lora_rank // 2 + rope_dim + kv_lora_rank // 16) / 16) * 16
+    )
+    sf_nope_off = kv_lora_rank // 2 + rope_dim
+
+    tmp_cache = torch.zeros(
+        num_blocks, block_size, entry_size, dtype=torch.uint8, device=kv_c.device
+    )
+    slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=kv_c.device)
+    ops.concat_and_cache_mla(
+        kv_c, k_pe, tmp_cache, slot_mapping, kv_cache_dtype=kv_cache_dtype, scale=scale
+    )
+
+    tokens = tmp_cache.view(-1, entry_size)[:num_tokens]
+    table = torch.tensor(
+        _E2M1_TABLE + [-v for v in _E2M1_TABLE],
+        dtype=torch.float32,
+        device=kv_c.device,
+    )
+
+    def unpack_e2m1(packed: torch.Tensor) -> torch.Tensor:
+        lo = (packed & 0xF).long()
+        hi = (packed >> 4).long()
+        return table[torch.stack([lo, hi], dim=-1).flatten(-2)]
+
+    nope_vals = unpack_e2m1(tokens[:, : kv_lora_rank // 2])
+    num_nope_sf = kv_lora_rank // 16
+    nope_sf = (
+        # undo the on-wire SF permutation -> element-block order
+        tokens[:, sf_nope_off : sf_nope_off + num_nope_sf]
+        .unflatten(-1, (4, num_nope_sf // 4))
+        .transpose(-1, -2)
+        .flatten(-2)
+        .view(torch.float8_e4m3fn)
+        .float()
+    )
+    dequant_kv_c = (
+        (nope_vals.unflatten(-1, (-1, 16)) * nope_sf.unsqueeze(-1)).flatten(-2)
+    ).to(kv_c.dtype)
+
+    # RoPE: plain e4m3, no scale factor
+    rope_raw = tokens[:, kv_lora_rank // 2 : sf_nope_off]
+    dequant_k_pe = rope_raw.view(torch.float8_e4m3fn).to(k_pe.dtype)
+
+    return dequant_kv_c, dequant_k_pe
+
+
 @pytest.mark.parametrize(
     "backend_cls",
     [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend],
     ids=["FlashMLA", "FlashInferTRTLLM"],
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_ds_mla"])
+@pytest.mark.parametrize(
+    "kv_cache_dtype",
+    ["auto", "fp8", "fp8_ds_mla", "nvfp4_ds_mla"],
+)
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 @pytest.mark.parametrize("block_size", [32, 64])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
@@ -219,6 +298,17 @@ def test_sparse_backend_decode_correctness(
             "fp8_ds_mla kv-cache dtype"
         )
 
+    if kv_cache_dtype == "nvfp4_ds_mla":
+        # Unlike "fp8" (an alias canonicalized to "fp8_ds_mla" above), the
+        # NVFP4 DS-MLA dtype must reach the backend unchanged.
+        assert (
+            _canonicalize_sparse_mla_kv_cache_dtype(backend_cls, kv_cache_dtype)
+            == kv_cache_dtype
+        )
+        device_capability = current_platform.get_device_capability()
+        if device_capability is None or device_capability.major != 10:
+            pytest.skip("The NVFP4 DS-MLA kv-cache dtype requires SM 10.x")
+
     supported_block_sizes = backend_cls.get_supported_kernel_block_sizes()
     if block_size not in supported_block_sizes:
         pytest.skip(
@@ -238,6 +328,7 @@ def test_sparse_backend_decode_correctness(
 
     batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
     use_fp8_ds_mla_quantization = kv_cache_dtype == "fp8_ds_mla"
+    use_nvfp4_ds_mla_quantization = kv_cache_dtype == "nvfp4_ds_mla"
 
     device = torch.device(DEVICE_TYPE)
     dtype = torch.bfloat16
@@ -379,6 +470,15 @@ def test_sparse_backend_decode_correctness(
                 block_size=block_size,
                 scale=kv_cache_scale,
                 simulate_sm100_e8m0_scales=is_sm100,
+            )
+            k_pe_full = k_pe_squeezed.unsqueeze(1)
+        elif use_nvfp4_ds_mla_quantization:
+            kv_c_full, k_pe_squeezed = _quantize_dequantize_nvfp4_ds_mla(
+                kv_c_full,
+                k_pe_full.squeeze(1),
+                block_size=block_size,
+                kv_cache_dtype=kv_cache_dtype,
+                scale=kv_cache_scale,
             )
             k_pe_full = k_pe_squeezed.unsqueeze(1)
 

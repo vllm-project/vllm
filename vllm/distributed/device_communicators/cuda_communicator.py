@@ -52,6 +52,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_custom_allreduce = False
             use_torch_symm_mem = False
             use_flashinfer_allreduce = False
+            use_flashinfer_pcie_ipc_allreduce = False
             use_aiter_allreduce = False
         else:
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
@@ -62,6 +63,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_flashinfer_allreduce = (
                 envs.VLLM_ALLREDUCE_USE_FLASHINFER and not envs.VLLM_BATCH_INVARIANT
             )
+            use_flashinfer_pcie_ipc_allreduce = (
+                envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC
+                and not envs.VLLM_BATCH_INVARIANT
+            )
             use_aiter_allreduce = use_custom_allreduce and bool(
                 rocm_aiter_ops.is_custom_all_reduce_enabled()
             )
@@ -69,6 +74,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
+        self.use_flashinfer_pcie_ipc_allreduce = use_flashinfer_pcie_ipc_allreduce
         self.use_aiter_allreduce = use_aiter_allreduce
 
         # lazy import to avoid documentation build error
@@ -77,6 +83,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
         from vllm.distributed.device_communicators.flashinfer_all_reduce import (
             FlashInferAllReduce,
+        )
+        from vllm.distributed.device_communicators.flashinfer_pcie_ipc_all_reduce import (  # noqa: E501
+            FlashInferPcieIpcAllReduce,
         )
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
         from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -97,6 +106,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
+        self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
 
@@ -109,6 +119,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.use_flashinfer_allreduce and self.world_size > 1:
             self.fi_ar_comm = FlashInferAllReduce(
                 group=self.cpu_group,
+                device=self.device,
+            )
+
+        if (
+            self.use_flashinfer_pcie_ipc_allreduce
+            and self.world_size > 1
+            and self.device_group is not None
+        ):
+            self.fi_pcie_ipc_ar_comm = FlashInferPcieIpcAllReduce(
+                group=self.device_group,
+                tune_group=self.cpu_group,
                 device=self.device,
             )
 
@@ -237,6 +258,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         depends on the input tensor.
         """
         all_potential_ar_backends = [
+            "FLASHINFER_PCIE_IPC",
             "FLASHINFER",
             "NCCL_SYMM_MEM",
             "QUICK_REDUCE",
@@ -246,6 +268,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "PYNCCL",
         ]
         enabled_ar_backends: list[str] = []
+        if (
+            self.fi_pcie_ipc_ar_comm is not None
+            and not self.fi_pcie_ipc_ar_comm.disabled
+        ):
+            enabled_ar_backends.append("FLASHINFER_PCIE_IPC")
         if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
             enabled_ar_backends.append("FLASHINFER")
         # Mirror the static preconditions of `should_nccl_symm_mem_allreduce`:
@@ -323,6 +350,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = qr_comm.quick_all_reduce(input_)
             assert out is not None
             return out
+        fi_pcie_ipc_ar_comm = self.fi_pcie_ipc_ar_comm
+        if fi_pcie_ipc_ar_comm is not None and fi_pcie_ipc_ar_comm.should_use(input_):
+            return fi_pcie_ipc_ar_comm.all_reduce(input_)
         if use_fi_ar:
             assert fi_ar_comm is not None
             out = fi_ar_comm.all_reduce(input_)
@@ -631,6 +661,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.fi_ar_comm is not None:
             self.fi_ar_comm.destroy()
             self.fi_ar_comm = None
+        if self.fi_pcie_ipc_ar_comm is not None:
+            self.fi_pcie_ipc_ar_comm.destroy()
+            self.fi_pcie_ipc_ar_comm = None
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]
@@ -662,6 +695,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
             return False
         bd = ctx.batch_descriptor
         return bd is not None and bd.uniform
+
+    def suspend(self) -> None:
+        if self.pynccl_comm is not None:
+            self.pynccl_comm.suspend()
+
+    def resume(self) -> None:
+        if self.pynccl_comm is not None:
+            self.pynccl_comm.resume()
 
     def checkpoint_prepare(self) -> None:
         # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.

@@ -29,7 +29,7 @@ import pickle
 import weakref
 from collections import deque, namedtuple
 from collections.abc import Callable
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from multiprocessing import shared_memory
@@ -178,6 +178,16 @@ def _apply_to_device_comms(
 
     for dc in comms:
         action(dc)
+
+
+def suspend_device_comms() -> None:
+    """Release device communicator memory (collective; comms must be idle)."""
+    _apply_to_device_comms(lambda comm: comm.suspend())
+
+
+def resume_device_comms() -> None:
+    """Restore suspended device communicators (collective)."""
+    _apply_to_device_comms(lambda comm: comm.resume())
 
 
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
@@ -666,6 +676,7 @@ class GroupCoordinator:
         # only cuda/rocm uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
+        maybe_fi_pcie_ipc_context: AbstractContextManager[Any] = nullcontext()
         maybe_aiter_ar_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
@@ -682,6 +693,10 @@ class GroupCoordinator:
             ca_comm = self.device_communicator.ca_comm
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
+            if isinstance(self.device_communicator, CudaCommunicator):
+                fi_pcie_ipc_ar_comm = self.device_communicator.fi_pcie_ipc_ar_comm
+                if fi_pcie_ipc_ar_comm is not None:
+                    maybe_fi_pcie_ipc_context = fi_pcie_ipc_ar_comm.capture()
 
             # Capture each group's own comm. A global lookup would double-capture
             aiter_ar_comm = getattr(self.device_communicator, "aiter_ar_comm", None)
@@ -697,6 +712,7 @@ class GroupCoordinator:
         with (
             torch.cuda.stream(stream),
             maybe_ca_context,
+            maybe_fi_pcie_ipc_context,
             maybe_aiter_ar_context,
         ):
             yield graph_capture_context
@@ -1362,14 +1378,17 @@ class GroupCoordinator:
         return self.device_communicator.recv(size, dtype, src)
 
     def destroy(self):
+        # Device communicators can own collective workspaces whose teardown
+        # uses these process groups (for example FlashInfer PCIe IPC barriers).
+        # Release them before destroying the groups they depend on.
+        if self.device_communicator is not None:
+            self.device_communicator.destroy()
         if hasattr(self, "device_group"):
             torch.distributed.destroy_process_group(self.device_group)
             del self.device_group
         if hasattr(self, "cpu_group"):
             torch.distributed.destroy_process_group(self.cpu_group)
             del self.cpu_group
-        if self.device_communicator is not None:
-            self.device_communicator.destroy()
         if self.mq_broadcaster is not None:
             self.mq_broadcaster = None
 
