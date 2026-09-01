@@ -83,6 +83,8 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
     testing of the decoder with larger input sequence lengths.
     """
 
+    requires_dcp_block_aligned_interleave = False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
