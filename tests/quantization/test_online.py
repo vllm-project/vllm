@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests online quantization."""
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock
@@ -20,14 +22,13 @@ from vllm._custom_ops import scaled_fp4_quant
 from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
-from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
-    UnquantizedFusedMoEMethod,
-)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
     CompressedTensorsLinearMethod,
@@ -67,6 +68,9 @@ from vllm.model_executor.layers.quantization.online.nvfp4 import (
 from vllm.model_executor.layers.quantization.quark.quark import (
     QuarkConfig,
     QuarkLinearMethod,
+)
+from vllm.model_executor.layers.quantization.quark.quark_moe import (
+    QuarkW8A8Int8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils import quant_utils
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -182,6 +186,24 @@ def _moe_only_compressed_tensors_config() -> CompressedTensorsConfig:
     )
 
 
+def _write_minimal_llama_config(
+    model_path: Path, quantization_config: dict[str, Any] | None = None
+) -> None:
+    config: dict[str, Any] = {
+        "architectures": ["LlamaForCausalLM"],
+        "model_type": "llama",
+        "hidden_size": 32,
+        "intermediate_size": 64,
+        "num_attention_heads": 4,
+        "num_hidden_layers": 1,
+        "vocab_size": 32,
+        "max_position_embeddings": 32,
+    }
+    if quantization_config is not None:
+        config["quantization_config"] = quantization_config
+    (model_path / "config.json").write_text(json.dumps(config))
+
+
 @pytest.mark.parametrize(
     "checkpoint_config_factory,raises_conflict",
     [
@@ -227,13 +249,20 @@ def test_online_prequantized_compatibility(
         assert isinstance(layer.quant_method, Mxfp8OnlineLinearMethod)
 
 
-def test_online_ignore_keeps_checkpoint_quantization(default_vllm_config, dist_init):
-    """Ignoring online quantization does not replace a checkpoint method."""
+def test_online_ignore_keeps_checkpoint_quantization_linear(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """Ignoring online quantization does not replace a checkpoint method (linear)."""
     default_vllm_config.model_config = ModelConfig()
     quant_config = _fully_quantized_quark_config()
     prefix = "model.layers.0.self_attn.o_proj"
     quant_config.online_quantization_config = OnlineQuantizationConfig(
         QuantizationConfigArgs(linear="mxfp8", ignore=[prefix])
+    )
+    monkeypatch.setattr(
+        quant_config.online_quantization_config,
+        "get_quant_method",
+        lambda *args: pytest.fail("online method should not be constructed"),
     )
 
     layer = ColumnParallelLinear(
@@ -249,10 +278,10 @@ def test_online_ignore_keeps_checkpoint_quantization(default_vllm_config, dist_i
     assert isinstance(layer.quant_method, QuarkLinearMethod)
 
 
-def test_online_ignored_moe_skips_method_construction(
+def test_online_ignore_keeps_checkpoint_quantization_moe(
     default_vllm_config, dist_init, monkeypatch
 ) -> None:
-    """Ignored checkpoint-quantized MoEs do not select a transient backend."""
+    """Ignoring online quantization does not replace a checkpoint method (moe)."""
     default_vllm_config.model_config = ModelConfig()
     prefix = "model.layers.0.mlp.experts"
     quant_config = _fully_quantized_quark_config()
@@ -276,34 +305,30 @@ def test_online_ignored_moe_skips_method_construction(
         prefix=prefix,
     ).routed_experts
 
-    assert not isinstance(layer.quant_method, UnquantizedFusedMoEMethod)
+    assert isinstance(layer.quant_method, QuarkW8A8Int8MoEMethod)
 
 
 def test_activation_only_override_applies_to_checkpoint_method(
-    monkeypatch, default_vllm_config
+    default_vllm_config, tmp_path
 ) -> None:
     """Activation-only overrides remain available to the checkpoint method."""
-    checkpoint_config = _moe_only_compressed_tensors_config()
-    quant_cls = SimpleNamespace(from_config=lambda _: checkpoint_config)
-    model_config = cast(
-        ModelConfig,
-        SimpleNamespace(
-            quantization="compressed-tensors",
-            quantization_config=QuantizationConfigArgs(moe={"activation": "mxfp8"}),
-            hf_config=SimpleNamespace(
-                quantization_config={"quant_method": "compressed-tensors"},
-                text_config=None,
-            ),
-            hf_overrides={},
-        ),
-    )
-    monkeypatch.setattr(weight_utils, "get_quantization_config", lambda _: quant_cls)
-
-    result = weight_utils.get_quant_config(
-        model_config, cast(LoadConfig, SimpleNamespace(download_dir=None))
+    _write_minimal_llama_config(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        quantization="compressed-tensors",
+        quantization_config=QuantizationConfigArgs(moe={"activation": "mxfp8"}),
+        hf_overrides={
+            "quantization_config": {
+                "quant_method": "compressed-tensors",
+                "format": "pack-quantized",
+                "config_groups": {},
+            }
+        },
     )
 
-    assert result is checkpoint_config
+    result = weight_utils.get_quant_config(model_config, LoadConfig())
+
+    assert isinstance(result, CompressedTensorsConfig)
     assert isinstance(result.online_quantization_config, OnlineQuantizationConfig)
 
     default_vllm_config.model_config = model_config
@@ -314,79 +339,52 @@ def test_activation_only_override_applies_to_checkpoint_method(
     assert _resolve_activation_key(None) == kMxfp8Dynamic
 
 
-def test_online_overlay_requires_normalized_quantization_config(monkeypatch) -> None:
+def test_online_overlay_requires_normalized_quantization_config(tmp_path) -> None:
     """The loader rejects a raw config dict instead of silently ignoring it."""
-    checkpoint_config = _moe_only_compressed_tensors_config()
-    quant_cls = SimpleNamespace(from_config=lambda _: checkpoint_config)
-    model_config = cast(
-        ModelConfig,
-        SimpleNamespace(
-            quantization="compressed-tensors",
-            quantization_config={"linear": "mxfp8"},
-            hf_config=SimpleNamespace(
-                quantization_config={"quant_method": "compressed-tensors"},
-                text_config=None,
-            ),
-            hf_overrides={},
-        ),
+    _write_minimal_llama_config(tmp_path)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        quantization="compressed-tensors",
+        quantization_config={"linear": "mxfp8"},
+        hf_overrides={
+            "quantization_config": {
+                "quant_method": "compressed-tensors",
+                "format": "pack-quantized",
+                "config_groups": {},
+            }
+        },
     )
-    monkeypatch.setattr(weight_utils, "get_quantization_config", lambda _: quant_cls)
 
+    # assert isinstance(online_args, QuantizationConfigArgs)
+    # in maybe_compose_online_quantization
     with pytest.raises(AssertionError):
-        weight_utils.get_quant_config(
-            model_config, cast(LoadConfig, SimpleNamespace(download_dir=None))
-        )
+        weight_utils.get_quant_config(model_config, LoadConfig())
 
 
-def test_online_overlay_loads_sidecar_checkpoint_config(monkeypatch, tmp_path) -> None:
-    """An online overlay must not bypass checkpoint sidecar config loading."""
-    checkpoint_config = SimpleNamespace(online_quantization_config=None)
-    loaded_configs: list[dict] = []
-
-    class SidecarQuantizationConfig:
-        @staticmethod
-        def get_config_filenames() -> list[str]:
-            return ["quantize_config.json"]
-
-        @staticmethod
-        def from_config(config: dict):
-            loaded_configs.append(config)
-            return checkpoint_config
-
-    (tmp_path / "quantize_config.json").write_text("{}")
-    model_config = cast(
-        ModelConfig,
-        SimpleNamespace(
-            quantization="awq",
-            quantization_config=QuantizationConfigArgs(linear="mxfp8"),
-            hf_config=SimpleNamespace(
-                quantization_config=None,
-                compression_config=None,
-                text_config=None,
-            ),
-            hf_overrides={},
-            model=str(tmp_path),
-            revision=None,
-        ),
+def test_online_overlay_loads_checkpoint_config_file(tmp_path) -> None:
+    """An online overlay must not bypass checkpoint config file loading."""
+    _write_minimal_llama_config(tmp_path)
+    (tmp_path / "quantize_config.json").write_text(
+        '{"w_bit": 4, "q_group_size": 128, "zero_point": true}'
     )
-    monkeypatch.setattr(
-        weight_utils,
-        "get_quantization_config",
-        lambda _: SidecarQuantizationConfig,
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        quantization="awq",
+        quantization_config=QuantizationConfigArgs(linear="mxfp8"),
     )
 
-    result = weight_utils.get_quant_config(
-        model_config, cast(LoadConfig, SimpleNamespace(download_dir=None))
-    )
+    result = weight_utils.get_quant_config(model_config, LoadConfig())
 
-    assert result is checkpoint_config
-    assert loaded_configs == [{}]
+    assert isinstance(result, AutoAWQConfig)
+    assert result.weight_bits == 4
+    assert result.group_size == 128
+    assert result.zero_point
     assert isinstance(result.online_quantization_config, OnlineQuantizationConfig)
     assert result.online_quantization_config.args is model_config.quantization_config
 
 
 @pytest.mark.parametrize(
-    "quantization,checkpoint_quantization_config,is_sidecar",
+    "quantization,checkpoint_quantization_config,is_config_file",
     [
         pytest.param("fp8_per_block", None, False, id="fp8-per-block-online"),
         pytest.param("mxfp4", None, False, id="mxfp4-online"),
@@ -401,33 +399,27 @@ def test_online_overlay_loads_sidecar_checkpoint_config(monkeypatch, tmp_path) -
             "mxfp8",
             {"quant_method": "mxfp8", "ignored_layers": []},
             True,
-            id="mxfp8-sidecar-checkpoint-config",
+            id="mxfp8-checkpoint-config-file",
         ),
     ],
 )
 def test_online_shorthand_selects_checkpoint_or_online_config(
-    tmp_path, quantization, checkpoint_quantization_config, is_sidecar
+    tmp_path, quantization, checkpoint_quantization_config, is_config_file
 ) -> None:
     """Online shorthands defer to checkpoint metadata when available."""
 
-    if is_sidecar:
+    if is_config_file:
         (tmp_path / "hf_quant_config.json").write_text(
             '{"quant_method": "mxfp8", "ignored_layers": []}'
         )
 
-    model_config = Mock()
-    model_config.quantization = quantization
-    model_config.quantization_config = None
-    model_config.hf_config = Mock(
-        quantization_config=(None if is_sidecar else checkpoint_quantization_config),
-        compression_config=None,
-        text_config=None,
+    _write_minimal_llama_config(
+        tmp_path,
+        None if is_config_file else checkpoint_quantization_config,
     )
-    model_config.hf_overrides = {}
-    model_config.model = str(tmp_path)
-    model_config.revision = None
+    model_config = ModelConfig(model=str(tmp_path), quantization=quantization)
 
-    result = weight_utils.get_quant_config(model_config, Mock(download_dir=None))
+    result = weight_utils.get_quant_config(model_config, LoadConfig())
 
     if checkpoint_quantization_config is not None:
         assert isinstance(result, ModelOptMxFp8Config)
@@ -444,16 +436,14 @@ def test_log_online_quantization_for_composable_config(monkeypatch) -> None:
         "model.layers.0.self_attn.o_proj": ("linear", "mxfp8", None),
         "model.layers.1.self_attn.o_proj": ("linear", "mxfp8", None),
     }
-    vllm_config = SimpleNamespace(
-        quant_config=SimpleNamespace(online_quantization_config=online_config)
-    )
+    vllm_config = VllmConfig(quant_config=online_config)
     log_args = []
     monkeypatch.setattr(
         "vllm.model_executor.model_loader.base_loader.logger.info",
         lambda *args: log_args.append(args),
     )
 
-    log_online_quantization(cast(Any, vllm_config))
+    log_online_quantization(vllm_config)
 
     assert log_args == [
         (
@@ -464,21 +454,12 @@ def test_log_online_quantization_for_composable_config(monkeypatch) -> None:
     ]
 
 
-def test_checkpoint_quantization_rejects_online_shorthand() -> None:
+def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
     """A checkpoint quant method cannot be replaced by an online shorthand."""
-    model_config = cast(
-        ModelConfig,
-        SimpleNamespace(
-            quantization="fp8_per_channel",
-            model_arch_config=SimpleNamespace(
-                quantization_config={"quant_method": "mxfp4"}
-            ),
-            hf_config=SimpleNamespace(model_type=None),
-        ),
-    )
+    _write_minimal_llama_config(tmp_path, {"quant_method": "mxfp4"})
 
     with pytest.raises(ValueError, match="does not match the quantization"):
-        ModelConfig._verify_quantization(model_config)
+        ModelConfig(model=str(tmp_path), quantization="fp8_per_channel")
 
 
 @pytest.mark.skipif(
