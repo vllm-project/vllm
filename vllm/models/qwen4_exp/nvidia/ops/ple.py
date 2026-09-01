@@ -37,12 +37,16 @@ def _ple_ngram_ids_kernel(
     NGRAM_CONTEXT_LEN: tl.constexpr,
     HEADS_PER_NGRAM: tl.constexpr,
     BLOCK_T: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     NGRAM_HEADS: tl.constexpr = NGRAM_CONTEXT_LEN * HEADS_PER_NGRAM
     BLOCK_H: tl.constexpr = triton.next_power_of_2(NGRAM_HEADS)
     pid = tl.program_id(0)
     token_offsets = pid * BLOCK_T + tl.arange(0, BLOCK_T)
     token_mask = token_offsets < num_tokens
+
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
 
     # A flattened token offset does not identify its request when query chunks
     # have different lengths. Binary-search the request boundaries instead.
@@ -100,6 +104,8 @@ def _ple_ngram_ids_kernel(
     remainders = mixed % sizes
     remainders = tl.where(remainders < 0, remainders + sizes, remainders)
     ids = remainders + head_offsets
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(
         out_ptr + token_offsets[:, None] * NGRAM_HEADS + g[None, :],
         ids,
@@ -114,18 +120,16 @@ def _ple_ngram_ids(
     layer_multipliers: torch.Tensor,
     ngram_heads_vocab_sizes: torch.Tensor,
     ngram_heads_offsets: torch.Tensor,
+    output: torch.Tensor,
     eos_token_id: int,
     heads_per_ngram: int,
-) -> torch.Tensor:
+) -> None:
     input_ids = input_ids.reshape(-1)
     num_tokens = input_ids.shape[0]
     num_reqs = query_start_loc.numel() - 1
     ctx_len = ngram_context.shape[1]
-    ngram_heads = ctx_len * heads_per_ngram
-    out = torch.empty(
-        (num_tokens, ngram_heads), dtype=torch.int64, device=input_ids.device
-    )
     BLOCK_T = 8
+    launch_pdl = current_platform.is_arch_support_pdl()
     _ple_ngram_ids_kernel[(triton.cdiv(num_tokens, BLOCK_T),)](
         input_ids,
         query_start_loc,
@@ -133,7 +137,7 @@ def _ple_ngram_ids(
         layer_multipliers,
         ngram_heads_vocab_sizes,
         ngram_heads_offsets,
-        out,
+        output,
         num_tokens,
         num_reqs,
         eos_token_id,
@@ -141,34 +145,9 @@ def _ple_ngram_ids(
         NGRAM_CONTEXT_LEN=ctx_len,
         HEADS_PER_NGRAM=heads_per_ngram,
         BLOCK_T=BLOCK_T,
+        launch_pdl=launch_pdl,
         num_warps=4,
     )
-    return out
-
-
-def _ple_ngram_ids_fake(
-    input_ids: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    ngram_context: torch.Tensor,
-    layer_multipliers: torch.Tensor,
-    ngram_heads_vocab_sizes: torch.Tensor,
-    ngram_heads_offsets: torch.Tensor,
-    eos_token_id: int,
-    heads_per_ngram: int,
-) -> torch.Tensor:
-    num_tokens = input_ids.reshape(-1).shape[0]
-    ngram_heads = ngram_context.shape[1] * heads_per_ngram
-    return torch.empty(
-        (num_tokens, ngram_heads), dtype=torch.int64, device=input_ids.device
-    )
-
-
-direct_register_custom_op(
-    op_name="qwen4_exp_ple_ngram_ids",
-    op_func=_ple_ngram_ids,
-    mutates_args=[],
-    fake_impl=_ple_ngram_ids_fake,
-)
 
 
 def ple_ngram_ids(
@@ -180,17 +159,26 @@ def ple_ngram_ids(
     ngram_heads_offsets: torch.Tensor,
     eos_token_id: int,
     heads_per_ngram: int,
+    output: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.ops.vllm.qwen4_exp_ple_ngram_ids(
+    if output is None:
+        output = torch.empty(
+            (input_ids.numel(), ngram_context.shape[1] * heads_per_ngram),
+            dtype=torch.int64,
+            device=input_ids.device,
+        )
+    _ple_ngram_ids(
         input_ids,
         query_start_loc,
         ngram_context,
         layer_multipliers,
         ngram_heads_vocab_sizes,
         ngram_heads_offsets,
+        output,
         eos_token_id,
         heads_per_ngram,
     )
+    return output
 
 
 # Gating and normalization
@@ -354,11 +342,16 @@ def _ple_conv_kernel(
     MODE: tl.constexpr,
     HAS_INIT: tl.constexpr,
     NULL_STATE_ID: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     t = tl.program_id(0)
     pid_c = tl.program_id(1)
     c_offs = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
     c_mask = c_offs < C
+
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+
     # Mode-specific launches use logical row indices. Mixed batches map them
     # back to the original token order without gathering inputs or residuals.
     output_t = tl.load(token_idx_ptr + t, mask=has_token_map, other=t).to(tl.int64)
@@ -448,6 +441,8 @@ def _ple_conv_kernel(
         mask=c_mask,
         other=0.0,
     )
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(
         residual_ptr + output_t * C + c_offs,
         residual + conv_output,
@@ -616,6 +611,7 @@ def ple_conv(
         raise ValueError(f"Unsupported short-conv mode: {mode}")
 
     num_warps = 4 if mode == "prefill" else 8
+    launch_pdl = current_platform.is_arch_support_pdl()
 
     # Constexpr flags eliminate accesses to optional None arguments. Without a
     # token map, state_indices is an unused but device-resident placeholder.
@@ -644,6 +640,7 @@ def ple_conv(
         MODE=mode,
         HAS_INIT=has_initial_states_arg,
         NULL_STATE_ID=NULL_BLOCK_ID,
+        launch_pdl=launch_pdl,
         num_warps=num_warps,
     )
     # conv state update is fused with the kernel above for decode

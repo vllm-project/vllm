@@ -356,6 +356,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
+        output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute n-gram embedding indices for the current request layout."""
         input_ids = input_ids.reshape(-1)
@@ -372,6 +373,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 ngram_heads_offsets=self.ngram_heads_offsets,
                 eos_token_id=self.eos_token_id,
                 heads_per_ngram=self.heads_per_ngram,
+                output=output,
             )
         input_ids = input_ids.long()
         query_start_loc = query_start_loc.long()
@@ -431,11 +433,16 @@ class Qwen4ExpNGramEmbedding(nn.Module):
     ) -> torch.Tensor:
         # Keep num_reqs-dependent ID generation outside PIECEWISE CUDA graphs,
         # which dispatch only on the padded token count.
-        ngram_ids = torch.ops.vllm.qwen4_exp_compute_ple_ngram_ids(
+        # torch.compile requires the splitting op to write graph-owned storage.
+        # Once compilation is removed, the op can return the IDs directly.
+        ngram_ids = input_ids.new_empty(
+            (input_ids.numel(), self.ngram_heads), dtype=torch.long
+        )
+        torch.ops.vllm.qwen4_exp_compute_ple_ngram_ids(
             input_ids,
             query_start_loc,
             ngram_context,
-            self.ngram_heads,
+            ngram_ids,
             self.layer_name,
         )
         return self.ngram_embedding(ngram_ids).flatten(-2)
@@ -843,17 +850,16 @@ def qwen4_exp_compute_ple_ngram_ids(
     input_ids: torch.Tensor,
     query_start_loc: torch.Tensor,
     ngram_context: torch.Tensor,
-    ngram_heads: int,
+    output: torch.Tensor,
     layer_name: str,
-) -> torch.Tensor:
+) -> None:
     """Compute request-dependent PLE n-gram IDs outside piecewise graphs."""
-    # The fake implementation uses ngram_heads to define the output shape.
-    del ngram_heads
     layer = get_forward_context().no_compile_layers[layer_name]
-    return layer.ple_embedding.compute_ngram_ids(
+    layer.ple_embedding.compute_ngram_ids(
         input_ids,
         query_start_loc,
         ngram_context,
+        output,
     )
 
 
@@ -861,11 +867,10 @@ def qwen4_exp_compute_ple_ngram_ids_fake(
     input_ids: torch.Tensor,
     query_start_loc: torch.Tensor,
     ngram_context: torch.Tensor,
-    ngram_heads: int,
+    output: torch.Tensor,
     layer_name: str,
-) -> torch.Tensor:
-    del query_start_loc, ngram_context, layer_name
-    return input_ids.new_empty((input_ids.numel(), ngram_heads), dtype=torch.long)
+) -> None:
+    return
 
 
 def qwen4_exp_ple_short_conv(
@@ -888,7 +893,7 @@ def qwen4_exp_ple_short_conv_fake(
 direct_register_custom_op(
     op_name="qwen4_exp_compute_ple_ngram_ids",
     op_func=qwen4_exp_compute_ple_ngram_ids,
-    mutates_args=[],
+    mutates_args=["output"],
     fake_impl=qwen4_exp_compute_ple_ngram_ids_fake,
 )
 
