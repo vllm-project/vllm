@@ -469,6 +469,22 @@ def get_version_by_config(config: PretrainedConfig) -> tuple[int, ...]:
     return tuple(int(x) for x in version_str.split("."))
 
 
+_VIDEO_TO_IMAGE_KWARGS = {
+    "video_pixel_values": "pixel_values",
+    "video_image_sizes": "image_sizes",
+    "video_tgt_sizes": "tgt_sizes",
+    "video_embeds": "image_embeds",
+}
+
+
+def _image_kwargs_from_video(kwargs: Mapping[str, object]) -> dict[str, object]:
+    return {
+        _VIDEO_TO_IMAGE_KWARGS[k]: v
+        for k, v in kwargs.items()
+        if k in _VIDEO_TO_IMAGE_KWARGS
+    }
+
+
 def _minicpmv_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     return dict(
         pixel_values=MultiModalFieldConfig.batched("image"),
@@ -1276,7 +1292,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                 and "videos" not in modalities
             ):
                 modalities["videos"] = self._parse_and_validate_vision_input(
-                    "videos", **{k.removeprefix("video_"): v for k, v in kwargs.items()}
+                    "videos", **_image_kwargs_from_video(kwargs)
                 )
 
         return modalities
