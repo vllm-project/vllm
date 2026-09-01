@@ -393,7 +393,12 @@ def test_multi_example_connector_consistency():
 def _ignore_event_collection(events: list[str]) -> list[str]:
     # Filter out per-step polling hooks that the scheduler calls repeatedly
     # and which are not meaningful state transitions for these assertions.
-    ignored = {"get_kv_connector_stats", "has_pending_push_work", "take_events"}
+    ignored = {
+        "get_kv_connector_stats",
+        "has_pending_push_work",
+        "is_connector_ready",
+        "take_events",
+    }
     return [event for event in events if event not in ignored]
 
 
@@ -855,6 +860,8 @@ def test_multi_connector_overrides_all_base_methods():
     # TODO(https://github.com/vllm-project/vllm/pull/31811): Remove
     # get_kv_connector_kv_cache_events from INHERITED_OK once implemented.
     INHERITED_OK = {
+        "enable_async_init",
+        "get_connector_init_state",
         "role",
         "has_connector_metadata",
         "get_kv_connector_kv_cache_events",

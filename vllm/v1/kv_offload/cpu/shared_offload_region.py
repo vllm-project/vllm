@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 import errno
 import mmap
 import os
@@ -14,11 +15,13 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.host_memory import madvise
 
 logger = init_logger(__name__)
 
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
+_HOST_REGISTER_YIELD_SECONDS = 0.001
 
 
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
@@ -35,7 +38,11 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
 
 
 def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
-    mmap_obj.madvise(_MADV_POPULATE_WRITE, offset, length)
+    # Goes through ctypes rather than `mmap.madvise()` because CPython holds
+    # the GIL across that syscall, which would stall the engine when
+    # population runs on a background thread (see AsyncHostBuffer).
+    base_ptr = ctypes.addressof(ctypes.c_char.from_buffer(mmap_obj))
+    madvise(base_ptr + offset, length, _MADV_POPULATE_WRITE)
 
 
 def _fallback_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
@@ -87,6 +94,7 @@ class SharedOffloadRegion:
         kv_bytes_per_block: int,
         cpu_page_size: int,
         barrier: Callable[[], None] | None = None,
+        populate: bool = True,
     ) -> None:
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_block % self.page_size == 0
@@ -103,9 +111,19 @@ class SharedOffloadRegion:
             self._worker_offset = rank * cpu_page_size
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
+        # Set before anything that can raise, so cleanup() is safe to call on a
+        # partially built region.
+        self.fd: int | None = None
+        self.mmap_obj: mmap.mmap | None = None
+        self._base: torch.Tensor | None = None
+        self._views: list[torch.Tensor] = []
+        self._canonical_offset = 0
+        self._registered_ptrs: list[int] = []
+        self.is_pinned: bool = False
+
         try:
             try:
-                self.fd: int | None = os.open(
+                self.fd = os.open(
                     self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
                 )
             except FileExistsError:
@@ -136,14 +154,14 @@ class SharedOffloadRegion:
                     self.mmap_path,
                     self.total_size_bytes / 1e9,
                 )
-
-            self.mmap_obj: mmap.mmap | None = mmap.mmap(
+            self.mmap_obj = mmap.mmap(
                 self.fd,
                 self.total_size_bytes,
                 flags=mmap.MAP_SHARED,
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
-        except Exception:
+            self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
+        except BaseException:
             if self._creator:
                 os.unlink(self.mmap_path)
                 self._creator = False
@@ -159,6 +177,8 @@ class SharedOffloadRegion:
                         "Failed to release peers waiting at the mmap barrier",
                         exc_info=True,
                     )
+            # This mapping can be hundreds of GB; never strand it.
+            self.cleanup()
             raise
 
         if barrier is not None:
@@ -167,48 +187,126 @@ class SharedOffloadRegion:
             # path — including SIGKILL — can leak the file.
             try:
                 barrier()
-            except Exception:
+            except BaseException:
                 if self._creator:
                     os.unlink(self.mmap_path)
                     self._creator = False
-                self.mmap_obj.close()
-                os.close(self.fd)
+                self.cleanup()
                 raise
             if self._creator:
                 os.unlink(self.mmap_path)
                 self._creator = False
                 logger.info("Unlinked mmap file %s", self.mmap_path)
 
-        populate_write_fn = _get_populate_write_fn(self.mmap_obj)
+        if populate:
+            self.populate(cpu_page_size)
 
-        if rank is not None:
-            # Populate only this worker's pages (one slot per block row).
-            worker_offset = rank * cpu_page_size
-            _t0 = time.perf_counter()
-            page_size = self.page_size
-            for block in range(num_blocks):
-                raw_offset = block * self._row_stride + worker_offset
-                aligned_offset = (raw_offset // page_size) * page_size
-                end = raw_offset + cpu_page_size
-                aligned_length = end - aligned_offset
-                populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
-            logger.debug(
-                "MADV_POPULATE_WRITE loop: %d blocks in %.3f s",
-                num_blocks,
-                time.perf_counter() - _t0,
-            )
-        else:
-            # No rank — populate the entire shared region in one call.
-            _t0 = time.perf_counter()
-            populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
+    def populate(self, cpu_page_size: int) -> None:
+        """Fault in writable pages up front, so transfers do not pay for them.
+
+        This does not CUDA-pin anything; see `pin`. Uses MADV_POPULATE_WRITE
+        where supported, falling back to per-page writes on older kernels
+        (see `_get_populate_write_fn`).
+        """
+        mmap_obj = self.mmap_obj
+        assert mmap_obj is not None
+        populate_write_fn = _get_populate_write_fn(mmap_obj)
+        _t0 = time.perf_counter()
+
+        if self.rank is None:
+            populate_write_fn(mmap_obj, 0, self.total_size_bytes)
             logger.debug(
                 "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
             )
+            return
 
-        self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
-        self._views: list[torch.Tensor] = []
-        self._canonical_offset = 0
-        self.is_pinned: bool = False
+        # Populate only this worker's strided slot in each block row.
+        worker_offset = self.rank * cpu_page_size
+        page_size = self.page_size
+        for block in range(self.num_blocks):
+            raw_offset = block * self._row_stride + worker_offset
+            aligned_offset = (raw_offset // page_size) * page_size
+            aligned_length = raw_offset + cpu_page_size - aligned_offset
+            populate_write_fn(mmap_obj, aligned_offset, aligned_length)
+        logger.debug(
+            "MADV_POPULATE_WRITE loop: %d blocks in %.3f s",
+            self.num_blocks,
+            time.perf_counter() - _t0,
+        )
+
+    def pin(self, chunk_size_bytes: int | None = None) -> None:
+        """Page-lock the region so DMA transfers skip the bounce buffer.
+
+        Idempotent, and paired with the cudaHostUnregister in `cleanup`. Failure
+        is a warning: unpinned transfers still work, they are just slower.
+
+        Args:
+            chunk_size_bytes: When set, register the region incrementally and
+                yield between chunks so inference can submit CUDA work.
+        """
+        if self.is_pinned:
+            return
+        if not current_platform.is_cuda_alike():
+            logger.info(
+                "Skipping mmap host registration on %s; cudaHostRegister is only "
+                "available on CUDA/ROCm.",
+                current_platform.device_name,
+            )
+            return
+
+        if chunk_size_bytes is not None and (
+            chunk_size_bytes <= 0 or chunk_size_bytes % self.page_size != 0
+        ):
+            raise ValueError("chunk_size_bytes must be a positive page multiple")
+
+        assert self._base is not None
+        base_ptr = self._base.data_ptr()
+        chunk_size = chunk_size_bytes or self.total_size_bytes
+        cudart = torch.cuda.cudart()
+        try:
+            for offset in range(0, self.total_size_bytes, chunk_size):
+                size = min(chunk_size, self.total_size_bytes - offset)
+                ptr = base_ptr + offset
+                result = cudart.cudaHostRegister(ptr, size, 0).value
+                if result != 0:
+                    self._unregister_pinned_ranges()
+                    logger.warning(
+                        "cudaHostRegister failed for rank=%d (code=%d) — "
+                        "transfers will still work but may be slower (unpinned DMA)",
+                        self.rank,
+                        result,
+                    )
+                    return
+                self._registered_ptrs.append(ptr)
+                if (
+                    chunk_size_bytes is not None
+                    and offset + size < self.total_size_bytes
+                ):
+                    time.sleep(_HOST_REGISTER_YIELD_SECONDS)
+        except BaseException:
+            self._unregister_pinned_ranges()
+            raise
+        logger.debug(
+            "cudaHostRegister rank=%d %.2f GB in %d range(s)",
+            self.rank,
+            self.total_size_bytes / 1e9,
+            len(self._registered_ptrs),
+        )
+        self.is_pinned = True
+
+    def _unregister_pinned_ranges(self) -> None:
+        if current_platform.is_cuda_alike():
+            cudart = torch.cuda.cudart()
+            for ptr in reversed(self._registered_ptrs):
+                result = cudart.cudaHostUnregister(ptr).value
+                if result != 0:
+                    logger.warning(
+                        "cudaHostUnregister failed for rank=%d (code=%d)",
+                        self.rank,
+                        result,
+                    )
+        self._registered_ptrs.clear()
+        self.is_pinned = False
 
     def create_next_worker_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
@@ -233,6 +331,7 @@ class SharedOffloadRegion:
             tensor_page_size: Bytes per block for this  tensor.
         """
         assert self.rank is not None
+        assert self._base is not None
         new_offset = self._worker_offset + tensor_page_size
         assert new_offset <= self._worker_area_end, (
             f"Worker offset {new_offset} exceeds worker area end "
@@ -299,6 +398,7 @@ class SharedOffloadRegion:
         Shape: (num_blocks, row_stride_bytes). Secondary tiers address
         block *b* as ``view[b]``.
         """
+        assert self._base is not None
         kv_tensor = self._base.view(self.num_blocks, self._row_stride)
         np_arr = kv_tensor.numpy()
         assert np_arr.ctypes.data == self._base.data_ptr(), (
@@ -308,17 +408,8 @@ class SharedOffloadRegion:
         return memoryview(np_arr)
 
     def cleanup(self) -> None:
-        if self.is_pinned and self._base is not None:
-            if current_platform.is_cuda_alike():
-                base_ptr = self._base.data_ptr()
-                result = torch.cuda.cudart().cudaHostUnregister(base_ptr)
-                if result.value != 0:
-                    logger.warning(
-                        "cudaHostUnregister failed for rank=%d (code=%d)",
-                        self.rank,
-                        result,
-                    )
-            self.is_pinned = False
+        if self._registered_ptrs:
+            self._unregister_pinned_ranges()
         # Release views before _base: each view holds a _base reference and a
         # direct StorageImpl reference.  Freeing views first lets both refcounts
         # drop so the storage (which holds the mmap_obj buffer export) is freed

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -294,6 +294,74 @@ class SchedulerOutput:
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
+
+    def without_requests(self, excluded: set[str]) -> "SchedulerOutput":
+        """A copy with `excluded` request ids dropped from every request view.
+
+        Lets the scheduler hide requests a KV connector never observed until ready.
+        """
+        if not excluded:
+            return self
+
+        cached = self.scheduled_cached_reqs
+        num_cached = len(cached.req_ids)
+        keep = [i for i, req_id in enumerate(cached.req_ids) if req_id not in excluded]
+        if len(keep) != num_cached:
+
+            def aligned(values: list) -> list:
+                # new_token_ids is empty unless pipeline parallelism is on.
+                return (
+                    [values[i] for i in keep] if len(values) == num_cached else values
+                )
+
+            cached = CachedRequestData(
+                req_ids=[cached.req_ids[i] for i in keep],
+                resumed_req_ids=cached.resumed_req_ids - excluded,
+                new_token_ids=aligned(cached.new_token_ids),
+                all_token_ids={
+                    r: t for r, t in cached.all_token_ids.items() if r not in excluded
+                },
+                new_block_ids=aligned(cached.new_block_ids),
+                num_computed_tokens=aligned(cached.num_computed_tokens),
+                num_output_tokens=aligned(cached.num_output_tokens),
+            )
+
+        num_scheduled_tokens = {
+            r: n for r, n in self.num_scheduled_tokens.items() if r not in excluded
+        }
+        return replace(
+            self,
+            scheduled_new_reqs=[
+                r for r in self.scheduled_new_reqs if r.req_id not in excluded
+            ],
+            scheduled_cached_reqs=cached,
+            num_scheduled_tokens=num_scheduled_tokens,
+            total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
+            finished_req_ids=self.finished_req_ids - excluded,
+            preempted_req_ids=(
+                None
+                if self.preempted_req_ids is None
+                else self.preempted_req_ids - excluded
+            ),
+            kv_connector_block_state=(
+                None
+                if self.kv_connector_block_state is None
+                else KVConnectorBlockState(
+                    block_ids={
+                        r: blocks
+                        for r, blocks in self.kv_connector_block_state.block_ids.items()
+                        if r not in excluded
+                    },
+                    boundary_state_offloads={
+                        r: entries
+                        for r, entries in (
+                            self.kv_connector_block_state.boundary_state_offloads.items()
+                        )
+                        if r not in excluded
+                    },
+                )
+            ),
+        )
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
