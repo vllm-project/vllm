@@ -1632,6 +1632,18 @@ async fn control_lora_lifecycle_selects_adapter_for_generation() {
     .await;
     let mut control_client = ControlClient::new(channel.clone());
     let mut inference_client = InferenceClient::new(channel);
+
+    let denied_source_path =
+        std::env::temp_dir().join(format!("vllm-grpc-lora-denied-{}", std::process::id()));
+    let denied = control_client
+        .load_lora(pb::LoadLoraRequest {
+            lora_name: "denied-adapter".to_string(),
+            source_path: denied_source_path.to_string_lossy().into_owned(),
+        })
+        .await
+        .expect_err("local LoRA path should be validated before engine load");
+    assert_eq!(denied.code(), tonic::Code::InvalidArgument);
+
     let loaded = control_client
         .load_lora(pb::LoadLoraRequest {
             lora_name: "adapter".to_string(),
