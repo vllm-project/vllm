@@ -2889,13 +2889,28 @@ class VllmConfig:
                 raise ValueError(
                     "RecoverSSM currently requires pipeline_parallel_size=1"
                 )
+            if self.mamba_config.backend != MambaBackendEnum.TRITON:
+                raise ValueError("RecoverSSM requires --mamba-backend triton")
         elif self.cache_config.mamba_cache_mode == "all":
             raise ValueError(
                 "--use-replayssm supports prefix caching only in align mode; "
                 "pass --mamba-cache-mode align"
             )
-        if self.mamba_config.backend != MambaBackendEnum.TRITON:
-            raise ValueError("--use-replayssm requires --mamba-backend triton")
+        elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
+            if self.cache_config.mamba_cache_mode == "align":
+                raise ValueError(
+                    "FlashInfer ReplaySSM does not support "
+                    "--mamba-cache-mode align yet; use none"
+                )
+        elif self.mamba_config.backend != MambaBackendEnum.TRITON:
+            raise ValueError(
+                "--use-replayssm requires --mamba-backend triton or flashinfer"
+            )
+        elif self.use_v2_model_runner:
+            raise ValueError(
+                "Triton ReplaySSM requires Model Runner V1; use "
+                "--mamba-backend flashinfer or Model Runner V1"
+            )
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
