@@ -41,7 +41,7 @@ stack from the repository root:
 docker compose --file rust/src/mock-engine/compose.yaml up --build
 ```
 
-The frontend listens on <http://127.0.0.1:8000>. 
+The frontend listens on <http://127.0.0.1:8000>.
 
 To use the mock engine with a frontend running directly on a Linux host, build
 and run the image manually:
@@ -53,7 +53,6 @@ docker build \
 docker run --rm --network host vllm-mock-engine
 ```
 
-The mock engine will be access via `tcp://$IP:29550`
 Pass `--handshake-address` when the frontend uses another address or port. For
 other network layouts, use an address reachable from the container, such as the
 frontend container's name on a shared Docker network.

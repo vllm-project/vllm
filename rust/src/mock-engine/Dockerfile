@@ -25,7 +25,8 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 2000 --gid 0 --create-home vllm
+    && useradd --uid 2000 --gid 0 --create-home vllm \
+    && install --directory --owner 2000 --group 0 /home/vllm/.cache/huggingface
 
 COPY --from=builder \
     /workspace/rust/target/release/vllm-mock-engine \
