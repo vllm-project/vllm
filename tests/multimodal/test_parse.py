@@ -75,3 +75,18 @@ def test_video_with_metadata_keeps_device_tensor():
 
     assert video is frames
     assert metadata is None
+
+
+@pytest.mark.parametrize(
+    "modality,processor_cls",
+    [
+        ("image", ImageProcessorItems),
+        ("video", VideoProcessorItems),
+    ],
+)
+def test_parse_mm_data_accepts_none_cached_item(modality, processor_cls):
+    mm_items = MultiModalDataParser().parse_mm_data({modality: [None]})
+    items = mm_items[modality]
+    assert isinstance(items, processor_cls)
+    assert len(items) == 1
+    assert items.get(0) is None
