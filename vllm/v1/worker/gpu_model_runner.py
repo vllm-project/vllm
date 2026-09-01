@@ -45,6 +45,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     copy_kv_blocks,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import NoOpKVConnectorMetadata
 from vllm.distributed.parallel_state import (
     GraphCaptureContext,
     get_dcp_group,
@@ -4278,7 +4279,8 @@ class GPUModelRunner(
         if has_kv_transfer_group():
             kv_connector_metadata = scheduler_output.kv_connector_metadata
             assert kv_connector_metadata is not None
-            get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
+            if not isinstance(kv_connector_metadata, NoOpKVConnectorMetadata):
+                get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with (
