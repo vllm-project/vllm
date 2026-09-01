@@ -2785,6 +2785,18 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,
                 )
+            elif current_platform.is_cpu():
+                assert not is_quantized_kv_cache(self.kv_cache_dtype), (
+                    "CPU MLA context gather fallback only supports "
+                    f"non-quantized KV cache, got {self.kv_cache_dtype}"
+                )
+                ops.gather_mla_context_cache_cpu(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace[:toks],
+                    block_table=block_table,
+                    starts=chunk.starts,
+                    cu_seq_lens=chunk.cu_seq_lens,
+                )
             elif not use_fp8_prefill:
                 ops.gather_and_maybe_dequant_cache(
                     src_cache=kv_c_and_k_pe_cache,
@@ -3145,9 +3157,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         parallel_config = get_current_vllm_config().parallel_config
         # Avoid requiring an initialized DCP group in tests.
         self.dcp_world_size: int = parallel_config.decode_context_parallel_size
-        self.cp_kv_cache_interleave_size: int = (
-            parallel_config.cp_kv_cache_interleave_size
-        )
 
     @abstractmethod
     def forward_mqa(
