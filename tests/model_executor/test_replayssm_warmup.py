@@ -84,11 +84,13 @@ def test_replayssm_autotune_decode_kwargs(runner_kwargs, expected_num_reqs):
         (dict(use_replayssm=False), True),
         (dict(backend=MambaBackendEnum.TRITON), True),
         ({}, False),
+        (dict(num_blocks=1), True),
     ],
     ids=[
         "replayssm_disabled",
         "non_flashinfer_backend",
         "kernel_unavailable",
+        "zero_non_padding_slots",
     ],
 )
 def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
@@ -99,16 +101,6 @@ def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
     ):
         result = warmup._replayssm_autotune_kwargs(
             _autotune_runner(**runner_kwargs), PREFILL_KWARGS
-        )
-    assert result is None
-
-
-def test_replayssm_autotune_kwargs_skipped_without_non_padding_slot():
-    with patch.object(
-        warmup, "flashinfer_replayssm_autotune_supported", return_value=True
-    ):
-        result = warmup._replayssm_autotune_kwargs(
-            _autotune_runner(num_blocks=1), PREFILL_KWARGS
         )
     assert result is None
 

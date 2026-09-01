@@ -21,7 +21,10 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
 
 
-def test_replayssm_does_not_reserve_speculative_state_blocks():
+@pytest.mark.parametrize(("use_replayssm", "expected_blocks"), [(False, 3), (True, 0)])
+def test_replayssm_does_not_reserve_speculative_state_blocks(
+    use_replayssm, expected_blocks
+):
     layer = SimpleNamespace(
         get_state_shape=lambda: ((2,),),
         get_state_dtype=lambda: (torch.float32,),
@@ -33,7 +36,7 @@ def test_replayssm_does_not_reserve_speculative_state_blocks():
             mamba_block_size=1,
             mamba_page_size_padded=None,
             mamba_cache_mode="none",
-            use_replayssm=True,
+            use_replayssm=use_replayssm,
         ),
         num_speculative_tokens=3,
     )
@@ -41,7 +44,7 @@ def test_replayssm_does_not_reserve_speculative_state_blocks():
     spec = MambaBase.get_kv_cache_spec(layer, vllm_config)
 
     assert spec is not None
-    assert spec.num_speculative_blocks == 0
+    assert spec.num_speculative_blocks == expected_blocks
 
 
 @pytest.mark.parametrize(

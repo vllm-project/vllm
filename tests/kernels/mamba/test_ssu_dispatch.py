@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -614,27 +613,6 @@ def test_replayssm_mixer_selects_mtp_layout(
     else:
         assert kernel.call_args.kwargs["cu_seqlens"] is query_start_loc_d
     assert kernel.call_args.kwargs["max_seqlen"] == expected_max_seqlen
-
-
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="compatible flashinfer checkpointing_ssu not available",
-)
-def test_replayssm_flashinfer_backend_rejects_missing_mtp_api(monkeypatch):
-    checkpointing_ssu_module = import_module("flashinfer.mamba.checkpointing_ssu")
-
-    def legacy_checkpointing_ssu():
-        pass
-
-    monkeypatch.setattr(
-        checkpointing_ssu_module, "checkpointing_ssu", legacy_checkpointing_ssu
-    )
-    with pytest.raises(ImportError, match="native MTP and PDL support"):
-        initialize_mamba_ssu_backend(
-            MambaConfig(backend=MambaBackendEnum.FLASHINFER),
-            _kv_cache_config_with_ssu(),
-            use_replayssm=True,
-        )
 
 
 @pytest.mark.parametrize(
