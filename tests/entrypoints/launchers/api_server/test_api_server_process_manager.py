@@ -5,6 +5,7 @@ import multiprocessing
 import socket
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -41,6 +42,8 @@ def update_admission_stats_worker(listen_address, sock, args, client_config):
     )
     value = client_config["client_index"] + 1
     stats.set_num_requests(value)
+    args.barrier.wait()
+    args.results.put(stats.get_num_requests())
 
 
 # Module-level stub for the gather_actual_addresses test. Must be
@@ -145,6 +148,13 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
 @pytest.mark.skip_global_cleanup
 def test_api_server_processes_share_admission_stats(api_server_args):
     args = api_server_args.copy()
+    spawn_context = multiprocessing.get_context("spawn")
+    worker_args = SimpleNamespace(
+        barrier=spawn_context.Barrier(args["num_servers"]),
+        results=spawn_context.Queue(),
+        max_num_queued_reqs=10,
+    )
+    args["args"] = worker_args
     args["target_server_fn"] = update_admission_stats_worker
     manager = APIServerProcessManager(**args)
 
@@ -153,14 +163,11 @@ def test_api_server_processes_share_admission_stats(api_server_args):
             process.join(timeout=30)
             assert process.exitcode == 0
 
-        stats = SharedAdmissionStats(
-            {"mp_admission_counters": manager.admission_counters},
-            client_count=3,
-            client_index=0,
-        )
-        assert stats.get_num_requests() == 6
+        assert [worker_args.results.get(timeout=5) for _ in range(3)] == [6] * 3
     finally:
         manager.shutdown()
+        worker_args.results.close()
+        worker_args.results.join_thread()
 
 
 @patch("vllm.v1.utils.run_api_server_worker_proc", mock_run_api_server_worker)
