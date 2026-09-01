@@ -2,7 +2,7 @@ group: Benchmarks XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: Benchmarks CLI Test
+- label: ':nvidia: (H200 MIG 18GB) Benchmarks CLI'
   device: intel_gpu
   timeout_in_minutes: 45
   working_dir: .
@@ -19,6 +19,7 @@ steps:
   source_file_dependencies:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
+  - rust/src/bench/tests/python_serve_flags.txt
   - tests/benchmarks/
   commands:
   - >-
