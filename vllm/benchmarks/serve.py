@@ -1319,9 +1319,7 @@ async def benchmark(
     queue_times: list[float] | None = None
     e2els_including_queue: list[float] | None = None
     if max_concurrency is not None:
-        queue_times = [
-            output.client_queue_time for output in outputs if output.success
-        ]
+        queue_times = [output.client_queue_time for output in outputs if output.success]
         if not math.isinf(request_rate):
             e2els_including_queue = [
                 output.latency + output.client_queue_time
