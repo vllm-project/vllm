@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -20,6 +21,17 @@ from .loader import read_probe_config
 from .token_probe import TokenProbe, TokenProbeForwardContext
 
 
+@dataclass(frozen=True)
+class TokenProbeOutputCopy:
+    scores: torch.Tensor
+    copy_event: torch.cuda.Event
+
+    def copy_to_cpu(self) -> torch.Tensor:
+        scores_cpu = self.scores.to("cpu", non_blocking=True)
+        self.copy_event.record()
+        return scores_cpu
+
+
 class TokenProbeRunner:
     def __init__(self, ckpt_path: str | None, output_rank: bool = True) -> None:
         self.enabled = ckpt_path is not None
@@ -31,7 +43,6 @@ class TokenProbeRunner:
         self.kv_cache_group_id: int | None = None
         self.probe: TokenProbe | None = None
         self.output_rank = output_rank
-        self._output_copy_event: torch.cuda.Event | None = None
 
     def find_probe(self, model: nn.Module) -> TokenProbe:
         candidates = [model]
@@ -82,7 +93,6 @@ class TokenProbeRunner:
     ) -> dict[str, Any]:
         if not self.enabled:
             return {}
-        self.wait_for_output_copy()
         score_enabled = self.output_rank and not is_prefill_only
         capture_enabled = self.output_rank and (score_enabled or self.uses_kv_cache)
         context: TokenProbeForwardContext = {
@@ -138,25 +148,17 @@ class TokenProbeRunner:
         trimmed = cls.trim_scores(scores, num_tokens)
         return None if trimmed is None else trimmed.cpu().numpy()
 
-    def set_output_copy_event(self, event: torch.cuda.Event | None) -> None:
-        self._output_copy_event = event
-
-    @staticmethod
-    def start_output_copy(
+    def prepare_output_copy(
+        self,
         scores: torch.Tensor | None,
-    ) -> tuple[torch.Tensor | None, torch.cuda.Event | None]:
+        num_tokens: int,
+    ) -> TokenProbeOutputCopy | None:
+        scores = self.trim_scores(scores, num_tokens)
         if scores is None:
-            return None, None
-        scores_cpu = scores.to("cpu", non_blocking=True)
-        copy_event = torch.cuda.Event()
-        copy_event.record()
-        return scores_cpu, copy_event
-
-    def wait_for_output_copy(self) -> None:
-        if self._output_copy_event is None:
-            return
-        torch.cuda.current_stream().wait_event(self._output_copy_event)
-        self._output_copy_event = None
+            return None
+        assert self.probe is not None
+        assert self.probe.output_copy_event is not None
+        return TokenProbeOutputCopy(scores, self.probe.output_copy_event)
 
     def needs_paged_attention_inputs(self, kv_cache_initialized: bool) -> bool:
         return bool(
@@ -172,6 +174,7 @@ class TokenProbeRunner:
         model: nn.Module,
         kv_cache_config: KVCacheConfig,
         block_tables: Sequence[Any],
+        async_output: bool,
     ) -> None:
         if not self.enabled:
             return
@@ -196,4 +199,4 @@ class TokenProbeRunner:
                 kv_cache_config.num_blocks * block_table.blocks_per_kv_block,
                 block_table.block_size,
             )
-        self.probe.initialize_overlap()
+        self.probe.initialize_runtime(async_output)

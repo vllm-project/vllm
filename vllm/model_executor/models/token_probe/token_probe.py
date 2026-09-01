@@ -45,6 +45,7 @@ class TokenProbe(nn.Module):
         self._side_stream: torch.cuda.Stream | None = None
         self._pending_event: torch.cuda.Event | None = None
         self._pending_scores: torch.Tensor | None = None
+        self._output_copy_event: torch.cuda.Event | None = None
         self._features: torch.Tensor | None = None
         self._captured = 0
         self._capture_enabled = True
@@ -101,6 +102,10 @@ class TokenProbe(nn.Module):
         if self.probe_head is None:
             return ()
         return self.probe_head.label_names
+
+    @property
+    def output_copy_event(self) -> torch.cuda.Event | None:
+        return self._output_copy_event
 
     def initialize_kv_cache(self, num_blocks: int, block_size: int) -> None:
         if not self.uses_kv_cache:
@@ -163,15 +168,19 @@ class TokenProbe(nn.Module):
                     force_splits=splits,
                 )
 
-    def initialize_overlap(self) -> None:
-        if not self.enabled or not self.overlap or not torch.cuda.is_available():
+    def initialize_runtime(self, async_output: bool) -> None:
+        if not self.enabled or not torch.cuda.is_available():
             return
         device = (
             self.kv_cache.device
             if self.kv_cache is not None
             else torch.device("cuda", torch.cuda.current_device())
         )
-        self._side_stream = torch.cuda.Stream(device=device)
+        if async_output and self._output_copy_event is None:
+            self._output_copy_event = torch.cuda.Event(external=True)
+            self._output_copy_event.record(torch.cuda.current_stream(device))
+        if self.overlap and self._side_stream is None:
+            self._side_stream = torch.cuda.Stream(device=device)
 
     def begin_forward(
         self,
@@ -221,6 +230,8 @@ class TokenProbe(nn.Module):
                 f"{len(self.tap_slots)}"
             )
         assert self._positions is not None
+        if self._score_enabled and self._output_copy_event is not None:
+            torch.cuda.current_stream().wait_event(self._output_copy_event)
         return self._compute(
             self._features,
             self._positions,

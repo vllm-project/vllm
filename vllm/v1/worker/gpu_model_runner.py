@@ -97,7 +97,10 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
-from vllm.model_executor.models.token_probe.runner import TokenProbeRunner
+from vllm.model_executor.models.token_probe.runner import (
+    TokenProbeOutputCopy,
+    TokenProbeRunner,
+)
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -301,7 +304,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         async_output_copy_stream: torch.cuda.Stream,
         vocab_size: int,
         routed_experts: RoutedExpertsTensors | None = None,
-        token_probe_scores: torch.Tensor | None = None,
+        token_probe_output: TokenProbeOutputCopy | None = None,
         check_ep_fault: bool = False,
         num_nans: torch.Tensor | None = None,
     ):
@@ -318,7 +321,9 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self.vocab_size = vocab_size
         self._logprobs_tensors = logprobs_tensors
         self._routed_experts = routed_experts
-        self._token_probe_scores = token_probe_scores
+        self._token_probe_scores = None
+        if token_probe_output is not None:
+            self._token_probe_scores = token_probe_output.scores
         self._num_nans = num_nans
         self._has_fault: torch.Tensor | None = None
 
@@ -326,11 +331,9 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         default_stream = torch.cuda.current_stream()
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
-            scores_cpu, copy_event = TokenProbeRunner.start_output_copy(
-                self._token_probe_scores
-            )
-            self._token_probe_scores_cpu = scores_cpu
-            self.token_probe_copy_ready_event = copy_event
+            self._token_probe_scores_cpu = None
+            if token_probe_output is not None:
+                self._token_probe_scores_cpu = token_probe_output.copy_to_cpu()
             self.sampled_token_ids_cpu = self._sampled_token_ids.to(
                 "cpu", non_blocking=True
             )
@@ -4978,7 +4981,7 @@ class GPUModelRunner(
             routed_experts_snapshot = self.get_routed_experts(
                 scheduler_output.total_num_scheduled_tokens
             )
-            token_probe_scores = self.token_probe_runner.trim_scores(
+            token_probe_output = self.token_probe_runner.prepare_output_copy(
                 token_probe_scores,
                 scheduler_output.total_num_scheduled_tokens,
             )
@@ -4991,12 +4994,9 @@ class GPUModelRunner(
                 async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
                 vocab_size=self.input_batch.vocab_size,
                 routed_experts=routed_experts_snapshot,
-                token_probe_scores=token_probe_scores,
+                token_probe_output=token_probe_output,
                 check_ep_fault=self.check_ep_fault,
                 num_nans=num_nans_device,
-            )
-            self.token_probe_runner.set_output_copy_event(
-                async_output.token_probe_copy_ready_event
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"
@@ -7637,6 +7637,7 @@ class GPUModelRunner(
             model=self.get_model(),
             kv_cache_config=kv_cache_config,
             block_tables=self.input_batch.block_table,
+            async_output=self.use_async_scheduling,
         )
 
         if (
