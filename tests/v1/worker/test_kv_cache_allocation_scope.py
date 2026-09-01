@@ -26,7 +26,7 @@ class _AllocationScope(AbstractContextManager):
         self.active = False
 
 
-def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
+def test_mrv2_kv_pool_wraps_all_cache_allocations(monkeypatch) -> None:
     scope = _AllocationScope()
     kv_caches = {"layer": torch.empty(0)}
 
@@ -37,7 +37,12 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
     def bind(*args, **kwargs):
         assert not scope.active
 
+    def allocate_replayssm(*args, **kwargs):
+        assert scope.active
+        return {}
+
     monkeypatch.setattr(attn_utils, "allocate_kv_cache", allocate)
+    monkeypatch.setattr(attn_utils, "allocate_replayssm_caches", allocate_replayssm)
     monkeypatch.setattr(attn_utils, "bind_kv_cache", bind)
     monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda config: {})
 
@@ -48,7 +53,7 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
     result = attn_utils.init_kv_cache(
         [],
         {},
-        object(),
+        SimpleNamespace(kv_cache_groups=[]),
         torch.device("cpu"),
         [],
         config,
@@ -59,7 +64,7 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
     assert not scope.active
 
 
-def test_mrv1_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
+def test_mrv1_kv_pool_wraps_all_cache_allocations(monkeypatch) -> None:
     scope = _AllocationScope()
     kv_caches = {"layer": torch.empty(0)}
 
@@ -70,7 +75,14 @@ def test_mrv1_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
     def bind(*args, **kwargs):
         assert not scope.active
 
+    def allocate_replayssm(*args, **kwargs):
+        assert scope.active
+        return {}
+
     monkeypatch.setattr(gpu_model_runner, "allocate_kv_cache", allocate)
+    monkeypatch.setattr(
+        gpu_model_runner, "allocate_replayssm_caches", allocate_replayssm
+    )
     monkeypatch.setattr(gpu_model_runner, "bind_kv_cache", bind)
 
     runner = SimpleNamespace(
@@ -83,7 +95,7 @@ def test_mrv1_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
     )
     result = gpu_model_runner.GPUModelRunner.initialize_kv_cache_tensors(
         runner,
-        object(),
+        SimpleNamespace(kv_cache_groups=[]),
         [],
         kv_cache_allocation_context=scope,
     )

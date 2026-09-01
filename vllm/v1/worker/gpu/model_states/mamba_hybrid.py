@@ -9,7 +9,12 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    materialize_replayssm_prefix_gpu,
+    materialize_replayssm_prefix_mtp_gpu,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -94,6 +99,11 @@ class MambaHybridModelState(DefaultModelState):
         # kernel reusing the postprocess copy machinery, so the per-step src
         # columns and the running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
+        self._use_flashinfer_replayssm = (
+            self._align_mode
+            and self.cache_config.use_replayssm is True
+            and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        )
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
@@ -111,6 +121,8 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
             self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
+            self._mamba_kv_cache_config: KVCacheConfig | None = None
+            self._mamba_block_tables: tuple[torch.Tensor, ...] | None = None
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -144,6 +156,8 @@ class MambaHybridModelState(DefaultModelState):
         mamba_group_ids: list[int],
         block_tables: tuple[torch.Tensor, ...],
     ) -> MambaSpecDecodeGPUContext:
+        self._mamba_kv_cache_config = kv_cache_config
+        self._mamba_block_tables = block_tables
         if self._mamba_state_copy_funcs is None:
             mamba_groups = get_mamba_groups(kv_cache_config)
             mamba_types = {spec.mamba_type for spec in mamba_groups}
@@ -221,6 +235,19 @@ class MambaHybridModelState(DefaultModelState):
             BLOCK_SIZE=block,
             MAMBA_BLOCK_SIZE=mamba_spec.block_size,
         )
+        if self._use_flashinfer_replayssm:
+            # Exact-ify the hashed source slot before the conv/SSM memcpy
+            # seeds the new running column from it.
+            materialize_replayssm_prefix_gpu(
+                kv_cache_config,
+                mamba_group_ids,
+                self.vllm_config.compilation_config.static_forward_context,
+                block_tables,
+                self._mamba_src_col_gpu,
+                self._mamba_state_idx_gpu,
+                input_batch.idx_mapping,
+                num_reqs,
+            )
         ctx.run_fused_precopy(
             num_reqs,
             self._mamba_state_idx_gpu,
@@ -387,6 +414,25 @@ class MambaHybridModelState(DefaultModelState):
                 num_computed_tokens,
                 idx_mapping,
             )
+            # Must match the condition that sets ``state_skip_postprocess``:
+            # the fused kernel skips the temporal copy for every FlashInfer
+            # ReplaySSM layer, so the materializer has to cover every one of
+            # them. Gating this on spec decode would drop the SSM state on any
+            # non-spec boundary where src_col != dst_col. Rows that need no
+            # work carry the -1 src_col sentinel and cost nothing.
+            if self._use_flashinfer_replayssm:
+                assert self._mamba_kv_cache_config is not None
+                assert self._mamba_block_tables is not None
+                materialize_replayssm_prefix_mtp_gpu(
+                    self._mamba_kv_cache_config,
+                    self._mamba_group_ids,
+                    self.vllm_config.compilation_config.static_forward_context,
+                    self._mamba_block_tables,
+                    self._mamba_ctx.materialize_src_cols,
+                    self._mamba_ctx.materialize_dst_cols,
+                    self._mamba_ctx.materialize_token_counts,
+                    num_reqs,
+                )
 
 
 @triton.jit
