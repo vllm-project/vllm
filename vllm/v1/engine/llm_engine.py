@@ -3,9 +3,9 @@
 
 import time
 import weakref
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from copy import copy
-from typing import Any
+from typing import Any, TypeAlias
 
 import torch.nn as nn
 from typing_extensions import TypeVar
@@ -43,6 +43,14 @@ from vllm.v1.worker.worker_base import WorkerBase
 logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
+
+LLMEngineRequest: TypeAlias = tuple[
+    str,
+    EngineInput,
+    PoolingParams,
+    LoRARequest | None,
+    int,
+]
 
 
 class LLMEngine:
@@ -295,6 +303,41 @@ class LLMEngine:
             self.engine_core.add_request(child_request)
 
         return req_id
+
+    def add_requests(self, requests: Sequence[LLMEngineRequest]) -> list[str]:
+        request_ids: list[str] = []
+        engine_core_requests: list[EngineCoreRequest] = []
+        try:
+            for request_id, prompt, params, lora_request, priority in requests:
+                if not isinstance(request_id, str):
+                    raise TypeError(
+                        f"request_id must be a string, got {type(request_id)}"
+                    )
+
+                request = self.input_processor.process_inputs(
+                    request_id,
+                    prompt,
+                    params,
+                    supported_tasks=self.get_supported_tasks(),
+                    lora_request=lora_request,
+                    priority=priority,
+                )
+                prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
+
+                self.input_processor.assign_request_id(request)
+                request_ids.append(request.request_id)
+                self.output_processor.add_request(request, prompt_text, None, 0)
+                engine_core_requests.append(request)
+
+            self.engine_core.add_requests(engine_core_requests)
+        except Exception:
+            internal_ids = self.output_processor.abort_requests(
+                request_ids, internal=True
+            )
+            if internal_ids:
+                self.engine_core.abort_requests(internal_ids)
+            raise
+        return request_ids
 
     def step(self) -> list[RequestOutput | PoolingRequestOutput]:
         if self.should_execute_dummy_batch:

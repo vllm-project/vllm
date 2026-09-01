@@ -35,8 +35,14 @@ def test_tiling_engine_basic(llm):
     No tiling should be triggered, but the engine still processes correctly.
     """
     prompts = ["Hello", "World"]
-    outputs = llm.encode(prompts, pooling_task="embed")
+    with mock.patch.object(
+        llm.llm_engine,
+        "add_requests",
+        wraps=llm.llm_engine.add_requests,
+    ) as mock_add_requests:
+        outputs = llm.encode(prompts, pooling_task="embed")
     assert len(outputs) == len(prompts)
+    mock_add_requests.assert_called_once()
 
 
 @pytest.mark.skip_global_cleanup

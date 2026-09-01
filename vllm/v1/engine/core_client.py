@@ -150,6 +150,10 @@ class EngineCoreClient(ABC):
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
+    def add_requests(self, requests: Sequence[EngineCoreRequest]) -> None:
+        for request in requests:
+            self.add_request(request)
+
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         raise NotImplementedError
 
@@ -909,6 +913,13 @@ class SyncMPClient(MPClient):
         if self.is_dp:
             self.engines_running = True
         self._send_input(EngineCoreRequestType.ADD, request)
+
+    def add_requests(self, requests: Sequence[EngineCoreRequest]) -> None:
+        if not requests:
+            return
+        if self.is_dp:
+            self.engines_running = True
+        self._send_input(EngineCoreRequestType.ADD_BATCH, requests)
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if request_ids and not self.resources.engine_dead:

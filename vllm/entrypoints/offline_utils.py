@@ -33,7 +33,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.utils.counter import Counter
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tqdm_utils import maybe_tqdm
-from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine.llm_engine import LLMEngine, LLMEngineRequest
 
 logger = init_logger(__name__)
 
@@ -528,10 +528,30 @@ class OfflineInferenceMixin:
         *,
         lora_requests: Sequence[LoRARequest | None] | None = None,
         priorities: Sequence[int] | None = None,
+        batch_engine_requests: bool = False,
     ) -> list[str]:
         added_request_ids: list[str] = []
 
         try:
+            if batch_engine_requests:
+                requests_to_add: list[LLMEngineRequest] = []
+                for i, prompt in enumerate(prompts):
+                    if not isinstance(params[i], PoolingParams):
+                        raise TypeError("Bulk request ingress only supports pooling")
+                    requests_to_add.append(
+                        (
+                            str(next(self.request_counter)),
+                            prompt,
+                            params[i],
+                            self._resolve_mm_lora(
+                                prompt,
+                                None if lora_requests is None else lora_requests[i],
+                            ),
+                            0 if priorities is None else priorities[i],
+                        )
+                    )
+                return self.llm_engine.add_requests(requests_to_add)
+
             for i, prompt in enumerate(prompts):
                 request_id = self._add_request(
                     prompt,
