@@ -1172,9 +1172,9 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         p = p.transpose(1, 2)  # (batch, head, time1, d_k)
 
         # (batch, head, time1, d_k)
-        q_with_bias_u = (q + self.pos_bias_u.to(q.dtype)).transpose(1, 2)
+        q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2)
         # (batch, head, time1, d_k)
-        q_with_bias_v = (q + self.pos_bias_v.to(q.dtype)).transpose(1, 2)
+        q_with_bias_v = (q + self.pos_bias_v).transpose(1, 2)
 
         # compute attention score
         # first compute matrix a and matrix c
@@ -1816,16 +1816,6 @@ class CohereASRModel(nn.Module):
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-
-                # Convert buffer dtype to match loaded weight for pos_bias tensors
-                if "pos_bias" in name and param.dtype != loaded_weight.dtype:
-                    logger.info(
-                        "Converting buffer %s dtype from %s to %s for loading.",
-                        name,
-                        param.dtype,
-                        loaded_weight.dtype,
-                    )
-                    param.data = param.data.to(loaded_weight.dtype)
 
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
