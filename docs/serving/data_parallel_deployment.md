@@ -124,6 +124,11 @@ vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 1 \
                   --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
 ```
 
+When using `--data-parallel-external-lb` with `--nnodes`, the data parallel rank
+can be inferred from `--node-rank` only when there is at most one data parallel
+rank per node. If the data parallel size exceeds the node count, each process
+must set a unique `--data-parallel-rank`.
+
 The coordinator process also runs in this scenario, co-located with the DP rank 0 engine.
 
 <figure markdown="1">
