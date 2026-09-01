@@ -46,6 +46,23 @@ MODELS = [
 ]
 
 
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_unquantized_model_rejects_legacy_fp8_online_quantization(vllm_runner) -> None:
+    """The legacy FP8 flag must not silently load BF16 weights as checkpoint FP8."""
+    with pytest.raises(
+        ValueError,
+        match="--quantization fp8_per_tensor.*online/",
+    ):
+        vllm_runner(
+            "inference-optimization/Qwen3-0.6B-debug-multiply",
+            quantization="fp8",
+            enforce_eager=True,
+        )
+
+
 def test_prepare_gated_trtllm_fp8_moe_weights_pads_each_projection(monkeypatch):
     monkeypatch.setattr(
         flashinfer_utils,

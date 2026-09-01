@@ -1019,13 +1019,13 @@ def test_kv_scale_reload(vllm_runner):
             "Qwen/Qwen3-0.6B",
             "inference-optimization/Qwen3-0.6B-debug-multiply",
             "inference-optimization/Qwen3-0.6B-debug-add",
-            "fp8",
+            "fp8_per_tensor",
         ),
         pytest.param(
             "inference-optimization/DeepSeek-V3-debug-empty",
             "inference-optimization/DeepSeek-V3-debug-multiply",
             "inference-optimization/DeepSeek-V3-debug-add",
-            "fp8",
+            "fp8_per_tensor",
             marks=[pytest.mark.slow_test],
         ),
         pytest.param(
@@ -1053,7 +1053,7 @@ def test_online_quantize_reload(
     if current_platform.device_count() < tp_size:
         pytest.skip(reason="Not enough GPU devices")
 
-    if quantization == "fp8" and _fp8_reload_unsupported():
+    if quantization == "fp8_per_tensor" and _fp8_reload_unsupported():
         pytest.skip(reason="Requires FP8 support")
 
     with vllm_runner(

@@ -60,6 +60,7 @@ except ImportError:
     fastsafetensors = PlaceholderModule("fastsafetensors")
     SingleGroup = fastsafetensors.placeholder_attr("SingleGroup")
 
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 
 logger = init_logger(__name__)
@@ -359,6 +360,9 @@ def get_quant_config(
 
     # If the quantization config is not found, use the default config.
     if not possible_config_filenames:
+        # TODO: Remove `is_checkpoint_fp8_serialized` altogether in a future release.
+        if model_config.quantization == "fp8":
+            return Fp8Config(is_checkpoint_fp8_serialized=False)
         return quant_cls()
 
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
