@@ -1795,8 +1795,6 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 "Dynamic quantization is not supported."
             )
 
-        self.kernel = init_mxfp8_linear_kernel()
-
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -1852,6 +1850,8 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
             weight_loader=weight_loader,
         )
         layer.register_parameter("weight_scale", weight_scale)
+
+        self.kernel = init_mxfp8_linear_kernel(weight_shape=layer.weight.shape)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Idempotent: the emulation kernel may dequant the weight to BF16 at load

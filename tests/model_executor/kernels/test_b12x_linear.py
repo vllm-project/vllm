@@ -66,7 +66,7 @@ from vllm.platforms import PlatformEnum
             "MarlinMxfp8LinearKernel",
             "EmulationMxfp8LinearKernel",
             init_mxfp8_linear_kernel,
-            {},
+            {"weight_shape": (2048, 2048)},
         ),
         (
             B12xTensorFP8ScaledMMLinearKernel,
@@ -363,7 +363,7 @@ def test_b12x_tensor_fp8_apply_quantizes_and_uses_packed_weight(
 
 def test_b12x_mxfp8_can_implement_supported_config() -> None:
     can_implement, reason = B12xMxfp8LinearKernel.can_implement(
-        Mxfp8LinearLayerConfig()
+        Mxfp8LinearLayerConfig(weight_shape=(256, 512))
     )
 
     assert can_implement
