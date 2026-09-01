@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
+
 from vllm.v1.kv_offload.base import BlockIDsLoadStoreSpec
 
 
@@ -13,5 +15,9 @@ class CPUOffloadingMetrics:
 
 class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
     """
-    Spec for loading/storing a KV block to CPU memory.
+    Spec for loading/storing a KV chunk to CPU memory.
     """
+
+    @property
+    def chunk_ids(self) -> np.ndarray:
+        return self.block_ids

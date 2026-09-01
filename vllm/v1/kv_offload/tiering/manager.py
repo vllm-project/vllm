@@ -464,7 +464,7 @@ class TieringOffloadingManager(OffloadingManager):
             )
         entry = tier_pending[ctx_id]
         entry.keys.extend(primary_write_result.keys_to_store)
-        entry.chunk_ids.extend(store_spec.block_ids)
+        entry.chunk_ids.extend(store_spec.chunk_ids)
         return True
 
     def _flush_pending_promotions(self) -> None:
@@ -725,7 +725,7 @@ class TieringOffloadingManager(OffloadingManager):
         job_metadata = TransferJob(
             job_id=job_id,
             keys=keys,
-            chunk_ids=primary_chunks_spec.block_ids,
+            chunk_ids=primary_chunks_spec.chunk_ids,
             is_promotion=False,
             req_context=req_context,
         )
