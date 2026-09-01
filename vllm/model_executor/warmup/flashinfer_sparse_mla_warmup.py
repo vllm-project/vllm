@@ -53,7 +53,9 @@ def autotune_hisparse_flashinfer_attention(runner: "GPUModelRunner") -> None:
         impl = getattr(layer, "impl", None)
         if not isinstance(impl, FlashInferMLASparseImpl):
             continue
-        if impl.hisparse_cache is None or impl.topk_indices_buffer is None:
+        if getattr(layer, "hisparse_cache", None) is None:
+            continue
+        if impl.topk_indices_buffer is None:
             continue
         key = (
             impl.kv_cache_dtype,

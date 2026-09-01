@@ -37,6 +37,7 @@ class SparseMLAIndexGroup:
     logical_topk_indices: torch.Tensor
     physical_topk_indices: torch.Tensor
     valid_topk_counts: torch.Tensor
+    request_ids: torch.Tensor
     side_stream: torch.Stream
     logical_topk_ready: torch.Event
     physical_topk_ready: torch.Event
@@ -237,7 +238,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 req_id_per_token,
                 leader.block_table,
                 leader.view.block_size,
-                block_stride_rows=block_stride_rows,
+                block_stride_rows=leader.view.attention_block_stride,
                 return_valid_counts=return_valid_counts,
             )
         return cache.swap_in(
@@ -247,6 +248,56 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             block_size=attn_metadata.block_size,
             return_valid_counts=return_valid_counts,
         )
+
+    def convert_decode_logical_to_physical_topk(
+        self,
+        layer_index: int,
+        logical_topk_indices: torch.Tensor,
+        attn_metadata: Any,
+        *,
+        return_valid_counts: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        num_tokens = attn_metadata.num_decode_tokens
+        num_decodes = attn_metadata.num_decodes
+        assert logical_topk_indices.shape[0] == num_tokens
+        max_query_len = attn_metadata.decode_max_query_len
+        if max_query_len == 1:
+            return self.convert_logical_to_physical_topk(
+                layer_index,
+                logical_topk_indices,
+                attn_metadata,
+                block_stride_rows=None,
+                return_valid_counts=return_valid_counts,
+            )
+
+        assert num_tokens == num_decodes * max_query_len
+        physical_topk_indices = self.physical_topk_indices[:num_tokens]
+        valid_topk_counts = self.valid_topk_counts[:num_tokens]
+        request_ids = self.request_ids[:num_decodes]
+        for step in range(max_query_len):
+            self.cache(layer_index).swap_in(
+                request_ids,
+                block_table=attn_metadata.block_table,
+                logical_topk_indices=logical_topk_indices,
+                block_size=attn_metadata.block_size,
+                return_valid_counts=return_valid_counts,
+                num_rows=num_decodes,
+                input_row_stride=max_query_len,
+                input_row_offset=step,
+                attention_indices_out=(
+                    physical_topk_indices if layer_index == 0 else None
+                ),
+                valid_counts_out=(
+                    valid_topk_counts
+                    if layer_index == 0 and return_valid_counts
+                    else None
+                ),
+                output_row_stride=max_query_len,
+                output_row_offset=step,
+            )
+        if return_valid_counts:
+            return physical_topk_indices, valid_topk_counts
+        return physical_topk_indices
 
     def stage_prefill_rows(
         self, layer_index: int, kv_cache: torch.Tensor, attn_metadata: Any
@@ -345,22 +396,28 @@ class SparseMLAIndexGroupBuilder:
         kv_cache_dtype: str | None = None,
     ) -> tuple[SparseMLAIndexGroup, int]:
         if is_index_producing_layer or self.current_group is None:
-            physical_topk_indices = torch.empty(
-                (self.max_decode_rows, self.logical_topk_indices.shape[1]),
-                dtype=self.logical_topk_indices.dtype,
-                device=self.logical_topk_indices.device,
-            )
             group_cls = (
                 HiSparseMLAIndexGroup
                 if vllm_config is not None
                 and vllm_config.attention_config.hisparse_config is not None
                 else SparseMLAIndexGroup
             )
+            workspace_rows = self.max_decode_rows
+            physical_topk_indices = torch.empty(
+                (workspace_rows, self.logical_topk_indices.shape[1]),
+                dtype=self.logical_topk_indices.dtype,
+                device=self.logical_topk_indices.device,
+            )
             self.current_group = group_cls(
                 logical_topk_indices=self.logical_topk_indices,
                 physical_topk_indices=physical_topk_indices,
                 valid_topk_counts=torch.empty(
-                    self.max_decode_rows,
+                    workspace_rows,
+                    dtype=torch.int32,
+                    device=self.logical_topk_indices.device,
+                ),
+                request_ids=torch.arange(
+                    workspace_rows,
                     dtype=torch.int32,
                     device=self.logical_topk_indices.device,
                 ),

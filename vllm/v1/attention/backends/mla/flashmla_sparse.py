@@ -643,50 +643,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 (q_concat_shape, torch.bfloat16),
             )
 
-    def _run_host_backed_decode(
-        self,
-        index_group: HiSparseMLAIndexGroup,
-        q: torch.Tensor,
-        logical_topk_indices: torch.Tensor,
-        attn_metadata: FlashMLASparseMetadata,
-        run_step,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        num_decodes = attn_metadata.num_decodes
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        assert num_decodes > 0 and num_decode_tokens % num_decodes == 0
-        max_query_len = num_decode_tokens // num_decodes
-        q_by_request = q.view(num_decodes, max_query_len, *q.shape[1:])
-        topk_by_request = logical_topk_indices[:num_decode_tokens].view(
-            num_decodes, max_query_len, -1
-        )
-        req_ids_by_request = attn_metadata.req_id_per_token[:num_decode_tokens].view(
-            num_decodes, max_query_len
-        )
-        attention_cache = index_group.physical_kv_cache(self.index_group_index)
-        outputs = []
-        lses = []
-        for step in range(max_query_len):
-            physical_topk, valid_counts = index_group.convert_logical_to_physical_topk(
-                self.index_group_index,
-                topk_by_request[:, step].contiguous(),
-                attn_metadata,
-                block_stride_rows=None,
-                return_valid_counts=True,
-                req_id_per_token=req_ids_by_request[:, step].contiguous(),
-            )
-            step_output, step_lse = run_step(
-                q_by_request[:, step],
-                attention_cache,
-                physical_topk,
-                valid_counts,
-            )
-            outputs.append(step_output)
-            if step_lse is not None:
-                lses.append(step_lse)
-        output = torch.stack(outputs, dim=1).flatten(0, 1)
-        lse = torch.stack(lses, dim=1).flatten(0, 1) if lses else None
-        return output, lse
-
     def _forward_bf16_kv(
         self,
         q: torch.Tensor,
@@ -700,24 +656,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             cache = index_group.cache(self.index_group_index)
         else:
             cache = None
-        if cache is not None and cache.decode_batch:
-            assert isinstance(index_group, HiSparseMLAIndexGroup)
-            topk_indices, topk_length = index_group.convert_logical_to_physical_topk(
-                self.index_group_index,
-                topk_indices,
-                attn_metadata,
-                block_stride_rows=None,
-                return_valid_counts=True,
-            )
-            kv_c_and_k_pe_cache = index_group.physical_kv_cache(self.index_group_index)
-            return self._bf16_flash_mla_kernel(
-                q,
-                kv_c_and_k_pe_cache,
-                topk_indices,
-                topk_length,
-                actual_num_heads,
-            )
-
         block_table = attn_metadata.block_table
         # req_id_per_token covers the whole batch; slice it to the MQA tokens
         # (q may exclude prefill tokens routed to dense MHA).
@@ -727,20 +665,20 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             assert isinstance(index_group, HiSparseMLAIndexGroup)
             num_decode_tokens = attn_metadata.num_decode_tokens
             if num_decode_tokens > 0:
-                decode_out, _ = self._run_host_backed_decode(
-                    index_group,
+                decode_topk, decode_lengths = (
+                    index_group.convert_decode_logical_to_physical_topk(
+                        self.index_group_index,
+                        topk_indices[:num_decode_tokens],
+                        attn_metadata,
+                        return_valid_counts=True,
+                    )
+                )
+                decode_out, _ = self._bf16_flash_mla_kernel(
                     q[:num_decode_tokens],
-                    topk_indices,
-                    attn_metadata,
-                    lambda step_q, hot_cache, step_topk, step_lengths: (
-                        self._bf16_flash_mla_kernel(
-                            step_q,
-                            hot_cache,
-                            step_topk,
-                            step_lengths,
-                            actual_num_heads,
-                        )
-                    ),
+                    index_group.physical_kv_cache(self.index_group_index),
+                    decode_topk,
+                    decode_lengths,
+                    actual_num_heads,
                 )
                 if num_decode_tokens == q.shape[0]:
                     return decode_out, None
@@ -1105,34 +1043,27 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
         kernel_metadata: FlashMLASparseMetadata.FP8KernelMetadata,
-        *,
-        flatten_requests: bool = False,
     ) -> torch.Tensor:
-        sequence_dim = 0 if flatten_requests else 1
-
-        def run_fp8_step(
-            step_q: torch.Tensor,
-            hot_cache: torch.Tensor,
-            step_topk: torch.Tensor,
-            _seq_lens: torch.Tensor,
-        ) -> tuple[torch.Tensor, None]:
-            step_output, _ = self._fp8_flash_mla_kernel(
-                q=step_q.unsqueeze(sequence_dim),
-                kv_c_and_k_pe_cache=hot_cache,
-                topk_indices=step_topk.unsqueeze(sequence_dim),
-                kernel_metadata=kernel_metadata,
-            )
-            return step_output.squeeze(sequence_dim), None
-
         assert isinstance(self.index_group, HiSparseMLAIndexGroup)
-        output, _ = self._run_host_backed_decode(
-            self.index_group,
-            q,
+        physical_topk = self.index_group.convert_decode_logical_to_physical_topk(
+            self.index_group_index,
             topk_indices,
             attn_metadata,
-            run_fp8_step,
+            return_valid_counts=False,
         )
-        return output
+        assert isinstance(physical_topk, torch.Tensor)
+        num_decodes = attn_metadata.num_decodes
+        q = reshape_query_for_spec_decode(q, num_decodes)
+        physical_topk = physical_topk.view(num_decodes, q.shape[1], -1)
+        output, _ = self._fp8_flash_mla_kernel(
+            q=q,
+            kv_c_and_k_pe_cache=self.index_group.physical_kv_cache(
+                self.index_group_index
+            ),
+            topk_indices=physical_topk,
+            kernel_metadata=kernel_metadata,
+        )
+        return reshape_attn_output_for_spec_decode(output)
 
     def _bf16_flash_mla_kernel(
         self,

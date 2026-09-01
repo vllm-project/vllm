@@ -684,9 +684,16 @@ class HiSparseRuntime:
         block_size: int,
         return_valid_counts: bool = False,
         shared_rows: slice,
+        num_rows: int | None = None,
+        input_row_stride: int = 1,
+        input_row_offset: int = 0,
+        attention_indices_out: torch.Tensor | None = None,
+        valid_counts_out: torch.Tensor | None = None,
+        output_row_stride: int = 1,
+        output_row_offset: int = 0,
     ) -> None:
         """Resolve logical top-k positions and compact rows requiring swaps."""
-        num_tokens = topk_indices.shape[0]
+        num_tokens = topk_indices.shape[0] if num_rows is None else num_rows
         hot = self.hot
         host_cache = self.host_cache
         assert hot.block_size == block_size
@@ -695,12 +702,20 @@ class HiSparseRuntime:
         group = self.index_group
         shared = group.shared_topk
 
-        relative_indices = topk_indices[:num_tokens].contiguous()
+        relative_indices = topk_indices.contiguous()
         device_topk_rows = shared.device_topk_rows[shared_rows]
-        valid_topk_counts = (
-            shared.valid_topk_counts[shared_rows] if return_valid_counts else None
+        valid_topk_counts = None
+        if return_valid_counts:
+            valid_topk_counts = (
+                shared.valid_topk_counts[shared_rows]
+                if valid_counts_out is None
+                else valid_counts_out
+            )
+        physical_topk_indices = (
+            shared.physical_topk_indices[shared_rows]
+            if attention_indices_out is None
+            else attention_indices_out
         )
-        physical_topk_indices = shared.physical_topk_indices[shared_rows]
         swap_host_physical_rows = shared.swap_host_physical_rows[shared_rows]
         swap_device_physical_rows = shared.swap_device_physical_rows[shared_rows]
         swap_counts = shared.swap_counts[shared_rows]
@@ -733,6 +748,11 @@ class HiSparseRuntime:
             if resident is not None and resident.view is not None
             else 0,
             0,
+            num_tokens,
+            input_row_stride,
+            input_row_offset,
+            output_row_stride,
+            output_row_offset,
         )
 
     def _swap_rows(self, shared_rows: slice) -> None:
@@ -756,10 +776,17 @@ class HiSparseRuntime:
         block_size: int,
         return_valid_counts: bool,
         shared_rows: slice,
+        num_rows: int | None,
+        input_row_stride: int,
+        input_row_offset: int,
+        attention_indices_out: torch.Tensor | None,
+        valid_counts_out: torch.Tensor | None,
+        output_row_stride: int,
+        output_row_offset: int,
     ) -> None:
         group = self.index_group
         compute_stream = current_stream()
-        if resident.decode_batch and group.logical_topk_ready is not None:
+        if group.logical_topk_ready is not None:
             group.copy_stream.wait_event(group.logical_topk_ready)
         else:
             group.copy_stream.wait_stream(compute_stream)
@@ -772,6 +799,13 @@ class HiSparseRuntime:
                 block_size=block_size,
                 return_valid_counts=return_valid_counts,
                 shared_rows=shared_rows,
+                num_rows=num_rows,
+                input_row_stride=input_row_stride,
+                input_row_offset=input_row_offset,
+                attention_indices_out=attention_indices_out,
+                valid_counts_out=valid_counts_out,
+                output_row_stride=output_row_stride,
+                output_row_offset=output_row_offset,
             )
             runtimes = [self]
             if resident.decode_batch:
@@ -794,6 +828,12 @@ class HiSparseRuntime:
             self._layer_ready_event.record(group.copy_stream)
             self._swap_staged = True
 
+    def wait_for_staged_swap(self) -> None:
+        if not self._swap_staged or self._layer_ready_event is None:
+            raise RuntimeError("HiSparse layer swap was not prefetched.")
+        current_stream().wait_event(self._layer_ready_event)
+        self._swap_staged = False
+
     def swap_in(
         self,
         *,
@@ -803,9 +843,16 @@ class HiSparseRuntime:
         logical_topk_indices: torch.Tensor,
         block_size: int,
         return_valid_counts: bool = False,
+        num_rows: int | None = None,
+        input_row_stride: int = 1,
+        input_row_offset: int = 0,
+        attention_indices_out: torch.Tensor | None = None,
+        valid_counts_out: torch.Tensor | None = None,
+        output_row_stride: int = 1,
+        output_row_offset: int = 0,
     ) -> HiSparseTopKResult:
         """Resolve once per group and ensure this layer's rows are available."""
-        num_tokens = logical_topk_indices.shape[0]
+        num_tokens = logical_topk_indices.shape[0] if num_rows is None else num_rows
         shared_rows = self._step_rows(num_tokens)
         group = self.index_group
         hot = self.hot
@@ -821,13 +868,18 @@ class HiSparseRuntime:
                 block_size=block_size,
                 return_valid_counts=return_valid_counts,
                 shared_rows=shared_rows,
+                num_rows=num_rows,
+                input_row_stride=input_row_stride,
+                input_row_offset=input_row_offset,
+                attention_indices_out=attention_indices_out,
+                valid_counts_out=valid_counts_out,
+                output_row_stride=output_row_stride,
+                output_row_offset=output_row_offset,
             )
 
         if not self._swap_staged:
             self._stage_this_layer(shared_rows)
-        assert self._layer_ready_event is not None
-        current_stream().wait_event(self._layer_ready_event)
-        self._swap_staged = False
+        self.wait_for_staged_swap()
 
         physical_topk_indices = group.shared_topk.physical_topk_indices[shared_rows]
         if return_valid_counts:
@@ -952,6 +1004,13 @@ class HiSparseCacheHandle:
         *,
         block_size: int,
         return_valid_counts: bool = False,
+        num_rows: int | None = None,
+        input_row_stride: int = 1,
+        input_row_offset: int = 0,
+        attention_indices_out: torch.Tensor | None = None,
+        valid_counts_out: torch.Tensor | None = None,
+        output_row_stride: int = 1,
+        output_row_offset: int = 0,
     ) -> HiSparseTopKResult:
         return self.runtime.swap_in(
             resident=self,
@@ -960,6 +1019,13 @@ class HiSparseCacheHandle:
             logical_topk_indices=logical_topk_indices,
             block_size=block_size,
             return_valid_counts=return_valid_counts,
+            num_rows=num_rows,
+            input_row_stride=input_row_stride,
+            input_row_offset=input_row_offset,
+            attention_indices_out=attention_indices_out,
+            valid_counts_out=valid_counts_out,
+            output_row_stride=output_row_stride,
+            output_row_offset=output_row_offset,
         )
 
 

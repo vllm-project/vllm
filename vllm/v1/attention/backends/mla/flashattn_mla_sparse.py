@@ -22,6 +22,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
+from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
@@ -195,31 +196,118 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
-        hisparse_resolution = self._hisparse_decode_cache(
-            kv_c_and_k_pe_cache,
+        index_group = self.index_group
+        if isinstance(index_group, HiSparseMLAIndexGroup):
+            num_decode_tokens = attn_metadata.num_decode_tokens
+            outputs = []
+            if num_decode_tokens:
+                physical_topk, valid_counts = (
+                    index_group.convert_decode_logical_to_physical_topk(
+                        self.index_group_index,
+                        topk_indices[:num_decode_tokens],
+                        attn_metadata,
+                        return_valid_counts=True,
+                    )
+                )
+                outputs.append(
+                    self._run_mqa_kernel(
+                        q_nope[:num_decode_tokens],
+                        q_rope[:num_decode_tokens],
+                        index_group.physical_kv_cache(self.index_group_index).view(
+                            kv_c_and_k_pe_cache.dtype
+                        ),
+                        physical_topk,
+                        valid_counts,
+                        attn_metadata.block_size,
+                    )
+                )
+            if num_decode_tokens < num_actual_toks:
+                cache = index_group.cache(self.index_group_index)
+                if num_decode_tokens == 0 and cache.all_context_pages_resident:
+                    physical_topk, valid_counts = (
+                        index_group.convert_logical_to_physical_topk(
+                            self.index_group_index,
+                            topk_indices,
+                            attn_metadata,
+                            block_stride_rows=None,
+                            return_valid_counts=True,
+                        )
+                    )
+                    prefill_cache = index_group.physical_kv_cache(
+                        self.index_group_index
+                    ).view(kv_c_and_k_pe_cache.dtype)
+                else:
+                    prefill_cache, block_table, req_ids = (
+                        index_group.stage_prefill_rows(
+                            self.index_group_index,
+                            kv_c_and_k_pe_cache,
+                            attn_metadata,
+                        )
+                    )
+                    physical_topk, valid_counts = (
+                        triton_convert_req_index_to_global_index(
+                            req_ids,
+                            block_table,
+                            topk_indices[num_decode_tokens:],
+                            BLOCK_SIZE=attn_metadata.block_size,
+                            NUM_TOPK_TOKENS=topk_indices.shape[1],
+                            return_valid_counts=True,
+                        )
+                    )
+                outputs.append(
+                    self._run_mqa_kernel(
+                        q_nope[num_decode_tokens:],
+                        q_rope[num_decode_tokens:],
+                        prefill_cache,
+                        physical_topk,
+                        valid_counts,
+                        attn_metadata.block_size,
+                    )
+                )
+            return torch.cat(outputs) if len(outputs) > 1 else outputs[0], None
+
+        kv_rows, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
+        topk_indices, valid_counts = triton_convert_req_index_to_global_index(
+            attn_metadata.req_id_per_token[:num_actual_toks],
+            attn_metadata.block_table,
             topk_indices,
-            attn_metadata,
+            BLOCK_SIZE=attn_metadata.block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
+            NUM_TOPK_TOKENS=topk_indices.shape[1],
             return_valid_counts=True,
         )
-        if hisparse_resolution is not None:
-            kv_c_and_k_pe_cache, topk_indices, valid_counts = hisparse_resolution
-            kv_rows, _ = flat_kv_row_view(kv_c_and_k_pe_cache, attn_metadata.block_size)
-        else:
-            kv_rows, block_stride_rows = flat_kv_row_view(
-                kv_c_and_k_pe_cache, attn_metadata.block_size
-            )
-            topk_indices, valid_counts = triton_convert_req_index_to_global_index(
-                attn_metadata.req_id_per_token[:num_actual_toks],
-                attn_metadata.block_table,
+        return (
+            self._run_mqa_kernel(
+                q_nope,
+                q_rope,
+                kv_rows,
                 topk_indices,
-                BLOCK_SIZE=attn_metadata.block_size,
-                BLOCK_STRIDE_ROWS=block_stride_rows,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
-                return_valid_counts=True,
-            )
+                valid_counts,
+                attn_metadata.block_size,
+                cache_is_flat=True,
+            ),
+            None,
+        )
+
+    def _run_mqa_kernel(
+        self,
+        q_nope: torch.Tensor,
+        q_rope: torch.Tensor,
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        valid_counts: torch.Tensor,
+        block_size: int,
+        *,
+        cache_is_flat: bool = False,
+    ) -> torch.Tensor:
+        kv_rows = (
+            kv_cache if cache_is_flat else flat_kv_row_view(kv_cache, block_size)[0]
+        )
 
         cu_seqlens_q = torch.arange(
-            0, num_actual_toks + 1, dtype=torch.int32, device=q_rope.device
+            0, q_rope.shape[0] + 1, dtype=torch.int32, device=q_rope.device
         )
         k_cache = kv_rows[:, self.kv_lora_rank :].unsqueeze(1).unsqueeze(1)
         v_cache = kv_rows[:, : self.kv_lora_rank].unsqueeze(1).unsqueeze(1)
@@ -238,4 +326,4 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
             causal=True,
             fa_version=3,
         )
-        return out, None
+        return out

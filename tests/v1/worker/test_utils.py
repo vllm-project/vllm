@@ -362,6 +362,7 @@ def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
     worker._set_row_mirrors((SparseKVRowMirror((0, 0), 7, 3),))
     worker._dma_submitted = False
     worker._per_layer_mirrored = set()
+    worker._submitted_mirror_layers = set()
     worker._post_forward_transfers = []
     worker._enqueue_row_dma = MagicMock()
     worker.host_write_event = MagicMock()
@@ -375,7 +376,7 @@ def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
 
     worker._forward_ready_event.record.assert_called_once_with()
     worker._enqueue_row_dma.assert_called_once_with(
-        range(2), ready_event=worker._forward_ready_event
+        (0, 1), ready_event=worker._forward_ready_event
     )
     leader.invalidate_written_slots.assert_called_once()
     torch.testing.assert_close(
@@ -409,6 +410,7 @@ def test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors():
     worker.cache_handles = handles
     worker._set_row_mirrors((SparseKVRowMirror((0, 0), 7, 2),))
     worker._per_layer_mirrored = {0, 1}
+    worker._submitted_mirror_layers = {0, 1}
     worker._enqueue_row_dma = MagicMock()
 
     worker._enqueue_host_mirror()
@@ -460,7 +462,7 @@ def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
     worker.cache_handles = handles
     worker._set_row_mirrors((SparseKVRowMirror((0, 0, 0), 7, 2),))
     worker._per_layer_mirrored = set()
-    worker._submitted_mirror_layers = 0
+    worker._submitted_mirror_layers = set()
     worker._layer_ready_events = tuple(MagicMock() for _ in handles)
     worker._enqueue_row_dma = MagicMock()
 
@@ -468,10 +470,10 @@ def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
         worker._enqueue_layer_mirror(layer_index)
 
     worker._enqueue_row_dma.assert_called_once_with(
-        range(2), ready_event=worker._layer_ready_events[1]
+        (0, 1), ready_event=worker._layer_ready_events[1]
     )
     worker._enqueue_host_mirror(ready_event=worker._layer_ready_events[-1])
-    assert worker._enqueue_row_dma.call_args_list[1].args == (range(2, 5),)
+    assert worker._enqueue_row_dma.call_args_list[1].args == ((2, 3, 4),)
     assert worker._enqueue_row_dma.call_args_list[1].kwargs == {
         "ready_event": worker._layer_ready_events[-1]
     }
@@ -501,7 +503,7 @@ def test_hisparse_prefill_mirrors_complete_source_groups():
     worker.cache_handles = handles
     worker._set_row_mirrors((SparseKVRowMirror((0, 0, 0), 7, 2),))
     worker._per_layer_mirrored = set()
-    worker._submitted_mirror_layers = 0
+    worker._submitted_mirror_layers = set()
     worker._layer_ready_events = tuple(MagicMock() for _ in handles)
     worker._enqueue_row_dma = MagicMock()
 
@@ -509,9 +511,9 @@ def test_hisparse_prefill_mirrors_complete_source_groups():
         worker._enqueue_layer_mirror(layer_index)
 
     assert [call.args[0] for call in worker._enqueue_row_dma.call_args_list] == [
-        range(2),
-        range(2, 6),
-        range(6, 7),
+        (0, 1),
+        (2, 3, 4, 5),
+        (6,),
     ]
 
 
@@ -539,6 +541,7 @@ def test_hisparse_finish_forward_rejects_partial_per_layer_mirror():
     worker.cache_handles = handles
     worker._set_row_mirrors((SparseKVRowMirror((0, 0), 7, 2),))
     worker._per_layer_mirrored = {0}
+    worker._submitted_mirror_layers = set()
     worker._enqueue_row_dma = MagicMock()
 
     with pytest.raises(RuntimeError, match="did not mirror every active layer"):
@@ -568,23 +571,14 @@ def test_hisparse_finish_step_orders_next_forward_after_dma(monkeypatch):
     assert not worker._dma_submitted
 
 
-def test_hisparse_finish_forward_excludes_trailing_mtp_cache(monkeypatch):
+def test_hisparse_finish_forward_mirrors_standalone_mtp_cache(monkeypatch):
     dst_slots = torch.tensor([7, 8], dtype=torch.int64)
     runtime = SimpleNamespace(
         eager_host_mirror=True,
         is_group_leader=False,
         invalidate_written_slots=MagicMock(),
     )
-    active = SimpleNamespace(
-        runtime=runtime,
-        decode_batch=True,
-        host_mirror_required=True,
-        num_actual_tokens=2,
-        num_decode_tokens=2,
-        req_id_per_token=torch.tensor([0, 1], dtype=torch.int32),
-        mirror_slot_mapping=dst_slots,
-    )
-    mtp = SimpleNamespace(
+    inactive = SimpleNamespace(
         runtime=runtime,
         decode_batch=False,
         host_mirror_required=False,
@@ -593,16 +587,26 @@ def test_hisparse_finish_forward_excludes_trailing_mtp_cache(monkeypatch):
         req_id_per_token=None,
         mirror_slot_mapping=dst_slots,
     )
+    mtp = SimpleNamespace(
+        runtime=runtime,
+        decode_batch=True,
+        host_mirror_required=True,
+        num_actual_tokens=2,
+        num_decode_tokens=2,
+        req_id_per_token=torch.tensor([0, 1], dtype=torch.int32),
+        mirror_slot_mapping=dst_slots,
+    )
     worker = object.__new__(HiSparseConnectorWorker)
     worker.is_host_writer = True
-    worker.cache_handles = [active, mtp]
+    worker.cache_handles = [inactive, mtp]
     worker._set_row_mirrors((SparseKVRowMirror((0,), 7, 2),))
     worker._per_layer_mirrored = set()
+    worker._submitted_mirror_layers = set()
     worker._enqueue_row_dma = MagicMock()
 
     worker._enqueue_host_mirror()
 
-    worker._enqueue_row_dma.assert_called_once_with(range(1), ready_event=None)
+    worker._enqueue_row_dma.assert_called_once_with((1,), ready_event=None)
 
 
 def test_hisparse_shared_host_reader_skips_mirror(monkeypatch):
@@ -685,6 +689,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
     worker._pending_invalid_block_ids = []
     worker.cache_handles = []
     worker._per_layer_mirrored = set()
+    worker._submitted_mirror_layers = set()
     worker._layer_mirror_callbacks = ()
     stream = MagicMock()
     monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
@@ -753,6 +758,7 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
     worker.host_num_blocks = 1
     worker.cache_handles = [handle]
     worker._per_layer_mirrored = set()
+    worker._submitted_mirror_layers = set()
     worker._layer_mirror_callbacks = (MagicMock(),)
     worker._post_forward_transfers = []
     worker._pending_invalid_block_ids = []

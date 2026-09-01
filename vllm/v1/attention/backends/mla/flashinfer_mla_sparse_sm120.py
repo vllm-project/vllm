@@ -14,6 +14,7 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
     _get_workspace_buffer,
 )
+from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
@@ -117,23 +118,101 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        index_group = self.index_group
+        if isinstance(index_group, HiSparseMLAIndexGroup):
+            num_decode_tokens = attn_metadata.num_decode_tokens
+            outputs = []
+            if num_decode_tokens:
+                topk_indices_physical = cast(
+                    torch.Tensor,
+                    index_group.convert_decode_logical_to_physical_topk(
+                        self.index_group_index,
+                        topk_indices[:num_decode_tokens],
+                        attn_metadata,
+                        return_valid_counts=False,
+                    ),
+                )
+                outputs.append(
+                    self._run_mqa_kernel(
+                        q[:num_decode_tokens],
+                        index_group.physical_kv_cache(self.index_group_index),
+                        topk_indices_physical,
+                        attn_metadata.topk_tokens,
+                    )
+                )
+            if num_decode_tokens < num_actual_toks:
+                cache = index_group.cache(self.index_group_index)
+                if num_decode_tokens == 0 and cache.all_context_pages_resident:
+                    topk_indices_physical = cast(
+                        torch.Tensor,
+                        index_group.convert_logical_to_physical_topk(
+                            self.index_group_index,
+                            topk_indices,
+                            attn_metadata,
+                            block_stride_rows=None,
+                            return_valid_counts=False,
+                        ),
+                    )
+                    prefill_cache = index_group.physical_kv_cache(
+                        self.index_group_index
+                    )
+                else:
+                    prefill_cache, block_table, req_ids = (
+                        index_group.stage_prefill_rows(
+                            self.index_group_index,
+                            kv_c_and_k_pe_cache,
+                            attn_metadata,
+                        )
+                    )
+                    topk_indices_physical = cast(
+                        torch.Tensor,
+                        triton_convert_req_index_to_global_index(
+                            req_ids,
+                            block_table,
+                            topk_indices[num_decode_tokens:],
+                            BLOCK_SIZE=attn_metadata.block_size,
+                            NUM_TOPK_TOKENS=topk_indices.shape[1],
+                        ),
+                    )
+                outputs.append(
+                    self._run_mqa_kernel(
+                        q[num_decode_tokens:],
+                        prefill_cache,
+                        topk_indices_physical,
+                        attn_metadata.topk_tokens,
+                    )
+                )
+            output = torch.cat(outputs) if len(outputs) > 1 else outputs[0]
+            return output, None
 
-        hisparse_resolution = self._hisparse_decode_cache(
-            kv_c_and_k_pe_cache, topk_indices, attn_metadata
+        topk_indices_physical = cast(
+            torch.Tensor,
+            triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+            ),
         )
-        if hisparse_resolution is not None:
-            kv_c_and_k_pe_cache, topk_indices_physical = hisparse_resolution
-        else:
-            topk_indices_physical = cast(
-                torch.Tensor,
-                triton_convert_req_index_to_global_index(
-                    attn_metadata.req_id_per_token[:num_actual_toks],
-                    attn_metadata.block_table,
-                    topk_indices,
-                    BLOCK_SIZE=attn_metadata.block_size,
-                    NUM_TOPK_TOKENS=topk_indices.shape[1],
-                ),
-            )
+        return (
+            self._run_mqa_kernel(
+                q,
+                kv_c_and_k_pe_cache,
+                topk_indices_physical,
+                attn_metadata.topk_tokens,
+            ),
+            None,
+        )
+
+    def _run_mqa_kernel(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        topk_indices_physical: torch.Tensor,
+        topk_tokens: int,
+    ) -> torch.Tensor:
+        num_actual_toks = q.shape[0]
 
         output = q.new_empty(
             (num_actual_toks, self.num_heads, self.kv_lora_rank),
@@ -149,18 +228,18 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
 
         out = flashinfer_trtllm_batch_decode_with_kv_cache_mla(
             query=q.unsqueeze(1),
-            kv_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(1),
+            kv_cache=kv_cache.view(torch.uint8).unsqueeze(1),
             workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
             block_tables=topk_indices_physical.unsqueeze(1),
             seq_lens=None,
-            max_seq_len=attn_metadata.topk_tokens,
+            max_seq_len=topk_tokens,
             out=output.unsqueeze(1),
             bmm1_scale=self.scale,
             bmm2_scale=1.0,
-            sparse_mla_top_k=attn_metadata.topk_tokens,
+            sparse_mla_top_k=topk_tokens,
             kv_scale_format=self.kv_scale_format,
         )
-        return out.squeeze(1), None
+        return out.squeeze(1)
