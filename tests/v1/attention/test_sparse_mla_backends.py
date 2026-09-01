@@ -2115,25 +2115,20 @@ def test_hisparse_multi_step_writes_request_major_output():
         ],
         dtype=torch.int32,
         device=device,
-    ).view(num_reqs * query_len, top_k)
+    )
     physical = torch.full_like(logical, -1)
-    valid_counts = torch.zeros(num_reqs * query_len, dtype=torch.int32, device=device)
+    valid_counts = torch.zeros((num_reqs, query_len), dtype=torch.int32, device=device)
 
     cache.runtime.begin_forward()
     for step in range(query_len):
         cache.swap_in(
             request_ids,
             block_table,
-            logical,
+            logical[:, step],
             block_size=block_size,
             return_valid_counts=True,
-            num_rows=num_reqs,
-            input_row_stride=query_len,
-            input_row_offset=step,
-            attention_indices_out=physical,
-            valid_counts_out=valid_counts,
-            output_row_stride=query_len,
-            output_row_offset=step,
+            attention_indices_out=physical[:, step],
+            valid_counts_out=valid_counts[:, step],
         )
     torch.accelerator.synchronize()
 
@@ -2146,14 +2141,14 @@ def test_hisparse_multi_step_writes_request_major_output():
             query_len
         ),
         block_table,
-        logical,
+        logical.view(num_reqs * query_len, top_k),
         block_size,
         top_k,
     )
     hot_rows = cache.runtime.hot.attention_cache.reshape(-1, row_width)
     host_rows = host.reshape(-1, row_width)
     torch.testing.assert_close(
-        hot_rows[physical.to(torch.long)].cpu(),
+        hot_rows[physical.view(num_reqs * query_len, top_k).to(torch.long)].cpu(),
         host_rows[global_rows.cpu().to(torch.long)],
     )
 
@@ -2890,12 +2885,10 @@ def test_hisparse_fp8_decode_resolves_steps_then_runs_batched_attention(monkeypa
     kernel_shapes: list[torch.Size] = []
 
     def swap_in(req_ids, *, logical_topk_indices, **kwargs):  # noqa: ARG001
-        step = kwargs["input_row_offset"]
-        steps.append(step)
+        steps.append(int(logical_topk_indices[0, 0]))
         output = kwargs["attention_indices_out"]
         if output is not None:
-            stride = kwargs["input_row_stride"]
-            output[step::stride].copy_(logical_topk_indices[step::stride] + 10)
+            output.copy_(logical_topk_indices + 10)
         return topk[:num_decodes]
 
     def run_kernel(self, *, q, **kwargs):  # noqa: ARG001

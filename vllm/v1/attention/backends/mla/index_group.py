@@ -271,32 +271,35 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             )
 
         assert num_tokens == num_decodes * max_query_len
-        physical_topk_indices = self.physical_topk_indices[:num_tokens]
-        valid_topk_counts = self.valid_topk_counts[:num_tokens]
+        logical_topk_by_request = logical_topk_indices.view(
+            num_decodes, max_query_len, -1
+        )
+        physical_topk_by_request = self.physical_topk_indices[:num_tokens].view(
+            num_decodes, max_query_len, -1
+        )
+        valid_topk_by_request = self.valid_topk_counts[:num_tokens].view(
+            num_decodes, max_query_len
+        )
         request_ids = self.request_ids[:num_decodes]
         for step in range(max_query_len):
             self.cache(layer_index).swap_in(
                 request_ids,
                 block_table=attn_metadata.block_table,
-                logical_topk_indices=logical_topk_indices,
+                logical_topk_indices=logical_topk_by_request[:, step],
                 block_size=attn_metadata.block_size,
                 return_valid_counts=return_valid_counts,
-                num_rows=num_decodes,
-                input_row_stride=max_query_len,
-                input_row_offset=step,
                 attention_indices_out=(
-                    physical_topk_indices if layer_index == 0 else None
+                    physical_topk_by_request[:, step] if layer_index == 0 else None
                 ),
                 valid_counts_out=(
-                    valid_topk_counts
+                    valid_topk_by_request[:, step]
                     if layer_index == 0 and return_valid_counts
                     else None
                 ),
-                output_row_stride=max_query_len,
-                output_row_offset=step,
             )
+        physical_topk_indices = physical_topk_by_request.view(num_tokens, -1)
         if return_valid_counts:
-            return physical_topk_indices, valid_topk_counts
+            return physical_topk_indices, valid_topk_by_request.view(num_tokens)
         return physical_topk_indices
 
     def stage_prefill_rows(
