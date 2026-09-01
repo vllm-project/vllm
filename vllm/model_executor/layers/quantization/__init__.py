@@ -43,6 +43,7 @@ QuantizationMethods = Literal[
     "int8_per_channel_weight_only",
     "nvfp4_per_token",
     "mxfp8",
+    "lut_b_moe",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
