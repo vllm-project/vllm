@@ -124,14 +124,17 @@ class TorchCodecVideoBackendMixin:
         # Note: torchcodec releases the GIL for the entire call
         batch = decoder.get_frames_at(frame_indices)
         frames = batch.data
-        if frames.device.type == "cpu":
-            if torch.device(device).type != "cpu":
-                # The codec or resolution is not supported by NVDEC, and
-                # torchcodec silently fell back to CPU decoding.
+        if torch.device(device).type != "cpu":
+            # The frames' device is not a reliable NVDEC signal: on
+            # NVDEC-less systems torchcodec decodes on CPU and *uploads*
+            # the frames, so they still land on the GPU. `cpu_fallback`
+            # records whether hardware decoding was actually used, and
+            # str() carries the reason (e.g. "NVCUVID not available").
+            status = getattr(decoder, "cpu_fallback", None)
+            if status is not None and bool(status):
                 logger.warning_once(
                     "torchcodec could not use NVDEC for this video and "
                     "decoded on CPU instead; check codec support and "
                     "libnvcuvid."
                 )
-            return frames.numpy(), list(frame_indices)
         return frames, list(frame_indices)
