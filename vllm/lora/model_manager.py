@@ -456,6 +456,8 @@ class LoRAModelManager:
 
             is_classifier_head = module_name in self.supported_modules_to_save
 
+            # Full classification heads come from PEFT modules_to_save and must be
+            # wrapped independently of target_modules, which only filters A/B LoRA.
             target_modules = self.lora_config.target_modules
             if (
                 not is_in_target_modules(
@@ -499,11 +501,7 @@ class LoRAModelManager:
                 continue
 
             existing_wrapper = wrapped_by_id.get(id(module))
-            if (
-                existing_wrapper is not None
-                and "lm_head" not in module_name
-                and not is_classifier_head
-            ):
+            if existing_wrapper is not None and "lm_head" not in module_name:
                 # Same underlying module was already wrapped under another
                 # path (e.g. a MoE gate held both directly on the block and
                 # inside the MoE runner). The adapter targets the canonical
@@ -528,17 +526,25 @@ class LoRAModelManager:
                 # LoRA weights of w1 and w3 have already been fused on disk.
 
                 packed_moduled_lst = ["w13"] if self._is_3d_moe_model else ["w1", "w3"]
-            new_module = replace_submodule(
-                self.model,
-                module_name,
-                from_layer(
+            if is_classifier_head:
+                new_module = from_layer_classification(
+                    module,
+                    self.lora_slots,
+                    self.lora_config,
+                    self.model.config,
+                )
+            else:
+                new_module = from_layer(
                     module,
                     self.lora_slots,
                     self.lora_config,
                     packed_moduled_lst,
                     self.model.config,
-                ),
-            )
+                )
+            new_module = replace_submodule(self.model, module_name, new_module)
+
+            if is_classifier_head:
+                self.model.pooler.replace_classifier(new_module)
             if isinstance(new_module, BaseLayerWithLoRA):
                 wrapped_by_id[id(module)] = new_module
                 wrapped_by_id[id(new_module)] = new_module
@@ -567,19 +573,6 @@ class LoRAModelManager:
                         self.model.config,
                     ),
                 )
-
-            if is_classifier_head:
-                new_module = replace_submodule(
-                    self.model,
-                    module_name,
-                    from_layer_classification(
-                        module,
-                        self.lora_slots,
-                        self.lora_config,
-                        self.model.config,
-                    ),
-                )
-                self.model.pooler.replace_classifier(new_module)
 
             # Some matched modules can be unsupported by LoRA wrappers
             # (e.g. subclasses with specialized forward behavior).
