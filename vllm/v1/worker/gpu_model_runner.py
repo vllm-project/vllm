@@ -2435,6 +2435,8 @@ class GPUModelRunner(
             # than the embed tokens, and prepend a position-dependent
             # alignment pad before the first sentinel. For those, derive the
             # span from the full placeholder range and strip the pad.
+            # TODO(Isotr0py): Refactor mm_prefix_lm implementation
+            # for better readability and maintainability.
             _span_pad_modulus = getattr(
                 hf_text_config, "mm_prefix_span_leading_pad_modulus", 0
             )
