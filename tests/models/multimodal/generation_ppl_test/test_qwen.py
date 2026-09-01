@@ -41,7 +41,7 @@ def test_pshm(hf_runner, vllm_runner, model_info: GenerateModelInfo):
         model_info,
         vllm_extra_kwargs={
             "mm_processor_cache_gb": 4,
-            "mm_processor_cache_type":"paged_shm"
+            "mm_processor_cache_type": "paged_shm",
         },
         mm_processor_kwargs=mm_processor_kwargs,
     )
