@@ -58,8 +58,6 @@ from .model import (
     Qwen4ExpMixtureOfExperts,
     Qwen4ExpSparseMoeBlock,
 )
-from .ops.hc import hc_gate_mix, hc_silu
-from .ops.mtp import mtp_residual_add_norm
 
 
 def _remap_ignored_layers(
@@ -108,45 +106,6 @@ def _remap_mtp_weight_name(name: str) -> str | None:
     if name.startswith("model.embed_tokens.") or name.startswith("lm_head."):
         return name
     return None
-
-
-def _forward_mtp_layer(
-    layer: Qwen4ExpDecoderLayer,
-    hidden_states: torch.Tensor,
-    positions: torch.Tensor,
-    normalized_hidden_states: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if normalized_hidden_states is None:
-        return layer(
-            hidden_states=hidden_states,
-            prev_block_output=None,
-            prev_injection=None,
-            positions=positions,
-            input_ids=None,
-            query_start_loc=None,
-            ngram_context=None,
-        )
-
-    assert layer.ple is None
-    assert layer.layer_type == "full_attention"
-    attn_hc = layer.attn_hyper_connection
-    if attn_hc.use_combine:
-        split_sizes = [attn_hc.lora_rank, attn_hc.hc_count, attn_hc.pad_size]
-        down_and_injection = attn_hc.input_mix_weight_down_block_inject(
-            normalized_hidden_states
-        )
-        lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
-    else:
-        lora = attn_hc.input_mix_weight_down(normalized_hidden_states)
-        injection = None
-    lora = hc_silu(lora, attn_hc.hc_count)
-    gate = attn_hc.input_mix_weight_up(lora)
-    block_input = hc_gate_mix(normalized_hidden_states, gate, attn_hc.hc_count)
-    attn_out = layer.self_attn(hidden_states=block_input, positions=positions)
-    hidden_states, block_input, injection = layer.mlp_hyper_connection.combine_and_mix(
-        hidden_states, attn_out, injection
-    )
-    return hidden_states, layer.mlp(block_input), injection
 
 
 def _make_draft_vllm_config(
@@ -323,7 +282,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         hidden_size = self.hidden_size
         current_step_idx = spec_step_idx % self.num_mtp_layers
         layer = self.layers[current_step_idx]
-        normalized_hidden_states = None
+        prev_block_output: torch.Tensor | None = None
 
         if get_pp_group().is_first_rank:
             assert hidden_states is not None
@@ -344,21 +303,20 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
                 num_tokens, hc_count, hidden_size
             )
             hidden_states = self.fc_hidden(hidden_states)
-            hidden_states, normalized_hidden_states = mtp_residual_add_norm(
-                inputs_embeds,
-                hidden_states,
-                layer.attn_hyper_connection.hc_norm.weight,
-                self.config.rms_norm_eps,
-            )
+            hidden_states = hidden_states.flatten(-2)
+            prev_block_output = inputs_embeds
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        hidden_states, block_output, injection = _forward_mtp_layer(
-            layer,
-            hidden_states,
-            positions,
-            normalized_hidden_states,
+        hidden_states, block_output, injection = layer(
+            hidden_states=hidden_states,
+            prev_block_output=prev_block_output,
+            prev_injection=None,
+            positions=positions,
+            input_ids=None,
+            query_start_loc=None,
+            ngram_context=None,
         )
         if not get_pp_group().is_last_rank:
             # As in the target model, PP carries a materialized tensor rather

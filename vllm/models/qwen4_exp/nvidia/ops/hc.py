@@ -197,6 +197,7 @@ def _hc_combine_kernel(
     stride_out,
     HC_DIM: tl.constexpr,
     HC: tl.constexpr,
+    HAS_INJECTION: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     launch_pdl: tl.constexpr,
 ) -> None:
@@ -215,14 +216,18 @@ def _hc_combine_kernel(
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
 
-    inj = tl.load(inj_ptr + row * stride_inj + offs_hc, mask_hc, other=0.0)
-    block = tl.load(block_ptr + row * stride_block + offs_inner, mask_inner, other=0.0)
+    if HAS_INJECTION:
+        inj = tl.load(inj_ptr + row * stride_inj + offs_hc, mask_hc, other=0.0)
+    block = tl.load(block_ptr + row * stride_block + offs_inner, mask_inner, 0.0)
     res = tl.load(res_ptr + row * stride_res + offs, mask, other=0.0)
 
     # Keeping HC as a broadcast dimension is faster here than four separate
     # residual load/store sequences.
-    inj = 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)
-    out = res.to(tl.float32) + block.to(tl.float32)[None, :] * inj[:, None]
+    if HAS_INJECTION:
+        scale = 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)
+    else:
+        scale = tl.full([HC_PAD], 1.0, tl.float32)
+    out = res.to(tl.float32) + block.to(tl.float32)[None, :] * scale[:, None]
 
     if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
@@ -232,32 +237,37 @@ def _hc_combine_kernel(
 def _hc_combine(
     residual: torch.Tensor,
     block_output: torch.Tensor,
-    injection_logits: torch.Tensor,
+    injection_logits: torch.Tensor | None,
     hc_count: int,
 ) -> torch.Tensor:
     N, DIM = residual.shape
     assert DIM % hc_count == 0
     hc_dim = DIM // hc_count
     assert block_output.shape == (N, hc_dim)
-    assert injection_logits.shape == (N, hc_count)
     assert residual.stride(1) == 1
     assert block_output.stride(1) == 1
-    assert injection_logits.stride(1) == 1
+    if injection_logits is not None:
+        assert injection_logits.shape == (N, hc_count)
+        assert injection_logits.stride(1) == 1
+
+    injection_ptr = injection_logits if injection_logits is not None else residual
+    stride_injection = injection_logits.stride(0) if injection_logits is not None else 0
 
     out = residual.new_empty(residual.shape)
     BLOCK_SIZE = 512
     _hc_combine_kernel[(N, triton.cdiv(hc_dim, BLOCK_SIZE))](
         block_output,
         residual,
-        injection_logits,
+        injection_ptr,
         out,
         block_output.stride(0),
         residual.stride(0),
-        injection_logits.stride(0),
+        stride_injection,
         out.stride(0),
         hc_dim,
         hc_count,
-        BLOCK_SIZE,
+        HAS_INJECTION=injection_logits is not None,
+        BLOCK_SIZE=BLOCK_SIZE,
         launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return out
@@ -278,6 +288,7 @@ def _hc_combine_norm_kernel(
     stride_y,
     HC_DIM: tl.constexpr,
     HC: tl.constexpr,
+    HAS_INJECTION: tl.constexpr,
     W_SHARED: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -305,13 +316,19 @@ def _hc_combine_norm_kernel(
     # Start the uncached residual load first, then issue the other combine
     # loads before consuming any of them.
     res = tl.load(res_ptr + row * stride_res + offs, mask_inner, other=0.0)
-    inj = tl.load(inj_ptr + row * stride_inj + offs_hc, mask_hc, other=0.0)
-    block = tl.load(block_ptr + row * stride_block + offs_inner, mask_inner, other=0.0)
-    inj = 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)
-    inj = tl.sum(tl.where(offs_hc == stream, inj, 0.0))
+    if HAS_INJECTION:
+        inj = tl.load(inj_ptr + row * stride_inj + offs_hc, mask_hc, other=0.0)
+    block = tl.load(block_ptr + row * stride_block + offs_inner, mask_inner, 0.0)
+    if HAS_INJECTION:
+        inj = 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)
+        scale = tl.sum(tl.where(offs_hc == stream, inj, 0.0))
+    else:
+        scale = 1.0
     # Round the materialized combine result before normalization. This matches
     # the unfused combine -> RMSNorm boundary.
-    out = (res.to(tl.float32) + block.to(tl.float32) * inj).to(out_ptr.dtype.element_ty)
+    out = (res.to(tl.float32) + block.to(tl.float32) * scale).to(
+        out_ptr.dtype.element_ty
+    )
     tl.store(out_ptr + row * stride_out + offs, out, mask=mask_inner)
 
     out = out.to(tl.float32)
@@ -334,7 +351,7 @@ def _hc_combine_norm_kernel(
 def _hc_combine_norm(
     residual: torch.Tensor,
     block_output: torch.Tensor,
-    injection_logits: torch.Tensor,
+    injection_logits: torch.Tensor | None,
     norm_weight: torch.Tensor,
     eps: float,
     hc_count: int,
@@ -343,12 +360,16 @@ def _hc_combine_norm(
     assert DIM % hc_count == 0
     hc_dim = DIM // hc_count
     assert block_output.shape == (N, hc_dim)
-    assert injection_logits.shape == (N, hc_count)
     assert residual.stride(1) == 1
     assert block_output.stride(1) == 1
-    assert injection_logits.stride(1) == 1
+    if injection_logits is not None:
+        assert injection_logits.shape == (N, hc_count)
+        assert injection_logits.stride(1) == 1
     assert norm_weight.is_contiguous()
     assert norm_weight.numel() in (hc_dim, DIM)
+
+    injection_ptr = injection_logits if injection_logits is not None else residual
+    stride_injection = injection_logits.stride(0) if injection_logits is not None else 0
 
     out = residual.new_empty(residual.shape)
     y = residual.new_empty(residual.shape)
@@ -356,17 +377,18 @@ def _hc_combine_norm(
     _hc_combine_norm_kernel[(N, hc_count)](
         block_output,
         residual,
-        injection_logits,
+        injection_ptr,
         norm_weight,
         out,
         y,
         block_output.stride(0),
         residual.stride(0),
-        injection_logits.stride(0),
+        stride_injection,
         out.stride(0),
         y.stride(0),
         hc_dim,
         hc_count,
+        HAS_INJECTION=injection_logits is not None,
         W_SHARED=norm_weight.numel() == hc_dim,
         EPS=eps,
         BLOCK_SIZE=BLOCK_SIZE,
@@ -389,7 +411,7 @@ def _hc_gate_mix_fake(
 def _hc_combine_fake(
     residual: torch.Tensor,
     block_output: torch.Tensor,
-    injection_logits: torch.Tensor,
+    injection_logits: torch.Tensor | None,
     hc_count: int,
 ) -> torch.Tensor:
     del block_output, injection_logits, hc_count
@@ -399,7 +421,7 @@ def _hc_combine_fake(
 def _hc_combine_norm_fake(
     residual: torch.Tensor,
     block_output: torch.Tensor,
-    injection_logits: torch.Tensor,
+    injection_logits: torch.Tensor | None,
     norm_weight: torch.Tensor,
     eps: float,
     hc_count: int,
@@ -452,7 +474,7 @@ def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Ten
 def hc_combine(
     residual: torch.Tensor,
     block_output: torch.Tensor,
-    injection_logits: torch.Tensor,
+    injection_logits: torch.Tensor | None,
     hc_count: int,
 ) -> torch.Tensor:
     return torch.ops.vllm.qwen4_exp_hc_combine(
@@ -463,7 +485,7 @@ def hc_combine(
 def hc_combine_norm(
     residual: torch.Tensor,
     block_output: torch.Tensor,
-    injection_logits: torch.Tensor,
+    injection_logits: torch.Tensor | None,
     norm_weight: torch.Tensor,
     eps: float,
     hc_count: int,

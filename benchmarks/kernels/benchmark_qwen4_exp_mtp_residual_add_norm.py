@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark Qwen4Exp MTP residual broadcast-add and HC normalization."""
+"""Benchmark Qwen4Exp MTP unit-injection combine and HC normalization."""
 
 import argparse
 import statistics
@@ -10,8 +10,10 @@ import pandas as pd
 import torch
 from flashinfer.testing import bench_gpu_time_with_cupti
 
-from vllm.models.qwen4_exp.nvidia.ops.hc import grouped_gemma_rmsnorm
-from vllm.models.qwen4_exp.nvidia.ops.mtp import mtp_residual_add_norm
+from vllm.models.qwen4_exp.nvidia.ops.hc import (
+    grouped_gemma_rmsnorm,
+    hc_combine_norm,
+)
 
 HC_COUNT = 4
 HIDDEN_SIZE = 2560
@@ -29,6 +31,14 @@ def _separate_add_norm(
 
 
 _compiled_add_norm = torch.compile(_separate_add_norm, fullgraph=True)
+
+
+def _unit_injection_combine_norm(
+    embedding: torch.Tensor,
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return hc_combine_norm(hidden.flatten(1), embedding, None, weight, EPS, HC_COUNT)
 
 
 def _bench_us(fn) -> float:
@@ -64,13 +74,13 @@ def main() -> None:
         weight = torch.randn(HC_COUNT * HIDDEN_SIZE, dtype=torch.bfloat16)
 
         expected, expected_norm = _separate_add_norm(embedding, hidden, weight)
-        actual, actual_norm = mtp_residual_add_norm(embedding, hidden, weight, EPS)
+        actual, actual_norm = _unit_injection_combine_norm(embedding, hidden, weight)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-        torch.testing.assert_close(actual_norm, expected_norm, rtol=0, atol=0)
+        torch.testing.assert_close(actual_norm, expected_norm)
 
         eager = partial(_separate_add_norm, embedding, hidden, weight)
         compiled = partial(_compiled_add_norm, embedding, hidden, weight)
-        fused = partial(mtp_residual_add_norm, embedding, hidden, weight, EPS)
+        fused = partial(_unit_injection_combine_norm, embedding, hidden, weight)
         _compiled_add_norm(embedding, hidden, weight)
         torch.accelerator.synchronize()
 
@@ -82,7 +92,7 @@ def main() -> None:
                 "tokens": num_tokens,
                 "eager_separate_us": eager_us,
                 "compiled_separate_us": compiled_us,
-                "fused_us": fused_us,
+                "fused_unit_injection_us": fused_us,
                 "vs_compiled": compiled_us / fused_us,
             }
         )

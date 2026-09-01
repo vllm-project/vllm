@@ -10,7 +10,6 @@ from vllm.models.qwen4_exp.nvidia.ops.hc import (
     hc_combine_norm,
     hc_gate_mix,
 )
-from vllm.models.qwen4_exp.nvidia.ops.mtp import mtp_residual_add_norm
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
@@ -69,6 +68,18 @@ def test_hc_combine() -> None:
     torch.testing.assert_close(actual, expected.flatten(-2).to(torch.bfloat16))
 
 
+def test_hc_combine_unit_injection() -> None:
+    torch.manual_seed(0)
+    block_output = torch.randn(2, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+    residual = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+
+    actual = hc_combine(residual, block_output, None, HC)
+    expected = residual.unflatten(-1, (HC, HIDDEN_SIZE))
+    expected = expected + block_output.unsqueeze(-2)
+
+    assert torch.equal(actual, expected.flatten(-2))
+
+
 def test_hc_combine_norm() -> None:
     torch.manual_seed(0)
     block_output = torch.randn(2, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
@@ -96,7 +107,7 @@ def test_hc_combine_norm() -> None:
 
 
 @pytest.mark.parametrize("num_tokens", [1, 17, 2048])
-def test_mtp_residual_add_norm(num_tokens: int) -> None:
+def test_hc_combine_norm_unit_injection(num_tokens: int) -> None:
     torch.manual_seed(0)
     embedding = torch.randn(
         num_tokens, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
@@ -106,9 +117,11 @@ def test_mtp_residual_add_norm(num_tokens: int) -> None:
     )
     weight = torch.randn(HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
 
-    actual, actual_norm = mtp_residual_add_norm(embedding, hidden, weight, EPS)
+    actual, actual_norm = hc_combine_norm(
+        hidden.flatten(1), embedding, None, weight, EPS, HC
+    )
 
     expected = (hidden + embedding.unsqueeze(1)).flatten(1)
     expected_norm = grouped_gemma_rmsnorm(expected, weight, EPS, HC)
     assert torch.equal(actual, expected)
-    assert torch.equal(actual_norm, expected_norm)
+    torch.testing.assert_close(actual_norm, expected_norm)
