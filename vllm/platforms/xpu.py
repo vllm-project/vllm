@@ -471,6 +471,8 @@ class XPUPlatform(Platform):
                 "xccl is not enabled in this torch build, communication"
                 " is not available."
             )
+        if envs.VLLM_XPU_USE_CUSTOM_ALLREDUCE:
+            return "vllm.distributed.device_communicators.xpu_p2p_dev_communicator.XpuP2pDevCommunicator"  # noqa
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
 
     @classmethod
