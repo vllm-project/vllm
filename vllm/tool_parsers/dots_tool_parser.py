@@ -7,6 +7,7 @@ from typing import Any
 
 import regex as re
 
+import vllm.envs as envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -49,8 +50,13 @@ class DotsToolParser(ToolParser):
     tool_call_start_token = "<dots_function_call>"
     tool_call_end_token = "</dots_function_call>"
 
+    # The whitespace runs are possessive. With `\s*` they overlap with the
+    # `.*?` between them -- under `DOTALL` a dot matches a space too -- so a
+    # run of spaces with no closing tag after it can be split between them in
+    # O(n^3) ways and a failing match walks all of them. `.*?` stays lazy so a
+    # block still ends at the *first* closing tag rather than the last.
     _block_regex = re.compile(
-        rf"{re.escape(tool_call_start_token)}\s*(.*?)\s*"
+        rf"{re.escape(tool_call_start_token)}\s*+(.*?)\s*+"
         rf"{re.escape(tool_call_end_token)}",
         re.DOTALL,
     )
@@ -167,7 +173,10 @@ class DotsToolParser(ToolParser):
         properties, defs = self._tool_schema(name, tools)
         arguments: dict[str, Any] = {}
 
-        for parameter in self._parameter_regex.finditer(match.group("body")):
+        for parameter in self._parameter_regex.finditer(
+            match.group("body"),
+            timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+        ):
             param_name = self._extract_name(parameter.group("name"))
             value = parameter.group("value").strip()
             param_type: Any = "string"
@@ -188,7 +197,9 @@ class DotsToolParser(ToolParser):
         if content.startswith("<invoke"):
             return [
                 self._parse_xml_invoke(match, tools)
-                for match in self._invoke_regex.finditer(content)
+                for match in self._invoke_regex.finditer(
+                    content, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+                )
             ]
 
         parsed = json.loads(content)
@@ -229,7 +240,22 @@ class DotsToolParser(ToolParser):
             )
 
         tool_calls: list[ToolCall] = []
-        for block in self._block_regex.finditer(model_output):
+        try:
+            blocks = list(
+                self._block_regex.finditer(
+                    model_output,
+                    timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+                )
+            )
+        except TimeoutError:
+            logger.warning(
+                "Regex timeout occurred when extracting tool calls; "
+                "returning the model output as content."
+            )
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
+        for block in blocks:
             try:
                 for parsed in self._parse_block(block.group(1), request.tools):
                     validated = self._validated_call(parsed, request.tools)
@@ -244,7 +270,7 @@ class DotsToolParser(ToolParser):
                             )
                         )
                     )
-            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            except (json.JSONDecodeError, TypeError, ValueError, TimeoutError) as exc:
                 logger.warning("Failed to parse Dots tool call: %s", exc)
 
         normal_text = model_output[:marker_index].strip()
@@ -414,7 +440,7 @@ class DotsToolParser(ToolParser):
 
                 if not valid_calls and not block_had_streamed_call:
                     normal_parts.append(content.strip())
-            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            except (json.JSONDecodeError, TypeError, ValueError, TimeoutError) as exc:
                 logger.warning("Failed to parse streamed Dots tool call: %s", exc)
                 normal_parts.append(content.strip())
 
