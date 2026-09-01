@@ -660,7 +660,7 @@ steps:
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
-- label: ":amd: (MI300) Distributed Compile" # TBD
+- label: ":amd: (MI300) Distributed Compile (Inductor Partition)" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
@@ -677,7 +677,26 @@ steps:
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/passes/distributed/test_async_tp.py
-  - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions -k "inductor_partition"
+
+- label: ":amd: (MI300) Distributed Compile (Dynamo Partition)" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/model_executor/layers
+  - tests/compile/passes/distributed/
+  - tests/compile/fusions_e2e/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/passes/distributed/test_async_tp.py
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions -k "dynamo_partition"
 
 - label: ":amd: (MI300) Distributed Compile + RPC" # TBD
   timeout_in_minutes: 180
