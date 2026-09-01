@@ -121,3 +121,15 @@ def test_data_parallel_start_rank_zero_infers_hybrid_lb():
 
     assert vllm_config.parallel_config.data_parallel_hybrid_lb is True
     assert vllm_config.parallel_config.data_parallel_rank == 0
+
+
+def test_extensible_kv_cache_from_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args([])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert not engine_args.enable_extensible_kv_cache
+
+    args = parser.parse_args(["--enable-extensible-kv-cache"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.enable_extensible_kv_cache

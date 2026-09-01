@@ -120,6 +120,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             compared with using gpu_memory_utilization. Note that
             kv_cache_memory_bytes (when not-None) ignores
             gpu_memory_utilization
+        enable_extensible_kv_cache: Reserve the KV cache address range with
+            device virtual memory and commit physical pages after warmup, so
+            the cache is sized from the memory actually free after CUDA graph
+            capture. Supported on CUDA with the V2 model runner.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
@@ -215,6 +219,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         profiler_config: dict[str, Any] | ProfilerConfig | None = None,
         attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
+        enable_extensible_kv_cache: bool = False,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
@@ -313,6 +318,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             kv_cache_memory_bytes=kv_cache_memory_bytes,
+            enable_extensible_kv_cache=enable_extensible_kv_cache,
             cpu_offload_gb=cpu_offload_gb,
             offload_group_size=offload_group_size,
             offload_num_in_group=offload_num_in_group,
