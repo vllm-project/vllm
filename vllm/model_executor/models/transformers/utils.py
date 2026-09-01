@@ -46,6 +46,31 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+# Attribute on an HF attention module holding the vLLM attention layer that serves it.
+# Deliberately the name an in-tree vLLM model uses (`LlamaAttention.attn`), so both
+# paths present the same module tree to `named_modules()`, to a state dict and to
+# `torch.compile`. See `Base.create_attention_instances`.
+VLLM_ATTN_ATTR = "attn"
+
+
+def declared_attn_scale(module: nn.Module | None) -> float | None:
+    """The softmax scale *module* declares, or `None` if it declares none usable.
+
+    HF attention modules keep it on `scaling` (`scale` in a few older ones) and pass it
+    down to the attention interface on every call. Reading it once, at construction, is
+    what lets `vllm_attention_forward` avoid writing `impl.scale` per forward.
+    """
+    if module is None:
+        return None
+    scale = getattr(module, "scaling", None)
+    if scale is None:
+        scale = getattr(module, "scale", None)
+    # bool is an int; a `scale=True` flag is not a softmax scale.
+    if isinstance(scale, bool) or not isinstance(scale, (int, float)):
+        return None
+    return float(scale)
+
+
 # Copied from `accelerate`
 @contextmanager
 def init_on_device_without_buffers(device: torch.device):

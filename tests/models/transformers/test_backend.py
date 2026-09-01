@@ -5,6 +5,7 @@
 import contextlib
 import os
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -531,3 +532,193 @@ def test_marking_skipped_without_tokenizer():
     """
     vision_tower = build_marked_model(0, skip_tokenizer_init=True).vision_tower
     assert not isinstance(vision_tower, StageMissingLayer)
+
+
+NUM_LAYERS = 4
+
+
+class AttentionStub(nn.Module):
+    """Just enough of the backend to exercise attention module discovery."""
+
+    _attention_module_prefixes = Base._attention_module_prefixes
+
+    def __init__(
+        self,
+        model: nn.Module,
+        layer_prefix: str = "layers",
+        num_layers: int = NUM_LAYERS,
+    ):
+        super().__init__()
+        self.model = model
+        # As `recursive_replace` records them: rooted at `self.model`, so "model."
+        # stripped.
+        self._layer_names = {i: f"{layer_prefix}.{i}" for i in range(num_layers)}
+
+
+def build_text_stack(model_type: str) -> nn.Module:
+    """A tiny HF decoder stack of `NUM_LAYERS` layers, built on the meta device."""
+    try:
+        config = AutoConfig.for_model(
+            model_type,
+            num_hidden_layers=NUM_LAYERS,
+            hidden_size=64,
+            intermediate_size=128,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=16,
+            vocab_size=VOCAB_SIZE,
+        )
+    except ValueError:
+        pytest.skip(f"The installed transformers has no {model_type!r} model")
+    with torch.device("meta"):
+        return AutoModel.from_config(config)
+
+
+@pytest.mark.parametrize(
+    "model_type",
+    [
+        "llama",
+        # Fuses no QKV at all, so it is only found by `layer_idx` and class name
+        "gemma4_text",
+        # MLA
+        "deepseek_v3",
+    ],
+)
+def test_attention_modules_found(model_type: str):
+    """Every decoder layer's attention module is located, so `attn` can be attached."""
+    stub = AttentionStub(build_text_stack(model_type))
+    assert stub._attention_module_prefixes() == {
+        i: f"model.layers.{i}.self_attn" for i in range(NUM_LAYERS)
+    }
+
+
+def test_attention_modules_found_when_nested():
+    """A text stack under a multimodal wrapper is reached through its own prefix."""
+    wrapper = nn.Module()
+    wrapper.add_module("language_model", build_text_stack("llama"))
+    stub = AttentionStub(wrapper, layer_prefix="language_model.layers")
+    assert stub._attention_module_prefixes() == {
+        i: f"model.language_model.layers.{i}.self_attn" for i in range(NUM_LAYERS)
+    }
+
+
+class FakeAttention(nn.Module):
+    """Mirrors an HF attention module: dispatches by `layer_idx`, named `*Attention`."""
+
+    def __init__(self, layer_idx: int):
+        super().__init__()
+        self.layer_idx = layer_idx
+
+
+class FakeCrossAttention(FakeAttention):
+    """A second dispatcher in the same layer, sharing its `layer_idx`."""
+
+
+class FakeMixer(nn.Module):
+    """A Mamba-style layer: carries a `layer_idx`, but is not attention."""
+
+    def __init__(self, layer_idx: int):
+        super().__init__()
+        self.layer_idx = layer_idx
+
+
+def test_only_unambiguous_attention_modules_are_found():
+    """Layers that cannot be resolved to one module are left on the dict lookup.
+
+    A layer with no attention at all, and one whose sibling shares its `layer_idx`,
+    are both skipped; a vision tower numbering its own layers from 0 is never scanned,
+    because only the decoder stack in `_layer_names` is.
+    """
+    layers = nn.ModuleList()
+    for children in [
+        {"self_attn": FakeAttention(0)},
+        {"mixer": FakeMixer(1)},
+        {"self_attn": FakeAttention(2), "cross_attn": FakeCrossAttention(2)},
+    ]:
+        layer = nn.Module()
+        for name, child in children.items():
+            layer.add_module(name, child)
+        layers.append(layer)
+
+    tower_layers = nn.ModuleList(FakeAttention(i) for i in range(len(layers)))
+    tower = nn.Module()
+    tower.add_module("layers", tower_layers)
+
+    model = nn.Module()
+    model.add_module("layers", layers)
+    model.add_module("vision_tower", tower)
+
+    stub = AttentionStub(model, num_layers=len(layers))
+    assert stub._attention_module_prefixes() == {0: "model.layers.0.self_attn"}
+
+
+@pytest.mark.parametrize(
+    ("attrs", "expected"),
+    [
+        ({"scaling": 0.5}, 0.5),
+        # A few older HF modules call it `scale`
+        ({"scale": 0.5}, 0.5),
+        ({"scaling": 0.5, "scale": 0.25}, 0.5),
+        # Nothing usable declared, so the caller falls back to `head_size**-0.5`
+        ({}, None),
+        ({"scaling": None}, None),
+        # `bool` is an `int`, but a flag is not a softmax scale
+        ({"scale": True}, None),
+        ({"scaling": "auto"}, None),
+    ],
+)
+def test_declared_attn_scale(attrs: dict[str, Any], expected: float | None):
+    """The scale is read off the HF module once, at construction."""
+    from vllm.model_executor.models.transformers.utils import declared_attn_scale
+
+    module = nn.Module()
+    for name, value in attrs.items():
+        setattr(module, name, value)
+
+    assert declared_attn_scale(module) == expected
+    assert declared_attn_scale(None) is None
+
+
+CONSTRUCTION_SCALE = 0.125
+HF_SCALE = 0.25
+
+
+class DummyAttention(nn.Module):
+    """Stands in for a vLLM `Attention`, recording the scale it is asked to use."""
+
+    def __init__(self, scale: float):
+        super().__init__()
+        self.impl = SimpleNamespace(scale=scale)
+
+    def forward(self, query, key, value):
+        return query
+
+
+@pytest.mark.parametrize("attach", [False, True])
+def test_attached_attention_keeps_its_construction_scale(attach: bool):
+    """Only the dict path writes `impl.scale` per forward; an attached layer keeps its.
+
+    The write is what one compiled artifact shared across layers would drop: only the
+    first layer's Python frame runs, leaving layers 1..N on the scale they were built
+    with. Attached layers take the scale from the HF module at construction instead.
+    """
+    from vllm.model_executor.models.transformers import vllm_attention_forward
+    from vllm.model_executor.models.transformers.utils import VLLM_ATTN_ATTR
+
+    attn = DummyAttention(CONSTRUCTION_SCALE)
+    module = FakeAttention(layer_idx=0)
+    if attach:
+        setattr(module, VLLM_ATTN_ATTR, attn)
+
+    query = key = value = torch.zeros(1, 4, 2, 16)
+    vllm_attention_forward(
+        module,
+        query,
+        key,
+        value,
+        None,
+        scaling=HF_SCALE,
+        attention_instances={0: attn},
+    )
+
+    assert attn.impl.scale == (CONSTRUCTION_SCALE if attach else HF_SCALE)

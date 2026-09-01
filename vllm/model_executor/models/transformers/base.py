@@ -59,8 +59,10 @@ from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.model_executor.models.transformers.fuser import BaseFuser, Fusers
 from vllm.model_executor.models.transformers.fusers import MLAFuser
 from vllm.model_executor.models.transformers.utils import (
+    VLLM_ATTN_ATTR,
     attrsetter,
     can_enable_torch_compile,
+    declared_attn_scale,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
@@ -137,7 +139,8 @@ class Base(
         self._target_class: type[nn.Module] = nn.Module
         """Target class for Eagle3 aux hidden state recording."""
         self._layer_names: dict[int, str] = {}
-        """Mapping from layer index to layer name for Eagle3."""
+        """Mapping from decoder layer index to layer name, for Eagle3 and for
+        `_attention_module_prefixes`."""
         self._output_aux_hidden_states_kwargs: dict[str, bool] = {}
         """Kwargs to pass to model forward for Eagle3 aux hidden states."""
 
@@ -519,6 +522,44 @@ class Base(
 
         _recursive_replace(self.model, prefix="model")
 
+    def _attention_module_prefixes(self) -> dict[int, str]:
+        """Decoder layer index -> qualname of the HF module that dispatches attention.
+
+        Matched on the `layer_idx` HF constructs it with -- the one
+        `vllm_attention_forward` indexes `attention_instances` by -- plus a class name
+        ending in `Attention`, so a wrapper like `Zamba2AttentionDecoderLayer`, which
+        carries a `layer_idx` too, is not mistaken for the dispatcher. Not keyed off
+        `self.fusers`: a model can dispatch through the interface without its
+        projections fusing at all, as Gemma 4 does.
+
+        Only the decoder stack in `_layer_names` is scanned, so a vision tower's own
+        attention cannot be read as a text layer, and the match must be unique within a
+        layer. Any layer left out keeps the `attention_instances` lookup.
+        """
+        prefixes: dict[int, str] = {}
+        for index, layer_name in self._layer_names.items():
+            # `_layer_names` has "model." stripped; qualnames here are rooted at it.
+            layer_prefix = maybe_prefix("model", layer_name)
+            layer = self.get_submodule(layer_prefix)
+            found = [
+                name
+                for name, module in layer.named_modules()
+                if name
+                and getattr(module, "layer_idx", None) == index
+                and type(module).__name__.endswith("Attention")
+            ]
+            if len(found) == 1:
+                prefixes[index] = maybe_prefix(layer_prefix, found[0])
+            elif found:
+                logger.debug(
+                    "Layer %d has %d attention modules (%s), so its attention layer "
+                    "stays reachable only through `attention_instances`.",
+                    index,
+                    len(found),
+                    ", ".join(found),
+                )
+        return prefixes
+
     def create_attention_instances(self) -> dict[int, Attention]:
         """
         Create `Attention` instances to inform KV cache allocation.
@@ -527,6 +568,7 @@ class Base(
         attention_instances = {}
         text_config = self.text_config
         attn_cls = self._get_attn_cls()
+        attn_module_prefixes = self._attention_module_prefixes()
 
         # kv_lora_rank indicates that this is an MLA model
         if getattr(text_config, "kv_lora_rank", None) is not None:
@@ -558,8 +600,22 @@ class Base(
                 self.parallel_config, arch_config
             )
             head_size = arch_config.head_size
-            # Default to Llama scale, maybe updated in vllm_attention_forward
-            scale = head_size**-0.5
+
+            # The HF module this layer's attention serves, when it could be located.
+            attn_module = (
+                self.get_submodule(attn_module_prefixes[i])
+                if i in attn_module_prefixes
+                else None
+            )
+
+            # Prefer the module's own scale over the Llama default, as MLA always has.
+            # The alternative is `vllm_attention_forward` writing `impl.scale` per
+            # forward, which one compiled artifact shared across layers would drop for
+            # all but the first -- wrong wherever the scale is not `head_size**-0.5`
+            # (Gemma 3's `query_pre_attn_scalar`, Granite's `attention_multiplier`).
+            scale = declared_attn_scale(attn_module)
+            if scale is None:
+                scale = head_size**-0.5
             num_kv_heads = self.model_config.get_num_kv_heads(
                 self.parallel_config, arch_config
             )
@@ -575,6 +631,9 @@ class Base(
             if attn_cls is MLAAttention:
                 prefix, fuser = mla_fusers[i]
                 mla_module = self.get_submodule(prefix)
+                # MLA has always attached its instance, so never regress to no attach.
+                if attn_module is None:
+                    attn_module = mla_module
                 dims = get_mla_dims(self.model_config)
                 kwargs.update(
                     scale=mla_module.scaling,
@@ -600,10 +659,29 @@ class Base(
                     kwargs["per_layer_sliding_window"] = text_config.sliding_window
 
             attn_instance = attn_cls(**kwargs)
-            if attn_cls is MLAAttention:
-                # Attach MLA attn_instance to mla_module so it appears in
-                # model.named_modules() and runs its process_weights_after_loading
-                mla_module._vllm_mla_attn = attn_instance
+
+            # Attach the instance to the HF module it serves, so that it is in the
+            # module tree at all, which `attention_instances` cannot do: a plain dict
+            # is invisible to `nn.Module.__setattr__`. Being in the tree is what runs
+            # its `process_weights_after_loading` and moves its KV-scale buffers with
+            # `model.to(device)` -- the reason MLA has always attached its instances --
+            # and what lets `vllm_attention_forward` read it off the module rather than
+            # index by `module.layer_idx`, an `int` that bakes layer identity into the
+            # traced graph and so costs one compiled artifact per layer.
+            #
+            # A module already owning the attribute keeps the dict lookup, rather than
+            # having something of its own overwritten.
+            if attn_module is not None:
+                existing = getattr(attn_module, VLLM_ATTN_ATTR, None)
+                if existing is None:
+                    setattr(attn_module, VLLM_ATTN_ATTR, attn_instance)
+                elif existing is not attn_instance:
+                    logger.warning(
+                        "%s already has a `.%s`, so its attention layer stays "
+                        "reachable only through `attention_instances`.",
+                        attn_module_prefixes[i],
+                        VLLM_ATTN_ATTR,
+                    )
             attention_instances[i] = attn_instance
         return attention_instances
 
