@@ -1498,9 +1498,6 @@ class MambaManager(SingleTypeKVCacheManager):
             # Dense caching (default) or no alignment constraint imposed.
             return None
         assert isinstance(kv_cache_spec, MambaSpec)
-        # Mamba uses TP, not DCP: each rank holds the full recurrent state, so a
-        # state block spans kv_cache_spec.block_size tokens regardless of DCP.
-        assert dcp_world_size == 1, "DCP not support mamba now."
         block_size = kv_cache_spec.block_size
         mask = [False] * (end_block - start_block)
 
