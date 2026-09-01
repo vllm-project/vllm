@@ -116,7 +116,7 @@ def _ple_gate(
         H=h,
         HC=hc,
         BLOCK_H=triton.next_power_of_2(h),
-        num_warps=8,
+        num_warps=4,
         launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return gated, normed

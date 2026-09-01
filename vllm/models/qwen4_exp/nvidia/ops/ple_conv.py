@@ -24,7 +24,6 @@ from vllm.triton_utils import tl, triton
 NULL_BLOCK_ID = tl.constexpr(0)
 
 BLOCK_C = 512
-NUM_WARPS = 8
 
 
 @triton.jit(do_not_specialize=["num_reqs", "bs_iters", "has_token_map"])
@@ -286,6 +285,8 @@ def ple_conv(
     else:
         raise ValueError(f"Unsupported short-conv mode: {mode}")
 
+    num_warps = 4 if mode == "prefill" else 8
+
     # MODE and HAS_INIT eliminate accesses to optional None arguments.
     _ple_conv_kernel[(T, triton.cdiv(C, BLOCK_C))](
         inputs,
@@ -311,7 +312,7 @@ def ple_conv(
         SPEC_QUERY_LEN=kernel_spec_query_len,
         MODE=mode,
         HAS_INIT=has_initial_states_arg,
-        num_warps=NUM_WARPS,
+        num_warps=num_warps,
     )
     _ple_conv_writeback_kernel[(num_reqs, triton.cdiv(C, BLOCK_C))](
         inputs,
@@ -332,5 +333,5 @@ def ple_conv(
         STATE_WIDTH=state_width,
         MODE=mode,
         HAS_INIT=has_initial_states_arg,
-        num_warps=NUM_WARPS,
+        num_warps=num_warps,
     )
