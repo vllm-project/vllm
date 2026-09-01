@@ -22,6 +22,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import init_logger
+from vllm.v1.cache_hit_source import (
+    CacheHitSource,
+    normalize_cache_hit_source,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.manager import (
@@ -108,7 +112,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 f"Unknown kv_offload_backend {kv_offload_backend!r}; "
                 f"expected one of {VALID_KV_OFFLOAD_BACKENDS}"
             )
-        self._cache_source = kv_offload_backend
+        self._cache_source = normalize_cache_hit_source(kv_offload_backend)
         disk_mode = kv_offload_backend == "disk"
 
         disk_path = extra_config.get("disk_path", None) or None
@@ -266,7 +270,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         request: "Request",
         num_external_tokens: int,
-    ) -> list[tuple[str, int]]:
+    ) -> list[tuple[CacheHitSource, int]]:
         if num_external_tokens == 0:
             return []
         return [(self._cache_source, num_external_tokens)]

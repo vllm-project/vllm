@@ -180,6 +180,8 @@ class KVConnectorWorkerMetadata(ABC):
 class KVConnectorBase_V1(ABC):
     """Base class for KV connectors."""
 
+    cache_hit_source = CacheHitSource.EXTERNAL
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         """Whether external hits can complete divergent local hybrid hits.
@@ -547,7 +549,7 @@ class KVConnectorBase_V1(ABC):
         """
         if num_external_tokens == 0:
             return []
-        return [(CacheHitSource.EXTERNAL, num_external_tokens)]
+        return [(self.cache_hit_source, num_external_tokens)]
 
     @abstractmethod
     def update_state_after_alloc(

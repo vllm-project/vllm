@@ -232,6 +232,9 @@ def test_nixl_wins_load_over_cpu_offload():
     assert not sched_out.has_sync_kv_loads
 
     assert mc._requests_to_connector[request.request_id] == 0
+    assert mc.get_external_cache_hit_sources(request, 2 * BLOCK_SIZE) == [
+        ("p2p", 2 * BLOCK_SIZE)
+    ]
 
     meta = sched_out.kv_connector_metadata
     assert isinstance(meta, MultiKVConnectorMetadata)
@@ -302,6 +305,7 @@ def test_cpu_offload_wins_when_nixl_has_no_match():
     assert hit_tokens is not None and hit_tokens > 0
     assert mc._requests_to_connector[req2.request_id] == 1
     assert is_async is True
+    assert mc.get_external_cache_hit_sources(req2, hit_tokens) == [("cpu", hit_tokens)]
 
 
 @pytest.mark.parametrize("swa_enabled", [False, True], ids=["fa_only", "fa_sw"])
