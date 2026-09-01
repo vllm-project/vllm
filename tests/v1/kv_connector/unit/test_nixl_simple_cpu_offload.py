@@ -213,7 +213,7 @@ def _multi_connector_config(swa_enabled: bool = False):
 def test_nixl_wins_load_over_cpu_offload():
     """When NixlConnector (index 0) has matched tokens from a remote prefill, it should
     win the load: Nixl metadata tracks the recv while CPU offload metadata has no load
-     scheduled."""
+    scheduled."""
     vllm_config, kv_cache_config = _multi_connector_config()
     scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
     mc = scheduler.connector
@@ -227,6 +227,9 @@ def test_nixl_wins_load_over_cpu_offload():
     )
     scheduler.add_request(request)
     sched_out = scheduler.schedule()
+    # The remote-prefill load is async, so the step has no sync KV loads
+    # and the worker will start the load after the forward.
+    assert not sched_out.has_sync_kv_loads
 
     assert mc._requests_to_connector[request.request_id] == 0
 

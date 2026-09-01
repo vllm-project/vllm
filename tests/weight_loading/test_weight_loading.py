@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.mem_constants import GiB_bytes
 
 MAX_MODEL_LEN = 1024
 MODEL_NAME = os.environ.get(
@@ -41,6 +42,9 @@ def test_weight_loading(vllm_runner):
         quantization=None if QUANTIZATION == "None" else QUANTIZATION,
         max_model_len=MAX_MODEL_LEN,
         tensor_parallel_size=2,
+        # Generating 20 tokens needs a tiny KV cache, while sizing and
+        # allocating a full-size one dominates this test on large devices.
+        kv_cache_memory_bytes=2 * GiB_bytes,
     ) as model:
         output = model.generate_greedy("Hello world!", max_tokens=20)
         print(output)

@@ -134,25 +134,22 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         assert output
 
 
-def swiglu(x, alpha: float = 1.702, beta: float = 1.0, limit: float | None = None):
-    # Note we add an extra bias of 1 to the linear layer
-    # Uses chunked layout: first half is gate, second half is up
-    x_glu, x_linear = torch.chunk(x, 2, dim=-1)
+def swiglu(
+    x,
+    alpha: float = 1.702,
+    beta: float = 1.0,
+    limit: float | None = None,
+    interleaved: bool = False,
+):
+    if interleaved:
+        x_glu, x_linear = x[..., ::2], x[..., 1::2]
+    else:
+        x_glu, x_linear = torch.chunk(x, 2, dim=-1)
     if limit is not None:
         x_glu = x_glu.clamp(max=limit)
         x_linear = x_linear.clamp(min=-limit, max=limit)
     out_glu = x_glu * torch.sigmoid(alpha * x_glu)
     return out_glu * (x_linear + beta)
-
-
-def swigluoai(x, alpha: float = 1.702, limit: float = 7.0):
-    # OAI swiglu uses interleaved layout: gate/up alternating
-    # See SwigluOAIAndMul in vllm/model_executor/layers/activation.py
-    gate, up = x[..., ::2], x[..., 1::2]
-    gate = gate.clamp(max=limit)
-    up = up.clamp(min=-limit, max=limit)
-    glu = gate * torch.sigmoid(gate * alpha)
-    return (up + 1) * glu
 
 
 fp4_lookup_table = [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0, -0.5, -1, -1.5, -2, -3, -4, -6]
@@ -242,12 +239,9 @@ def reference_moe(
 
     # Apply activation
     if activation in ("swiglu", "silu"):
-        if use_interleaved_layout:
-            # SWIGLUOAI: interleaved gate/up layout
-            t = swigluoai(t, alpha=alpha, limit=limit)
-        else:
-            # Standard swiglu/silu: chunked layout
-            t = swiglu(t, alpha=alpha, beta=beta, limit=limit)
+        t = swiglu(
+            t, alpha=alpha, beta=beta, limit=limit, interleaved=use_interleaved_layout
+        )
     elif activation == "relu2":
         # RELU2_NO_MUL: relu(x)^2
         t = torch.relu(t)
@@ -1403,6 +1397,14 @@ ROCM_BACKEND_CONFIGS = {
         "requires_aiter": True,
         "requires_gfx950": True,
     },
+    "AITER_TRITON_MXFP4_BF16": {
+        "activation": "SILU",
+        "rtol": 0.3,
+        "percent": 0.95,
+        "requires_aiter": True,
+        "requires_gfx950": False,
+        "interleaved_layout": True,
+    },
     "AITER_MXFP4_FP8": {
         "activation": "SWIGLUOAI",
         "rtol": 0.5,
@@ -1670,7 +1672,9 @@ def test_rocm_mxfp4_moe_oracle(
     # Determine activation type and layout
     # SWIGLUOAI uses interleaved layout (gate/up alternating)
     # SILU uses chunked layout (first half gate, second half up)
-    use_interleaved = activation == MoEActivation.SWIGLUOAI
+    use_interleaved = bool(
+        config.get("interleaved_layout", activation == MoEActivation.SWIGLUOAI)
+    )
     if activation in [MoEActivation.SWIGLUOAI, MoEActivation.SILU]:
         act_name = "swiglu"
     else:

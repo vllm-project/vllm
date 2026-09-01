@@ -60,7 +60,8 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, StopParam
+from vllm.entrypoints.generate.base.protocol import StopParam
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -252,6 +253,7 @@ class ResponsesRequest(OpenAIBaseModel):
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -622,8 +624,15 @@ class ResponsesRequest(OpenAIBaseModel):
                 if isinstance(tool, dict):
                     if tool.get("type") == "namespace":
                         namespace = tool.get("name")
-                        for namespaced_tool in tool.get("tools", []):
-                            namespaced_name = namespaced_tool.get("name")
+                        namespaced_tools = tool.get("tools")
+                        if not isinstance(namespaced_tools, list):
+                            return data
+                        for namespaced_tool in namespaced_tools:
+                            namespaced_name = (
+                                namespaced_tool.get("name")
+                                if isinstance(namespaced_tool, dict)
+                                else getattr(namespaced_tool, "name", None)
+                            )
                             tool_names.add(namespaced_name)
                             tool_names.add(f"{namespace}__{namespaced_name}")
                     else:
