@@ -108,6 +108,13 @@ def cuda_platform_plugin() -> str | None:
 
 
 def rocm_platform_plugin() -> str | None:
+    # An explicit ROCm target is authoritative. This is needed on APUs such as
+    # Strix Halo (gfx1151), where amdsmi can fail to enumerate the integrated
+    # GPU even though the installed HIP runtime and PyTorch are ROCm-capable.
+    if envs.VLLM_TARGET_DEVICE == "rocm":
+        logger.debug("Explicitly selected ROCm platform.")
+        return "vllm.platforms.rocm.RocmPlatform"
+
     is_rocm = False
     logger.debug("Checking if ROCm platform is available.")
     try:
