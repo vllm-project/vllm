@@ -23,6 +23,9 @@ from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.vllm import VllmConfig
+from vllm.model_executor.kernels.linear.mxfp8.marlin import (
+    MarlinMxfp8LinearKernel,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -621,6 +624,11 @@ def test_online_quantization(
             if quant_scheme == "mxfp4":
                 # Packed e2m1 values, two per byte.
                 assert o_proj.weight.dtype == torch.uint8
+            elif isinstance(
+                o_proj.quant_method, Mxfp8OnlineLinearMethod
+            ) and isinstance(o_proj.quant_method.kernel, MarlinMxfp8LinearKernel):
+                # Marlin repacks MXFP8 values into int32 words.
+                assert o_proj.weight.dtype == torch.int32
             elif current_platform.is_cuda() or current_platform.is_xpu():
                 assert o_proj.weight.dtype == torch.float8_e4m3fn
             elif current_platform.is_rocm():
