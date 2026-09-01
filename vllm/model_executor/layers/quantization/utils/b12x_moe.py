@@ -5,7 +5,7 @@
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.model_executor.layers.quantization.utils.flashinfer_moe import (
     swap_w13_to_w31,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
