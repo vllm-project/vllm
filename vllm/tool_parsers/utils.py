@@ -29,6 +29,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
 Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
@@ -334,15 +335,29 @@ def _get_tool_schema_defs(
 ) -> dict:
     all_defs: dict[str, dict[str, Any]] = {}
     for tool in tools:
-        _, params = _extract_tool_info(tool)
+        name, params = _extract_tool_info(tool)
         if params is None:
             continue
         defs = params.pop("$defs", {})
+        # `parameters` is an arbitrary caller-supplied dict, so `$defs` is
+        # whatever the request said it was. The `{}` default only covers the
+        # key being absent; an explicit `"$defs": null` (or a list, or a
+        # string) reaches `.items()` below and raises `AttributeError`, which
+        # is not caught between here and the route and so becomes a 500.
+        if not isinstance(defs, dict):
+            raise VLLMValidationError(
+                f"`$defs` in the parameters of tool '{name}' must be an "
+                f"object, got {type(defs).__name__}.",
+                parameter="tools",
+            )
         for def_name, def_schema in defs.items():
             if def_name in all_defs and all_defs[def_name] != def_schema:
-                raise ValueError(
+                # Also caller-caused, so a 400 rather than the 500 a plain
+                # ValueError produced here.
+                raise VLLMValidationError(
                     f"Tool definition '{def_name}' has multiple schemas, "
-                    "which is not supported."
+                    "which is not supported.",
+                    parameter="tools",
                 )
             all_defs[def_name] = def_schema
     return all_defs
