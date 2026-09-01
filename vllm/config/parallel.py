@@ -123,6 +123,9 @@ class ParallelConfig:
     """Number of pipeline parallel groups."""
     tensor_parallel_size: int = Field(default=1, ge=1)
     """Number of tensor parallel groups."""
+    ngram_parallel_size: int | None = Field(default=None, ge=1)
+    """Number of ranks that shard each PLE n-gram embedding table. Defaults
+    to ``tensor_parallel_size`` and may span multiple data-parallel replicas."""
     prefill_context_parallel_size: int = Field(default=1, ge=1)
     """Number of ranks that split prefill sequence computation. PCP expands
     the process world size but does not increase the KV-cache shard count."""
@@ -543,6 +546,22 @@ class ParallelConfig:
                 )
 
         tp = self.tensor_parallel_size
+        if self.ngram_parallel_size is None:
+            self.ngram_parallel_size = tp
+        np = self.ngram_parallel_size
+        if np % tp != 0:
+            raise ValueError(
+                "ngram_parallel_size must be divisible by tensor_parallel_size, "
+                f"but got NP={np} and TP={tp}."
+            )
+        if self.data_parallel_size % (np // tp) != 0:
+            raise ValueError(
+                "data_parallel_size must be divisible by the number of DP "
+                f"replicas spanned by NP, but got NP={np}, TP={tp}, and "
+                f"DP={self.data_parallel_size}."
+            )
+        if self.enable_elastic_ep and np != tp:
+            raise ValueError("NP spanning DP is not supported with elastic EP yet.")
         pcp = self.prefill_context_parallel_size
         dcp = self.decode_context_parallel_size
         if pcp > 1 and self.data_parallel_size > 1:

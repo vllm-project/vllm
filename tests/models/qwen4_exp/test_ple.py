@@ -12,6 +12,7 @@ from torch.nn import functional as F
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
     compute_ple_shard_overlap,
@@ -20,10 +21,31 @@ from vllm.models.qwen4_exp.common.ple import (
 from vllm.models.qwen4_exp.nvidia import ple_layer as ple_layer_module
 from vllm.models.qwen4_exp.nvidia.ple_layer import (
     Qwen4ExpNGramEmbedding,
+    Qwen4ExpPinnedHostEmbedding,
+    Qwen4ExpPLEDeviceEmbedding,
+    Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLELayer,
-    _get_ple_embedding_quant_method,
+    Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
+
+
+def _mock_np_group(
+    monkeypatch: pytest.MonkeyPatch,
+    world_size: int = 1,
+    all_reduce=lambda tensor: tensor,
+) -> None:
+    group = SimpleNamespace(
+        rank_in_group=0,
+        world_size=world_size,
+        all_reduce=all_reduce,
+    )
+    monkeypatch.setattr(ple_layer_module, "get_np_group", lambda: group)
+    monkeypatch.setattr(
+        ple_layer_module,
+        "get_tp_group",
+        lambda: SimpleNamespace(world_size=world_size),
+    )
 
 
 def _make_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbedding:
@@ -159,9 +181,55 @@ def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
     assert torch.equal(module.ngram_embedding.weight_scale, weight_scale)
 
 
+@pytest.mark.parametrize(("dp_rank", "local_tokens"), [(0, 2), (1, 3)])
+def test_np_lookup_gathers_and_returns_dp_local_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    dp_rank: int,
+    local_tokens: int,
+) -> None:
+    embedding = Qwen4ExpPLEDeviceEmbedding.__new__(Qwen4ExpPLEDeviceEmbedding)
+    nn.Module.__init__(embedding)
+    embedding.tp_size = 2
+    embedding.np_data_parallel_size = 2
+    embedding.data_parallel_rank = dp_rank
+    gathered_ids = torch.tensor([[10], [11], [0], [20], [21], [22]])
+    group = SimpleNamespace(
+        rank_in_group=dp_rank,
+        all_gather=lambda input_ids, dim: gathered_ids,
+        all_reduce=lambda embeddings: embeddings,
+    )
+    embedding.parallel_group = group
+    forward_context = SimpleNamespace(
+        dp_metadata=SimpleNamespace(
+            num_tokens_across_dp_cpu=torch.tensor([2, 3]),
+        )
+    )
+    monkeypatch.setattr(ple_layer_module, "get_np_dp_group", lambda: group)
+    monkeypatch.setattr(
+        ple_layer_module, "get_forward_context", lambda: forward_context
+    )
+    local_ids = gathered_ids[dp_rank * 3 : dp_rank * 3 + local_tokens]
+    embeddings = torch.arange(12).reshape(6, 2)
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        assert torch.equal(input_ids, gathered_ids)
+        return embeddings
+
+    monkeypatch.setattr(
+        ple_layer_module.PLEVocabParallelEmbedding,
+        "forward",
+        forward,
+    )
+    output = embedding._fetch_np_embeddings_impl(local_ids)
+
+    expected = embeddings[dp_rank * 3 : dp_rank * 3 + local_tokens]
+    assert torch.equal(output, expected)
+
+
 def _make_fp8_embedding_layer(
     monkeypatch: pytest.MonkeyPatch,
-) -> embedding_module.VocabParallelEmbedding:
+) -> Qwen4ExpPLEDeviceEmbedding:
+    _mock_np_group(monkeypatch)
     monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
@@ -171,12 +239,13 @@ def _make_fp8_embedding_layer(
         parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
     )
     method = Qwen4ExpPLEFp8EmbeddingMethod()
-    layer = embedding_module.VocabParallelEmbedding(
+    layer = Qwen4ExpPLEDeviceEmbedding(
         3,
         2,
         params_dtype=torch.bfloat16,
         padding_size=1,
-        quant_method=method,
+        prefix="test.ple_embedding",
+        embedding_method=method,
     )
     weight = torch.tensor([[1.0, 2.0], [4.0, 8.0], [16.0, 32.0]])
     layer.weight.data.copy_(weight.to(torch.float8_e4m3fn))
@@ -205,7 +274,7 @@ def test_ple_fp8_embedding_dequantizes_in_ple_layer(monkeypatch) -> None:
     torch.testing.assert_close(output, (weight[[2, 0]] * 0.25).bfloat16())
 
 
-def test_ple_fp8_embedding_uses_int8_for_tp_reduce(monkeypatch) -> None:
+def test_ple_fp8_embedding_uses_int8_for_parallel_reduce(monkeypatch) -> None:
     monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         embedding_module, "get_tensor_model_parallel_world_size", lambda: 2
@@ -228,17 +297,14 @@ def test_ple_fp8_embedding_uses_int8_for_tp_reduce(monkeypatch) -> None:
         reduced_dtypes.append(tensor.dtype)
         return tensor.clone()
 
-    monkeypatch.setattr(
-        embedding_module,
-        "tensor_model_parallel_all_reduce",
-        all_reduce,
-    )
-    layer = embedding_module.VocabParallelEmbedding(
+    _mock_np_group(monkeypatch, world_size=2, all_reduce=all_reduce)
+    layer = Qwen4ExpPLEDeviceEmbedding(
         4,
         2,
         params_dtype=torch.bfloat16,
         padding_size=1,
-        quant_method=Qwen4ExpPLEFp8EmbeddingMethod(),
+        prefix="test.ple_embedding",
+        embedding_method=Qwen4ExpPLEFp8EmbeddingMethod(),
     )
     layer.weight.data.copy_(
         torch.tensor([[1.0, 2.0], [4.0, 8.0]]).to(torch.float8_e4m3fn)
@@ -260,17 +326,252 @@ def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
         weight_block_size=[128, 128],
     )
     assert isinstance(
-        _get_ple_embedding_quant_method(quant_config, prefix),
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
         Qwen4ExpPLEFp8EmbeddingMethod,
     )
 
     quant_config.ignored_layers = [f"{prefix}.shard_0"]
-    assert _get_ple_embedding_quant_method(quant_config, prefix) is None
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(None, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+
+def test_ple_embedding_rejects_unsupported_quantization_configs() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    with pytest.raises(NotImplementedError, match="SimpleNamespace"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(SimpleNamespace(), prefix)
+
+    nvfp4_config = ModelOptNvFp4Config(exclude_modules=[])
+    with pytest.raises(NotImplementedError, match="ModelOptNvFp4Config"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(nvfp4_config, prefix)
+
+    dynamic_fp8_config = Fp8Config(
+        is_checkpoint_fp8_serialized=False,
+        ignored_layers=[],
+    )
+    with pytest.raises(NotImplementedError, match="serialized FP8"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(dynamic_fp8_config, prefix)
+
+
+def test_ple_embedding_respects_modelopt_exclusion() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = ModelOptNvFp4Config(exclude_modules=[prefix])
+
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+
+def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = ModelOptNvFp4Config(exclude_modules=[prefix])
+
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(
+            quant_config,
+            prefix,
+            "float8_e4m3fn",
+        ),
+        Qwen4ExpPLEFp8EmbeddingMethod,
+    )
+
+
+def test_ngram_embedding_delegates_prefetch_completion_to_backend() -> None:
+    class PrefetchEmbedding(nn.Module):
+        supports_prefetch = True
+
+        def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+            return hidden_states[:, :2]
+
+    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
+    nn.Module.__init__(module)
+    module.ngram_embedding = PrefetchEmbedding()
+    hidden_states = torch.arange(12).reshape(3, 4)
+
+    output = module(
+        hidden_states,
+        torch.arange(3),
+        torch.tensor([0, 3]),
+        torch.empty(0),
+    )
+
+    assert torch.equal(output, hidden_states[:, :2])
+
+
+def test_ngram_embedding_delegates_prefetch_start_to_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    class PrefetchEmbedding(nn.Module):
+        supports_prefetch = True
+
+        def start_prefetch(
+            self,
+            hidden_states: torch.Tensor,
+            ngram_ids: torch.Tensor,
+        ) -> None:
+            calls.append((hidden_states, ngram_ids))
+
+    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
+    nn.Module.__init__(module)
+    module.ngram_embedding = PrefetchEmbedding()
+    hidden_states = torch.zeros(3, 4)
+    ngram_ids = torch.arange(6).reshape(3, 2)
+    monkeypatch.setattr(module, "_compute_ngram_ids", lambda *args: ngram_ids)
+
+    module.start_prefetch(
+        hidden_states,
+        torch.arange(3),
+        torch.tensor([0, 3]),
+        torch.empty(0),
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] is hidden_states
+    assert calls[0][1] is ngram_ids
+
+
+def test_pinned_embedding_forward_finalizes_prefetched_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    embedding = Qwen4ExpPinnedHostEmbedding.__new__(Qwen4ExpPinnedHostEmbedding)
+    nn.Module.__init__(embedding)
+    embedding._prefetch_buffer = torch.empty(4, 2, 3)
+    embedding._output_dim = 6
+    embedding.layer_name = "test.ple"
+    hidden_states = torch.zeros(2, 4)
+    expected = torch.arange(12).reshape(2, 6)
+
+    def finalize_prefetched(
+        actual_hidden_states: torch.Tensor,
+        prefetch_output: torch.Tensor,
+        output: torch.Tensor,
+        layer_name: str,
+    ) -> None:
+        assert actual_hidden_states is hidden_states
+        assert prefetch_output is embedding._prefetch_buffer
+        assert layer_name == embedding.layer_name
+        output.copy_(expected)
+
+    monkeypatch.setattr(
+        torch.ops.vllm,
+        "qwen4_exp_ple_finalize_prefetched",
+        finalize_prefetched,
+    )
+
+    output = embedding(hidden_states)
+
+    assert torch.equal(output, expected)
+
+
+def test_ple_device_embedding_allocates_on_active_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_np_group(monkeypatch)
+    monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    embedding_method = Qwen4ExpPLEUnquantizedEmbeddingMethod()
+
+    with torch.device("cuda:0"):
+        embedding = Qwen4ExpPLEDeviceEmbedding(
+            4,
+            3,
+            params_dtype=torch.bfloat16,
+            padding_size=1,
+            prefix="test.ple_embedding",
+            embedding_method=embedding_method,
+        )
+
+    assert embedding.weight.device == torch.device("cuda:0")
+    assert embedding.embedding_method is embedding_method
+    assert embedding.quant_method is embedding_method
+    assert not embedding.supports_prefetch
+
+
+@pytest.mark.parametrize("fp8_checkpoint", [False, True])
+def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
+    monkeypatch: pytest.MonkeyPatch,
+    fp8_checkpoint: bool,
+) -> None:
+    _mock_np_group(monkeypatch)
+    monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        embedding_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    with torch.device("cuda:0"):
+        embedding_method = (
+            Qwen4ExpPLEFp8EmbeddingMethod()
+            if fp8_checkpoint
+            else Qwen4ExpPLEUnquantizedEmbeddingMethod()
+        )
+        embedding = Qwen4ExpPinnedHostEmbedding(
+            4,
+            3,
+            params_dtype=torch.bfloat16,
+            padding_size=1,
+            prefix="test.ple_embedding",
+            embedding_method=embedding_method,
+        )
+
+    storage_dtype = torch.float8_e4m3fn if fp8_checkpoint else torch.bfloat16
+    loaded_weight = (
+        torch.arange(12, dtype=torch.float32).reshape(4, 3).to(storage_dtype)
+    )
+    copied = copy_ple_embedding_shard_(
+        embedding.weight,
+        loaded_weight,
+        checkpoint_start=0,
+        tp_start=0,
+        tp_end=4,
+    )
+    input_ids = torch.tensor([[3, 0], [1, 2]], device="cuda:0")
+    output = embedding._lookup(input_ids)
+    if fp8_checkpoint:
+        embedding.weight_scale.data.fill_(0.25)
+    dequantized = embedding.dequantize(output, torch.bfloat16)
+
+    assert copied == 4
+    assert embedding.weight.device.type == "cpu"
+    assert embedding.weight.is_pinned()
+    assert embedding.embedding_method is embedding_method
+    assert not hasattr(embedding, "quant_method")
+    assert embedding._uva_weight.device.type == "cuda"
+    assert embedding.supports_prefetch
+    assert embedding._prefetch_stream.device == embedding._uva_weight.device
+    assert embedding._prefetch_buffer.shape == (0, 1, 3)
+    assert output.dtype == torch.bfloat16
+    expected = loaded_weight[input_ids.cpu()].to(device="cuda:0", dtype=torch.bfloat16)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    expected_scale = 0.25 if fp8_checkpoint else 1.0
+    torch.testing.assert_close(
+        dequantized,
+        expected * expected_scale,
+        rtol=0,
+        atol=0,
+    )
 
 
 def test_ple_ngram_ids_custom_op_uses_current_request_layout(monkeypatch) -> None:
     class RuntimeNGramEmbedding(nn.Module):
-        def compute_ngram_ids(
+        def _compute_ngram_ids_impl(
             self,
             input_ids: torch.Tensor,
             query_start_loc: torch.Tensor,

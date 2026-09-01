@@ -46,6 +46,14 @@ def test_optional_type():
     assert optional_type_func("42") == 42
 
 
+def test_ngram_parallel_size_short_option():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args(["-tp", "4", "-dp", "2", "-np", "8"])
+
+    assert args.ngram_parallel_size == 8
+
+
 @pytest.mark.parametrize(
     ("type_hint", "type", "expected"),
     [
