@@ -4,6 +4,7 @@
 
 import pytest
 
+import vllm.envs as envs
 from vllm.v1.metrics.reader import Counter
 
 from ...models.utils import check_logprobs_close
@@ -21,29 +22,48 @@ PROMPTS = [
 ]
 
 
-def _check_replayssm_parity(vllm_runner, model_name, *, tensor_parallel_size=1):
+def _check_replayssm_parity(
+    vllm_runner,
+    model_name,
+    *,
+    tensor_parallel_size=1,
+    mamba_backend: str = "triton",
+    name_1: str = "replayssm",
+    require_v2: bool = False,
+    monkeypatch: pytest.MonkeyPatch | None = None,
+):
     # Compare logprobs, not greedy ids: ReplaySSM's fp arithmetic can flip a
     # near-tie. Baseline and ReplaySSM run at the same TP, so TP numerics are
     # common-mode and only ReplaySSM varies.
+    if require_v2:
+        assert monkeypatch is not None
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+        envs.disable_envs_cache()
+
     common = dict(
         max_model_len=1024,
         trust_remote_code=True,
         enable_prefix_caching=False,
         mamba_cache_mode="none",
         tensor_parallel_size=tensor_parallel_size,
+        mamba_backend=mamba_backend,
     )
     with vllm_runner(model_name, **common) as llm:
+        if require_v2:
+            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
         baseline = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
     with vllm_runner(
         model_name, use_replayssm=True, replayssm_buffer_len=16, **common
     ) as llm:
+        if require_v2:
+            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
         replay = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
 
     check_logprobs_close(
         outputs_0_lst=baseline,
         outputs_1_lst=replay,
         name_0="baseline",
-        name_1="replayssm",
+        name_1=name_1,
     )
 
 
@@ -58,6 +78,21 @@ def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
     # Tensor-parallel correctness: ReplaySSM's caches and checkpoint state are
     # sharded per rank, so TP2 decode must still match the baseline at TP2.
     _check_replayssm_parity(vllm_runner, model_name, tensor_parallel_size=2)
+
+
+@pytest.mark.parametrize("model_name", MODELS)
+def test_replayssm_flashinfer_decode_matches_baseline_v2(
+    vllm_runner, model_name, monkeypatch
+):
+    pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
+    _check_replayssm_parity(
+        vllm_runner,
+        model_name,
+        mamba_backend="flashinfer",
+        name_1="replayssm_flashinfer_v2",
+        require_v2=True,
+        monkeypatch=monkeypatch,
+    )
 
 
 # Prefix spans several mamba blocks; prefix caching only reuses full blocks.
