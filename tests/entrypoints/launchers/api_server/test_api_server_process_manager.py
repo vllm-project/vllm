@@ -14,6 +14,7 @@ from tests.entrypoints.launchers.api_server._api_server_spawn_workers import (
     exit_before_report_worker,
 )
 from vllm.utils.network_utils import make_zmq_socket, split_zmq_path
+from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.utils import (
     APIServerProcessManager,
     get_engine_client_zmq_addr,
@@ -30,6 +31,16 @@ def mock_run_api_server_worker(listen_address, sock, args, client_config=None):
     print(f"Mock worker started with client_config: {client_config}")
     time.sleep(WORKER_RUNTIME_SECONDS)
     print("Mock worker completed successfully")
+
+
+def update_admission_stats_worker(listen_address, sock, args, client_config):
+    stats = SharedAdmissionStats(
+        client_config,
+        client_config["client_count"],
+        client_config["client_index"],
+    )
+    value = client_config["client_index"] + 1
+    stats.set_num_requests(value)
 
 
 # Module-level stub for the gather_actual_addresses test. Must be
@@ -129,6 +140,27 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
         # Verify all processes were terminated
         for proc in manager.processes:
             assert not proc.is_alive()
+
+
+@pytest.mark.skip_global_cleanup
+def test_api_server_processes_share_admission_stats(api_server_args):
+    args = api_server_args.copy()
+    args["target_server_fn"] = update_admission_stats_worker
+    manager = APIServerProcessManager(**args)
+
+    try:
+        for process in manager.processes:
+            process.join(timeout=30)
+            assert process.exitcode == 0
+
+        stats = SharedAdmissionStats(
+            {"mp_admission_counters": manager.admission_counters},
+            client_count=3,
+            client_index=0,
+        )
+        assert stats.get_num_requests() == 6
+    finally:
+        manager.shutdown()
 
 
 @patch("vllm.v1.utils.run_api_server_worker_proc", mock_run_api_server_worker)

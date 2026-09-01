@@ -14,6 +14,7 @@ These tests cover:
 
 import argparse
 import asyncio
+import multiprocessing
 from http import HTTPStatus
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -34,6 +35,7 @@ from vllm.exceptions import (
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import human_readable_int
+from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import OutputProcessor
 
@@ -66,6 +68,8 @@ def _make_async_llm(
     llm.output_processor = MagicMock()
     llm.output_processor.get_num_unfinished_requests.return_value = num_unfinished
     llm.output_processor.get_num_queued_tokens.return_value = num_queued_tokens
+    llm.admission_stats = SharedAdmissionStats(None, 1, 0)
+    llm.admission_stats.set_num_requests(num_unfinished)
     return llm
 
 
@@ -82,6 +86,42 @@ def _make_scheduler_config(**kwargs) -> SchedulerConfig:
         is_encoder_decoder=False,
         **kwargs,
     )
+
+
+def _make_shared_stats(client_count: int = 2) -> list[SharedAdmissionStats]:
+    counters = multiprocessing.RawArray(
+        "q", SharedAdmissionStats.num_counters(client_count)
+    )
+    return [
+        SharedAdmissionStats({"mp_admission_counters": counters}, client_count, index)
+        for index in range(client_count)
+    ]
+
+
+@pytest.mark.skip_global_cleanup
+def test_shared_admission_stats_aggregate_api_servers():
+    server_0, server_1 = _make_shared_stats()
+
+    server_0.set_num_requests(2)
+    assert server_0.get_num_requests() == 2
+    server_1.set_num_requests(3)
+    assert server_0.get_num_requests() == server_1.get_num_requests() == 5
+
+    server_0.set_num_requests(1)
+    assert server_0.get_num_requests() == 4
+
+
+@pytest.mark.skip_global_cleanup
+def test_shared_request_snapshot_enforces_global_limit():
+    server_0, server_1 = _make_shared_stats()
+    server_0.set_num_requests(2)
+    llm = _make_async_llm(max_num_queued_reqs=2)
+    llm.admission_stats = server_1
+
+    with pytest.raises(QueueOverflowError):
+        llm.check_admission()
+
+    assert server_0.get_num_requests() == 2
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +312,7 @@ async def test_concurrent_single_request_admission_respects_limit():
         request_states[request.request_id] = _make_req_state(
             len(request.prompt_token_ids)
         )
+        llm.admission_stats.set_num_requests(len(request_states))
 
     llm.output_processor.add_request.side_effect = add_request
 
