@@ -1410,3 +1410,66 @@ def test_suffix_match_at_module_boundary(prefix, ignored_layer, expected):
         )
         is expected
     )
+
+
+MXFP4_GLOBAL = {"weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32}}
+FP8_PER_BLOCK = {
+    "weight": {"dtype": "fp8_e4m3", "qscheme": "per_block", "block_size": [128, 128]}
+}
+LAYER = "language_model.model.layers.0"
+
+
+def _mixed_precision_config(
+    layer_quant_config: dict[str, dict],
+    packed_modules_mapping: dict[str, list[str]],
+) -> QuarkConfig:
+    config = QuarkConfig(
+        {
+            "global_quant_config": MXFP4_GLOBAL,
+            "layer_type_quant_config": {},
+            "layer_quant_config": layer_quant_config,
+        }
+    )
+    config.packed_modules_mapping = packed_modules_mapping
+    return config
+
+
+def test_identity_packed_mapping_uses_layer_quant_config():
+    # Regression for mixed-precision Quark checkpoints: plamo3/molmo-style
+    # models map a module to itself, so substituting the shard name is a no-op
+    # and the layer fell through to global_quant_config even when
+    # layer_quant_config named it, surfacing as a shape mismatch at load.
+    config = _mixed_precision_config(
+        {"*mlp.gate_up_proj": FP8_PER_BLOCK, "*mlp.down_proj": FP8_PER_BLOCK},
+        {"qkv_proj": ["qkv_proj"], "gate_up_proj": ["gate_up_proj"]},
+    )
+    module = torch.nn.Identity()
+    gate_up_proj = f"{LAYER}.mlp.gate_up_proj"
+
+    assert config.get_layer_quant_config_from_name(gate_up_proj) == FP8_PER_BLOCK
+    assert config._find_matched_config(gate_up_proj, module) == FP8_PER_BLOCK
+    # Sibling outside packed_modules_mapping; the two must agree.
+    assert (
+        config._find_matched_config(f"{LAYER}.mlp.down_proj", module) == FP8_PER_BLOCK
+    )
+    # An identity entry that layer_quant_config does not name keeps the global
+    # scheme.
+    assert (
+        config._find_matched_config(f"{LAYER}.self_attn.qkv_proj", module)
+        == MXFP4_GLOBAL
+    )
+
+
+def test_fused_packed_mapping_still_resolves_through_shards():
+    # A genuine fusion keeps expanding to the shard names the checkpoint
+    # actually carries.
+    config = _mixed_precision_config(
+        {"*mlp.gate_proj": FP8_PER_BLOCK, "*mlp.up_proj": FP8_PER_BLOCK},
+        {"gate_up_proj": ["gate_proj", "up_proj"]},
+    )
+    gate_up_proj = f"{LAYER}.mlp.gate_up_proj"
+
+    assert config.get_layer_quant_config_from_name(gate_up_proj) == FP8_PER_BLOCK
+    assert (
+        config._find_matched_config(gate_up_proj, torch.nn.Identity()) == FP8_PER_BLOCK
+    )

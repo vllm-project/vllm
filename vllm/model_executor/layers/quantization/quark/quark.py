@@ -749,6 +749,20 @@ class QuarkConfig(QuantizationConfig):
             return quant_config[0] if len(quant_config) == 1 else None
         return quant_config
 
+    def _match_layer_quant_config(self, layer_name: str) -> dict[str, Any] | None:
+        """Match ``layer_name`` against the ``layer_quant_config`` patterns."""
+        layer_quant_config = cast(
+            dict[str, Any], self.quant_config.get("layer_quant_config") or {}
+        )
+        for name_pattern, config in layer_quant_config.items():
+            if "*" not in name_pattern:
+                matches = layer_name in name_pattern
+            else:
+                matches = fnmatch.fnmatch(layer_name, name_pattern)
+            if matches:
+                return config
+        return None
+
     def get_layer_quant_config_from_name(
         self, layer_name: str
     ) -> dict[str, Any] | None:
@@ -761,7 +775,9 @@ class QuarkConfig(QuantizationConfig):
                 if shard_name != layer_name:
                     config = self.get_layer_quant_config_from_name(shard_name)
                 else:
-                    config = None
+                    # Identity entry: the shard name is the layer name, so
+                    # recursing would not terminate. Look it up directly.
+                    config = self._match_layer_quant_config(layer_name)
                 shard_configs.append(config)
 
             matched_configs = [config for config in shard_configs if config is not None]
@@ -777,17 +793,7 @@ class QuarkConfig(QuantizationConfig):
                 return matched_configs[0]
             return None
         else:
-            layer_quant_config = cast(
-                dict[str, Any], self.quant_config.get("layer_quant_config") or {}
-            )
-            for name_pattern, config in layer_quant_config.items():
-                if "*" not in name_pattern:
-                    matches = layer_name in name_pattern
-                else:
-                    matches = fnmatch.fnmatch(layer_name, name_pattern)
-                if matches:
-                    return config
-            return None
+            return self._match_layer_quant_config(layer_name)
 
     def _find_matched_config(
         self, layer_name: str, module: torch.nn.Module | type[torch.nn.Module]
@@ -813,11 +819,12 @@ class QuarkConfig(QuantizationConfig):
             for shard_proj_name in shard_proj_names:
                 shard_name = layer_name.replace(proj_name, shard_proj_name)
                 if shard_name == layer_name:
-                    config = fallback_config
+                    # Identity entry: see get_layer_quant_config_from_name.
+                    config = self._match_layer_quant_config(layer_name)
                 else:
                     config = self.get_layer_quant_config_from_name(shard_name)
-                    if config is None:
-                        config = fallback_config
+                if config is None:
+                    config = fallback_config
                 shard_configs.append(config)
 
             if not all(
