@@ -21,6 +21,7 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
 )
 from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseTritonImpl
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -252,7 +253,7 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
         _decode_score_program_budget,
     )
 
-    torch.manual_seed(0)
+    set_random_seed(0)
     head_dim = 128
     block_size_q = 1 << (max_decode_query_len - 1).bit_length()
     score_stride = (max_block + 15) // 16 * 16
@@ -1082,7 +1083,7 @@ def test_amd_decode_fused_topk_total_order_and_replay(
         _decode_topk_fused_kernel,
     )
 
-    torch.manual_seed(0)
+    set_random_seed(0)
     block_size_t = 1 << (topk - 1).bit_length()
     long_seq_lens_list = [
         0,
