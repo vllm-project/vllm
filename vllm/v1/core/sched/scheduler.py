@@ -266,12 +266,18 @@ class Scheduler(SchedulerInterface):
         # reserve between a chunk boundary and the prefill end.
         self.num_prefill_lookahead = 0
         self.dynamic_sd_lookup: list[int] | None = None
+        self.dynamic_sd_seq_len_lookup: list[tuple[int, int, int]] | None = None
+
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
                 self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
                     speculative_config.num_speculative_tokens_per_batch_size,
                     vllm_max_batch_size=self.scheduler_config.max_num_seqs,
                     vllm_num_speculative_tokens=self.num_spec_tokens,
+                )
+            if speculative_config.num_speculative_tokens_per_seq_len:
+                self.dynamic_sd_seq_len_lookup = (
+                    speculative_config.num_speculative_tokens_per_seq_len
                 )
             self.use_eagle = speculative_config.use_eagle()
             if self.use_eagle:
@@ -1330,6 +1336,16 @@ class Scheduler(SchedulerInterface):
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
                 len(num_scheduled_tokens)
             ]
+        elif (
+            self.dynamic_sd_seq_len_lookup is not None and len(num_scheduled_tokens) > 0
+        ):
+            max_seq_len = max(
+                self.requests[req_id].num_tokens for req_id in num_scheduled_tokens
+            )
+            for start, end, tokens in self.dynamic_sd_seq_len_lookup:
+                if start <= max_seq_len <= end:
+                    num_spec_tokens_to_schedule = min(tokens, self.num_spec_tokens)
+                    break
 
         scheduled_encoder_input_stats = None
         if (

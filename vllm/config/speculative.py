@@ -476,6 +476,7 @@ class SpeculativeConfig:
 
     # dynamic speculative decoding control
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
+    num_speculative_tokens_per_seq_len: list[tuple[int, int, int]] | None = None
     """Batch-size schedule used to dynamically choose speculative-token count.
 
     Each entry is ``(range_start, range_end, num_speculative_tokens)`` with an
@@ -1862,7 +1863,10 @@ class SpeculativeConfig:
         return self.method == "dspark"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
-        return self.num_speculative_tokens_per_batch_size is not None
+        return (
+            self.num_speculative_tokens_per_batch_size is not None
+            or self.num_speculative_tokens_per_seq_len is not None
+        )
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

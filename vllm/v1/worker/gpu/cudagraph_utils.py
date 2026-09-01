@@ -216,8 +216,12 @@ class CudaGraphManager:
             num_new_sampled_tokens_per_step = (
                 self.decode_query_len - self.vllm_config.num_speculative_tokens
             )
+            schedule = (
+                speculative_config.num_speculative_tokens_per_batch_size
+                or speculative_config.num_speculative_tokens_per_seq_len
+            )
             dense_schedule = build_dynamic_sd_schedule_lookup(
-                speculative_config.num_speculative_tokens_per_batch_size,
+                schedule,
                 vllm_max_batch_size=self.max_num_reqs,
                 vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
             )
