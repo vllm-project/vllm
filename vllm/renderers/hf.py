@@ -569,30 +569,6 @@ def _resolve_chat_template_content_format(
     return detected_format
 
 
-@lru_cache
-def _log_chat_template_content_format(
-    chat_template: str | None,  # For caching purposes
-    given_format: ChatTemplateContentFormatOption,
-    detected_format: ChatTemplateContentFormatOption,
-):
-    if given_format == "auto":
-        logger.info(
-            "Detected the chat template content format to be '%s'. "
-            "You can set `--chat-template-content-format` to override this.",
-            detected_format,
-        )
-    elif given_format != detected_format:
-        logger.warning(
-            "You specified `--chat-template-content-format %s` "
-            "which is different from the detected format '%s'. "
-            "If our automatic detection is incorrect, please consider "
-            "opening a GitHub issue so that we can improve it: "
-            "https://github.com/vllm-project/vllm/issues/new/choose",
-            given_format,
-            detected_format,
-        )
-
-
 def resolve_chat_template_content_format(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
@@ -608,11 +584,22 @@ def resolve_chat_template_content_format(
         model_config=model_config,
     )
 
-    _log_chat_template_content_format(
-        chat_template,
-        given_format=given_format,
-        detected_format=detected_format,
-    )
+    if given_format == "auto":
+        logger.info_once(
+            "Detected the chat template content format to be '%s'. "
+            "You can set `--chat-template-content-format` to override this.",
+            detected_format,
+        )
+    elif given_format != detected_format:
+        logger.warning_once(
+            "You specified `--chat-template-content-format %s` "
+            "which is different from the detected format '%s'. "
+            "If our automatic detection is incorrect, please consider "
+            "opening a GitHub issue so that we can improve it: "
+            "https://github.com/vllm-project/vllm/issues/new/choose",
+            given_format,
+            detected_format,
+        )
 
     return detected_format if given_format == "auto" else given_format
 

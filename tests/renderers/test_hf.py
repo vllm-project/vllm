@@ -6,12 +6,12 @@ import pytest
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.logger import _print_warning_once
 from vllm.renderers.hf import (
     _consolidate_system_messages,
     _convert_developer_to_system,
     _detect_developer_role_support,
     _get_hf_base_chat_template_params,
-    _log_chat_template_content_format,
     _try_extract_ast,
     resolve_chat_template,
     resolve_chat_template_content_format,
@@ -561,8 +561,8 @@ def test_resolve_content_format_forced(
     chat_template = load_chat_template(EXAMPLES_DIR / template_path)
     assert isinstance(chat_template, str)
 
-    # The log helper is cached, so a prior call would swallow the warning.
-    _log_chat_template_content_format.cache_clear()
+    # `warning_once` dedupes, so a prior call would swallow the warning.
+    _print_warning_once.cache_clear()
 
     resolved_format = resolve_chat_template_content_format(
         chat_template,
