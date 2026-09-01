@@ -29,7 +29,7 @@ use axum::body::Body;
 use axum::http::Request;
 pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
-    HttpListenerMode, TlsConfig,
+    HttpListenerMode, LoraModulePath, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -187,6 +187,20 @@ where
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
+    for module in &config.lora_modules {
+        let request = state.load_static_lora(module).await.with_context(|| {
+            format!(
+                "failed to load LoRA adapter `{}` from --lora-modules",
+                module.name
+            )
+        })?;
+        info!(
+            lora_name = %request.lora_name,
+            lora_int_id = request.lora_int_id,
+            lora_path = %request.lora_path,
+            "loaded static LoRA adapter"
+        );
+    }
     let model = state.primary_model_name().to_owned();
     let app = extend_router(build_router(state.clone()));
 

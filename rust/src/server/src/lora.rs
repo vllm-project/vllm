@@ -11,6 +11,8 @@ use tokio::sync::{Mutex, RwLock};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::{LoraRequest, LoraRequestError};
 
+use crate::config::LoraModulePath;
+
 const RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV: &str = "VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES";
 
 #[derive(Debug, Error, Macro)]
@@ -194,6 +196,49 @@ impl LoraManager {
         let allowed_prefixes = runtime_lora_allowed_path_prefixes();
         let lora_path = validate_lora_path_access(&lora_path, allowed_prefixes.as_deref())?
             .unwrap_or(lora_path);
+        self.register(
+            engine_core_client,
+            base_model_names,
+            lora_name,
+            lora_path,
+            load_inplace,
+            is_3d_lora_weight,
+            None,
+        )
+        .await
+    }
+
+    /// Load an operator-configured adapter (`--lora-modules`). Unlike the
+    /// runtime endpoint, the path is trusted as given: no allowed-prefix
+    /// check applies.
+    pub async fn load_static_lora(
+        &self,
+        engine_core_client: &EngineCoreClient,
+        base_model_names: &[String],
+        module: &LoraModulePath,
+    ) -> Result<LoraRequest, LoadLoraError> {
+        self.register(
+            engine_core_client,
+            base_model_names,
+            module.name.clone(),
+            module.path.clone(),
+            false,
+            module.is_3d_lora_weight,
+            module.base_model_name.clone(),
+        )
+        .await
+    }
+
+    async fn register(
+        &self,
+        engine_core_client: &EngineCoreClient,
+        base_model_names: &[String],
+        lora_name: String,
+        lora_path: String,
+        load_inplace: bool,
+        is_3d_lora_weight: bool,
+        base_model_name: Option<String>,
+    ) -> Result<LoraRequest, LoadLoraError> {
         let _guard = self.update_lock.lock().await;
         if base_model_names.iter().any(|name| name == &lora_name) {
             return Err(LoadLoraError::BaseModelName { lora_name });
@@ -206,7 +251,7 @@ impl LoraManager {
 
         let lora_int_id = existing_lora_int_id
             .unwrap_or_else(|| self.id_counter.fetch_add(1, Ordering::Relaxed) + 1);
-        let lora_request = LoraRequest::new(
+        let mut lora_request = LoraRequest::new(
             lora_name.clone(),
             lora_int_id,
             lora_path,
@@ -214,6 +259,7 @@ impl LoraManager {
             is_3d_lora_weight,
         )
         .map_err(LoadLoraError::InvalidRequest)?;
+        lora_request.base_model_name = base_model_name;
         drop(requests);
 
         let loaded = engine_core_client.add_lora(&lora_request).await.map_err(|source| {
