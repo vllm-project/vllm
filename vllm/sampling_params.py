@@ -503,6 +503,16 @@ class SamplingParams(
             self.stop = []
         elif isinstance(self.stop, str):
             self.stop = [self.stop]
+        else:
+            self.stop = list(dict.fromkeys(self.stop))
+        max_stop_strings = envs.VLLM_MAX_STOP_STRINGS
+        if len(self.stop) > max_stop_strings:
+            raise VLLMValidationError(
+                f"Too many stop strings: {len(self.stop)}. "
+                f"The max number is {max_stop_strings}.",
+                parameter="stop",
+                value=self.stop,
+            )
 
         if self.stop_token_ids is None:
             self.stop_token_ids = []
