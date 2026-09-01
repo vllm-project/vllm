@@ -332,6 +332,7 @@ class SamplingParams(
     output_text_buffer_length: int = 0
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
+    _stop_token_ids_set: frozenset[int] = msgspec.field(default_factory=frozenset)
 
     # Fields used to construct logits processors
     structured_outputs: StructuredOutputsParams | None = None
@@ -507,6 +508,14 @@ class SamplingParams(
             self.stop_token_ids = []
         else:
             self.stop_token_ids = list(dict.fromkeys(self.stop_token_ids))
+        max_stop_token_ids = envs.VLLM_MAX_STOP_TOKEN_IDS
+        if len(self.stop_token_ids) > max_stop_token_ids:
+            raise VLLMValidationError(
+                f"Too many stop_token_ids: {len(self.stop_token_ids)}. "
+                f"The max number is {max_stop_token_ids}.",
+                parameter="stop_token_ids",
+                value=self.stop_token_ids,
+            )
 
         if self.bad_words is None:
             self.bad_words = []
@@ -535,6 +544,7 @@ class SamplingParams(
 
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
+        self._stop_token_ids_set = frozenset(self.stop_token_ids)
 
         if self.skip_reading_prefix_cache is None:
             # If prefix caching is enabled,
@@ -767,6 +777,10 @@ class SamplingParams(
     @property
     def all_stop_token_ids(self) -> set[int]:
         return self._all_stop_token_ids
+
+    @property
+    def stop_token_ids_set(self) -> frozenset[int]:
+        return self._stop_token_ids_set
 
     @property
     def bad_words_token_ids(self) -> list[list[int]] | None:

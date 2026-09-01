@@ -110,6 +110,7 @@ if TYPE_CHECKING:
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
     VLLM_MAX_STOP_STRINGS: int = 4
+    VLLM_MAX_STOP_TOKEN_IDS: int = 128
     VLLM_MAX_NUM_BAD_WORDS: int = 128
     VLLM_MAX_BAD_WORDS_TOTAL_TOKENS: int = 1024
     VLLM_PLUGINS: list[str] | None = None
@@ -1131,6 +1132,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Maximum number of stop strings allowed in a single request.
     "VLLM_MAX_STOP_STRINGS": lambda: int(os.environ.get("VLLM_MAX_STOP_STRINGS", "4")),
+    # Maximum number of stop token IDs allowed in a single request.
+    "VLLM_MAX_STOP_TOKEN_IDS": lambda: int(
+        os.environ.get("VLLM_MAX_STOP_TOKEN_IDS", "128")
+    ),
     # Maximum number of bad-word token sequences generated per request.
     "VLLM_MAX_NUM_BAD_WORDS": lambda: int(
         os.environ.get("VLLM_MAX_NUM_BAD_WORDS", "128")

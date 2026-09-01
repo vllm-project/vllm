@@ -30,6 +30,7 @@ from vllm.entrypoints.generate.base.protocol import (
     FunctionDefinition,
     PerRequestMetrics,
     StopParam,
+    StopTokenIdsParam,
     StreamOptions,
     ToolCall,
     structured_outputs_from_response_format,
@@ -267,7 +268,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_p: float | None = None
     repetition_penalty: float | None = None
     length_penalty: float = 1.0
-    stop_token_ids: list[int] | None = []
+    stop_token_ids: StopTokenIdsParam = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
