@@ -29,7 +29,7 @@ pub struct JsonSchemaFormat {
 /// that we can support the vLLM-specific `structural_tag` variant.
 ///
 /// Original Python definitions:
-/// <https://github.com/vllm-project/vllm/blob/f22d6e026/vllm/entrypoints/openai/engine/protocol.py#L116-L157>
+/// <https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/generate/base/protocol.py#L71-L112>
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseFormat {
