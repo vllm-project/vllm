@@ -328,12 +328,16 @@ vllm serve Qwen/Qwen3-0.6B \
   --reasoning-parser qwen3 \
   --reasoning-config '{
     "reasoning_start_str": "<think>",
-    "reasoning_end_str": "</think>",
+    "reasoning_end_str": "I have to give the solution based on the reasoning directly now.</think>",
     "loop_break_max_pattern_size": 128,
     "loop_break_min_pattern_size": 4,
     "loop_break_min_count": 4
   }'
 ```
+
+`reasoning_end_str` must carry a transition phrase *before* the reasoning end token, as shown. A bare `"</think>"` is not enough: the break fires, but with nothing steering the model past the loop it resumes the same cycle inside the answer. Measured on Qwen3.8-27B-NVFP4 at temperature 0, 10 runs per arm across two hosts in reversed order: a bare `"</think>"` looped 10/10, the phrase-before-tag form answered correctly 10/10, and the server log confirms the break fired in both arms at an identical reasoning length, so the difference is entirely in what the forced string steers toward.
+
+Keep the reasoning end token last. A string ending in anything else, including a trailing space after the token, steers the model toward that trailing text and leaks reasoning into the answer instead of ending it.
 
 Tune on total repeated length, not pattern size. `loop_break_min_pattern_size` does not exclude shorter cycles: a cycle also matches at every multiple of its own period, so twelve identical separator tokens satisfy `loop_break_min_pattern_size: 4` with `loop_break_min_count: 3`. What a break actually costs a benign repeat is `loop_break_min_pattern_size * loop_break_min_count` tokens, so raise `loop_break_min_count` if separator runs, ellipses, or long enumerations are being cut short. Individual requests can opt out with the `thinking_loop_break: false` sampling parameter; `null` (the default) follows the server configuration.
 
