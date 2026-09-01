@@ -272,10 +272,7 @@ class BreakableCUDAGraphWrapper:
 
         Multiple engines may coexist in one process; clearing across engines
         invalidates another engine's already-captured graphs. Engine identity
-        is the ``compilation_config`` object: derived configs (e.g. from
-        ``VllmConfig.with_hf_config`` for a multimodal model's language
-        backbone) are distinct VllmConfig instances that share the engine's
-        compilation_config.
+        is the ``compilation_config`` object.
         """
         for instance in list(cls._all_instances):
             if (
