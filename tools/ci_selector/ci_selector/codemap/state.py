@@ -12,11 +12,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..handwritten import PATH_TOKEN_FAMILIES
 from . import hardware
+from .build_map import BuildMap
 from .docs_deps import DocsDeps, build_docs_deps
 from .externals import copy_inputs, docker_image_inputs, release_pipeline_refs
 from .graph.build import FullGraph, build_full_graph
 from .guards import PreflightReport, run_preflight
+from .native_ops import NativeOps
 from .pipeline.buildkite import load_pipeline_configs, load_steps
 from .pipeline.images import ArtifactGraph, add_image_inputs, build_artifact_graph
 from .pipeline.invoked_tests import invoked_files, legacy_amd_invoked
@@ -79,6 +82,10 @@ class RepoState:
     artifacts: ArtifactGraph = field(default_factory=ArtifactGraph)
     # crate closures of the two shipped rust artifacts (the rust rule's map)
     rust_workspace: RustWorkspace = field(default_factory=RustWorkspace)
+    # csrc/cmake path -> the device families that compile it
+    build_map: BuildMap = field(default_factory=BuildMap)
+    # csrc path -> its ops -> the Python wrappers calling them
+    native_ops: NativeOps = field(default_factory=NativeOps)
 
     @classmethod
     def build(cls, repo: Path) -> RepoState:
@@ -132,6 +139,8 @@ class RepoState:
         state.docker_inputs = docker_image_inputs(repo)
         state.artifacts = build_artifact_graph(repo, pipelines)
         state.rust_workspace = RustWorkspace.build(repo)
+        state.build_map = BuildMap.build(repo)
+        state.native_ops = NativeOps.build(repo, state.catalog)
         dockerfiles = {d for fs in state.artifacts.defined_by.values() for d in fs}
         in_files, in_dirs, blanket = copy_inputs(repo, dockerfiles)
         add_image_inputs(
@@ -189,6 +198,23 @@ class RepoState:
             for s in p.steps
             if hardware.step_in_family(s, family)
         }
+
+    def family_partition(
+        self,
+    ) -> tuple[dict[str, frozenset[str]], frozenset[str], frozenset[str]]:
+        """(per token family, their union, the auto steps in no family).
+
+        The remainder is the main image and its steps. Cached on the instance,
+        not on id(), so a collected state cannot alias another's answer.
+        """
+        if not hasattr(self, "_family_partition"):
+            per = {
+                fam: frozenset(self.family_steps(fam))
+                for _tokens, fam in PATH_TOKEN_FAMILIES
+            }
+            union = frozenset().union(*per.values())
+            self._family_partition = (per, union, frozenset(self.auto_step_ids) - union)
+        return self._family_partition
 
 
 def detect_duplicate_ids(steps: list[Step], report: LoadReport) -> None:

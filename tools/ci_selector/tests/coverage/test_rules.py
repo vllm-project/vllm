@@ -832,3 +832,63 @@ class TestTheBreadthGate:
             small, keys, query_for("vllm/mod.py", "plain"), "vllm_ci:row0"
         )
         assert "vllm_ci:row1" in reading.added
+
+
+class TestProxyEvidence:
+    """Wrapper stand-ins for a csrc change: the drop side weighs them, the
+    add side ignores them, and an unrecorded name keeps the step."""
+
+    def _proxy_query(self, *names, status=Attribution.ATTRIBUTED):
+        return Query(
+            base="base",
+            head="head",
+            files=[
+                FileQuery(
+                    path="vllm/mod.py",
+                    status=status,
+                    head_names=frozenset(names),
+                    proxy=True,
+                )
+            ],
+        )
+
+    def test_the_positive_rung_reads_proxy_wrappers(self, table):
+        reading = read(table, self._proxy_query("plain"), "vllm_ci:runs-plain")
+        assert "vllm_ci:runs-plain" in reading.kept
+        assert reading.reasons["row-executes-a-changed-function"] == 1
+
+    def test_a_silent_row_drops_on_proxy_evidence(self, table):
+        reading = read(table, self._proxy_query("plain"), "vllm_ci:elsewhere")
+        assert "vllm_ci:elsewhere" in reading.dropped
+        assert reading.reasons["proxy-evidence-consulted"] == 1
+        assert reading.reasons["proxy-evidence-drop"] == 1
+
+    def test_an_unrecorded_proxy_name_fails_open(self, table):
+        reading = read(
+            table,
+            self._proxy_query("ghost_wrapper", status=Attribution.FAILED),
+            "vllm_ci:elsewhere",
+        )
+        assert "vllm_ci:elsewhere" in reading.kept
+        assert not reading.dropped
+        assert reading.reasons["query-cannot-answer"] == 1
+
+    def test_a_proxy_never_adds(self, table):
+        keys = RowKeys(
+            {"vllm_ci"}, {"vllm_ci": 1.0}, steps={s: FakeStep() for s in ALL_STEPS}
+        )
+
+        def run(query):
+            return read_pr(
+                table,
+                result_for("vllm_ci:elsewhere", paths=("vllm/mod.py",)),
+                query,
+                unknown_names(query, UNION, {}),
+                KNOWN,
+                keys,
+            )
+
+        control = run(query_for("vllm/mod.py", "plain"))
+        assert "vllm_ci:runs-plain" in control.added  # the detection floor
+        proxied = run(self._proxy_query("plain"))
+        assert "vllm_ci:runs-plain" not in proxied.added

@@ -11,7 +11,7 @@ set.
 
 from __future__ import annotations
 
-from . import hardware
+from . import build_map, hardware
 from .claim import Claim
 from .state import RepoState, _graph_known
 from .step_refs import _source_dep_steps
@@ -79,8 +79,9 @@ def _apply_image_input_union(state: RepoState, path: str, claim: Claim) -> Claim
     the C++, cmake and shared requirements files reach the AMD and Intel
     pipelines through here and nowhere else.
 
-    Never droppable: a coverage row says which functions a step ran and
-    nothing about which image it ran on, so no evidence could overturn it.
+    Added non-droppably: a coverage row says which functions a step ran and
+    nothing about which image it ran on. For csrc files a later pass can still
+    mark these steps droppable, on wrapper names a row can speak to.
     """
     if claim.run_all or claim.rule in _IMAGE_UNION_EXEMPT or claim.image_union_exempt:
         return claim
@@ -92,8 +93,35 @@ def _apply_image_input_union(state: RepoState, path: str, claim: Claim) -> Claim
     family = hardware.exclusive_family_of_path(path)
     if family and path not in state.exclusive_disabled:
         steps &= state.family_steps(family)
+    # A mapped file only reaches the images whose builds compile it. Keep this
+    # before `added` is computed. An unmapped path keeps the full set, and so
+    # does everything if the device list has gaps, since family_steps() is then
+    # incomplete and cannot be trusted to subtract.
+    fams = state.build_map.families.get(path)
+    if fams and not state.preflight.unmapped_devices and build_map.mode() == "on":
+        steps &= _build_map_allowed(state, fams)
     added = steps - claim.step_ids
     if added:
         claim.step_ids |= added
         claim.detail += f"; +{len(added)} steps run on an image this file is built into"
     return claim
+
+
+def _build_map_allowed(state: RepoState, fams: frozenset[str]) -> set[str]:
+    """The steps these families may keep.
+
+    "cuda" is the remainder that carries no device token, which is where the
+    main image's GPU suites live; reading it as a token family would drop them
+    all. "other" is every token family except amd and cpu.
+    """
+    per, union, nonfamily = state.family_partition()
+    allowed: set[str] = set()
+    if build_map.CUDA in fams:
+        allowed |= nonfamily
+    if build_map.AMD in fams:
+        allowed |= per.get("amd", frozenset())
+    if build_map.CPU in fams:
+        allowed |= per.get("cpu", frozenset())
+    if build_map.OTHER in fams:
+        allowed |= union - per.get("amd", frozenset()) - per.get("cpu", frozenset())
+    return allowed

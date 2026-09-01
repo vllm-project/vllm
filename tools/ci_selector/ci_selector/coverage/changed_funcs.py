@@ -72,6 +72,9 @@ class FileQuery:
     # Set from the table: the recorder's names for this file are not faithful to
     # its source, so matching on names is meaningless here. See merge.py.
     unfaithful: bool = False
+    # A stand-in for a file the recorder cannot see, not part of the diff.
+    # The drop side weighs it like any file; the add side skips it.
+    proxy: bool = False
     note: str = ""  # why FAILED, for diagnosis; never load-bearing
 
     @property
@@ -111,7 +114,9 @@ class Query:
         PR. Narrowing cuts both ways though: dropping a file can only remove a
         fail-open or a matching name, and both turn a keep into a drop. So it
         is safe only on a path set COMPLETE for the step, which is what
-        `Selection.selected_paths` guarantees.
+        `Selection.selected_paths` guarantees. A csrc claim carries its
+        wrapper files instead of its own path, so completeness there rests on
+        a kernel being reachable only through its wrappers.
 
         Matches either side of a rename. The FileQuery objects are shared, not
         copied, so a flag set on the query afterwards shows through here too.

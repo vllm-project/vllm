@@ -40,6 +40,12 @@ def test_shared_build_inputs_reach_every_platform(state):
 
     The crosscheck scores `vllm_ci` only, so no amount of PR replay catches
     that. This test is the floor.
+
+    Since the build map shipped: an unmapped shared input must still reach
+    every platform, while a mapped cuda+amd source keeps its own families wide
+    and loses the intel pipeline down to CI's own declarers. The mapped
+    fixture is asserted to exist and be mapped, because the file this test
+    used before had been deleted and so pinned nothing.
     """
     names = {p.config.name for p in state.pipelines}
     auto_per = {
@@ -58,11 +64,8 @@ def test_shared_build_inputs_reach_every_platform(state):
     # a trivially-everything selector cannot pass the assertion above it.
     narrow = select(state, ["requirements/test/rocm.txt"])
 
-    for path in (
-        "csrc/attention/attention_kernels.cu",
-        "cmake/hipify.py",
-        "requirements/common.txt",
-    ):
+    for path in ("cmake/hipify.py", "requirements/common.txt"):
+        assert path not in state.build_map.families
         sel = select(state, [path])
         assert not sel.run_all, f"{path} escalated instead of routing"
         for name in names:
@@ -80,6 +83,26 @@ def test_shared_build_inputs_reach_every_platform(state):
                 f"{path} is a shared build input but reaches no more of "
                 f"{name} than a rocm-only requirements file does"
             )
+
+    from ci_selector.codemap.step_refs import _source_dep_steps
+
+    shared_tu = "csrc/libtorch_stable/cache_kernels.cu"
+    assert (state.repo / shared_tu).is_file(), "the mapped fixture went ghost"
+    assert state.build_map.families.get(shared_tu) == frozenset({"cuda", "amd"})
+    sel = select(state, [shared_tu])
+    assert not sel.run_all
+    per, _union, nonfamily = state.family_partition()
+    picked = set(sel.selected)
+    # Its own families stay wide.
+    assert len(picked & nonfamily) >= len(nonfamily) // 2
+    assert len(picked & per["amd"]) >= len(per["amd"]) // 2
+    # And the narrowing is live. Without this the test cannot tell if the
+    # wider answer came back.
+    declared = _source_dep_steps(state, shared_tu)
+    assert picked & per["xpu"] <= declared, (
+        f"{shared_tu} reaches intel steps beyond its declarers; the family "
+        "scoping stopped applying"
+    )
 
 
 def test_csrc_cpu_routes_to_declarers_plus_cpu_family(state):

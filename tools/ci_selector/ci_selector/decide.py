@@ -164,6 +164,8 @@ def _apply_record(
             union.setdefault(path, set()).update(names)
     union_names = {p: frozenset(n) for p, n in union.items()}
 
+    _append_op_proxies(query, repo, base, union_names, table)
+
     reading = read_pr(
         table,
         selection,
@@ -180,3 +182,47 @@ def _apply_record(
     out.dropped_by_coverage = set(reading.dropped)
     out.steps |= out.added_by_coverage
     out.steps -= out.dropped_by_coverage
+
+
+def _append_op_proxies(query, repo: Path, base: str, union_names, table) -> None:
+    """Stand-in queries for changed csrc files: the wrapper names the drop
+    side weighs instead of the path, which is never recorded.
+
+    A derived name the record has never seen marks the whole stand-in FAILED,
+    which keeps the step. Reading it as "never ran" would be a wrong drop, and
+    the per-file name gate cannot catch it when the file itself is recorded.
+    """
+    from .codemap import native_ops as native_ops_mod
+    from .codemap.worktree import state_for
+    from .coverage.changed_funcs import Attribution, FileQuery
+
+    if native_ops_mod.mode() != "on":
+        return
+    if not any(f.path.startswith("csrc/") for f in query.files):
+        return
+    no = getattr(state_for(repo, base), "native_ops", None)
+    if no is None or no.error:
+        return
+    proxies: dict[str, set[str]] = {}
+    for f in query.files:
+        if f.proxy or not no.owns(f.path):
+            continue
+        for wf, quals in (no.proxies_for(f.path) or {}).items():
+            proxies.setdefault(wf, set()).update(quals)
+    for wf in sorted(proxies):
+        quals = frozenset(proxies[wf])
+        missing = quals - union_names.get(wf, frozenset())
+        query.files.append(
+            FileQuery(
+                path=wf,
+                status=Attribution.FAILED if missing else Attribution.ATTRIBUTED,
+                head_names=quals,
+                unfaithful=wf in table.unfaithful_paths,
+                proxy=True,
+                note=(
+                    f"op-wrapper proxy; unrecorded names: {sorted(missing)[:3]}"
+                    if missing
+                    else "op-wrapper proxy"
+                ),
+            )
+        )

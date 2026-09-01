@@ -259,6 +259,7 @@ def read_pr(
     # everything. The old fallback claimed to be the more careful reading,
     # which was true of the scope and false of the authority it granted.
     attribution = selection.selected_paths or {}
+    proxy_paths = frozenset(f.path for f in query.files if f.proxy)
 
     for step_id in selection.selected:
         key = keys.key_for(step_id)
@@ -314,6 +315,10 @@ def read_pr(
             reading.kept.append(step_id)
             reading.reasons["no-attributed-file"] += 1
             continue
+        # Counted so a stand-in that never fires cannot pass for one that
+        # fired and found nothing.
+        if proxy_paths and scope & proxy_paths:
+            reading.reasons["proxy-evidence-consulted"] += 1
 
         scoped = query.restrict(scope)
         # The unknown-name gates, per step and not per PR. Whole-diff was the
@@ -340,6 +345,8 @@ def read_pr(
         reading.reasons[evidence.value] += 1
         if evidence.authorizes_drop:
             reading.dropped.append(step_id)
+            if proxy_paths and scope & proxy_paths:
+                reading.reasons["proxy-evidence-drop"] += 1
             if set(matched.get(step_id, ())) & failed:
                 reading.dropped_and_failed.append(step_id)
         else:
@@ -387,7 +394,9 @@ def _add_from_rows(
             continue  # no row: the map decides, and the map did not pick it
         if any(
             row.contains_call(f.path, name) and table.discriminates(f.path, name)
+            # Stand-ins are drop evidence only.
             for f in query.files
+            if not f.proxy
             for name in f.names - set(unresolved.get(f.path, ()))
         ):
             reading.added.append(step_id)

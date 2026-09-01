@@ -40,7 +40,7 @@ from ..handwritten import (
     RUST_GATE_ENV_VARS,
     RUST_PYO3_BRIDGE_FILE,
 )
-from . import colocation, hardware, registry_diff
+from . import build_map, colocation, hardware, native_ops, registry_diff
 from .claim import (
     Claim,
     classify_world,
@@ -84,9 +84,12 @@ def select(
     base: str | None = None,
     head: str | None = None,
 ) -> Selection:
-    # Read once and discarded, so a typo in CI_SELECTOR_COLOCATION kills the
-    # run instead of changing behaviour on whichever diff first hits the rule.
+    # Read once and discarded, so a typo in CI_SELECTOR_COLOCATION,
+    # CI_SELECTOR_BUILD_MAP or CI_SELECTOR_CSRC_OPS kills the run instead of
+    # changing behaviour on whichever diff first hits the rule.
     colocation.mode()
+    build_map.mode()
+    native_ops.mode()
     sel = Selection()
     sel.docs_affected, sel.docs_reasons = state.docs_deps.docs_affected(paths)
     if docs_only(paths):
@@ -135,9 +138,12 @@ def select(
                 sel.run_all[pipeline] = f"{claim.rule}: {claim.detail}"
                 sel.run_all_paths[pipeline] = path
         # A table claim covers the files it carries as much as the table.
+        # evidence_paths replaces the path rather than joining it: the path
+        # itself is never recorded, so keeping it would keep every step.
         carried = {a for a, t in covered_added.items() if t == path}
+        weighed = set(claim.evidence_paths) or ({path} | carried)
         for pdata in state.pipelines:
-            _apply_claim_to_pipeline(state, sel, claim, pdata, path, {path} | carried)
+            _apply_claim_to_pipeline(state, sel, claim, pdata, path, weighed)
     for path in dict.fromkeys(paths):
         if path in state.exclusive_disabled:
             sel.notes.append(
@@ -542,7 +548,42 @@ def _classify_added_head_closure(
 
 def _classify(state: RepoState, path: str, ctx: DiffContext | None) -> Claim:
     claim = _apply_declarer_union(state, path, _classify_inner(state, path, ctx))
-    return _apply_image_input_union(state, path, claim)
+    claim = _apply_image_input_union(state, path, claim)
+    return _apply_csrc_droppability(state, path, claim)
+
+
+def _apply_csrc_droppability(state: RepoState, path: str, claim: Claim) -> Claim:
+    """Let the record drop a csrc file's steps on wrapper evidence.
+
+    Selection is untouched. Runs after both unions, so the narrowed step set
+    is what may become droppable. The bet is that a kernel is only reached
+    through its Python wrappers, so anything unresolved keeps: no ops, an op
+    with no wrapper, or a path this diff added all grant nothing.
+
+    Kept regardless: steps declaring the file, steps that build an image, and
+    steps whose tests name one of its ops, since a test may call the op from a
+    frame the recorder cannot see.
+    """
+    if claim.run_all or not state.native_ops.owns(path) or native_ops.mode() != "on":
+        return claim
+    proxies = state.native_ops.proxies_for(path)
+    if not proxies:
+        return claim
+    held: set[str] = set(_source_dep_steps(state, path))
+    held |= {s for ss in state.artifacts.producers_of.values() for s in ss}
+    held |= {s for ss in state.artifacts.self_builders.values() for s in ss}
+    for test_file in state.native_ops.test_files_for(path):
+        held |= _steps_targeting(state, test_file)
+    droppable = (claim.step_ids & state.auto_step_ids) - held
+    if not droppable:
+        return claim
+    claim.droppable_step_ids |= droppable
+    claim.evidence_paths = frozenset(proxies)
+    claim.detail += (
+        f"; {len(droppable)} steps droppable on op-wrapper evidence "
+        f"({len(proxies)} wrapper files)"
+    )
+    return claim
 
 
 def _classify_image_input(state: RepoState, path: str) -> Claim | None:

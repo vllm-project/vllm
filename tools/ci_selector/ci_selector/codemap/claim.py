@@ -89,6 +89,10 @@ class Claim:
     # widening must skip it. Decided per path, unlike _IMAGE_UNION_EXEMPT,
     # which exempts a whole rule.
     image_union_exempt: bool = False
+    # Files the record may weigh instead of this claim's own path, used for
+    # csrc changes. The path itself is never recorded, so leaving it in would
+    # keep every step.
+    evidence_paths: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if self.rule not in RULES:
