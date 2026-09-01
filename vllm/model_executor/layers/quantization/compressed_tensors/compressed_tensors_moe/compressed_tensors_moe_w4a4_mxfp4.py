@@ -9,25 +9,20 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
-
-from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
-
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
-
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
-    CompressedTensorsMoEMethod,
-)
-
-from vllm.model_executor.utils import set_weight_attrs
-
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     select_mxfp4_moe_backend,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
+    CompressedTensorsMoEMethod,
+)
+from vllm.model_executor.utils import set_weight_attrs
 
 
 class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
@@ -120,39 +115,30 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        w13 = torch.nn.Parameter(
-            layer.w13_weight_packed.data, requires_grad=False
-        )
-        w2 = torch.nn.Parameter(
-            layer.w2_weight_packed.data, requires_grad=False
-        )
+        w13 = torch.nn.Parameter(layer.w13_weight_packed.data, requires_grad=False)
+        w2 = torch.nn.Parameter(layer.w2_weight_packed.data, requires_grad=False)
         delattr(layer, "w13_weight_packed")
         delattr(layer, "w2_weight_packed")
 
-        w13, w2, w13_scale, w2_scale, _, _ = (
-            convert_weight_to_mxfp4_moe_kernel_format(
-                mxfp4_backend=self.mxfp4_backend,
-                layer=layer,
-                w13_weight=w13,
-                w2_weight=w2,
-                w13_weight_scale=layer.w13_weight_scale,
-                w2_weight_scale=layer.w2_weight_scale,
-                _cache_permute_indices=self._cache_permute_indices,
-                activation=self.moe.activation,
-            )
+        w13, w2, w13_scale, w2_scale, _, _ = convert_weight_to_mxfp4_moe_kernel_format(
+            mxfp4_backend=self.mxfp4_backend,
+            layer=layer,
+            w13_weight=w13,
+            w2_weight=w2,
+            w13_weight_scale=layer.w13_weight_scale,
+            w2_weight_scale=layer.w2_weight_scale,
+            _cache_permute_indices=self._cache_permute_indices,
+            activation=self.moe.activation,
         )
 
         layer.w13_weight = torch.nn.Parameter(w13, requires_grad=False)
         layer.w2_weight = torch.nn.Parameter(w2, requires_grad=False)
-        layer.w13_weight_scale = torch.nn.Parameter(
-            w13_scale, requires_grad=False
-        )
-        layer.w2_weight_scale = torch.nn.Parameter(
-            w2_scale, requires_grad=False
-        )
+        layer.w13_weight_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
+        layer.w2_weight_scale = torch.nn.Parameter(w2_scale, requires_grad=False)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None:
+            assert self.experts_cls is not None
             self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,

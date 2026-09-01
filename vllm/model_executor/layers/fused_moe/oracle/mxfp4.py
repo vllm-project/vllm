@@ -115,7 +115,6 @@ class Mxfp4MoeBackend(Enum):
     # Marlin
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
-    # vLLM CUTLASS (true W4A4: MXFP4 weights + MXFP4 activations)
     VLLM_CUTLASS_MXFP4_MXFP4 = "VLLM_CUTLASS_MXFP4_MXFP4"
     # ROCm AITER backends
     AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel
@@ -224,7 +223,7 @@ def backend_to_kernel_cls(
         )
 
         return [CutlassExpertsMxfp4]
-    
+
     elif backend == Mxfp4MoeBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             MarlinExperts,
@@ -1760,18 +1759,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend in (
         Mxfp4MoeBackend.XPU,
         Mxfp4MoeBackend.EMULATION,
-    ):
-        # No additional transformation is needed: XPU consumes the checkpoint
-        # layout directly, while emulation dequantizes that layout at runtime.
-        return (
-            w13_weight,
-            w2_weight,
-            w13_weight_scale,
-            w2_weight_scale,
-            w13_bias,
-            w2_bias,
-        )
-    elif mxfp4_backend in (
+    ) or mxfp4_backend in (
         Mxfp4MoeBackend.XPU,
         Mxfp4MoeBackend.EMULATION,
     ):
