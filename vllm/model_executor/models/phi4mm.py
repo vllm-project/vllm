@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias
 
 import numpy as np
 import torch
@@ -32,6 +32,10 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
     NestedTensors,
 )
+
+if TYPE_CHECKING:
+    from vllm.multimodal.inputs import MultiModalKwargsItem
+
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageEmbeddingItems,
@@ -1300,3 +1304,22 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             connector=["audio_projection_for_vision", "audio_projection"],
             tower_model=["vision_encoder", "embed_tokens_extend"],
         )
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: "MultiModalKwargsItem | None",
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        """
+        Phi-4-multimodal's audio_projection and audio_projection_for_vision
+        connector modules are shape-preserving in the token dimension: all
+        downsampling (NeMo conv subsampling, qformer, and the
+        linear_downsample_rate reshape) happens upstream inside tower
+        processing / _compute_audio_embed_size. So tower and connector
+        token counts both equal the LM-side placeholder count.
+        """
+        if modality.startswith("image") or modality.startswith("audio"):
+            return num_mm_embeds, num_mm_embeds
+        raise ValueError(f"Unsupported modality for LoRA token counts: {modality}")

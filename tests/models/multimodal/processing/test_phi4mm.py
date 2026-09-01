@@ -62,3 +62,73 @@ def test_processor_override(
         _IMAGE_PLACEHOLDER_TOKEN_ID
     )
     assert img_tok_count == expected_toks_per_img * num_imgs
+
+
+class _StubModel:
+    """get_mm_lora_token_counts for Phi4MM reads only its arguments
+    (modality, num_mm_embeds), not any instance state, so an empty
+    stub is sufficient to exercise it without constructing the full
+    `nn.Module` (vision tower, audio tower, language model, etc.)."""
+
+
+def _get_mm_lora_token_counts():
+    # Imported lazily to avoid initializing CUDA early, consistent
+    # with the pattern used in test_processor_override above.
+    from vllm.model_executor.models.phi4mm import Phi4MMForCausalLM
+
+    return Phi4MMForCausalLM.get_mm_lora_token_counts
+
+
+@pytest.mark.parametrize("modality", ["image", "audio"])
+@pytest.mark.parametrize("num_mm_embeds", [0, 1, 16, 197, 1500])
+def test_mm_lora_token_counts_passthrough(modality, num_mm_embeds):
+    """Phi4MM's tower/connector modules are shape-preserving in the
+    token dimension (all downsampling happens upstream, inside tower
+    processing), so tower and connector token counts should both
+    equal the input embed count, for both image and audio modalities.
+    """
+    get_mm_lora_token_counts = _get_mm_lora_token_counts()
+    stub = _StubModel()
+
+    tower_tokens, connector_tokens = get_mm_lora_token_counts(
+        stub,
+        modality=modality,
+        mm_kwargs=None,
+        num_mm_embeds=num_mm_embeds,
+    )
+
+    assert tower_tokens == num_mm_embeds
+    assert connector_tokens == num_mm_embeds
+
+
+@pytest.mark.parametrize("modality", ["image_embeds", "audio_embeds"])
+def test_mm_lora_token_counts_modality_prefix_match(modality):
+    """Modality strings are matched by prefix (e.g. `image_embeds`
+    should still match `image`), consistent with how vLLM passes
+    modality-variant strings elsewhere in the codebase.
+    """
+    get_mm_lora_token_counts = _get_mm_lora_token_counts()
+    stub = _StubModel()
+
+    tower_tokens, connector_tokens = get_mm_lora_token_counts(
+        stub,
+        modality=modality,
+        mm_kwargs=None,
+        num_mm_embeds=42,
+    )
+
+    assert tower_tokens == 42
+    assert connector_tokens == 42
+
+
+def test_mm_lora_token_counts_unsupported_modality_raises():
+    get_mm_lora_token_counts = _get_mm_lora_token_counts()
+    stub = _StubModel()
+
+    with pytest.raises(ValueError, match="Unsupported modality"):
+        get_mm_lora_token_counts(
+            stub,
+            modality="video",
+            mm_kwargs=None,
+            num_mm_embeds=10,
+        )
