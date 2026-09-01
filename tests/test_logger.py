@@ -31,6 +31,7 @@ from vllm.logger import (
 )
 from vllm.logging_utils import NewLineFormatter
 from vllm.logging_utils.dump_input import prepare_object_to_dump
+from vllm.logging_utils.formatter import TraceJSONFormatter
 from vllm.utils.system_utils import decorate_logs
 
 
@@ -165,6 +166,35 @@ def test_json_logging(monkeypatch, tmp_path):
     assert log["message"] == "structured log probe"
     assert log["vllm_process_name"] == "Worker_DP0"
     assert log["process"] == os.getpid()
+
+
+def test_json_formatter_injects_active_trace_context():
+    pytest.importorskip("opentelemetry.sdk")
+    from opentelemetry.sdk.trace import TracerProvider
+
+    formatter = TraceJSONFormatter()
+    record = logging.LogRecord(
+        name="vllm",
+        level=logging.INFO,
+        pathname="logger.py",
+        lineno=1,
+        msg="hello",
+        args=(),
+        exc_info=None,
+    )
+    inactive_payload = json.loads(formatter.format(record))
+    assert "trace_id" not in inactive_payload
+    assert "span_id" not in inactive_payload
+    with (
+        TracerProvider()
+        .get_tracer("vllm-test")
+        .start_as_current_span("request") as span
+    ):
+        payload = json.loads(formatter.format(record))
+        context = span.get_span_context()
+
+    assert payload["trace_id"] == format(context.trace_id, "032x")
+    assert payload["span_id"] == format(context.span_id, "016x")
 
 
 @pytest.mark.parametrize("factory_order", ["before", "after", "replacement"])

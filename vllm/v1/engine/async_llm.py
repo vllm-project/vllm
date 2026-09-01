@@ -39,7 +39,7 @@ from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import init_tracer
+from vllm.tracing import activate_span, init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
@@ -516,15 +516,19 @@ class AsyncLLM(EngineClient):
 
         self.check_admission(parent_params.n, parent_request.request_id)
         try:
+            request_states = []
             for idx, child_request in enumerate(child_requests):
-                self.output_processor.add_request(
-                    child_request, prompt_text, parent_request, idx, queue
+                request_states.append(
+                    self.output_processor.add_request(
+                        child_request, prompt_text, parent_request, idx, queue
+                    )
                 )
 
-            for child_request in child_requests:
-                await self.engine_core.add_request_async(child_request)
-                if self.log_requests:
-                    logger.info("Added request %s.", child_request.request_id)
+            for child_request, req_state in zip(child_requests, request_states):
+                with activate_span(req_state.trace_span):
+                    await self.engine_core.add_request_async(child_request)
+                    if self.log_requests:
+                        logger.info("Added request %s.", child_request.request_id)
         except BaseException:
             await self.abort(parent_request.request_id, internal=True)
             raise
@@ -544,13 +548,16 @@ class AsyncLLM(EngineClient):
             self.check_admission(request_id=request.request_id)
 
         # Register locally before the first await so concurrent tasks see this request.
-        self.output_processor.add_request(request, prompt, parent_req, index, queue)
+        req_state = self.output_processor.add_request(
+            request, prompt, parent_req, index, queue
+        )
 
-        # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        with activate_span(req_state.trace_span):
+            # Add the EngineCoreRequest to EngineCore (separate process).
+            await self.engine_core.add_request_async(request)
 
-        if self.log_requests:
-            logger.info("Added request %s.", request.request_id)
+            if self.log_requests:
+                logger.info("Added request %s.", request.request_id)
 
     async def _add_streaming_input_request(
         self,

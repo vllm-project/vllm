@@ -6,7 +6,7 @@ robust and flexible configuration of the various loggers used by vLLM.
 For `vllm serve`, configure logging with CLI arguments:
 
 - Use the built-in configuration, optionally with `--log-level`.
-- Emit structured JSON with `--logging-config.formatter json`.
+- Emit ordinary structured JSON with `--logging-config.formatter json`.
 - Use a custom Python logging configuration file with
   `--logging-config.pylogging_config_file`.
 - Disable vLLM logging configuration with

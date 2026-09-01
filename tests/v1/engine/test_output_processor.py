@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+import json
+import logging
 import math
 import time
-from unittest.mock import MagicMock, Mock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import numpy as np
 import pytest
@@ -16,6 +20,7 @@ from tests.v1.engine.utils import (
     MockEngineCore,
 )
 from vllm import PoolingParams
+from vllm.logging_utils.formatter import TraceJSONFormatter
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput, RequestOutput, SamplingMask
@@ -29,6 +34,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import (
     OutputProcessor,
     RequestOutputCollector,
@@ -36,6 +42,102 @@ from vllm.v1.engine.output_processor import (
 )
 from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 from vllm.v1.outputs import SamplingMaskLists
+
+
+def test_request_span_is_current_for_request_log_records(monkeypatch) -> None:
+    pytest.importorskip("opentelemetry.sdk")
+    from opentelemetry.sdk.trace import TracerProvider
+
+    from vllm.tracing import activate_span
+    from vllm.tracing import otel as otel_module
+
+    tracer = TracerProvider().get_tracer("vllm-test")
+    monkeypatch.setattr(otel_module.trace, "get_tracer", lambda _: tracer)
+    output_processor = OutputProcessor(None, log_stats=False, tracing_enabled=True)
+    request = EngineCoreRequest(
+        request_id="request-123",
+        external_req_id="external-request-123",
+        prompt_token_ids=[1],
+        mm_features=None,
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+        arrival_time=time.time(),
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        trace_headers={
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        },
+    )
+
+    request_state = output_processor.add_request(request, prompt=None)
+    record = logging.LogRecord(
+        name="vllm.engine",
+        level=logging.INFO,
+        pathname="engine.py",
+        lineno=1,
+        msg="Added request request-123.",
+        args=(),
+        exc_info=None,
+    )
+    with activate_span(request_state.trace_span):
+        payload = json.loads(TraceJSONFormatter().format(record))
+
+    assert payload["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736"
+    assert payload["span_id"] == format(
+        request_state.trace_span.get_span_context().span_id, "016x"
+    )
+
+
+def test_async_request_log_uses_llm_request_span(monkeypatch) -> None:
+    pytest.importorskip("opentelemetry.sdk")
+    from opentelemetry.sdk.trace import TracerProvider
+
+    from vllm.tracing import otel as otel_module
+    from vllm.v1.engine import async_llm as async_llm_module
+
+    tracer = TracerProvider().get_tracer("vllm-test")
+    monkeypatch.setattr(otel_module.trace, "get_tracer", lambda _: tracer)
+    output_processor = OutputProcessor(None, log_stats=False, tracing_enabled=True)
+    request = EngineCoreRequest(
+        request_id="request-123",
+        external_req_id="external-request-123",
+        prompt_token_ids=[1],
+        mm_features=None,
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+        arrival_time=time.time(),
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        trace_headers={
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        },
+    )
+    async_llm = object.__new__(AsyncLLM)
+    async_llm.output_processor = output_processor
+    async_llm.engine_core = SimpleNamespace(
+        add_request_async=AsyncMock(), shutdown=Mock()
+    )
+    async_llm.log_requests = True
+    async_llm.check_admission = Mock()
+    emitted = []
+
+    def log_request(*_args) -> None:
+        emitted.append(otel_module.trace.get_current_span().get_span_context())
+
+    monkeypatch.setattr(async_llm_module.logger, "info", log_request)
+    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
+    asyncio.run(AsyncLLM._add_request(async_llm, request, None, None, 0, queue))
+
+    assert len(emitted) == 1
+    assert format(emitted[0].trace_id, "032x") == "4bf92f3577b34da6a3ce929d0e0e4736"
+    assert format(emitted[0].span_id, "016x") == format(
+        output_processor.request_states[request.request_id]
+        .trace_span.get_span_context()
+        .span_id,
+        "016x",
+    )
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])

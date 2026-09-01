@@ -8,6 +8,7 @@ from typing import Any, TypeAlias
 # Import the implementation details
 from .otel import (
     SpanKind,
+    activate_otel_span,
     extract_trace_context,
     init_otel_tracer,
     init_otel_worker_tracer,
@@ -36,6 +37,7 @@ __all__ = [
     "log_tracing_disabled_warning",
     "contains_trace_headers",
     "otel_import_error_traceback",
+    "activate_span",
 ]
 
 BackendAvailableFunc: TypeAlias = Callable[[], bool]
@@ -123,25 +125,32 @@ def instrument_manual(
     attributes: dict[str, Any] | None = None,
     context: Any = None,
     kind: Any = None,
+    end_span: bool = True,
 ):
     """Manually create a span with explicit timestamps.
 
     Args:
         span_name: Name of the span to create.
         start_time: Start time in nanoseconds since epoch.
-        end_time: Optional end time in nanoseconds. If None, ends immediately.
+        end_time: Optional end time in nanoseconds when ending the span.
         attributes: Optional dict of span attributes.
         context: Optional trace context (e.g., from extract_trace_context).
         kind: Optional SpanKind (e.g., SpanKind.SERVER).
+        end_span: Whether to end the span before returning it.
 
     """
     is_available, _, _, _, manual_instrument_fn = _REGISTERED_TRACING_BACKENDS["otel"]
     if is_available():
         return manual_instrument_fn(
-            span_name, start_time, end_time, attributes, context, kind
+            span_name, start_time, end_time, attributes, context, kind, end_span
         )
     else:
         return None
+
+
+def activate_span(span: Any):
+    """Make an existing manual span current without ending it on exit."""
+    return activate_otel_span(span)
 
 
 def is_tracing_available() -> bool:

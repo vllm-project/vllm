@@ -184,8 +184,9 @@ def manual_instrument_otel(
     attributes: dict[str, Any] | None = None,
     context: Context | None = None,
     kind: Any = None,  # SpanKind, but typed as Any for when OTEL unavailable
+    end_span: bool = True,
 ):
-    """Manually create and end a span with explicit timestamps."""
+    """Manually create a span with explicit timestamps."""
     if not _IS_OTEL_AVAILABLE:
         return
 
@@ -204,10 +205,23 @@ def manual_instrument_otel(
     span = tracer.start_span(**span_kwargs)
     if attributes:
         span.set_attributes(attributes)
-    if end_time is not None:
-        span.end(end_time=end_time)
-    else:
-        span.end()
+    if end_span:
+        if end_time is not None:
+            span.end(end_time=end_time)
+        else:
+            span.end()
+    return span
+
+
+@contextmanager
+def activate_otel_span(span: Any):
+    """Make an existing span current without ending it on exit."""
+    if not _IS_OTEL_AVAILABLE or span is None:
+        yield
+        return
+
+    with trace.use_span(span):
+        yield
 
 
 def _get_smart_context() -> Context | None:
