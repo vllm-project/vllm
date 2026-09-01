@@ -464,7 +464,6 @@ class NanoNemotronVLMultiModalProcessor(
                 num_tokens_per_image = out_mm_data["num_tokens_per_image"]
                 assert isinstance(num_tokens_per_image, list)
                 feature_size = num_tokens_per_image[item_idx]
-                assert isinstance(feature_size, int)
             else:
                 assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
@@ -894,7 +893,7 @@ class NanoNemotronVLDummyInputsBuilder(
 
         if sound_config := self.info.sound_config:
             num_audios = mm_counts.get("audio", 0)
-            audio_overrides = mm_options.get("audio")
+            audio_overrides = mm_options.get("audio") if mm_options else None
             assert audio_overrides is None or isinstance(
                 audio_overrides, AudioDummyOptions
             )
@@ -1133,8 +1132,6 @@ class NemotronH_Nano_VL_V2(
         image_embeds = kwargs.pop("image_embeds", None)
         if image_embeds is not None:
             assert isinstance(image_embeds, (torch.Tensor, list))
-            if isinstance(image_embeds, list):
-                assert all(isinstance(item, torch.Tensor) for item in image_embeds)
             return NanoNemotronVLImageEmbeddingInputs(
                 type="image_embeds",
                 data=image_embeds,
@@ -1394,8 +1391,6 @@ class NemotronH_Nano_VL_V2(
 
         if video_embeds is not None:
             assert isinstance(video_embeds, (torch.Tensor, list))
-            if isinstance(video_embeds, list):
-                assert all(isinstance(item, torch.Tensor) for item in video_embeds)
             return NanoNemotronVLVideoEmbeddingInputs(
                 type="video_embeds",
                 data=video_embeds,
@@ -1406,14 +1401,12 @@ class NemotronH_Nano_VL_V2(
                 frames_indices = frames_indices.flatten()
             else:
                 assert isinstance(frames_indices, (list, tuple))
-                assert all(isinstance(item, torch.Tensor) for item in frames_indices)
                 frames_indices = torch.cat([f.flatten() for f in frames_indices], dim=0)
 
             if isinstance(frame_duration_ms, torch.Tensor):
                 frame_duration_ms = frame_duration_ms.flatten()
             else:
                 assert isinstance(frame_duration_ms, (list, tuple))
-                assert all(isinstance(item, torch.Tensor) for item in frame_duration_ms)
                 frame_duration_ms = torch.cat(
                     [f.flatten() for f in frame_duration_ms], dim=0
                 )
@@ -1429,9 +1422,6 @@ class NemotronH_Nano_VL_V2(
 
             if not isinstance(pixel_values_flat_video, torch.Tensor):
                 assert isinstance(pixel_values_flat_video, (list, tuple))
-                assert all(
-                    isinstance(item, torch.Tensor) for item in pixel_values_flat_video
-                )
                 pixel_values_flat_video = torch.cat(pixel_values_flat_video, dim=0)
 
             assert isinstance(video_num_patches, torch.Tensor)
@@ -1480,7 +1470,6 @@ class NemotronH_Nano_VL_V2(
                 assert isinstance(input_audio_features, torch.Tensor)
                 assert isinstance(feature_attention_mask, torch.Tensor)
                 assert isinstance(audio_num_clips, list)
-                assert all(isinstance(item, int) for item in audio_num_clips)
                 modalities["audios"] = NanoNemotronVLAudioFeatureInputs(
                     input_audio_features=input_audio_features,
                     feature_attention_mask=feature_attention_mask,
@@ -1511,7 +1500,6 @@ class NemotronH_Nano_VL_V2(
                 elif isinstance(image_input, NanoNemotronVLImagePixelInputsDynamic):
                     image_embeddings = self._process_image_input_dynamic(image_input)
                 else:
-                    assert isinstance(image_input, NanoNemotronVLImagePixelInputs)
                     image_embeddings = self._process_image_input(image_input)
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
@@ -1520,7 +1508,6 @@ class NemotronH_Nano_VL_V2(
                 if isinstance(video_input, NanoNemotronVLVideoEmbeddingInputs):
                     video_embeddings = video_input["data"]
                 else:
-                    assert isinstance(video_input, NanoNemotronVLVideoPixelInputs)
                     video_embeddings = self._process_video_input(video_input)
                 multimodal_embeddings += tuple(video_embeddings)
             if modality == "audios":
