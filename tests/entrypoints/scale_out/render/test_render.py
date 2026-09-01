@@ -532,6 +532,52 @@ async def test_chat_completion_render_assistant_tokens_mask_with_generation_tags
 
 
 @pytest.mark.asyncio
+async def test_chat_render_assistant_tokens_mask_follows_truncation(client):
+    """The assistant mask must be truncated with the prompt it describes.
+
+    `assistant_tokens_mask` is positional: entry i labels token i. Truncating
+    `token_ids` from the left without truncating the mask leaves the two
+    describing different positions, and the mask ends up marking whichever
+    tokens happen to sit at the old offsets.
+    """
+    messages = [
+        # Deliberately lopsided: a long leading user turn and a short trailing
+        # one, so keeping the head of the mask is distinguishable from keeping
+        # its tail.
+        {"role": "user", "content": "Hello hello hello hello hello hello"},
+        {"role": "assistant", "content": "Hi!"},
+        {"role": "user", "content": "Bye"},
+    ]
+    body = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "chat_template": _TEMPLATE_WITH_GENERATION,
+        "return_assistant_tokens_mask": True,
+    }
+
+    full = await client.post("/v1/chat/completions/render", json=body)
+    assert full.status_code == 200
+    full_token_ids = full.json()["token_ids"]
+    full_mask = full.json()["assistant_tokens_mask"]
+    assert sum(full_mask) > 0
+
+    keep = len(full_token_ids) - 4
+    # Precondition: with this prompt the head and tail slices of the mask
+    # really do differ, so the assertion below can tell them apart.
+    assert full_mask[-keep:] != full_mask[:keep]
+
+    truncated = await client.post(
+        "/v1/chat/completions/render",
+        json={**body, "truncate_prompt_tokens": keep, "truncation_side": "left"},
+    )
+    assert truncated.status_code == 200
+    data = truncated.json()
+
+    assert data["token_ids"] == full_token_ids[-keep:]
+    assert data["assistant_tokens_mask"] == full_mask[-keep:]
+
+
+@pytest.mark.asyncio
 async def test_messages_render_basic(client):
     """Test basic Anthropic Messages render endpoint."""
     response = await client.post(
