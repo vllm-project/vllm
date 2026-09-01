@@ -17,7 +17,7 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
