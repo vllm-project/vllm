@@ -124,24 +124,29 @@ def make_moonep_prepare_finalize(
     weight_layout: "MoonEPExpertWeightLayout",
     pass_layout_to_pf: bool = True,
 ):
-    from moonep import Buffer
     from moonep._C import nvl_multicast_supported
+
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.moonep import (
+        MoonEPBufferPool,
+    )
 
     if not nvl_multicast_supported():
         raise MulticastNotAvailableError("NVSwitch multicast not available")
 
-    buffer = Buffer(
-        S=max_tokens_per_rank,
-        H=hidden_size,
-        K=topk,
-        E=num_experts,
-        num_ep_ranks=pgi.world_size,
-        B=weight_layout.num_prefetch_slots,
-        group=pg,
-        explicitly_destroy=True,
+    pool = MoonEPBufferPool(
+        dict(
+            H=hidden_size,
+            K=topk,
+            E=num_experts,
+            num_ep_ranks=pgi.world_size,
+            B=weight_layout.num_prefetch_slots,
+            group=pg,
+            explicitly_destroy=True,
+        ),
+        max_tokens_per_rank=max_tokens_per_rank,
     )
-    return buffer, MoonEPPrepareAndFinalize(
-        buffer=buffer,
+    return pool, MoonEPPrepareAndFinalize(
+        buffer_pool=pool,
         max_tokens_per_rank=max_tokens_per_rank,
         num_dispatchers=pgi.world_size,
         num_global_experts=num_experts,
@@ -162,7 +167,7 @@ def moonep_moe_impl(
     max_tokens_per_rank = 128 * ((config.m + 127) // 128)
 
     weight_layout = make_moonep_weight_layout(w1, w2, num_prefetch_slots)
-    buffer, pf = make_moonep_prepare_finalize(
+    pool, pf = make_moonep_prepare_finalize(
         pg,
         pgi,
         hidden_size,
@@ -197,7 +202,7 @@ def moonep_moe_impl(
         torch.accelerator.synchronize()
         return output
     finally:
-        buffer.destroy()
+        pool.destroy()
 
 
 def _no_quant_config():
@@ -228,7 +233,7 @@ def moonep_modular_kernel_impl(
     weight_layout = make_moonep_weight_layout(w1, w2, num_prefetch_slots)
     # weight_layout deliberately not passed to the P/F: the engine path
     # resolves it through post_init_setup + the experts' weight hook.
-    buffer, pf = make_moonep_prepare_finalize(
+    pool, pf = make_moonep_prepare_finalize(
         pg,
         pgi,
         hidden_size,
@@ -266,7 +271,7 @@ def moonep_modular_kernel_impl(
         torch.accelerator.synchronize()
         return out
     finally:
-        buffer.destroy()
+        pool.destroy()
 
 
 def _moonep_moe(

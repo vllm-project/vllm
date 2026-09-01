@@ -299,11 +299,11 @@ def maybe_make_prepare_finalize(
         )
         handle = all2all_manager.get_handle(all_to_all_args)
 
-        # The [E+B] weight layout is attached via set_weight_layout() once the
-        # layer has loaded and converted its weights (see
-        # UnquantizedFusedMoEMethod._setup_kernel).
+        # The [E+B] weight layout is picked up from the experts (their
+        # process_weights_after_loading hook) once the layer has loaded and
+        # converted its weights.
         prepare_finalize = MoonEPPrepareAndFinalize(
-            buffer=handle,
+            buffer_pool=handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             num_global_experts=moe.num_experts,
