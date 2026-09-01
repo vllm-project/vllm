@@ -217,7 +217,7 @@ def resolve_moriio_transfer_ack(
 
 
 class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
-    cache_hit_source = CacheHitSource.P2P
+    _cache_hit_source = CacheHitSource.P2P
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
