@@ -6,6 +6,7 @@ steps:
   key: weight-loading-multiple-gpu
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   optional: true
   source_file_dependencies:
