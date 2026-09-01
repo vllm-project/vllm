@@ -11,6 +11,7 @@ from vllm.utils.torch_utils import (
     get_kv_cache_torch_dtype,
     is_lossless_cast,
     is_quantized_kv_cache,
+    set_default_torch_dtype,
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
 )
@@ -26,6 +27,19 @@ def test_nvfp4_4over6_cache_dtype() -> None:
     assert get_kv_cache_torch_dtype(cache_config.cache_dtype) == torch.uint8
     assert is_quantized_kv_cache(cache_config.cache_dtype)
     assert get_kv_quant_mode(cache_config.cache_dtype) == KVQuantMode.NVFP4
+
+
+def test_set_default_torch_dtype_restores_dtype_after_exception() -> None:
+    original_dtype = torch.get_default_dtype()
+
+    with (
+        pytest.raises(RuntimeError, match="expected failure"),
+        set_default_torch_dtype(torch.bfloat16),
+    ):
+        assert torch.get_default_dtype() == torch.bfloat16
+        raise RuntimeError("expected failure")
+
+    assert torch.get_default_dtype() == original_dtype
 
 
 @pytest.mark.parametrize(

@@ -13,16 +13,22 @@ from torch.distributed import ProcessGroup
 from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
+    load_model_without_vllm_runner,
 )
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.config.quantization import resolve_quantization_config
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
+    Fp8PtpcOnlineLinearMethod,
+    Fp8PtpcOnlineMoEMethod,
     _fp8_channel_scale,
     _fp8_quant_per_channel,
     _fp8_scale,
@@ -42,6 +48,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
     weight_amax,
+)
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+from vllm.model_executor.models.granitemoe import (
+    GraniteMoeModel,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
@@ -128,6 +138,12 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerBlockOnlineMoEMethod,
         ),
+        (
+            "fp8_per_channel",
+            None,
+            Fp8PtpcOnlineLinearMethod,
+            Fp8PtpcOnlineMoEMethod,
+        ),
         # quantization='online' with per-layer-kind overrides
         (
             "online",
@@ -160,13 +176,14 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
 def test_online_quantization(
-    vllm_runner,
     quant_scheme: str,
     online_quant_args: dict | None,
     expected_linear_cls,
     expected_moe_cls,
     use_rocm_aiter: bool,
     monkeypatch,
+    dist_init,
+    workspace_init,
 ) -> None:
     """
     Tests that online quantization frontend configuration works -
@@ -188,67 +205,117 @@ def test_online_quantization(
     if current_platform.is_xpu() and quant_scheme == "fp8_per_block":
         pytest.skip("Skip test for online fp8_per_block on XPU platform.")
 
-    # `LLM.apply_model` requires pickling a function.
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-
-    # a tiny model with both dense and MoE layers
     model_name = "ibm-granite/granite-3.0-1b-a400m-base"
-
-    runner_kwargs = dict(
+    model, vllm_config = load_model_without_vllm_runner(
+        model_name,
+        dtype="bfloat16",
         quantization=quant_scheme,
-        enforce_eager=True,
+        model_config_kwargs={
+            "quantization_config": resolve_quantization_config(
+                quant_scheme, online_quant_args
+            ),
+            "hf_overrides": {
+                "num_hidden_layers": 3,
+                "vocab_size": 256,
+                "hidden_size": 256,
+                "intermediate_size": 512,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+                "max_position_embeddings": 64,
+                "num_local_experts": 4,
+                "num_experts_per_tok": 2,
+            },
+        },
+        model_loader_cls=DummyModelLoader,
     )
-    if online_quant_args is not None:
-        runner_kwargs["quantization_config"] = online_quant_args
+
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
+
+    o_proj = model.model.layers[0].self_attn.o_proj
+    moe = model.model.layers[0].block_sparse_moe.experts
+    assert isinstance(o_proj.quant_method, expected_linear_cls)
+    assert isinstance(moe._quant_method, expected_moe_cls)
+
+    if quant_scheme == "mxfp4":
+        assert o_proj.weight.dtype == torch.uint8
+    elif current_platform.is_cuda() or current_platform.is_xpu():
+        assert o_proj.weight.dtype == torch.float8_e4m3fn
+    elif current_platform.is_rocm():
+        assert o_proj.weight.dtype == current_platform.fp8_dtype()
+    else:
+        pytest.skip("Only runs on CUDA and ROCm.")
+
+    if quant_scheme == "fp8_per_channel":
+        assert o_proj.weight_scale.ndim == 2
+        assert o_proj.weight_scale.shape[-1] == 1
+        assert o_proj.input_scale is None
+
+    if isinstance(online_quant_args, dict) and "ignore" in online_quant_args:
+        for layer_idx in range(len(model.model.layers)):
+            o_proj = model.model.layers[layer_idx].self_attn.o_proj
+            if layer_idx == 1:
+                assert isinstance(o_proj.quant_method, UnquantizedLinearMethod)
+            else:
+                assert isinstance(o_proj.quant_method, expected_linear_cls)
+
+        for layer in model.model.layers:
+            assert isinstance(
+                layer.self_attn.qkv_proj.quant_method, UnquantizedLinearMethod
+            )
+
+    input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE)
+    positions = torch.arange(input_ids.numel(), device=DEVICE)
+    with set_forward_context(None, vllm_config, num_tokens=input_ids.numel()):
+        hidden_states = model(input_ids, positions, None)
+        logits = model.compute_logits(hidden_states)
+    assert torch.isfinite(logits).all()
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_online_quantization_loads_real_weights(vllm_runner, monkeypatch) -> None:
+    """Verify online quantization loads a Granite-MoE checkpoint end to end."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    original_load_weights = GraniteMoeModel.load_weights
+
+    def load_weights(self, weights):
+        weights = (
+            (name, weight)
+            for name, weight in weights
+            if not name.startswith("layers.") or int(name.split(".")[1]) < 3
+        )
+        return original_load_weights(self, weights)
+
+    monkeypatch.setattr(GraniteMoeModel, "load_weights", load_weights)
 
     with vllm_runner(
-        model_name,
-        **runner_kwargs,
+        "ibm-granite/granite-3.0-1b-a400m-base",
+        quantization="fp8_per_tensor",
+        dtype="bfloat16",
+        enforce_eager=True,
+        hf_overrides={"num_hidden_layers": 3},
+        max_model_len=16,
+        max_num_seqs=1,
     ) as llm:
 
         def check_model(model):
-            # checks further down in the test case are hardcoded for this
-            # model
-            assert model_name == "ibm-granite/granite-3.0-1b-a400m-base"
-
-            o_proj = model.model.layers[0].self_attn.o_proj
-            moe = model.model.layers[0].block_sparse_moe.experts
-
-            # o_proj and moe in layer 0 are always quantized (never ignored)
-            # because of how we craft the test case inputs
-            assert isinstance(o_proj.quant_method, expected_linear_cls)
-            if moe is not None:
-                assert isinstance(moe._quant_method, expected_moe_cls)
-
-            if quant_scheme == "mxfp4":
-                # Packed e2m1 values, two per byte.
-                assert o_proj.weight.dtype == torch.uint8
-            elif current_platform.is_cuda() or current_platform.is_xpu():
-                assert o_proj.weight.dtype == torch.float8_e4m3fn
-            elif current_platform.is_rocm():
-                assert o_proj.weight.dtype == current_platform.fp8_dtype()
-            else:
-                pytest.skip("Only runs on CUDA and ROCm.")
-
-            # Verify ignored layers are unquantized.
-            if isinstance(online_quant_args, dict) and "ignore" in online_quant_args:
-                # only .*1.self_attn_o_proj is skipped
-                for layer_idx in range(len(model.model.layers)):
-                    o_proj = model.model.layers[layer_idx].self_attn.o_proj
-                    if layer_idx == 1:
-                        assert isinstance(o_proj.quant_method, UnquantizedLinearMethod)
-                    else:
-                        assert isinstance(o_proj.quant_method, expected_linear_cls)
-
-                # every .*self_attn.qkv_proj is skipped
-                for layer_idx in range(len(model.model.layers)):
-                    qkv_proj = model.model.layers[layer_idx].self_attn.qkv_proj
-                    assert isinstance(qkv_proj.quant_method, UnquantizedLinearMethod)
+            layer = model.model.layers[0]
+            assert isinstance(
+                layer.self_attn.o_proj.quant_method,
+                Fp8PerTensorOnlineLinearMethod,
+            )
+            assert isinstance(
+                layer.block_sparse_moe.experts._quant_method,
+                Fp8PerTensorOnlineMoEMethod,
+            )
 
         llm.apply_model(check_model)
-
-        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
-        print(outputs[0][1])
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=1)
+        assert outputs
 
 
 @pytest.mark.skipif(
