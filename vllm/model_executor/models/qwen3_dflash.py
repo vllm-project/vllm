@@ -3,6 +3,7 @@
 
 import io
 from collections.abc import Iterable
+from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
@@ -53,6 +54,35 @@ logger = init_logger(__name__)
 
 
 _SLIDING_ATTENTION = "sliding_attention"
+
+
+def _materialize_vocab_module(module: nn.Module) -> None:
+    from vllm.model_executor.model_loader.reload.layerwise import (
+        get_layerwise_info,
+    )
+    from vllm.model_executor.model_loader.reload.meta import materialize_layer
+
+    materialize_layer(module, get_layerwise_info(module))
+
+
+_VOCAB_LOADING_BYPASS_FORMATS = frozenset(
+    {"modelexpress", "runai_streamer_sharded", "sharded_state", "tensorizer"}
+)
+
+
+def _defer_vocab_module_allocation(vllm_config: VllmConfig) -> bool:
+    """Whether the loader delegates checkpoint ownership to model.load_weights."""
+    load_config = getattr(vllm_config, "load_config", None)
+    load_format = getattr(load_config, "load_format", "auto")
+    return load_format not in _VOCAB_LOADING_BYPASS_FORMATS
+
+
+def _vocab_module_init_context(vllm_config: VllmConfig):
+    return (
+        torch.device("meta")
+        if _defer_vocab_module_allocation(vllm_config)
+        else nullcontext()
+    )
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
@@ -399,11 +429,12 @@ class DFlashQwen3Model(nn.Module):
 
         current_vllm_config = get_current_vllm_config()
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            prefix=maybe_prefix(prefix, "embed_tokens"),
-        )
+        with _vocab_module_init_context(vllm_config):
+            self.embed_tokens = VocabParallelEmbedding(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                prefix=maybe_prefix(prefix, "embed_tokens"),
+            )
 
         # Masked query slots are fed to the draft as `mask_token_id`. Most DFlash
         # checkpoints will have the mask embedding in the vocabulary embedding table
@@ -703,12 +734,16 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             start_layer_id=target_layer_num,
         )
 
+        defer_vocab_allocation = _defer_vocab_module_allocation(vllm_config)
+        self.has_own_embed_tokens = not defer_vocab_allocation
+        self.has_own_lm_head = not defer_vocab_allocation
         logit_scale = getattr(self.config, "logit_scale", 1.0)
-        self.lm_head = ParallelLMHead(
-            self.config.draft_vocab_size,
-            self.config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        with _vocab_module_init_context(vllm_config):
+            self.lm_head = ParallelLMHead(
+                self.config.draft_vocab_size,
+                self.config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size, scale=logit_scale
         )
@@ -799,6 +834,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
+        includes_lm_head = False
         for name, loaded_weight in weights:
             assert "mask_hidden" not in name, (
                 "DFlash embeds masked slots via mask_token_id (optionally "
@@ -814,8 +850,17 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
                 name = "model." + name
             if "embed_tokens" in name:
                 includes_embed_tokens = True
+            if "lm_head" in name:
+                includes_lm_head = True
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
+        self.has_own_embed_tokens = includes_embed_tokens
+        self.has_own_lm_head = includes_lm_head
+
+        if includes_embed_tokens:
+            _materialize_vocab_module(self.model.embed_tokens)
+        if includes_lm_head:
+            _materialize_vocab_module(self.lm_head)
 
         # Route the separately-trained mask embedding (if shipped) through the
         # standard weight loader alongside the rest of the draft weights.
@@ -836,6 +881,11 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items(), mapper=mapper)
+        if not includes_embed_tokens:
+            self.model.embed_tokens = None
+        if not includes_lm_head:
+            self.lm_head = None
+
         self.model._build_fused_kv_buffers()
 
     def _read_mask_embedding(self) -> torch.Tensor | None:
