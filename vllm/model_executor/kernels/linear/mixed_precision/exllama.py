@@ -32,13 +32,6 @@ class ExllamaLinearKernel(MPLinearKernel):
                 "Exllama is only supported on CUDA and ROCm",
             )
 
-        if c.has_g_idx and c.partition_weight_shape[0] != c.full_weight_shape[0]:
-            return (
-                False,
-                "Act reordering currently not supported by Exllama, "
-                "when the input features are partitioned across "
-                "devices",
-            )
 
         if c.partition_weight_shape[1] % (32 // c.weight_type.size_bits) != 0:
             return (
@@ -111,25 +104,21 @@ class ExllamaLinearKernel(MPLinearKernel):
                 layer, self.w_zp_name, torch.nn.Parameter(zeros, requires_grad=False)
             )
 
-        if c.has_g_idx:
+        g_idx = getattr(layer, "g_idx", None)
+        if g_idx is not None:
 
             def transform_w_g_idx(x):
                 # Exllama wants the permutation array instead of the group
                 # indices
                 return torch.argsort(x).to(torch.int)
 
-            self._transform_param(layer, self.w_gidx_name, transform_w_g_idx)  # type: ignore
-        else:
-            self.w_gidx_name = "g_idx"
-            empty_g_idx = torch.nn.Parameter(
-                torch.empty((0,), dtype=torch.int, device=device), requires_grad=False
-            )
-            setattr(layer, self.w_gidx_name, empty_g_idx)
+            self._transform_param(layer, "g_idx", transform_w_g_idx)
 
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
-            assert self.w_gidx_name is not None
-            g_idx = getattr(layer, self.w_gidx_name)
+            g_idx = getattr(layer, "g_idx", None)
+            if g_idx is None:
+                raise ValueError("g_idx is required for Exllama")
 
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
             x_cont = x.data.contiguous()
@@ -157,7 +146,8 @@ class ExllamaLinearKernel(MPLinearKernel):
         x_2d = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1],)
 
-        w_q, w_s, w_zp, w_g_idx = self._get_weight_params(layer)
+        w_q, w_s, w_zp = self._get_weight_params(layer)
+        w_g_idx = getattr(layer, "g_idx", None)
 
         # gptq_gemm supports GPTQv2 format by passing use_v2_format=True.
         # However, the MPLinearLayerConfig doesn't contain format info.

@@ -39,9 +39,6 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         if c.act_type != torch.float8_e4m3fn:
             return False, "CUTLASS W4A8 only supports FP8 (e4m3) activations"
 
-        if c.has_g_idx:
-            return False, "Act reordering not supported by CUTLASS W4A8"
-
         if c.zero_points:
             return False, "Zero points not supported by CUTLASS W4A8"
 

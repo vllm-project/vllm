@@ -150,7 +150,7 @@ def _backend_incompatibility_reason(
             isinstance(quant_config, QuantizationArgs)
             and quant_config.actorder == "group"
         ):
-            return "group activation ordering is not supported"
+            return "group activation ordering is no longer supported"
 
     # Marlin only supports certain problem/group sizes.
     allow_marlin = not isinstance(quant_config, MoeWNA16Config)
@@ -536,7 +536,6 @@ def _process_weights_marlin(
     num_bits: int,
     pack_factor: int,
     group_size: int,
-    actorder: str | None,
     w13_qweight: torch.Tensor,
     w2_qweight: torch.Tensor,
     w13_scales: torch.Tensor,
@@ -1486,12 +1485,10 @@ def convert_to_wna16_moe_kernel_format(
             num_bits = quant_config.quant_type.size_bits
             pack_factor = quant_config.pack_factor
             group_size = quant_config.group_size
-            actorder = None
         elif isinstance(quant_config, QuantizationArgs):
             num_bits = quant_config.num_bits
             pack_factor = 32 // quant_config.num_bits
             group_size = quant_config.group_size
-            actorder = quant_config.actorder
         else:
             raise TypeError(
                 "Marlin WNA16 MoE backend requires AutoGPTQConfig, AutoAWQConfig or "
@@ -1524,7 +1521,6 @@ def convert_to_wna16_moe_kernel_format(
                 num_bits,
                 pack_factor,
                 group_size,
-                actorder,
                 w13,
                 w2,
                 w13_scale,

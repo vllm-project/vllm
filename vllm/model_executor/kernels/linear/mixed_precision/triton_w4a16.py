@@ -309,13 +309,6 @@ class TritonW4A16LinearKernel(MPLinearKernel):
                 "(8 int4 values packed per int32)",
             )
 
-        if c.has_g_idx:
-            return (
-                False,
-                "Activation reordering (g_idx) is not supported by "
-                "TritonW4A16LinearKernel",
-            )
-
         gs = c.group_size
         if (
             gs not in TRITON_W4A16_SUPPORTED_GROUP_SIZES

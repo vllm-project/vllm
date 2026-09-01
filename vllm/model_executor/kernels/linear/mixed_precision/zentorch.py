@@ -52,8 +52,6 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
                 "zentorch_woq_linear} are not registered.",
             )
 
-        if c.has_g_idx:
-            return False, "ZentorchWNA16 does not support activation re-ordering."
         return True, None
 
     def _zentorch_woq_eligible(self, layer: torch.nn.Module) -> bool:
@@ -62,11 +60,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         Constraints (any failure -> ``cpu_gemm_wna16`` path via ``super()``
         with ``layer`` untouched).
         """
-        if (
-            self.w_gidx_name is not None
-            and getattr(layer, self.w_gidx_name, None) is not None
-        ) or (getattr(self.config, "has_g_idx", False)):
-            return False
+        # g_idx is always None (activation ordering no longer supported)
 
         weight_packed = getattr(layer, self.w_q_name, None)
         weight_scale = getattr(layer, self.w_s_name, None)
@@ -120,9 +114,6 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
 
         if (not self.config.zero_points) and (self.w_zp_name is not None):
             setattr(layer, self.w_zp_name, None)
-
-        if (not self.config.has_g_idx) and (self.w_gidx_name is not None):
-            setattr(layer, self.w_gidx_name, None)
 
         weight_q = getattr(layer, self.w_q_name)
         weight_s = getattr(layer, self.w_s_name)

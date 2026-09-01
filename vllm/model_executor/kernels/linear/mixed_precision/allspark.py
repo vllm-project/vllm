@@ -23,9 +23,6 @@ class AllSparkLinearKernel(MPLinearKernel):
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        if c.has_g_idx:
-            return False, "Act reordering currently not supported by AllSpark"
-
         if c.zero_points:
             return False, "Zero points currently not supported by AllSpark"
 

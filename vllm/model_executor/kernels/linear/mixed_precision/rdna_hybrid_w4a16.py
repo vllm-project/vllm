@@ -476,9 +476,6 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         if c.act_type not in (torch.float16, torch.bfloat16):
             return False, "requires float16 or bfloat16 activations"
 
-        if c.has_g_idx:
-            return False, "does not support g_idx reordering"
-
         gs = c.group_size
         if gs not in SUPPORTED_GROUP_SIZES:
             return (

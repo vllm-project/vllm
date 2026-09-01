@@ -89,7 +89,6 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
             act_type=torch.float8_e4m3fn,  # always use fp8(e4m3)
             group_size=self.group_size,
             zero_points=not self.symmetric,
-            has_g_idx=False,
             out_type=params_dtype,
         )
 

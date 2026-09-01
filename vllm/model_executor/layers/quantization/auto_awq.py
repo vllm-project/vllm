@@ -439,7 +439,6 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
             act_type=params_dtype if self.input_dtype is None else self.input_dtype,
             group_size=self.quant_config.group_size,
             zero_points=self.quant_config.zero_point,
-            has_g_idx=False,
         )
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
