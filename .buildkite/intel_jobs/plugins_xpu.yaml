@@ -2,7 +2,7 @@ group: Plugins XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: Plugin Tests (2 GPUs)
+- label: ':nvidia: (L4) Plugin Integration'
   device: intel_gpu
   timeout_in_minutes: 35
   num_devices: 2
@@ -73,10 +73,10 @@ steps:
     pytest -v -s plugins_tests/test_oot_registration_online.py || true &&
     pytest -v -s plugins_tests/test_oot_registration_offline.py || true &&
     pytest -v -s plugins_tests/lora_resolvers || true'
-- label: GGUF Plugin
+- label: ':nvidia: (H200 MIG 18GB) GGUF Plugin'
   device: intel_gpu
   timeout_in_minutes: 30
-  optional: true
+  optional: false
   soft_fail: true
   working_dir: .
   no_plugin: true
@@ -99,10 +99,10 @@ steps:
     'pip install vllm-gguf-plugin \>= 0.0.2 || true &&
     cd tests &&
     pytest -v -s plugins_tests/gguf || true'
-- label: BitsAndBytes Plugin
+- label: ':nvidia: (H200 MIG 18GB) BitsAndBytes Plugin'
   device: intel_gpu
   timeout_in_minutes: 30
-  optional: true
+  optional: false
   soft_fail: true
   working_dir: .
   no_plugin: true
@@ -126,11 +126,11 @@ steps:
     'pip install vllm-bnb-plugin \>= 0.0.1 || true &&
     cd tests &&
     pytest -v -s plugins_tests/bitsandbytes -m not distributed || true'
-- label: BitsAndBytes Plugin (2 GPUs)
+- label: ':nvidia: (L4) BitsAndBytes Plugin'
   device: intel_gpu
   timeout_in_minutes: 15
   num_devices: 2
-  optional: true
+  optional: false
   soft_fail: true
   working_dir: .
   no_plugin: true

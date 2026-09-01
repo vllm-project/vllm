@@ -2,7 +2,7 @@ group: Samplers XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: Samplers Test
+- label: ':nvidia: (H200 MIG 35GB) Samplers'
   device: intel_gpu
   timeout_in_minutes: 40
   working_dir: .
