@@ -76,8 +76,9 @@ constexpr int kNTS = kBT / 32;
 // [16, 16] tile is 64 lanes x 4 floats, lane-major.  Every producer and
 // consumer then moves 16 B per lane at consecutive addresses -- one fully
 // coalesced dwordx4 per tile instead of 16 rows scattered 512 B apart.
-constexpr int kStKt = 64 * 4;          // one [16, 16] tile
-constexpr int kStTile = kNKT * kStKt;  // one 16-row slice of the plane
+constexpr int kStKt = 64 * 4;  // one [16, 16] tile
+[[maybe_unused]] constexpr int kStTile =
+    kNKT * kStKt;  // one 16-row slice of the plane
 
 // LDS mirrors each operand tile row-major with a padded row stride.  A fragment
 // read is 8 B per lane with its two halves 32 B apart, so the stride only
@@ -160,7 +161,7 @@ struct Params {
 
 // Transfer blocks stage an all-zero `u` tile by pointing it at this single row
 // with a leading dimension of 0, so nothing inside the chunk loop changes.
-__device__ bf16_t g_uzero[kK];
+[[maybe_unused]] __device__ bf16_t g_uzero[kK];
 
 union Frag {
   bf16x8 v;
@@ -1260,7 +1261,7 @@ constexpr int kSG = kK + 4;
 __device__ __forceinline__ constexpr int lblk(int bi, int bj) {
   return (bi * (bi + 1) / 2 + bj) * 256;
 }
-constexpr int kS2 = kBT + 4;
+[[maybe_unused]] constexpr int kS2 = kBT + 4;
 
 struct PrologueParams {
   const bf16_t* q;
