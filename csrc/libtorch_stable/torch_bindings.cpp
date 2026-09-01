@@ -535,15 +535,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor mixed_qkv, Tensor a, Tensor b, Tensor A_log, Tensor dt_bias, "
       "Tensor state_indices, Tensor cu_seqlens, Tensor num_accepted_tokens, "
       "Tensor! state, Tensor output_gate, Tensor norm_weight, Tensor! out, "
-      "float scale, float norm_eps=1e-5) -> ()");
+      "float scale, float norm_eps=1e-5, "
+      "str output_gate_activation='silu') -> ()");
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
   ops.def(
       "kimi_k3_attn_res("
-      "Tensor! prefix, Tensor delta, Tensor blocks, Tensor norm_weight, "
-      "Tensor qk_weight, Tensor output_norm_weight, Tensor! output, "
-      "int num_blocks, float eps, float output_norm_eps) -> ()");
+      "Tensor! prefix, Tensor? delta, Tensor! blocks, Tensor norm_weight, "
+      "Tensor qk_weight, Tensor? output_norm_weight, Tensor! output, "
+      "int num_blocks, "
+      "int block_write_idx, float eps, "
+      "float output_norm_eps) -> ()");
 #endif
 
   // Apply repetition penalties to logits in-place.
@@ -699,6 +702,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // LongCat n-gram embedding index kernel. All tensor args are marked mutable
   // to match the (non-const) stable-Tensor& C++ signature; only ne_token_table
   // and n_gram_ids are actually written in place.
+  // Fused vocab-parallel embedding: gather the rows this rank owns and write
+  // zeros for the rest, so the following all-reduce reconstructs the full
+  // embedding.
+  ops.def(
+      "vocab_parallel_embedding(Tensor! out, Tensor input_ids, Tensor weight, "
+      "int org_vocab_start_index, int org_vocab_end_index, "
+      "int num_org_vocab_padding, int added_vocab_start_index, "
+      "int added_vocab_end_index) -> ()");
   ops.def(
       "ngram_compute_n_gram_ids(int ne_n, int ne_k, Tensor(a!) ne_weights, "
       "Tensor(b!) ne_mods, Tensor(c!) exclusive_ne_embedder_size_sums, "
@@ -710,6 +721,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // LongCat n-gram embedding index kernel.
   ops.impl("ngram_compute_n_gram_ids", TORCH_BOX(&ngram_compute_n_gram_ids));
+  ops.impl("vocab_parallel_embedding", TORCH_BOX(&vocab_parallel_embedding));
 
   // Per-token group quantization
   ops.impl("per_token_group_fp8_quant", TORCH_BOX(&per_token_group_quant_fp8));
