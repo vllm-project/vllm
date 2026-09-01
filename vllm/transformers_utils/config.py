@@ -28,6 +28,7 @@ from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import is_mistral_model_repo
 from vllm.transformers_utils.utils import (
+    is_cloud_storage,
     parse_safetensors_file_metadata,
     without_trust_remote_code,
 )
@@ -640,6 +641,110 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
+_SPECULATIVE_METHOD_BY_ARCHITECTURE: dict[str, str] = {
+    **dict.fromkeys(
+        (
+            "DFlashDraftModel",
+            "DFlash2DraftModel",
+            "DFlashLagunaForCausalLM",
+            "DFlashMuseGlimmerAssistantModel",
+            "MuseGlimmerAssistantModel",
+        ),
+        "dflash",
+    ),
+    **dict.fromkeys(
+        (
+            "DSparkDraftModel",
+            "Gemma4DSparkModel",
+            "K3DSparkModel",
+            "Qwen3DSparkModel",
+            "Qwen3OmniDSparkModel",
+        ),
+        "dspark",
+    ),
+    **dict.fromkeys(
+        (
+            "EagleCohereForCausalLM",
+            "EagleDeepSeekMTPModel",
+            "EagleLlama4ForCausalLM",
+            "EagleLlamaForCausalLM",
+            "EagleMiniCPMForCausalLM",
+            "EagleMistralForCausalLM",
+            "EagleMistralLarge3ForCausalLM",
+        ),
+        "eagle",
+    ),
+    **dict.fromkeys(
+        (
+            "Eagle3DeepseekV2ForCausalLM",
+            "Eagle3DeepseekV3ForCausalLM",
+            "Eagle3LlamaForCausalLM",
+            "Eagle3MiniMaxM2ForCausalLM",
+            "Eagle3Qwen2_5vlForCausalLM",
+            "Eagle3Qwen3ForCausalLM",
+            "Eagle3Qwen3vlForCausalLM",
+            "LlamaForCausalLMEagle3",
+            "PEagleDraftModel",
+            "PeagleLlamaForCausalLM",
+            "PeagleQwen3ForCausalLM",
+        ),
+        "eagle3",
+    ),
+    **dict.fromkeys(
+        (
+            "BailingMoeV25MTPModel",
+            "BailingMoeV3MTPModel",
+            "DeepSeekMTPModel",
+            "DeepSeekV4MTPModel",
+            "DeepseekV32MTPModel",
+            "Dots3NoteMTPModel",
+            "ErnieMTPModel",
+            "Exaone4_5_MTP",
+            "ExaoneMoeMTP",
+            "Gemma4MTPModel",
+            "Glm4MoeLiteMTPModel",
+            "Glm4MoeMTPModel",
+            "GlmOcrMTPModel",
+            "HYV3MTPModel",
+            "InklingMTPModel",
+            "InternS2MobiusMTP",
+            "KimiK3MTPModel",
+            "LongCatFlashMTPModel",
+            "MiMoMTPModel",
+            "MiMoV2MTPModel",
+            "MiMoV2OmniMTPModel",
+            "MiniMaxM3MTP",
+            "NemotronHMTPModel",
+            "OpenPanguMTPModel",
+            "Qwen3NextMTP",
+            "Qwen3_5MTP",
+            "Qwen3_5MoeMTP",
+            "Step3p5MTP",
+        ),
+        "mtp",
+    ),
+    "MedusaModel": "medusa",
+}
+
+
+def _infer_speculative_method(architectures: object) -> str | None:
+    if not isinstance(architectures, list):
+        return None
+
+    inferred_method: str | None = None
+    for architecture in architectures:
+        if not isinstance(architecture, str):
+            continue
+        method = _SPECULATIVE_METHOD_BY_ARCHITECTURE.get(architecture)
+        if method is None:
+            continue
+        if inferred_method is not None and inferred_method != method:
+            return None
+        inferred_method = method
+
+    return inferred_method
+
+
 def maybe_override_with_speculators(
     model: str,
     tokenizer: str | None,
@@ -676,7 +781,11 @@ def maybe_override_with_speculators(
     speculators_config = config_dict.get("speculators_config")
 
     if speculators_config is None:
-        # No speculators config found, return original values
+        # The target is not a speculators checkpoint, but the draft model
+        # named in the speculative config may still declare its settings.
+        vllm_speculative_config = _maybe_resolve_spec_model_config(
+            vllm_speculative_config, hf_token=hf_token, **kwargs
+        )
         return model, tokenizer, vllm_speculative_config
 
     # Speculators format detected - process overrides
@@ -687,11 +796,11 @@ def maybe_override_with_speculators(
     )
     speculators_method = speculative_config["method"]
 
-    # Apply user --speculative-config overrides (e.g. attention_backend).
+    # Apply user --speculative-config runtime overrides.
     if isinstance(vllm_speculative_config, dict):
         speculative_config.update(vllm_speculative_config)
 
-    # Lock fields dictated by the speculators format
+    # Lock fields dictated by the speculators format.
     speculative_config["method"] = speculators_method
     speculative_config["model"] = model
 
@@ -700,6 +809,81 @@ def maybe_override_with_speculators(
     model = tokenizer = verifier_model
 
     return model, tokenizer, speculative_config
+
+
+def _maybe_resolve_spec_model_config(
+    vllm_speculative_config: dict[str, Any] | None,
+    hf_token: bool | str | None = None,
+    **kwargs,
+) -> dict[str, Any] | None:
+    """Populate missing speculative settings from the draft checkpoint.
+
+    Checkpoint declarations fill missing settings. An explicit method must
+    match any method inferred from a registered draft architecture.
+    """
+    if not vllm_speculative_config:
+        return vllm_speculative_config
+    draft_model = vllm_speculative_config.get("model")
+    if not isinstance(draft_model, str) or is_cloud_storage(draft_model):
+        return vllm_speculative_config
+
+    try:
+        config_dict, _ = PretrainedConfig.get_config_dict(
+            draft_model,
+            revision=vllm_speculative_config.get("revision"),
+            token=hf_token,
+            **without_trust_remote_code(kwargs),
+        )
+    except Exception:
+        # Keep downstream validation as the actionable error.
+        logger.debug(
+            "Could not read the draft model config from %s while resolving "
+            "the speculative settings.",
+            draft_model,
+            exc_info=True,
+        )
+        return vllm_speculative_config
+    resolved = dict(vllm_speculative_config)
+    if config_dict.get("speculators_config") is not None:
+        from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
+
+        declared = SpeculatorsConfig.extract_vllm_speculative_config(
+            config_dict=config_dict
+        )
+        declared_method = declared["method"]
+        declared.update(resolved)
+        if resolved.get("method") is None:
+            declared["method"] = declared_method
+        resolved = declared
+
+    architectures = config_dict.get("architectures")
+    method = _infer_speculative_method(architectures)
+    configured_method = resolved.get("method")
+    if configured_method is not None:
+        if method is not None and configured_method != method:
+            raise ValueError(
+                f"Configured speculative method {configured_method!r} conflicts "
+                f"with method {method!r} inferred from registered draft "
+                f"architectures={architectures!r} for draft model "
+                f"{draft_model!r}. Use method={method!r} or omit `method` to "
+                "infer it."
+            )
+        return resolved
+
+    if method is None:
+        raise ValueError(
+            "Could not infer the speculative method for draft model "
+            f"{draft_model!r} from architectures="
+            f"{architectures!r}. Set `method` in "
+            "--speculative-config or pass --spec-method."
+        )
+    resolved["method"] = method
+    logger.info_once(
+        "Inferred speculative method %r from draft model %r.",
+        method,
+        draft_model,
+    )
+    return resolved
 
 
 def get_config(

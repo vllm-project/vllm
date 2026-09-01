@@ -46,6 +46,15 @@ def test_optional_type():
     assert optional_type_func("42") == 42
 
 
+def test_speculative_shorthand_merge_is_consumptive():
+    engine_args = EngineArgs(spec_tokens=3)
+
+    engine_args._merge_speculative_shorthand_args()
+    engine_args._merge_speculative_shorthand_args()
+
+    assert engine_args.speculative_config == {"num_speculative_tokens": 3}
+
+
 @pytest.mark.parametrize(
     ("type_hint", "type", "expected"),
     [

@@ -12,6 +12,7 @@ def test_unsupported_configs():
         AsyncEngineArgs(
             model=MODEL,
             speculative_config={
+                "method": "draft_model",
                 "model": MODEL,
             },
         ).create_engine_config()

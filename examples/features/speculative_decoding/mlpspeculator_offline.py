@@ -61,6 +61,7 @@ def main():
     llm = LLM(
         model="meta-llama/Llama-2-13b-chat-hf",
         speculative_config={
+            "method": "mlp_speculator",
             "model": "ibm-ai-platform/llama-13b-accelerator",
         },
     )

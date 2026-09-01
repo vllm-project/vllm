@@ -8,12 +8,13 @@ from dataclasses import MISSING, Field, asdict, dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pydantic
 import pytest
 from huggingface_hub import ResolvedRevision
 from pydantic import ValidationError
+from transformers import PretrainedConfig
 
 import vllm.config.vllm as vllm_config_module
 import vllm.envs as envs
@@ -896,7 +897,7 @@ def test_draft_model_enables_async_scheduling_by_default():
 )
 def test_max_num_new_slots_for_drafting(method, parallel_drafting, expected_slots):
     speculative_config = SpeculativeConfig(
-        model="ngram",
+        method="ngram",
         num_speculative_tokens=8,
     )
     speculative_config.method = method
@@ -2237,6 +2238,7 @@ def test_eagle_draft_model_config():
         "meta-llama/Meta-Llama-3-8B-Instruct", trust_remote_code=True
     )
     speculative_config = SpeculativeConfig(
+        method="eagle",
         model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
         num_speculative_tokens=1,
         target_model_config=target_model_config,
@@ -2251,12 +2253,396 @@ def test_eagle_draft_model_config():
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
 
 
+@pytest.mark.parametrize(
+    "model", ["/train/checkpoints/6", "[ngram]", "pkg.CustomProposer"]
+)
+def test_speculative_config_requires_method(model):
+    with pytest.raises(ValueError, match="requires an explicit `method`"):
+        SpeculativeConfig(
+            model=model,
+            num_speculative_tokens=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "method", ["extract_hidden_states", "ngram", "ngram_gpu", "suffix"]
+)
+def test_model_free_methods_reject_model(method):
+    with pytest.raises(ValueError, match="does not use `model`; omit it"):
+        SpeculativeConfig(
+            method=method,
+            model="unused",
+            num_speculative_tokens=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "custom_class",
+        "dflash",
+        "draft_model",
+        "eagle",
+        "eagle3",
+        "medusa",
+        "mlp_speculator",
+    ],
+)
+def test_methods_with_external_sources_require_model(method):
+    with pytest.raises(ValueError, match="requires .*model"):
+        SpeculativeConfig(method=method, num_speculative_tokens=1)
+
+
+def _spec_model_declaration_configs(model_type="dflash", tokens=15):
+    return {
+        "target/model": {"architectures": ["LlamaForCausalLM"]},
+        "draft/model": {
+            "speculators_model_type": model_type,
+            "transformer_layer_config": {},
+            "speculators_config": {
+                "proposal_methods": [{"speculative_tokens": tokens}],
+                "verifier": {"name_or_path": "target/model"},
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("model_type", "tokens", "explicit", "expected"),
+    [
+        pytest.param(
+            "dflash",
+            15,
+            {"model": "draft/model"},
+            {"method": "dflash", "model": "draft/model", "num_speculative_tokens": 15},
+            id="declaration-populates-method-and-tokens",
+        ),
+        pytest.param(
+            "dflash",
+            15,
+            {"model": "draft/model", "num_speculative_tokens": 3},
+            {"method": "dflash", "model": "draft/model", "num_speculative_tokens": 3},
+            id="explicit-tokens-take-precedence",
+        ),
+        pytest.param(
+            "peagle",
+            7,
+            {"model": "draft/model", "method": "eagle3"},
+            {
+                "method": "eagle3",
+                "model": "draft/model",
+                "num_speculative_tokens": 7,
+                "parallel_drafting": True,
+            },
+            id="explicit-method-still-adopts-peagle-settings",
+        ),
+    ],
+)
+def test_spec_model_declaration_fills_missing_settings(
+    model_type, tokens, explicit, expected
+):
+    from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    configs = _spec_model_declaration_configs(model_type, tokens)
+
+    with patch(
+        "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+        side_effect=lambda model, **kwargs: (configs[model], {}),
+    ):
+        model, tokenizer, speculative_config = maybe_override_with_speculators(
+            model="target/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config=explicit,
+        )
+
+    assert (model, tokenizer) == ("target/model", None)
+    assert speculative_config == expected
+
+
+@pytest.mark.parametrize(
+    ("architecture", "method"),
+    [
+        ("DFlash2DraftModel", "dflash"),
+        ("MuseGlimmerAssistantModel", "dflash"),
+        ("Qwen3OmniDSparkModel", "dspark"),
+        ("EagleDeepSeekMTPModel", "eagle"),
+        ("PEagleDraftModel", "eagle3"),
+        ("DeepSeekMTPModel", "mtp"),
+        ("MedusaModel", "medusa"),
+    ],
+)
+def test_spec_model_architecture_infers_method(architecture, method):
+    from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    configs = {
+        "target/model": {"architectures": ["LlamaForCausalLM"]},
+        "draft/model": {"architectures": [architecture]},
+    }
+
+    with patch(
+        "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+        side_effect=lambda model, **kwargs: (configs[model], {}),
+    ):
+        _, _, speculative_config = maybe_override_with_speculators(
+            model="target/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config={"model": "draft/model"},
+        )
+
+    assert speculative_config == {"model": "draft/model", "method": method}
+
+
+@pytest.mark.parametrize(
+    ("architecture", "method"),
+    [
+        ("Qwen3DSparkModel", "dspark"),
+        ("DeepSeekMTPModel", "mtp"),
+    ],
+)
+def test_explicit_method_matching_draft_architecture_is_preserved(architecture, method):
+    from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    configs = {
+        "target/model": {"architectures": ["LlamaForCausalLM"]},
+        "draft/model": {"architectures": [architecture]},
+    }
+    explicit = {"model": "draft/model", "method": method}
+
+    with patch(
+        "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+        side_effect=lambda model, **kwargs: (configs[model], {}),
+    ):
+        _, _, speculative_config = maybe_override_with_speculators(
+            model="target/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config=explicit,
+        )
+
+    assert speculative_config == explicit
+
+
+@pytest.mark.parametrize(
+    ("architecture", "configured_method", "registered_method"),
+    [
+        ("MuseGlimmerAssistantModel", "draft_model", "dflash"),
+        ("DeepSeekMTPModel", "deepseek_mtp", "mtp"),
+    ],
+)
+def test_explicit_method_conflicting_with_draft_architecture_is_rejected(
+    architecture, configured_method, registered_method
+):
+    from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    configs = {
+        "target/model": {"architectures": ["LlamaForCausalLM"]},
+        "draft/model": {"architectures": [architecture]},
+    }
+
+    with (
+        patch(
+            "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+            side_effect=lambda model, **kwargs: (configs[model], {}),
+        ),
+        pytest.raises(
+            ValueError,
+            match=(
+                f"method '{configured_method}' conflicts with method "
+                f"'{registered_method}'"
+            ),
+        ),
+    ):
+        maybe_override_with_speculators(
+            model="target/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config={
+                "model": "draft/model",
+                "method": configured_method,
+            },
+        )
+
+
+def test_explicit_method_with_unrecognized_draft_architecture_is_preserved():
+    from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    configs = {
+        "target/model": {"architectures": ["LlamaForCausalLM"]},
+        "draft/model": {"architectures": ["LlamaForCausalLM"]},
+    }
+    explicit = {"model": "draft/model", "method": "draft_model"}
+
+    with patch(
+        "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+        side_effect=lambda model, **kwargs: (configs[model], {}),
+    ):
+        _, _, speculative_config = maybe_override_with_speculators(
+            model="target/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config=explicit,
+        )
+
+    assert speculative_config == explicit
+
+
+@pytest.mark.parametrize(
+    "architectures",
+    [
+        ["LlamaForCausalLM"],
+        ["DFlashDraftModel", "Qwen3DSparkModel"],
+    ],
+)
+def test_unrecognized_or_ambiguous_architecture_requires_method(architectures):
+    from vllm.transformers_utils.config import maybe_override_with_speculators
+
+    draft_model = "/checkpoints/eagle3-dflash-dspark"
+    configs = {
+        "target/model": {"architectures": ["LlamaForCausalLM"]},
+        draft_model: {"architectures": architectures},
+    }
+
+    with (
+        patch(
+            "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+            side_effect=lambda model, **kwargs: (configs[model], {}),
+        ),
+        pytest.raises(ValueError, match="Could not infer.*Set `method`"),
+    ):
+        maybe_override_with_speculators(
+            model="target/model",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config={"model": draft_model},
+        )
+
+
+@pytest.fixture
+def deepseek_v4_dspark_config():
+    return PretrainedConfig(
+        architectures=["DeepseekV4ForCausalLM"],
+        model_type="deepseek_v4",
+        num_nextn_predict_layers=1,
+        dspark_block_size=5,
+        sample_from_anchor=False,
+        dspark_noise_token_id=128799,
+        dspark_target_layer_ids=[58, 59, 60],
+        dspark_markov_rank=512,
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [
+        ("draft_model", ("deepseek_v4", "DeepseekV4ForCausalLM", None)),
+        ("mtp", ("deepseek_mtp", "DeepSeekV4MTPModel", 1)),
+        ("dspark", ("deepseek_v4", "DSparkDraftModel", None)),
+    ],
+)
+def test_explicit_method_selects_deepseek_v4_loader(
+    deepseek_v4_dspark_config,
+    method,
+    expected,
+):
+    hf_config = SpeculativeConfig.compose_draft_hf_overrides(None, method)(
+        deepseek_v4_dspark_config
+    )
+
+    assert (
+        hf_config.model_type,
+        hf_config.architectures[0],
+        getattr(hf_config, "n_predict", None),
+    ) == expected
+
+
+def test_dspark_reuses_embedded_target_and_defaults_tokens(
+    deepseek_v4_dspark_config,
+):
+    target_model_config = MagicMock(spec=ModelConfig)
+    target_model_config.model = "target/model"
+    target_model_config.quantization = "fp8"
+    target_model_config.hf_overrides = None
+    target_model_config.max_model_len = 4096
+    target_model_config.hf_config = PretrainedConfig(
+        architectures=["DeepseekV4ForCausalLM"], model_type="deepseek_v4"
+    )
+    target_model_config.architectures = target_model_config.hf_config.architectures
+
+    draft_model_config = MagicMock(spec=ModelConfig)
+    draft_model_config.hf_config = SpeculativeConfig.dspark_hf_config_override(
+        deepseek_v4_dspark_config
+    )
+    draft_model_config.architectures = draft_model_config.hf_config.architectures
+    draft_model_config.max_model_len = 4096
+
+    with patch(
+        "vllm.config.speculative.ModelConfig",
+        return_value=draft_model_config,
+    ):
+        speculative_config = SpeculativeConfig(
+            method="dspark",
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+        )
+
+    assert speculative_config.model == "target/model"
+    assert speculative_config.quantization == "fp8"
+    assert speculative_config.num_speculative_tokens == 4
+
+
+@pytest.mark.parametrize(
+    ("method", "config_kwargs", "expected"),
+    [
+        pytest.param("dflash", {"block_size": 16}, 15, id="dflash-anchor-is-bonus"),
+        pytest.param(
+            "dflash",
+            {"dflash_config": {"block_size": 16}},
+            15,
+            id="dflash-nested-block-size",
+        ),
+        pytest.param(
+            "dflash",
+            {"block_size": 16, "dflash_config": {"block_size": 8}},
+            7,
+            id="dflash-nested-block-size-takes-precedence",
+        ),
+        pytest.param("dspark", {"block_size": 7}, 7, id="dspark-full-block"),
+        pytest.param(
+            "dspark",
+            {"dspark_block_size": 5, "block_size": 7},
+            5,
+            id="dspark-specific-block-size-takes-precedence",
+        ),
+        pytest.param(
+            "dspark",
+            {"block_size": 7, "sample_from_anchor": False},
+            6,
+            id="dspark-bonus-anchor",
+        ),
+        pytest.param("dflash", {}, None, id="no-block-size-stays-required"),
+        pytest.param("draft_model", {"block_size": 16}, None, id="non-block-drafter"),
+        pytest.param("dflash", {"block_size": 1}, None, id="degenerate-block"),
+        pytest.param("dspark", {"block_size": True}, None, id="boolean-block-size"),
+    ],
+)
+def test_block_drafters_default_tokens_from_block_size(method, config_kwargs, expected):
+    hf_config = PretrainedConfig(**config_kwargs)
+
+    block_tokens = SpeculativeConfig._block_drafter_tokens(method, hf_config)
+    actual = block_tokens[0] if block_tokens is not None else None
+
+    assert actual == expected
+
+
 def test_draft_sample_method_probabilistic_is_accepted():
     speculative_config = SpeculativeConfig(
         method="ngram",
         num_speculative_tokens=1,
         draft_sample_method="probabilistic",
     )
+    assert speculative_config.model is None
     assert speculative_config.draft_sample_method == "probabilistic"
 
 
