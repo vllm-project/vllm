@@ -4,12 +4,23 @@
 """
 Paged shared memory cache for multi-modal processing.
 
-This module provides sender (P0) and receiver (P1) cache implementations
-that use a shared memory server managed by PagedShmServer.
+**Workflow:**
+- **Sender**: Encodes item into MessagePack chunks. If multiple chunks (large tensor),
+  allocates SHM blocks and writes asynchronously. Returns `(None, updates)` to
+  indicate data is now in cache.
+- **Receiver**: On cache miss (`mm_item=None`), reads and decodes from SHM;
+  on hit, returns item directly.
+
+**Classes:**
+- PagedShmCache: Base class handling client, encoder/decoder, and common ops.
+- PagedShmSenderCache: Implements BaseMultiModalProcessorCache for writing.
+- PagedShmReceiverCache: Implements BaseMultiModalReceiverCache for reading.
 """
 
+import threading
 from collections.abc import Sequence
 from contextlib import nullcontext
+from dataclasses import dataclass
 
 import torch
 
@@ -37,7 +48,49 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 logger = init_logger(__name__)
 
 
+@dataclass
+class CacheStats:
+    """
+    Thread-safe statistics collector for cache operations.
+    Maintains hit count, total accesses, and supports incremental reporting.
+    """
+
+    _hits: int = 0
+    _total: int = 0
+    _last_info: CacheInfo = CacheInfo(hits=0, total=0)
+    _lock: threading.Lock = threading.Lock()
+
+    def record_access(self, is_hit: bool) -> None:
+        """Record one cache access; increment total and optionally hits."""
+        with self._lock:
+            self._total += 1
+            if is_hit:
+                self._hits += 1
+
+    def reset(self) -> None:
+        """Reset all counters to zero."""
+        with self._lock:
+            self._hits = 0
+            self._total = 0
+            self._last_info = CacheInfo(hits=0, total=0)
+
+    def make_stats(self, delta: bool = False) -> CacheInfo:
+        """
+        Return current statistics. If delta=True, return the increment since the
+        last call to make_stats(delta=True) (or since last reset).
+        """
+        with self._lock:
+            current = CacheInfo(hits=self._hits, total=self._total)
+            if delta:
+                diff = current - self._last_info
+                self._last_info = current
+                return diff
+            return current
+
+
 class PagedShmCache:
+    """Base class for SHM‑backed multi‑modal caches."""
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -51,7 +104,7 @@ class PagedShmCache:
         address = mm_config.paged_shm_server_address
         if not address:
             raise RuntimeError(
-                "PagedShmSenderCache requires a valid paged_shm_server_address "
+                "PagedShmCache requires a valid paged_shm_server_address "
                 "in the model's multimodal config."
             )
 
@@ -80,7 +133,7 @@ class PagedShmCache:
             return False
 
     def invalidate(self, mm_hash: str) -> None:
-        """Delete the item from SHM."""
+        """Delete the item from shared memory."""
         try:
             self._client.delete(mm_hash)
         except Exception as e:
@@ -91,16 +144,28 @@ class PagedShmCache:
         mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
+        """
+        Encode and write the item to shared memory.
+
+        Steps:
+        1. Encode the item into chunks;
+            if only one chunk, skip SHM and return original.
+        2. Calculate total physical blocks needed
+            (each logical chunk starts at a new block).
+        3. Request block allocation from the SHM server.
+        4. Submit an async task to write chunks and close the write handle.
+        5. Immediately return `(None, updates)` indicating the item is now cached.
+        """
         encoded = encode_item(mm_item, self._encoder)
 
         if encoded is None:
             # No tensor larger than block_size, so no SHM transfer needed.
-            # Return the original item directly.
             return mm_item
 
         chunks, lengths = encoded
 
-        # Calculate total blocks needed (each chunk starts at a new block)
+        # Each chunk starts at a new block boundary,
+        # so total blocks is sum of per‑chunk needs.
         total_blocks = sum(
             (length + self.block_size - 1) // self.block_size for length in lengths
         )
@@ -127,6 +192,7 @@ class PagedShmCache:
         chunks: Sequence[bytes | torch.Tensor],
         blocks: list[int],
     ) -> None:
+        """Background task to write chunks and finalize the write handle."""
         try:
             write_encoded_to_blocks(self._storage, chunks, blocks)
             self._client.close_write(uuid)
@@ -141,6 +207,15 @@ class PagedShmCache:
             raise  # re-raise original exception
 
     def get_item(self, mm_hash: str) -> MultiModalProcessorCacheInItem:
+        """
+        Read and decode an item from shared memory.
+
+        Steps:
+        1. Open a read handle for the given hash, retrieving the allocated blocks.
+        2. Within a stream context (if CUDA), decode the blocks into Python objects.
+        3. Synchronize the stream if it's a CUDA stream to ensure data is ready.
+        4. Return the reconstructed item; finally close the read handle.
+        """
         try:
             alloc = self._client.open_read(mm_hash, timeout=self.open_write_timeout)
             try:
@@ -163,11 +238,12 @@ class PagedShmCache:
             raise MultiModalCacheMissError([mm_hash]) from None
 
     def close(self) -> None:
+        """Close the underlying client and release resources."""
         self._client.close()
 
 
 class PagedShmSenderCache(PagedShmCache, BaseMultiModalProcessorCache):
-    """Sender (P0) cache that stores multi-modal items in paged shared memory."""
+    """Sender (P0) cache."""
 
     def __init__(
         self,
@@ -182,49 +258,42 @@ class PagedShmSenderCache(PagedShmCache, BaseMultiModalProcessorCache):
             open_write_timeout=open_write_timeout,
             pool_workers=pool_workers,
         )
-
-        self._hits = 0
-        self._total = 0
-        self._last_info = CacheInfo(hits=0, total=0)
-
-    def _stat(self, *, delta: bool = False) -> CacheInfo:
-        info = CacheInfo(hits=self._hits, total=self._total)
-        if delta:
-            info_delta = info - self._last_info
-            self._last_info = info
-            info = info_delta
-        return info
+        self._stats = CacheStats()
 
     def get_and_update_item(
         self,
         mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
-        self._total += 1
+        """
+        Update the cache with the given item and return the cached representation.
+
+        If `mm_item` is provided, we treat it as a cache hit, record stats, and
+        store it. Otherwise, we treat it as a miss and read from SHM (should not
+        happen for sender).
+        """
         if mm_item is not None:
-            self._hits += 1
+            self._stats.record_access(is_hit=True)
             return self.create_item(mm_item, mm_hash)
-        return self.get_item(mm_hash)
+        else:
+            self._stats.record_access(is_hit=False)
+            return self.get_item(mm_hash)
 
     def touch_sender_cache_item(self, mm_hash: str) -> None:
+        """No‑op for sender; items are already in SHM when created."""
         pass
 
     def clear_cache(self) -> None:
-        self._hits = 0
-        self._total = 0
-        self._last_info = CacheInfo(hits=0, total=0)
+        """Reset statistics; actual SHM data is managed by the server."""
+        self._stats.reset()
 
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
-        return self._stat(delta=delta)
+        """Return cache statistics (hits/total)."""
+        return self._stats.make_stats(delta=delta)
 
 
 class PagedShmReceiverCache(PagedShmCache, BaseMultiModalReceiverCache):
-    """
-    Receiver (P1) cache that reads multi-modal items from paged shared memory.
-
-    It only reads data; it does not write. If mm_item is None, it reads from SHM.
-    If mm_item is not None, it returns mm_item as is (no caching performed).
-    """
+    """Receiver (P1) cache."""
 
     def __init__(
         self,
@@ -243,7 +312,12 @@ class PagedShmReceiverCache(PagedShmCache, BaseMultiModalReceiverCache):
         mm_item: MultiModalKwargsItem | None,
         mm_hash: str,
     ) -> MultiModalKwargsItem:
-        # If data is provided, return it as-is (no caching)
+        """
+        Return the cached item.
+
+        If `mm_item` is not None, return it directly (cache hit).
+        Otherwise, read from SHM and return the reconstructed kwargs item.
+        """
         if mm_item is not None:
             return mm_item
         kwargs_item, _ = self.get_item(mm_hash)
@@ -254,7 +328,9 @@ class PagedShmReceiverCache(PagedShmCache, BaseMultiModalReceiverCache):
         mm_hash: str,
         mm_item: MultiModalKwargsItem | None = None,
     ) -> None:
+        """No‑op for receiver; items are already valid when read."""
         pass
 
     def clear_cache(self) -> None:
+        """No‑op; receiver does not manage cache data."""
         pass

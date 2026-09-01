@@ -46,3 +46,21 @@ The actual tensor bytes are **offloaded** from the ZMQ hot path, eliminating ser
 1. Call `open_read(uuid_or_token)` to acquire a read lock and obtain block information. If the item is still being written, the call may wait (with timeout).
 2. Read the data from SHM into CPU or GPU memory.
 3. **Note**: The read lock is **not** released immediately after reading. Instead, the release of the read token (via `close_read`) is deferred to the `PagedShmTensorTracker`, which is invoked when the request is freed (e.g., after generation completes). This design avoids synchronizing the GPU stream, since the H2D transfer may still be in flight when `read()` returns. The tracker ensures the token is destroyed only after all workers have finished using the data.
+
+### Higher‑Level Cache (PagedShmCache)
+
+`PagedShmCache` is a high‑level abstraction built on `PagedShmClient` that integrates with the multi‑modal processing pipeline (`BaseMultiModalProcessorCache`). It handles:
+
+- **Serialization**: Encodes arbitrary multi‑modal items (tensors + prompt updates) into block‑aligned chunks using MessagePack, with a separate metadata chunk for per‑chunk lengths and type flags.
+- **Asynchronous writes**: Submits write tasks to a thread pool, allowing the API Server to return immediately without waiting for SHM allocation to complete.
+- **Efficient reads**: Supports CUDA streams and pinned memory to overlap data transfer with computation. Reads are synchronous but stream‑synchronized.
+
+**Sender (P0) cache** (`PagedShmSenderCache`):  
+
+Used by the API Server to store items. When given a new item, it encodes and writes it asynchronously, returning `(None, updates)` to indicate the item is now in SHM. On subsequent requests (if the same item is encountered again), it can return the cached representation without re‑encoding.
+
+**Receiver (P1) cache** (`PagedShmReceiverCache`):  
+
+Used by GPU Workers to retrieve items. On cache miss, it reads from SHM and reconstructs the item; on hit, it returns the data directly.
+
+The cache automatically manages block allocation, reference counting, and cleanup through the underlying server, providing a simple and robust API for the multi‑modal processing system.

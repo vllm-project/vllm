@@ -141,32 +141,39 @@ class TestEncode:
     def test_encode_item_basic(self):
         encoder = MsgpackEncoder(size_threshold=4096)
         item = _make_test_item()
-        # encode_item expects a tuple (kwargs_item, prompt_updates)
         result = encode_item((item.kwargs_item, item.prompt_updates), encoder)
         assert result is not None, "Expected multi-chunk encoding"
         chunks, lengths = result
 
-        first = chunks[0]
-        assert isinstance(first, bytes)
-        num_chunks = struct.unpack("<I", first[:4])[0]
-        assert num_chunks == len(chunks) == len(lengths)
+        # First chunk is the metadata chunk
+        meta = chunks[0]
+        assert isinstance(meta, bytes)
 
-        offset = 4
+        # Parse 8-byte header
+        meta_size = struct.unpack("<I", meta[:4])[0]
+        total_chunks = struct.unpack("<I", meta[4:8])[0]
+        assert total_chunks == len(chunks)
+
+        # Parse per-data-chunk metadata entries
+        offset = 8
         stored_lengths = []
-        for _ in range(num_chunks):
-            stored_len = struct.unpack("<I", first[offset : offset + 4])[0]
+        for _ in range(total_chunks - 1):  # data chunks
+            stored_len = struct.unpack("<I", meta[offset : offset + 4])[0]
             offset += 4
-            flag = struct.unpack("<B", first[offset : offset + 1])[0]
+            flag = struct.unpack("<B", meta[offset : offset + 1])[0]
             offset += 1
             stored_lengths.append(stored_len)
             assert flag in (0, 1)
 
-        # Verify metadata length calculation
-        meta_data_len = 4 + num_chunks * 5
-        assert lengths[0] == meta_data_len + stored_lengths[0]
-        for i in range(1, num_chunks):
-            assert lengths[i] == stored_lengths[i]
+        # Verify metadata chunk size
+        assert meta_size == len(meta)
 
+        # Verify that chunk lengths match metadata
+        assert lengths[0] == meta_size
+        for i in range(1, total_chunks):
+            assert lengths[i] == stored_lengths[i - 1]
+
+        # Verify actual sizes
         for i, ch in enumerate(chunks):
             actual_size = (
                 ch.nbytes if isinstance(ch, (torch.Tensor, np.ndarray)) else len(ch)
@@ -410,6 +417,79 @@ class TestIntegration:
         )
         assert _compare_items(original_item, decoded_item)
 
+    def test_metadata_chunk_cross_blocks(self, client):
+        """
+        Test that metadata chunk can span multiple blocks when it's large.
+        Create many medium-sized tensor chunks to force a large metadata chunk.
+        Each tensor is slightly above the encoder's size_threshold, so each
+        becomes a separate data chunk.
+        """
+        block_size = client._block_size
+        threshold = 1024
+        encoder = MsgpackEncoder(size_threshold=threshold)
+        decoder = MsgpackDecoder(PagedShmCacheOutItem)
+
+        # Create many data chunks, enough to make metadata chunk > block_size
+        num_tensors = (
+            1000  # This many tensors, but encoder may produce more/less data chunks
+        )
+        data_dict = {}
+        for i in range(num_tensors):
+            data_dict[f"t{i}"] = MultiModalFieldElem(
+                torch.randn(257, dtype=torch.float32), MultiModalBatchedField()
+            )
+        kwargs_item = MultiModalKwargsItem(data_dict)
+        original_item = PagedShmCacheOutItem(kwargs_item=kwargs_item, prompt_updates=[])
+
+        result = encode_item(
+            (original_item.kwargs_item, original_item.prompt_updates), encoder
+        )
+        assert result is not None
+        chunks, lengths = result
+
+        # Verify metadata chunk size > block_size
+        meta_chunk = chunks[0]
+        assert len(meta_chunk) > block_size, (
+            f"Metadata chunk size {len(meta_chunk)} "
+            f"should exceed block size {block_size}"
+        )
+
+        # Parse header to verify total_chunks == len(chunks)
+        meta_size = struct.unpack("<I", meta_chunk[:4])[0]
+        total_chunks = struct.unpack("<I", meta_chunk[4:8])[0]
+        assert total_chunks == len(chunks)
+        assert meta_size == len(meta_chunk)
+
+        # Calculate total blocks needed
+        total_blocks = sum(
+            (length + block_size - 1) // block_size for length in lengths
+        )
+
+        # Write and read back
+        mm_hash = _unique_uuid()
+        req = ShmWriteRequest(
+            uuid=mm_hash,
+            size=total_blocks * block_size,
+            use_cache=True,
+            generate_read_token=True,
+        )
+        alloc = client.open_write([req], timeout=10.0)[0]
+        write_encoded_to_blocks(client._storage, chunks, alloc.blocks)
+        client.close_write(mm_hash)
+
+        read_alloc = client.open_read(alloc.read_token, timeout=5.0)
+        decoded_kwargs, _ = read_decoded_from_blocks(
+            client._storage, read_alloc.blocks, block_size, decoder
+        )
+        client.close_read(alloc.read_token)
+
+        decoded_item = PagedShmCacheOutItem(
+            kwargs_item=decoded_kwargs, prompt_updates=[]
+        )
+        assert _compare_items(original_item, decoded_item), (
+            "Data mismatch for large metadata chunk"
+        )
+
 
 class TestErrorHandling:
     """Tests for error conditions."""
@@ -423,7 +503,6 @@ class TestErrorHandling:
         assert result is not None
         chunks, _ = result
 
-        # The error message now includes chunk index and details, so match a prefix.
         with pytest.raises(ValueError, match="Not enough blocks for chunk"):
             write_encoded_to_blocks(storage, chunks, [0])
 
@@ -431,12 +510,21 @@ class TestErrorHandling:
         storage = client._storage
         block_size = storage.block_size
 
-        # Create a header claiming length larger than available
-        header = struct.pack("<I", 1) + struct.pack("<I", 10000) + struct.pack("<B", 0)
-        fake_chunk = header + b"X" * 100
-        storage.write(fake_chunk, [0])
+        # Construct a metadata chunk with one data chunk whose length requires
+        # more blocks than available.
+        data_length = 10000  # > block_size, needs multiple blocks
+        meta_body = struct.pack("<I", data_length) + struct.pack("<B", 0)  # type 0
+        meta_size = 8 + len(meta_body)
+        total_chunks = 2  # metadata + 1 data
+        header = struct.pack("<I", meta_size) + struct.pack("<I", total_chunks)
+        meta_chunk = header + meta_body
 
-        with pytest.raises(ValueError, match="Insufficient blocks for first chunk"):
+        # Write the metadata chunk into block 0 (it fits in one block)
+        storage.write(meta_chunk, [0])
+
+        # Attempt to read with only block 0 available.
+        # The metadata chunk can be read, but the data chunk requires more blocks.
+        with pytest.raises(ValueError, match="Insufficient blocks for data chunk"):
             read_decoded_from_blocks(
                 storage, [0], block_size, MsgpackDecoder(PagedShmCacheOutItem)
             )
