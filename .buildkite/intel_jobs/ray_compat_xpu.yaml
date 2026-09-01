@@ -2,7 +2,7 @@ group: Ray Compatibility XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: Ray Dependency Compatibility Check
+- label: ':nvidia: (H200 MIG 18GB) Ray Dependency Compatibility Check'
   device: intel_gpu
   timeout_in_minutes: 10
   soft_fail: true

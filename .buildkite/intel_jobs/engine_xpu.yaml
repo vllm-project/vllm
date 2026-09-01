@@ -2,7 +2,7 @@ group: Engine XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: Engine
+- label: ':nvidia: (H200 MIG 18GB) Engine Core'
   device: intel_gpu
   timeout_in_minutes: 30
   working_dir: .
@@ -44,6 +44,7 @@ steps:
 - label: Engine (1 GPU)
   device: intel_gpu
   timeout_in_minutes: 45
+  num_devices: 1
   working_dir: .
   no_plugin: true
   env:
@@ -68,7 +69,7 @@ steps:
     pytest -v -s v1/engine/test_preprocess_error_handling.py || true &&
     pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py || true &&
     pytest -v -s v1/test_tensor_ipc_queue.py || true'
-- label: e2e Scheduling (1 GPU)
+- label: ':nvidia: (H200 MIG 18GB) E2E Scheduling'
   device: intel_gpu
   timeout_in_minutes: 53
   working_dir: .
@@ -90,7 +91,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/general/test_async_scheduling.py || true'
-- label: e2e Core (1 GPU)
+- label: ':nvidia: (H200 MIG 35GB) E2E Core'
   device: intel_gpu
   timeout_in_minutes: 40
   working_dir: .
@@ -112,11 +113,11 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py || true'
-- label: V1 e2e (2 GPUs)
+- label: ':nvidia: (L4) V1 E2E'
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 2
-  optional: true
+  optional: false
   working_dir: .
   no_plugin: true
   env:
@@ -153,11 +154,11 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism || true'
-- label: V1 e2e (4xH100)
+- label: ':nvidia: (B200) V1 E2E Hybrid Chunked Prefill'
   device: intel_gpu
   timeout_in_minutes: 35
-  num_devices: 4
-  optional: true
+  num_devices: 1
+  optional: false
   working_dir: .
   no_plugin: true
   env:
@@ -166,11 +167,12 @@ steps:
     VLLM_TEST_DEVICE: xpu
   agent_tags:
     label: debug
-    gpu: 4+
+    gpu: 1+
   _raw_old_commands:
   - pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py
   source_file_dependencies:
   - vllm/v1/attention/backends/utils.py
+  - vllm/v1/core/
   - vllm/v1/worker/gpu_model_runner.py
   - tests/v1/e2e/test_hybrid_chunked_prefill.py
   commands:

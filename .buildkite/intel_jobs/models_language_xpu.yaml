@@ -2,7 +2,7 @@ group: Models - Language XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: Language Models Tests (Standard)
+- label: ':nvidia: (H200 MIG 18GB) Language Models (Standard)'
   device: intel_gpu
   timeout_in_minutes: 30
   working_dir: .
@@ -26,7 +26,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/language -m core_model and (not slow_test) || true'
-- label: Language Models Tests (Extra Standard) %N
+- label: ':nvidia: (H200 MIG 35GB) Language Models (Extra Standard) Shard %N'
   device: intel_gpu
   timeout_in_minutes: 40
   parallelism: 2
@@ -52,7 +52,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/language -m core_model and slow_test --deselect="tests/models/language/generation/test_common.py::test_models[True-False-5-32-bigscience/bloom-560m]" --deselect="tests/models/language/generation/test_common.py::test_models[False-False-5-32-bigscience/bloom-560m]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
-- label: Language Models Tests (Hybrid) %N
+- label: ':nvidia: (H200 MIG 35GB) Language Models (Hybrid) Shard %N'
   device: intel_gpu
   timeout_in_minutes: 65
   parallelism: 2
@@ -66,7 +66,7 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+  - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
   - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   source_file_dependencies:
@@ -76,13 +76,12 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pip install --no-build-isolation git+https://github.com/state-spaces/mamba@v2.3.0 || true &&
-    pip install --no-build-isolation git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0 || true &&
-    cd tests &&
+    'cd tests &&
     pytest -v -s models/language/generation -m hybrid_model -k not granite-4.0-tiny-preview --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[SD-20-ai21labs/Jamba-tiny-dev]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[SD-20-state-spaces/mamba-130m-hf]" --deselect="tests/models/language/generation/test_hybrid.py::test_chunked_prefill_with_parallel_sampling[DS-10-ai21labs/Jamba-tiny-dev]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[DS-20-state-spaces/mamba-130m-hf]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[DS-20-ai21labs/Jamba-tiny-dev]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
-- label: Language Models Tests (Granite L4 Compatibility)
+- label: ':nvidia: (L4) Granite Language Model Compatibility'
   device: intel_gpu
   timeout_in_minutes: 65
+  num_devices: 1
   working_dir: .
   no_plugin: true
   env:
@@ -93,7 +92,7 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+  - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
   - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
   source_file_dependencies:
@@ -105,10 +104,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/language/generation -m hybrid_model -k granite-4.0-tiny-preview || true'
-- label: Language Models Test (Extended Generation)
+- label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Generation)'
   device: intel_gpu
   timeout_in_minutes: 80
-  optional: true
+  optional: false
   working_dir: .
   no_plugin: true
   env:
@@ -119,7 +118,7 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+  - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
   - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
   source_file_dependencies:
@@ -131,10 +130,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/language/generation -m (not core_model) and (not hybrid_model) || true'
-- label: Language Models Test (PPL)
+- label: ':nvidia: (H200 MIG 18GB) Language Models (PPL)'
   device: intel_gpu
   timeout_in_minutes: 30
-  optional: true
+  optional: false
   working_dir: .
   no_plugin: true
   env:
@@ -155,11 +154,11 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/language/generation_ppl_test || true'
-- label: Language Models Test (Extended Pooling) %N
+- label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Pooling) Shard %N'
   device: intel_gpu
   timeout_in_minutes: 120
   parallelism: 4
-  optional: true
+  optional: false
   working_dir: .
   no_plugin: true
   env:
@@ -180,10 +179,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/language/pooling -m not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
-- label: Language Models Test (MTEB)
+- label: ':nvidia: (H200 MIG 18GB) Language Models (MTEB)'
   device: intel_gpu
   timeout_in_minutes: 68
-  optional: true
+  optional: false
   working_dir: .
   no_plugin: true
   env:
