@@ -890,6 +890,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     residual: torch.Tensor,
     weight: torch.Tensor,
     epsilon: float,
+    gemma_norm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
     assert aiter_ar is not None, "aiter allreduce must be initialized"
@@ -924,6 +925,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         weight,
         epsilon,
         use_1stage=use_1stage,
+        gemma_norm=gemma_norm,
     )
     assert result is not None
     return result[0], result[1]
@@ -934,6 +936,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_fake(
     residual: torch.Tensor,
     weight: torch.Tensor,
     epsilon: float,
+    gemma_norm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty_like(input_), torch.empty_like(residual)
 
