@@ -152,8 +152,8 @@ class _RecordingBackend:
         self.calls.append({"is_store": is_store, "wait_event": wait_event})
 
 
-def test_get_finished_passes_wait_event_for_store_only():
-    """get_finished gates stores on a compute-done event but not loads."""
+def test_transfer_hooks_pass_wait_event_for_store_only():
+    """wait_for_save gates stores on a compute-done event; start_load_kv does not."""
     worker = SimpleCPUOffloadWorker(
         vllm_config=None, kv_cache_config=None, cpu_capacity_bytes=0
     )
@@ -168,7 +168,8 @@ def test_get_finished_passes_wait_event_for_store_only():
         store_cpu_blocks=[1],
     )
 
-    worker.get_finished(set())
+    worker.start_load_kv()
+    worker.wait_for_save()
 
     store_calls = [c for c in recording.calls if c["is_store"]]
     load_calls = [c for c in recording.calls if not c["is_store"]]
@@ -209,7 +210,10 @@ def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
         device="cuda",
     )
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
-    cache_config = MagicMock(num_blocks=num_blocks)
+    cache_config = MagicMock(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[MagicMock(size=raw.nbytes)],
+    )
     worker = SimpleCPUOffloadWorker(
         vllm_config=None,
         kv_cache_config=cache_config,
@@ -238,6 +242,30 @@ def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
     }
 
 
+def test_register_kv_cache_storage_with_trailing_padding(monkeypatch):
+    num_blocks = 4
+    block_bytes = 32
+    cache_bytes = num_blocks * block_bytes
+    raw = torch.zeros(4096, dtype=torch.int8, device="cuda")
+    cache = raw[:cache_bytes].view(num_blocks, block_bytes)
+    worker = SimpleCPUOffloadWorker(
+        vllm_config=None,
+        kv_cache_config=MagicMock(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[MagicMock(size=cache_bytes)],
+        ),
+        cpu_capacity_bytes=cache_bytes,
+    )
+    worker._backend = MagicMock()
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
+
+    worker.register_kv_caches({"layer.0": cache})
+
+    assert worker.gpu_kv_caches is not None
+    assert list(worker.gpu_kv_caches) == ["layer.0"]
+    assert worker.gpu_kv_caches["layer.0"].shape == (num_blocks, block_bytes)
+
+
 def test_register_separate_kv_head_groups(monkeypatch):
     # LHBNC hoists the K/V head groups outside the block dim, so each layer's
     # blocks are registered as one region per group (K, V).
@@ -260,7 +288,10 @@ def test_register_separate_kv_head_groups(monkeypatch):
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
     worker = SimpleCPUOffloadWorker(
         vllm_config=None,
-        kv_cache_config=MagicMock(num_blocks=num_blocks),
+        kv_cache_config=MagicMock(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[MagicMock(size=raw.nbytes)],
+        ),
         cpu_capacity_bytes=raw.nbytes,
     )
     worker._backend = MagicMock()

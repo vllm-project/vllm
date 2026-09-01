@@ -842,6 +842,29 @@ should_upload_wheel_artifacts() {
         || "${TARGET}" == *"artifact"* ]]
 }
 
+should_export_rocm_smoke() {
+    [[ "${TARGET}" == "test-rocm-ci-with-wheel" \
+        || "${TARGET}" == "smoke-test-rocm-ci" ]]
+}
+
+verify_rocm_smoke_export() {
+    local marker="./build/rocm-smoke-export/vllm-smoke-ok"
+    local expected_smoke_id="${BUILDKITE_BUILD_ID:-local}"
+    local actual_smoke_id=""
+
+    should_export_rocm_smoke || return 0
+    if [[ ! -f "${marker}" ]]; then
+        echo "ROCm BuildKit smoke marker is missing: ${marker}" >&2
+        return 1
+    fi
+    actual_smoke_id="$(< "${marker}")"
+    if [[ "${actual_smoke_id}" != "${expected_smoke_id}" ]]; then
+        echo "ROCm BuildKit smoke marker belongs to ${actual_smoke_id}, not ${expected_smoke_id}" \
+            >&2
+        return 1
+    fi
+}
+
 get_remote_image_label() {
     local image_ref="$1"
     local label_key="$2"
@@ -1386,8 +1409,9 @@ maybe_skip_existing_image() {
         echo "FORCE_BUILD=1 set; skipping existing-image check"
         return 0
     fi
-    if ! is_ci_base_target && should_upload_wheel_artifacts; then
-        echo "Artifact-producing targets always run for the current build"
+    if ! is_ci_base_target \
+        && { should_upload_wheel_artifacts || should_export_rocm_smoke; }; then
+        echo "Local-output targets always run for the current build"
         return 0
     fi
 
@@ -1741,7 +1765,12 @@ EOF
 
 uses_rocm_csrc_cache() {
     case "${TARGET}" in
-        csrc-rocm-ci|test-rocm-ci|test-rocm-ci-with-wheel|test-rocm-ci-with-artifacts|export-wheel-rocm)
+        csrc-rocm-ci \
+            | test-rocm-ci \
+            | test-rocm-ci-with-wheel \
+            | test-rocm-ci-with-artifacts \
+            | export-wheel-rocm \
+            | smoke-test-rocm-ci)
             return 0
             ;;
         *)
@@ -1752,7 +1781,12 @@ uses_rocm_csrc_cache() {
 
 uses_rocm_rust_cache() {
     case "${TARGET}" in
-        rust-rocm-ci|test-rocm-ci|test-rocm-ci-with-wheel|test-rocm-ci-with-artifacts|export-wheel-rocm)
+        rust-rocm-ci \
+            | test-rocm-ci \
+            | test-rocm-ci-with-wheel \
+            | test-rocm-ci-with-artifacts \
+            | export-wheel-rocm \
+            | smoke-test-rocm-ci)
             return 0
             ;;
         *)
@@ -2140,7 +2174,7 @@ write_rocm_cache_override() {
     # exporter unless it is requested explicitly.
     if ((${#rust_cache_to[@]} > 0)); then
         case "${TARGET}" in
-            test-rocm-ci|export-wheel-rocm)
+            test-rocm-ci|export-wheel-rocm|smoke-test-rocm-ci)
                 BAKE_TARGETS=("rust-rocm-ci" "${BAKE_TARGETS[@]}")
                 ;;
         esac
@@ -2188,6 +2222,15 @@ EOF
 EOF
         write_hcl_string_list_attr "  " "cache-to" "${rocm_cache_to[@]}"
         cat <<EOF
+}
+
+target "smoke-test-rocm-ci" {
+  cache-from = concat(
+    get_cache_from_rocm(),
+EOF
+        write_hcl_string_list "    " "${combined_content_cache_from[@]}"
+        cat <<EOF
+  )
 }
 
 target "export-wheel-rocm" {
@@ -2675,8 +2718,14 @@ main() {
         # clean prevents a failed/retried export from packaging a stale wheel.
         rm -rf ./wheel-export
     fi
+    if should_export_rocm_smoke; then
+        # The marker is a build output, not a cache. Never accept stale output
+        # from an earlier build or retry.
+        rm -rf ./build/rocm-smoke-export
+    fi
     seed_dependency_caches_if_needed
     run_bake
+    verify_rocm_smoke_export
     promote_stable_ci_base_tag
     publish_ci_base_handoff_ref
     upload_wheel_artifacts_if_present

@@ -70,7 +70,7 @@ def test_fused_recurrent_packed_decode_matches_reference(
         x <= 20.0, torch.log1p(torch.exp(torch.clamp(x, max=20.0))), x
     )
     g = (-torch.exp(A_log.float()) * softplus_x).unsqueeze(1)
-    beta = torch.sigmoid(b.float()).to(dtype).unsqueeze(1)
+    beta = torch.sigmoid(b.float()).unsqueeze(1)
 
     out_ref, state_ref = fused_recurrent_gated_delta_rule(
         q=q,
@@ -107,6 +107,37 @@ def test_fused_recurrent_packed_decode_matches_reference(
     valid = ssm_state_indices > 0
     torch.testing.assert_close(out_packed[valid], out_ref[valid], rtol=rtol, atol=atol)
     torch.testing.assert_close(state_packed, state_ref, rtol=rtol, atol=atol)
+
+
+def test_packed_decode_keeps_beta_in_fp32():
+    device = torch.device(DEVICE)
+    dtype = torch.bfloat16
+
+    mixed_qkv = torch.ones((1, 3), device=device, dtype=dtype)
+    a = torch.zeros((1, 1), device=device, dtype=dtype)
+    b = torch.full((1, 1), 0.5, device=device, dtype=dtype)
+    params = torch.zeros((1,), device=device, dtype=dtype)
+    ssm_state_indices = torch.ones((1,), device=device, dtype=torch.int32)
+
+    state_packed = torch.zeros((2, 1, 1, 1), device=device, dtype=torch.float32)
+    out_packed = torch.empty((1, 1, 1, 1), device=device, dtype=dtype)
+
+    fused_recurrent_gated_delta_rule_packed_decode(
+        mixed_qkv=mixed_qkv,
+        a=a,
+        b=b,
+        A_log=params,
+        dt_bias=params,
+        scale=1.0,
+        initial_state=state_packed,
+        out=out_packed,
+        ssm_state_indices=ssm_state_indices,
+    )
+
+    expected_beta = torch.sigmoid(b.float()).squeeze()
+    torch.testing.assert_close(
+        state_packed[1, 0, 0, 0], expected_beta, rtol=1e-6, atol=1e-6
+    )
 
 
 def test_packed_decode_supports_large_batch_head_grid():

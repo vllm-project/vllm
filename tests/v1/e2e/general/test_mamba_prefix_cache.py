@@ -234,7 +234,8 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                 iter(scheduler_output.num_scheduled_tokens.values())
             )
             assert num_scheduled_tokens == cur_step_action.num_scheduled_tokens
-        mamba_group_ids, mamba_spec = get_mamba_groups(self.kv_cache_config)
+        mamba_groups = get_mamba_groups(self.kv_cache_config)
+        mamba_spec, mamba_group_ids = next(iter(mamba_groups.items()))
         mamba_group_id = mamba_group_ids[0]
         mamba_layer_name = self.kv_cache_config.kv_cache_groups[
             mamba_group_id
@@ -321,7 +322,8 @@ def get_fake_process_mamba_fn(
             assert len(copy_info[0]) == len(copy_info[1]) == len(copy_info[2]) == 0
         else:
             assert len(copy_info[0]) == len(copy_info[1]) == len(copy_info[2]) == 2
-            mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
+            mamba_groups = get_mamba_groups(kv_cache_config)
+            mamba_spec, mamba_group_ids = next(iter(mamba_groups.items()))
             mamba_group_id = mamba_group_ids[0]
             mamba_layer_name = kv_cache_config.kv_cache_groups[
                 mamba_group_id
@@ -936,12 +938,12 @@ def _run_mamba_prefix_cache_mrv1(
     cleanup_dist_env_and_memory()
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=False)
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv1_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=True)
 
@@ -975,11 +977,12 @@ def _run_mamba_prefix_cache_mrv2(
         forward_context = (
             model_state.vllm_config.compilation_config.static_forward_context
         )
-        group_ids, _ = get_mamba_groups(kv_cache_config)
-        for group_id in group_ids:
-            block_table = block_tables[group_id]
-            for layer_name in kv_cache_config.kv_cache_groups[group_id].layer_names:
-                yield forward_context[layer_name].kv_cache[-1], block_table
+        mamba_groups = get_mamba_groups(kv_cache_config)
+        for group_ids in mamba_groups.values():
+            for group_id in group_ids:
+                block_table = block_tables[group_id]
+                for layer_name in kv_cache_config.kv_cache_groups[group_id].layer_names:
+                    yield forward_context[layer_name].kv_cache[-1], block_table
 
     def temporal_block(temporal_state, block_table, col):
         # Resolving the block id for assertions is a deliberate D2H.

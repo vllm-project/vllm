@@ -66,6 +66,49 @@ def test_stop_by_max_tokens(max_tokens: int):
     assert total_num_scheduled_tokens == expected_total_num_scheduled_tokens
 
 
+def test_no_spec_decode_padding_up_to_max_model_len():
+    """Uniform spec-decode padding must leave room for the sampled token.
+
+    Padding a single-token decode up to exactly max_model_len makes the
+    running-loop max_model_len cap negative on the next step (async
+    scheduling schedules it before the output that would stop the request),
+    and a negative num_scheduled_tokens crashes the model runner. The
+    request is scheduled un-padded instead.
+
+    Modelled on a disaggregated decode worker, where every request arrives
+    with all but the last prompt token already computed.
+    """
+    max_model_len = 32
+    num_spec = 1
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        max_model_len=max_model_len,
+        num_speculative_tokens=num_spec,
+        speculative_method="ngram_gpu",
+    )
+
+    # A running decode, so padding's "something already scheduled and no
+    # prefill this step" precondition holds for the request below.
+    (filler,) = create_requests(num_requests=1, num_tokens=4, req_ids=["filler"])
+    scheduler.add_request(filler)
+    sched_output = scheduler.schedule()
+    scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
+
+    (request,) = create_requests(
+        num_requests=1, num_tokens=max_model_len - num_spec, req_ids=["boundary"]
+    )
+    request.num_computed_tokens = request.num_tokens - 1
+    scheduler.add_request(request)
+
+    sched_output = scheduler.schedule()
+    assert sched_output.num_scheduled_tokens["boundary"] == 1
+    assert "boundary" not in sched_output.scheduled_spec_decode_tokens
+    assert request.num_computed_tokens < max_model_len
+
+    scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+
 def test_abort():
     scheduler = create_scheduler(async_scheduling=True)
     requests = create_requests(num_requests=10, max_tokens=20)

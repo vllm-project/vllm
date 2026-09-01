@@ -27,12 +27,6 @@ class MatrixView_half {
   __device__ __forceinline__ half item(int row, int column) const {
     return data[row * width + column];
   }
-  __device__ __forceinline__ half2 item_half2(int row, int column) const {
-    return ((half2*)data)[(row * width + column) / 2];
-  }
-  __device__ __forceinline__ half2 item_half2half2(int row, int column) const {
-    return __half2half2(data[row * width + column]);
-  }
   __device__ __forceinline__ const half* item_ptr(int row, int column) const {
     return &data[row * width + column];
   }
@@ -82,9 +76,6 @@ class MatrixView_half_rw {
 
   __device__ __forceinline__ half item(int row, int column) const {
     return data[row * width + column];
-  }
-  __device__ __forceinline__ half2 item_half2(int row, int column) const {
-    return ((half2*)data)[(row * width + column) / 2];
   }
   __device__ __forceinline__ half* item_ptr(int row, int column) {
     return &data[row * width + column];
@@ -138,31 +129,6 @@ class MatrixView_q4_row {
     items[1] = (d >> 4) & 0x0f;
     items[2] = (d >> 8) & 0x0f;
     items[3] = (d >> 12) & 0x0f;
-  }
-};
-
-class MatrixView_q4_column {
- public:
-  const uint32_t* data;
-  const int height;
-  const int width;
-
-  __device__ __forceinline__ MatrixView_q4_column(const uint32_t* data,
-                                                  const int height,
-                                                  const int width)
-      : data(data), height(height), width(width) {}
-
-  __device__ __forceinline__ int item(int row, int column) const {
-    int shift = (row & 0x07) * 4;
-    return (data[row / 8 * width + column] >> shift) & 0x0f;
-  }
-
-  __device__ __forceinline__ uint32_t item_uint32_t(int row, int column) {
-    return data[row / 8 * width + column];
-  }
-  __device__ __forceinline__ const uint32_t* item_uint32_ptr(int row,
-                                                             int column) {
-    return &data[row / 8 * width + column];
   }
 };
 

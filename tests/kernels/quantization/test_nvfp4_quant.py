@@ -119,7 +119,7 @@ def ref_nvfp4_quant(x, global_scale):
     return cast_to_fp4(clipped_x), scale.squeeze(-1)
 
 
-def recover_swizzled_scales(scale, m, n):
+def recover_swizzled_scales(scale, m, n, include_padding=False):
     round_up = lambda x, y: (x + y - 1) // y * y
     rounded_m = round_up(m, 128)
     scale_n = n // BLOCK_SIZE
@@ -128,6 +128,8 @@ def recover_swizzled_scales(scale, m, n):
     tmp = torch.reshape(scale, (1, rounded_m // 128, rounded_n // 4, 32, 4, 4))
     tmp = torch.permute(tmp, (0, 1, 4, 3, 2, 5))
     result = torch.reshape(tmp, (rounded_m, rounded_n)).to(torch.float32)
+    if include_padding:
+        return result
     return result[:m, :scale_n]
 
 
@@ -262,6 +264,43 @@ def test_quantize_to_fp4_with_padded_output(
         scale_ans = out_scale.to(torch.float32)
         torch.testing.assert_close(scale_ans[:, : n // BLOCK_SIZE], scale_ref)
         assert torch.count_nonzero(scale_ans[:, n // BLOCK_SIZE :]) == 0
+
+
+@pytest.mark.parametrize(
+    ("shape", "padded_n"),
+    [((90, 80), None), ((90, 48), 64)],
+)
+@torch.inference_mode()
+def test_swizzled_scale_padding_initialized_in_kernel(
+    shape: tuple[int, int], padded_n: int | None
+) -> None:
+    """The out variant must overwrite dirty scale padding without a memset."""
+    torch.set_default_device("cuda:0")
+    m, n = shape
+    physical_n = padded_n if padded_n is not None else n
+    rounded_m = round_up(m, 128)
+    rounded_scale_n = round_up(physical_n // BLOCK_SIZE, 4)
+
+    x = torch.randn((m, n), dtype=torch.float16)
+    global_scale = torch.tensor(1.0, dtype=torch.float32)
+    out = torch.full((m, physical_n // 2), 0xFF, dtype=torch.uint8)
+    out_scale = torch.full(
+        (rounded_m, rounded_scale_n // 4), 0x7F7F7F7F, dtype=torch.int32
+    )
+
+    torch.ops._C.scaled_fp4_quant.out(
+        x,
+        global_scale,
+        True,
+        output=out,
+        output_scale=out_scale,
+    )
+
+    full_scale = recover_swizzled_scales(
+        out_scale.view(torch.float8_e4m3fn), m, physical_n, include_padding=True
+    )
+    assert torch.count_nonzero(full_scale[m:, :]) == 0
+    assert torch.count_nonzero(full_scale[:m, n // BLOCK_SIZE :]) == 0
 
 
 @pytest.mark.parametrize("pad_shape", PAD_SHAPES)

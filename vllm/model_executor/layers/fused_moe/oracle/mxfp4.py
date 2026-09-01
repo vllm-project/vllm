@@ -116,9 +116,12 @@ class Mxfp4MoeBackend(Enum):
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
     # ROCm AITER backends
-    AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel
-    # Keep the legacy name as an alias while the ROCm split backend rename settles.
+    AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel (gfx950)
+    # Legacy alias, resolves to the CK kernel. New code should name either
+    # AITER_MXFP4_BF16 (CK) or AITER_TRITON_MXFP4_BF16 (Triton) explicitly.
     AITER = "AITER_MXFP4_BF16"
+    # W4A16: aiter Triton moe_gemm_a16w4 kernel (gfx942/gfx950/gfx1250)
+    AITER_TRITON_MXFP4_BF16 = "AITER_TRITON_MXFP4_BF16"
     AITER_MXFP4_FP8 = "AITER_MXFP4_FP8"  # W4A8: triton kernel
     AITER_MXFP4_MXFP4 = "AITER_MXFP4_MXFP4"  # W4A4: CK kernel
     # Triton
@@ -143,6 +146,8 @@ TRTLLM_BACKENDS = (
 TRITON_BACKENDS = (
     Mxfp4MoeBackend.TRITON,
     Mxfp4MoeBackend.TRITON_UNFUSED,
+    # aiter Triton W4A16 shares the triton_kernels weight format
+    Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
 )
 
 B12X_BACKENDS = (
@@ -232,14 +237,18 @@ def backend_to_kernel_cls(
         return [BatchedMarlinExperts]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
-            AiterW4A16ExpertsMonolithic,
-        )
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
-        return [AiterExperts, AiterW4A16ExpertsMonolithic]
+        return [AiterExperts]
+
+    elif backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
+            AiterW4A16ExpertsMonolithic,
+        )
+
+        return [AiterW4A16ExpertsMonolithic]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
@@ -301,9 +310,11 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "marlin": [Mxfp4MoeBackend.MARLIN],
         "aiter": [
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
             Mxfp4MoeBackend.AITER_MXFP4_FP8,
             Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         ],
+        "aiter_triton_mxfp4_bf16": [Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16],
         "aiter_mxfp4_fp8": [Mxfp4MoeBackend.AITER_MXFP4_FP8],
         "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
         "xpu": [Mxfp4MoeBackend.XPU],
@@ -325,6 +336,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
+        Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         Mxfp4MoeBackend.TRITON,
@@ -474,6 +486,39 @@ def _get_requested_backends(
     return _filter_by_activation(backends, requested_activation_key)
 
 
+def _requires_qwen38_tep8_emulation(
+    config: FusedMoEConfig,
+    activation_key: QuantKey | None,
+) -> bool:
+    """Avoid the inaccurate native gfx950 kernel for Qwen3.8 TEP8.
+
+    Qwen3.8 Flash Next's routed experts use the distinctive
+    ``E=512, H=2560, N=640`` W4A4 shape. With eight-way expert parallelism,
+    AITER operates on 64 local experts and pads ``N`` to 768. That native path
+    is not numerically reliable on gfx950, while OCP MX emulation preserves
+    model accuracy. Keep this guard exact so other MXFP4 shapes and smaller EP
+    configurations retain the native backend.
+    """
+    parallel = config.moe_parallel_config
+    if not (
+        activation_key == kMxfp4Dynamic
+        and parallel.use_ep
+        and parallel.ep_size == 8
+        and config.num_experts == 512
+        and config.num_local_experts == 64
+        and config.hidden_dim == 2560
+        and config.intermediate_size == 640
+    ):
+        return False
+
+    if not current_platform.is_rocm():
+        return False
+
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
 def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
@@ -531,6 +576,21 @@ def select_mxfp4_moe_backend(
                 last_error = e
         assert last_error is not None
         raise last_error
+
+    if _requires_qwen38_tep8_emulation(config, requested_activation_key):
+        backend = Mxfp4MoeBackend.EMULATION
+        logger.warning_once(
+            "Using OCP MX emulation for the Qwen3.8 Flash Next TEP8 routed "
+            "experts on gfx950 because the native AITER W4A4 kernel is not "
+            "numerically reliable for this shape. Performance will be lower."
+        )
+        return _return_or_raise(
+            backend,
+            config,
+            kMxfp4Static,
+            requested_activation_key,
+            activation_format,
+        )
 
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _filter_by_activation(
@@ -1599,7 +1659,18 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     ):
         from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
-        if mxfp4_backend == Mxfp4MoeBackend.TRITON:
+        if mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
+            # AITER moe_gemm_a16w4 needs gate/up interleaved
+            def interleave_gate_up(w: torch.Tensor) -> torch.Tensor:
+                gate, up = w.chunk(2, dim=1)
+                return torch.stack((gate, up), dim=2).reshape(w.shape)
+
+            w13_weight = interleave_gate_up(w13_weight)
+            w13_weight_scale = interleave_gate_up(w13_weight_scale)
+
+            if w13_bias is not None:
+                w13_bias = interleave_gate_up(w13_bias.to(torch.float32))
+        elif mxfp4_backend == Mxfp4MoeBackend.TRITON:
 
             def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
                 shape = w.shape
@@ -1843,6 +1914,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
+        Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
         Mxfp4MoeBackend.CPU,
     ):
         return mxfp4_w4a16_moe_quant_config(

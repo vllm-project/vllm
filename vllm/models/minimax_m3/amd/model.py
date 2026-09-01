@@ -101,6 +101,8 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
+    MiniMaxM3SparseMetadata,
+    minimax_m3_rebase_slots_to_page16,
     minimax_m3_use_aiter_sparse_pa,
     select_main_impl_cls,
 )
@@ -755,35 +757,45 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             kv_cache = kv_cache.view(self.impl.kv_cache_fp8_dtype)
         key_cache, value_cache = kv_cache.unbind(1)
-        if not key_cache.is_contiguous() or not value_cache.is_contiguous():
-            raise RuntimeError(
-                "MiniMax-M3 AITER sparse PA requires K/V-separated KV cache "
-                "storage. Set VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1 before "
-                "initializing the engine."
-            )
 
-        x = 16 // key_cache.element_size()
+        x = 16 // kv_cache.element_size()
         if self.head_dim % x != 0:
             raise RuntimeError(
                 "MiniMax-M3 AITER sparse PA requires head_dim divisible by "
                 f"16 / dtype_size, got head_dim={self.head_dim}, x={x}"
             )
-        num_blocks = key_cache.shape[0]
-        num_phys16 = num_blocks * 8
-        self.kv_cache_k = key_cache.view(
+
+        num_blocks, _, block_size, _ = kv_cache.shape
+        pages_in_side = block_size // 16
+        if key_cache.is_contiguous() and value_cache.is_contiguous():
+            k_src, v_src = key_cache, value_cache
+            block_pages, v_page_offset = pages_in_side, 0
+        elif kv_cache.is_contiguous():
+            k_src = v_src = kv_cache
+            block_pages, v_page_offset = 2 * pages_in_side, pages_in_side
+        else:
+            raise RuntimeError(
+                "MiniMax-M3 AITER sparse PA needs each K/V head slot stored as "
+                "whole 16-token pages, but the resolved KV cache layout gives "
+                "neither dense planes nor block-contiguous pages."
+            )
+
+        num_phys16 = num_blocks * block_pages
+        self.kv_cache_k = k_src.view(
             num_phys16,
             self.num_kv_heads,
             self.head_dim // x,
             16,
             x,
         )
-        self.kv_cache_v = value_cache.view(
+        # Offsetting V by half a block lets both sides share one page id.
+        self.kv_cache_v = v_src.view(
             num_phys16,
             self.num_kv_heads,
             16 // x,
             self.head_dim,
             x,
-        )
+        )[v_page_offset:]
         self._aiter_sparse_pa_cache_data_ptr = self.kv_cache.data_ptr()
 
     def get_aiter_sparse_pa_kv_cache(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -807,6 +819,21 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         )
 
         key_cache, value_cache = self.get_aiter_sparse_pa_kv_cache()
+        if value_cache.shape[0] != key_cache.shape[0]:
+            attn_metadata = get_forward_context().attn_metadata
+            page16_slot_mapping = None
+            if isinstance(attn_metadata, dict):
+                main_md = attn_metadata[self.layer_name]
+                assert isinstance(main_md, MiniMaxM3SparseMetadata)
+                page16_slot_mapping = main_md.page16_slot_mapping
+            if (
+                page16_slot_mapping is None
+                or page16_slot_mapping.shape != slot_mapping.shape
+            ):
+                page16_slot_mapping = minimax_m3_rebase_slots_to_page16(
+                    slot_mapping, self.kv_cache.shape[2]
+                )
+            slot_mapping = page16_slot_mapping
         kv_cache_dtype = (
             self.kv_cache_dtype
             if is_quantized_kv_cache(self.kv_cache_dtype)

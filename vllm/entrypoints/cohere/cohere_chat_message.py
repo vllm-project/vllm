@@ -29,11 +29,9 @@ from typing import Any, Literal
 
 from pydantic import Field, model_serializer
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatMessage
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    OpenAIBaseModel,
-)
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 
 
 class CitationSource(OpenAIBaseModel):

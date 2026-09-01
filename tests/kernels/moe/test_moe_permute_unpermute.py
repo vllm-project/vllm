@@ -286,3 +286,39 @@ def test_moe_permute_reuses_scratch_buffers(dtype: torch.dtype):
         permuted_idx_1.untyped_storage().data_ptr()
         == scratch.permuted_idx.untyped_storage().data_ptr()
     )
+
+
+def test_moe_permute_ignores_invalid_expert_ids_with_scratch() -> None:
+    if not moe_permute_unpermute_supported():
+        pytest.skip("moe_permute_unpermute is not supported on this platform.")
+
+    hidden_states = torch.arange(5 * 16, dtype=torch.bfloat16, device="cuda").view(
+        5, 16
+    )
+    topk_ids = torch.tensor([[0], [-1], [1], [4], [2]], device="cuda")
+    expert_map = torch.tensor([0, 1, -1, -1], dtype=torch.int32, device="cuda")
+    scratch = MoEPermuteScratch(
+        max_num_tokens=5,
+        topk=1,
+        num_experts=4,
+        num_local_experts=2,
+        device=hidden_states.device,
+        hidden_size=16,
+        hidden_dtype=hidden_states.dtype,
+    )
+
+    permuted, _, expert_offsets, _, _ = moe_permute(
+        hidden_states=hidden_states,
+        a1q_scale=None,
+        topk_ids=topk_ids,
+        n_expert=4,
+        n_local_expert=2,
+        expert_map=expert_map,
+        scratch=scratch,
+    )
+
+    torch.testing.assert_close(
+        expert_offsets,
+        torch.tensor([0, 1, 2], dtype=torch.int64, device="cuda"),
+    )
+    torch.testing.assert_close(permuted[:2], hidden_states[[0, 2]])

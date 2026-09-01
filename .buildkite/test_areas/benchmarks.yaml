@@ -2,7 +2,7 @@ group: Benchmarks
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) Benchmarks CLI"
+- label: ":nvidia: (H200 MIG 18GB) Benchmarks CLI"
   key: benchmarks-cli-test
   timeout_in_minutes: 45
   device: h200_18gb

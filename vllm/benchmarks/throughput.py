@@ -567,10 +567,9 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
 
 def get_requests(args, tokenizer):
     serve_args = _to_serve_args(args)
-    # Throughput reuses bench serve's dataset dispatch. vllm-chat is the only
-    # multimodal-capable throughput backend, so it is the only one allowed past
-    # the multimodal gates inside get_samples; other backends raise there.
-    mm_backends = ("vllm-chat",) if args.backend == "vllm-chat" else ()
+    # Both offline vLLM backends forward multi_modal_data to the engine;
+    # "hf" and "mii" are text-only and get rejected inside get_samples.
+    mm_backends = ("vllm", "vllm-chat")
     requests = get_samples(serve_args, tokenizer, multimodal_backends=mm_backends)
     requests = assign_loras(requests, args)
     requests = filter_requests_for_dp(requests, args.data_parallel_size)

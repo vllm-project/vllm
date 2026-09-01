@@ -716,6 +716,10 @@ class BlockPool:
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
+    def is_block_writable(self, block: KVCacheBlock) -> bool:
+        """Return whether a block can be mutated by its sole owner."""
+        return not block.is_null and block.ref_cnt == 1 and block.block_hash is None
+
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.

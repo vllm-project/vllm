@@ -85,6 +85,7 @@ def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: i
         "vllm:request_inference_time_seconds": [("_count", num_requests)],
         "vllm:request_prefill_time_seconds": [("_count", num_requests)],
         "vllm:request_decode_time_seconds": [("_count", num_requests)],
+        "vllm:request_num_preemptions": [("_count", num_requests)],
         "vllm:request_prompt_tokens": [
             ("_sum", num_requests * num_prompt_tokens),
             ("_count", num_requests),
@@ -225,6 +226,9 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_decode_time_seconds_sum",
     "vllm:request_decode_time_seconds_bucket",
     "vllm:request_decode_time_seconds_count",
+    "vllm:request_num_preemptions_sum",
+    "vllm:request_num_preemptions_bucket",
+    "vllm:request_num_preemptions_count",
 ]
 
 EXPECTED_METRICS_MM = [

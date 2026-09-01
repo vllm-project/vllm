@@ -5,7 +5,7 @@ import copy
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
-from unittest.mock import PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 from transformers import AutoTokenizer
@@ -23,7 +23,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -608,3 +608,37 @@ def test_encoder_instance_zero_kv_cache(
         assert not engine_core.scheduler.ec_connector.is_producer, (
             "Consumer instance EC connector should be consumer"
         )
+
+
+def _pausable_engine_core_proc() -> EngineCoreProc:
+    """A bare EngineCoreProc holding just the state pause_scheduler touches."""
+    core = object.__new__(EngineCoreProc)
+    core.model_executor = MagicMock()
+    core.scheduler = MagicMock()
+    core.scheduler.has_requests.return_value = False
+    core.batch_queue = None
+    core.engines_running = False
+    core._idle_state_callbacks = []
+    return core
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
+    """A resolved pause promises an idle device: the barrier must run before
+    caches are cleared and before the caller is unblocked."""
+    core = _pausable_engine_core_proc()
+    core.engines_running = deferred
+    order: list[str] = []
+    core.model_executor.collective_rpc.side_effect = lambda method: order.append(method)
+    core._reset_caches = lambda: order.append("reset_caches")
+
+    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=True)
+    if deferred:
+        assert isinstance(result, Future)
+        assert not result.done() and order == []
+        core.engines_running = False
+        core._notify_idle_state_callbacks()
+        assert result.result(timeout=0) is None
+    else:
+        assert result is None
+    assert order == ["synchronize_device", "reset_caches"]

@@ -2,7 +2,7 @@ group: LM Eval
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) LM Eval Small Models"
+- label: ":nvidia: (H200 MIG 35GB) LM Eval Small Models"
   device: h200_35gb
   key: lm-eval-small-models
   timeout_in_minutes: 45
@@ -291,7 +291,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
 
-- label: ":nvidia: (H200) LM Eval TurboQuant KV Cache"
+- label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant KV Cache"
   key: lm-eval-turboquant-kv-cache
   timeout_in_minutes: 55
   device: h200_18gb
@@ -331,6 +331,42 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
 
+- label: ":nvidia: (B200) Qwen3.8-Flash-Next-FP8 Accuracy Eval"
+  key: accuracy-eval-qwen3-8-flash-next-fp8-b200
+  timeout_in_minutes: 60
+  device: b200-k8s
+  optional: true
+  num_devices: 4
+  source_file_dependencies:
+  - csrc/libtorch_stable/gdn/
+  - tests/evals/qwen4_exp/
+  - vllm/model_executor/layers/mamba/
+  - vllm/models/qwen4_exp/
+  - vllm/transformers_utils/configs/qwen4_exp.py
+  - vllm/v1/attention/backends/short_conv_attn.py
+  - vllm/v1/spec_decode/qwen4_exp.py
+  commands:
+    - uv pip install --system 'evalscope==1.10.0'
+    - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-b200.txt
+
+- label: ":nvidia: (H200) Qwen3.8-Flash-Next-FP8 Accuracy Eval"
+  key: accuracy-eval-qwen3-8-flash-next-fp8-h200
+  timeout_in_minutes: 60
+  device: h200
+  optional: true
+  num_devices: 4
+  source_file_dependencies:
+  - csrc/libtorch_stable/gdn/
+  - tests/evals/qwen4_exp/
+  - vllm/model_executor/layers/mamba/
+  - vllm/models/qwen4_exp/
+  - vllm/transformers_utils/configs/qwen4_exp.py
+  - vllm/v1/attention/backends/short_conv_attn.py
+  - vllm/v1/spec_decode/qwen4_exp.py
+  commands:
+    - uv pip install --system 'evalscope==1.10.0'
+    - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-h200.txt
+
 - label: ":nvidia: (DGX) Spark GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-spark
   timeout_in_minutes: 35
@@ -347,7 +383,7 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt
 
-- label: ":nvidia: (H200) LM Eval KV-Offload"
+- label: ":nvidia: (H200 MIG 35GB) LM Eval KV-Offload"
   key: kv-offload-small
   timeout_in_minutes: 30
   device: h200_35gb
@@ -388,10 +424,26 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
 
-- label: ":nvidia: (H200) MRCR Eval Small Models"
+- label: ":nvidia: (H200 MIG 35GB) MRCR Eval Small Models"
   device: h200_35gb
   timeout_in_minutes: 25
   source_file_dependencies:
   - tests/evals/mrcr/
   commands:
     - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) MRCR Eval Small Models"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - tests/evals/mrcr/

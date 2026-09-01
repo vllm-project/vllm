@@ -2,7 +2,7 @@ group: Basic Correctness
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) Basic Correctness"
+- label: ":nvidia: (H200 MIG 18GB) Basic Correctness"
   key: basic-correctness
   timeout_in_minutes: 68
   device: h200_18gb

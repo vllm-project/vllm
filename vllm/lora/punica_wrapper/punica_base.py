@@ -145,7 +145,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             max_num_batched_tokens, dtype=torch.long, device=device
         )
         self._embeddings_indices = torch.empty(
-            2, max_num_batched_tokens, dtype=torch.long, device=device
+            max_num_batched_tokens, dtype=torch.long, device=device
         )
 
         # 4 is the number of indices tensors.
@@ -172,10 +172,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         max_loras: int,
         vocab_size: int,
     ):
-        # NOTE We have remove lora extra vocab support for now. So we set
-        # extra_vocab_size always to 0, and extra_vocab_size will be removed.
-
-        extra_vocab_size = 0
         (
             base_indices,
             sampler_indices,
@@ -187,7 +183,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
             lora_index_to_id,
             max_loras,
             vocab_size,
-            extra_vocab_size,
             self.device,
         )
         self._token_lora_indices[: base_indices.shape[0]].copy_(base_indices)
@@ -195,9 +190,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self._sampler_indices_padded[: sampler_indices_padded.shape[0]].copy_(
             sampler_indices_padded
         )
-        self._embeddings_indices[
-            : embeddings_indices.shape[0], : embeddings_indices.shape[1]
-        ].copy_(embeddings_indices)
+        self._embeddings_indices[: embeddings_indices.shape[0]].copy_(
+            embeddings_indices
+        )
 
         self.indices_len[:] = indices_len
 
@@ -271,15 +266,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         """
         indices_padded_len = self.indices_len[2]
         return self._sampler_indices_padded[:indices_padded_len]
-
-    @property
-    def embeddings_indices(self) -> torch.Tensor:
-        """
-        This property provides access to the indices used for lora embeddings,
-        specifically for VocabParallelEmbeddingWithLoRA.
-        """
-        embeddings_indices_len = self.indices_len[3]
-        return self._embeddings_indices[:, :embeddings_indices_len]
 
     def update_metadata(
         self,

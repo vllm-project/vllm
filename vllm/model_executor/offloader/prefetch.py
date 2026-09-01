@@ -163,11 +163,15 @@ class PrefetchOffloader(BaseOffloader):
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
+        prefix: str = "",
     ) -> list[nn.Module]:
         """Wrap modules with prefetch offloading logic."""
         assert len(self.module_offloaders) == 0, (
             "wrap_modules should only be called once"
         )
+
+        if prefix:
+            prefix = f"{prefix}."
 
         all_modules = []
         offload_modules = []
@@ -182,7 +186,9 @@ class PrefetchOffloader(BaseOffloader):
                     whitelist = [
                         name
                         for name, _ in module.named_parameters()
-                        if any(f".{p}." in f".{name}." for p in self.offload_params)
+                        if any(
+                            f".{p}." in f".{prefix}{name}." for p in self.offload_params
+                        )
                     ]
                 else:
                     whitelist = [name for name, _ in module.named_parameters()]

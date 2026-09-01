@@ -1,37 +1,13 @@
 group: CRCR Report
-# Runs only in the torch-nightly lane; the script exits 0 immediately otherwise,
-# following the same in-script gating as image_build.sh.
-#
-# ORDERING (needs confirmation against the pipeline generator): this must be the
-# last step to run, because it reads final job states from the Buildkite REST
-# API and silently skips any job still in a non-terminal state. On build 83159
-# four jobs were still `scheduled` when the build was already 320 jobs deep, so
-# running early under-reports rather than erroring.
-#
-# depends_on across every group is brittle to maintain. If the generator emits a
-# `wait` between groups, placing this group last is enough. If not, the more
-# robust option is an agent pre-exit hook or a follow-up scheduled step, since
-# `CONTINUE_ON_FAILURE=1` means failures must not stop the report either way.
+depends_on:
+  - image-build-cpu
 steps:
   - label: ":satellite: Report nightly results to CRCR"
     key: crcr-report
-    # Belt and braces with the script's own TORCH_NIGHTLY check: this keeps the
-    # step out of non-nightly builds entirely, while the script gate still holds
-    # if the generator ever drops this key.
     if: build.env("TORCH_NIGHTLY") == "1"
-    # Reporting is observability, never a gate: a relay outage, an expired
-    # pipeline mapping or a missing secret must not turn the nightly red.
     soft_fail: true
     allow_dependency_failure: true
     timeout_in_minutes: 15
-    # Reporting is a couple of REST calls and a curl: no GPU needed, so keep it
-    # off the accelerator agents the test groups queue for.
     device: cpu-small
-    # No source_file_dependencies: this step is lane-gated, not change-gated,
-    # so it must not be skipped by the file-based step selection.
     commands:
-      - bash .buildkite/scripts/crcr-report.sh
-    # CRCR_CALLBACK_URL and BUILDKITE_API_TOKEN are deliberately not declared
-    # here. Buildkite interpolates a step-level env block at pipeline-upload
-    # time, so declaring them would substitute empty strings and shadow the
-    # values the agent already has from the pipeline/schedule environment.
+      - bash /vllm-workspace/.buildkite/scripts/crcr-report.sh

@@ -24,6 +24,23 @@ from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 
+def _all_workers_barrier() -> None:
+    """Block until every worker rank has reached this point (gloo cpu group).
+
+    A superset of the node-local mmap openers suffices: once the barrier
+    releases, every worker sharing the region file has mapped it."""
+    from vllm.distributed.parallel_state import (
+        get_inner_dp_world_group,
+        get_world_group,
+    )
+
+    try:
+        group = get_inner_dp_world_group()
+    except AssertionError:
+        group = get_world_group()
+    group.barrier()
+
+
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
 
@@ -123,9 +140,10 @@ class CPUOffloadingSpec(OffloadingSpec):
     @override
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
-            # store_threshold: how many times a block must appear in lookup()
-            # before it is eligible for CPU offloading.  Values < 2 disable
-            # filtering (a threshold of 1 equals no filter; 0 is the default).
+            # store_threshold: how many times a block must be offered for
+            # storage before it is eligible for CPU offloading.  Values < 2
+            # disable filtering (a threshold of 1 equals no filter; 0 is the
+            # default).
             store_threshold = int(self.extra_config.get("store_threshold", 0))
 
             # Maximum entries in the internal tracker's LRU table.
@@ -164,6 +182,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 rank=rank,
                 kv_bytes_per_block=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
+                barrier=_all_workers_barrier,
             )
         try:
             return CPUOffloadingWorker(

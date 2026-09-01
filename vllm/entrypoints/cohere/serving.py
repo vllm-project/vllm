@@ -71,6 +71,11 @@ from vllm.entrypoints.cohere.protocol import (
     ToolCallStartEvent,
     ToolPlanDeltaEvent,
 )
+from vllm.entrypoints.generate.base.protocol import (
+    JsonSchemaResponseFormat,
+    ResponseFormat,
+    StreamOptions,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -79,13 +84,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    JsonSchemaResponseFormat,
-    ResponseFormat,
-    StreamOptions,
-)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.parser.abstract_parser import Parser
@@ -1761,7 +1761,6 @@ class CohereServingChatV2(OpenAIServingChat):
         # so the router can translate the envelope uniformly. ``param``
         # is accepted for signature parity with the base class but is
         # not surfaced in the Cohere wire format.
-        from vllm.entrypoints.openai.engine.protocol import ErrorInfo
 
         del param  # unused; kept for signature compatibility
         return ErrorResponse(

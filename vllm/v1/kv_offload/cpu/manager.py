@@ -103,6 +103,17 @@ class CPUOffloadingManager(OffloadingManager):
     ) -> CPULoadStoreSpec:
         return CPULoadStoreSpec([block.block_id for block in blocks])
 
+    def _record_access(self, key: OffloadKey) -> None:
+        """Count one observation of ``key`` for store admission."""
+        assert self.counts is not None
+        if key in self.counts:
+            self.counts.move_to_end(key)
+            self.counts[key] += 1
+        else:
+            if len(self.counts) >= self.max_tracker_size:
+                self.counts.popitem(last=False)
+            self.counts[key] = 1
+
     # --- OffloadingManager interface ---
 
     @override
@@ -111,14 +122,6 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        if self.counts is not None:
-            if key in self.counts:
-                self.counts.move_to_end(key)
-                self.counts[key] += 1
-            else:
-                if len(self.counts) >= self.max_tracker_size:
-                    self.counts.popitem(last=False)
-                self.counts[key] = 1
         block = self._policy.get(key)
         if block is None:
             return LookupResult.MISS
@@ -170,6 +173,8 @@ class CPUOffloadingManager(OffloadingManager):
     ) -> PrepareStoreOutput | None:
         if self.counts is not None:
             num_keys = len(keys)
+            for key in keys:
+                self._record_access(key)
             keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
             self.stores_skipped_in_current_batch += num_keys - len(keys)
         # filter out blocks that are already stored

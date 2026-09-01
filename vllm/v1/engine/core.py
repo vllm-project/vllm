@@ -839,6 +839,13 @@ class EngineCore:
         self.reset_mm_cache()
         self.reset_encoder_cache()
 
+    def _finish_pause(self, clear_cache: bool) -> None:
+        # A completed pause promises an idle device: nothing else waits on
+        # the last dummy batch an idle DP rank launches.
+        self.model_executor.collective_rpc("synchronize_device")
+        if clear_cache:
+            self._reset_caches()
+
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> Future | None:
@@ -865,8 +872,7 @@ class EngineCore:
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
-        if clear_cache:
-            self._reset_caches()
+        self._finish_pause(clear_cache)
 
         return None
 
@@ -1937,8 +1943,7 @@ class EngineCoreProc(EngineCore):
             raise ValueError(f"Invalid pause mode: {mode}")
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
-            if clear_cache:
-                engine._reset_caches()
+            engine._finish_pause(clear_cache)
             future.set_result(None)
 
         if mode == "abort":
@@ -1951,8 +1956,7 @@ class EngineCoreProc(EngineCore):
         self.scheduler.set_pause_state(pause_state)
 
         if self._pause_complete():
-            if clear_cache:
-                self._reset_caches()
+            self._finish_pause(clear_cache)
             return None
 
         future = Future[Any]()

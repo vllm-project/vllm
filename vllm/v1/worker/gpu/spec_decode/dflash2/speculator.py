@@ -51,15 +51,17 @@ def _selector_walk_kernel(
             other=0,
         )
 
-        # Candidate ids key the noise, matching the target's own sampling.
-        position = tl.load(sample_pos_ptr + flat) - 1
+        # sample_pos is the predicted token's position P. Sampling keys a draw
+        # by the position before the sampled token, P-1.
+        sample_pos = tl.load(sample_pos_ptr + flat) - 1
         _, index = gumbel_noised_argmax(
             scores,
             candidates,
             mask & valid,
             seed,
-            position,
+            sample_pos,
             temperature if SAMPLE_PROBABILISTIC else 0.0,
+            IS_DRAFTING=True,
             USE_FP64=USE_FP64,
         )
 

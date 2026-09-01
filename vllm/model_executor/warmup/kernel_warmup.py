@@ -13,6 +13,9 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
+from vllm.distributed.device_communicators.flashinfer_pcie_ipc_all_reduce import (
+    warmup_flashinfer_pcie_ipc_allreduce,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
@@ -35,8 +38,8 @@ from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
-from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
-    sparse_mla_triton_warmup,
+from vllm.model_executor.warmup.replayssm_warmup import (
+    replayssm_autotune_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -154,7 +157,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
         fa4_cutedsl_warmup(worker)
-        sparse_mla_triton_warmup(worker)
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
@@ -185,6 +187,10 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     b12x_warmup(worker, cudagraph_capture_sizes)
 
     minimax_m3_msa_warmup(worker)
+
+    # Allocate the exact decode-sized workspace, autotune cache misses, and
+    # resolve every CUDA Graph bucket before capture begins.
+    warmup_flashinfer_pcie_ipc_allreduce(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
@@ -247,6 +253,31 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
     return None
 
 
+_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
+
+
+def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    linear_backend = runner.vllm_config.kernel_config.linear_backend
+    if (
+        linear_backend == "flashinfer_cutedsl"
+        and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
+    ):
+        return max_tokens, _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
+    return (max_tokens,)
+
+
+def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
+    for num_tokens in _flashinfer_autotune_token_counts(runner):
+        logger.info("Running FlashInfer autotune with %d tokens.", num_tokens)
+        runner._dummy_run(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            randomize_inputs=True,
+        )
+
+
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """
     Autotune FlashInfer operations.
@@ -284,20 +315,10 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
 
     # We skip EPLB here since we don't want to record dummy metrics.
-    # When autotuning with number of tokens m, flashinfer will autotune
-    # operations for all number of tokens up to m, so we only need to
-    # run with the max number of tokens.
     # Randomize inputs to avoid every token pick the same experts,
     # which lead to some EP ranks receiving no tokens and skipping their
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
-    dummy_run_kwargs = dict(
-        num_tokens=runner.scheduler_config.max_num_batched_tokens,
-        skip_eplb=True,
-        is_profile=True,
-        randomize_inputs=True,
-    )
-
     # Read cached autotune results and broadcast to all ranks.
     cached_results: bytes | None = None
     if is_leader and cache_path.exists():
@@ -316,7 +337,8 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             torch.inference_mode(),
             fi_utils.autotune(tune_mode=True, **autotune_kwargs),
         ):
-            runner._dummy_run(**dummy_run_kwargs)
+            _run_flashinfer_autotune_dummy_runs(runner)
+            replayssm_autotune_warmup(runner)
     finally:
         set_autotune_process_group(None)
 

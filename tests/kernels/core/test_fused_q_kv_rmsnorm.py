@@ -51,6 +51,37 @@ def test_fused_q_kv_rmsnorm_correctness(num_tokens: int, dtype: torch.dtype):
     torch.testing.assert_close(kv_out, kv_ref, **tol)
 
 
+@pytest.mark.parametrize("num_tokens", [1, 16])
+def test_fused_q_kv_rmsnorm_outputs_are_packed(num_tokens: int):
+    """Regression guard: the outputs must be packed row-major even when the
+    inputs are column slices of a wider fused-projection buffer.
+
+    empty_like preserves the strides of size-1 dims, so with num_tokens == 1
+    a [1, q_size] slice of a [1, q_size + kv_size] buffer used to produce a
+    qr_out with row stride q_size + kv_size. Downstream dispatchers that
+    require packed row-major inputs then reject the tensor and silently fall
+    back to a slower GEMM path on every decode step."""
+    device = "cuda"
+    dtype = torch.bfloat16
+    q_size, kv_size = 192, 576
+    fused = torch.randn(num_tokens, q_size + kv_size, dtype=dtype, device=device)
+    qr, kv = fused.split([q_size, kv_size], dim=-1)
+    qw = torch.randn(q_size, dtype=dtype, device=device)
+    kvw = torch.randn(kv_size, dtype=dtype, device=device)
+    eps = 1e-6
+
+    qr_out, kv_out = fused_q_kv_rmsnorm(qr, kv, qw, kvw, eps)
+
+    assert qr_out.stride() == (q_size, 1)
+    assert kv_out.stride() == (kv_size, 1)
+
+    qr_ref = _ref_rmsnorm(qr, qw, eps)
+    kv_ref = _ref_rmsnorm(kv, kvw, eps)
+    tol = dict(rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(qr_out, qr_ref, **tol)
+    torch.testing.assert_close(kv_out, kv_ref, **tol)
+
+
 @pytest.mark.parametrize("num_tokens", [65535, 65536, 131072])
 def test_fused_q_kv_rmsnorm_launches_past_grid_y_cap(num_tokens: int):
     """Regression guard: grid used to be (2, num_tokens), hitting CUDA's

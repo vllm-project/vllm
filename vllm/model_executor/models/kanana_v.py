@@ -38,6 +38,7 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .qwen2_vl import Qwen2VisionTransformer
@@ -323,10 +324,7 @@ class CustomQwen2VLVE(Qwen2VisionTransformer):
             grid_thw_np[:, 0],
         ).cumsum(axis=0, dtype=np.int32)
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
-        cu_seqlens = torch.from_numpy(cu_seqlens).to(
-            self.device,
-            non_blocking=True,
-        )
+        cu_seqlens = async_tensor_h2d(cu_seqlens, device=self.device)
 
         # Shape to (S, B, D) with batch dimension 1 as expected by the blocks.
         x = x.unsqueeze(1)

@@ -2,6 +2,7 @@ group: Hardware
 depends_on: ~
 steps:
   - label: "Ascend NPU Test"
+    key: ascend-npu-test
     soft_fail: true
     timeout_in_minutes: 20
     no_plugin: true

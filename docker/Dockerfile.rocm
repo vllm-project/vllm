@@ -899,6 +899,17 @@ RUN mkdir src && mv vllm src/vllm
 # Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
 ENV VLLM_GPU_SYNC_CHECK=error
 
+# Run the structural smoke test inside BuildKit, where the test image layers
+# are already available. Export only a build-scoped success marker.
+FROM test AS test_smoke
+ARG ROCM_SMOKE_ID
+RUN --network=none \
+    bash /vllm-workspace/.buildkite/scripts/rocm/smoke-test-image.sh --inside \
+    && printf '%s\n' "${ROCM_SMOKE_ID:-local}" > /vllm-smoke-ok
+
+FROM scratch AS export_test_smoke
+COPY --from=test_smoke /vllm-smoke-ok /
+
 # -----------------------
 # Final vLLM image
 FROM mori_base AS final_common

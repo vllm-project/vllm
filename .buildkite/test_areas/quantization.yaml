@@ -2,7 +2,7 @@ group: Quantization
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200) Quantization Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Quantization Shard %N"
   device: h200_35gb
   key: quantization
   timeout_in_minutes: 40
@@ -21,7 +21,7 @@ steps:
   # parameter. It was not exercised by the previous L4 job.
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k 'not test_compressed_tensors_w4a8_fp8' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: ":nvidia: (H200) Quantized Fusions"
+- label: ":nvidia: (H200 MIG 35GB) Quantized Fusions"
   device: h200_35gb
   key: quantized-fusions
   timeout_in_minutes: 20
@@ -52,7 +52,7 @@ steps:
   commands:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
 
-- label: ":nvidia: (H200) Quantized Models"
+- label: ":nvidia: (H200 MIG 35GB) Quantized Models"
   device: h200_35gb
   key: quantized-models-test
   timeout_in_minutes: 65

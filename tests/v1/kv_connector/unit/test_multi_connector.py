@@ -148,6 +148,26 @@ KVConnectorFactory.register_connector(
 )
 
 
+def test_register_finished_partial_tail_notifies_every_connector():
+    connector = object.__new__(MultiConnector)
+    first = MagicMock(spec_set=KVConnectorBase_V1)
+    second = MagicMock(spec_set=KVConnectorBase_V1)
+    first.register_finished_partial_tail.return_value = True
+    second.register_finished_partial_tail.return_value = False
+    connector._connectors = [first, second]
+    request = MagicMock()
+    block_ids = ([1], [2])
+    offloads = [(1, 2, 12)]
+
+    assert connector.register_finished_partial_tail(request, block_ids, offloads)
+    first.register_finished_partial_tail.assert_called_once_with(
+        request, block_ids, offloads
+    )
+    second.register_finished_partial_tail.assert_called_once_with(
+        request, block_ids, offloads
+    )
+
+
 @pytest.fixture
 def mc() -> MultiConnector:
     """MultiConnector using two mocked connectors"""
@@ -294,18 +314,23 @@ def test_multi_example_connector_consistency():
         "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
-    # First three events are from initialization (register_kv_caches,
-    # set_host_xfer_buffer_ops, get_handshake_metadata), then generate() events.
-    assert events["storage1-WORKER"][:8] == [
+    # First three events are from initialization. During generate(), layer hooks
+    # run before the deferred load is started after the forward pass.
+    expected_worker_prefix = [
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
         "get_handshake_metadata",
         "handle_preemptions",
         "bind_connector_metadata",
-        "start_load_kv",
         "wait_for_layer_load",
         "save_kv_layer",
     ]
+    for connector_name in ("storage1-WORKER", "storage2-WORKER"):
+        worker_events = events[connector_name]
+        assert worker_events[:7] == expected_worker_prefix
+        assert worker_events.index("start_load_kv") > worker_events.index(
+            "save_kv_layer"
+        )
     assert storage2_scheduler_events[:7] == [
         "bind_gpu_block_pool",
         "get_finished_count",
@@ -315,17 +340,6 @@ def test_multi_example_connector_consistency():
         "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
-    assert events["storage2-WORKER"][:8] == [
-        "register_kv_caches",
-        "set_host_xfer_buffer_ops",
-        "get_handshake_metadata",
-        "handle_preemptions",
-        "bind_connector_metadata",
-        "start_load_kv",
-        "wait_for_layer_load",
-        "save_kv_layer",
-    ]
-
     # Reset prefix cache or else we'll just get the tokens back from there.
     llm.reset_prefix_cache()
 

@@ -17,7 +17,12 @@ import pytest
 
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED, init_none_hash
-from vllm.v1.kv_offload.base import LookupResult, ReqContext, ScheduleEndContext
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadPolicy,
+    ReqContext,
+    ScheduleEndContext,
+)
 from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
@@ -238,6 +243,28 @@ class TestLookup:
         mgr = _make_manager()
         ctx = _req_context(kv_params=_remote_decoder_kv_params())
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+
+
+# ---------------------------------------------------------------------------
+# Tests for on_new_request offload policy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kv_params,expected",
+    [
+        (_remote_decoder_kv_params(), OffloadPolicy.REQUEST_LEVEL),
+        (None, OffloadPolicy.BLOCK_LEVEL),
+        (_remote_prefiller_kv_params(), OffloadPolicy.BLOCK_LEVEL),
+        ({"remote_decoder": {}}, OffloadPolicy.BLOCK_LEVEL),
+    ],
+    ids=["producer", "plain", "consumer", "producer_no_id"],
+)
+def test_on_new_request_policy(monkeypatch, kv_params, expected):
+    """Only a producer leg carrying a kv_request_id widens to REQUEST_LEVEL."""
+    mgr = _make_manager()
+    monkeypatch.setattr(mgr, "_get_or_create_session", lambda peer_id: None)
+    assert mgr.on_new_request(_req_context(kv_params=kv_params)).policy is expected
 
 
 # ---------------------------------------------------------------------------

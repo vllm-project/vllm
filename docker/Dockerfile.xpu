@@ -188,17 +188,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     git clone --depth 1 --branch "${UCX_VERSION}" https://github.com/openucx/ucx /tmp/ucx_source && \
     cd /tmp/ucx_source && \
     bash autogen.sh && \
-    ./configure --prefix=/tmp/ucx_install --with-ze=yes --enable-examples --enable-mt && \
+    ./configure --prefix=/opt/ucx --with-ze=yes --enable-examples --enable-mt && \
     make CFLAGS="-Wno-error=incompatible-pointer-types" -j"$(nproc)" && make install && \
     git clone --depth 1 --branch "${NIXL_VERSION}" https://github.com/ai-dynamo/nixl /tmp/nixl_source && \
     cd /tmp/nixl_source && \
     uv pip install --upgrade meson pybind11 patchelf && \
     uv pip install -r requirements.txt && \
-    PKG_CONFIG_PATH=/tmp/ucx_install/lib/pkgconfig \
-    LD_LIBRARY_PATH=/tmp/ucx_install/lib \
+    PKG_CONFIG_PATH=/opt/ucx/lib/pkgconfig \
+    LD_LIBRARY_PATH=/opt/ucx/lib \
     python -m pip wheel --no-deps . -w /tmp/nixl_wheels/ && \
-    find /tmp/ucx_install -type f \( -name '*.a' -o -name '*.la' \) -delete && \
-    rm -rf /tmp/ucx_install/{include,share,etc,bin} /tmp/ucx_install/lib/cmake \
+    find /opt/ucx -type f \( -name '*.a' -o -name '*.la' \) -delete && \
+    rm -rf /opt/ucx/{include,share,etc} /opt/ucx/lib/cmake \
            /tmp/ucx_source /tmp/nixl_source
 
 FROM vllm-base AS vllm-openai
@@ -209,10 +209,10 @@ ARG NIXL_VERSION=v1.3.2
 
 # Copy compiled UCX runtime libraries and the pre-built NIXL wheel.
 # No compiler or autotools are installed in this stage.
-COPY --from=ucx-nixl-build /tmp/ucx_install /tmp/ucx_install
+COPY --from=ucx-nixl-build /opt/ucx /opt/ucx
 COPY --from=ucx-nixl-build /tmp/nixl_wheels /tmp/nixl_wheels
 
-ENV LD_LIBRARY_PATH=/tmp/ucx_install/lib:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=/opt/ucx/lib:${LD_LIBRARY_PATH}
 
 # Install RDMA runtime libraries (no build tools) and the pre-built NIXL wheel.
 # Do not uninstall/reinstall large Python packages here to avoid extra layer
@@ -230,7 +230,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     librdmacm1t64 \
     && rm -rf /var/lib/apt/lists/* \
     && uv pip install --no-deps /tmp/nixl_wheels/nixl*.whl \
-    && uv pip install nixl==${NIXL_VERSION} && uv pip uninstall nixl-cu13 \
+    && uv pip install --no-deps nixl==${NIXL_VERSION} \
     && rm -rf /tmp/nixl_wheels
 
 RUN --mount=type=cache,target=/root/.cache/uv \

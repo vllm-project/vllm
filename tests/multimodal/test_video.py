@@ -113,7 +113,7 @@ import vllm.multimodal.video  # noqa: F401
 
 backend_modules = {
     f"vllm.multimodal.video_decoders.{backend}"
-    for backend in ("opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream")
+    for backend in ("opencv", "torchcodec", "pynvvideocodec", "deepstream")
 }
 loaded = sorted(backend_modules & sys.modules.keys())
 assert not loaded, loaded
@@ -128,7 +128,7 @@ assert not loaded, loaded
 
 @pytest.mark.parametrize(
     "backend",
-    ["opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"],
+    ["opencv", "torchcodec", "pynvvideocodec", "deepstream"],
 )
 def test_decode_video_imports_only_selected_backend(
     backend: str,
@@ -199,15 +199,15 @@ def test_video_backend_kwargs_are_separated_from_sampling_kwargs(
 
 def test_video_backend_rejects_options_for_another_decoder():
     with pytest.raises(
-        ValueError, match="num_ffmpeg_threads is not supported by the 'pyav' backend"
+        ValueError, match="num_ffmpeg_threads is not supported by the 'opencv' backend"
     ):
-        resolve_video_backend_kwargs("pyav", {"num_ffmpeg_threads": 2})
+        resolve_video_backend_kwargs("opencv", {"num_ffmpeg_threads": 2})
 
 
 @pytest.mark.parametrize(
     ("backend", "error"),
     [
-        ("pyav", AssertionError),
+        ("torchcodec", AssertionError),
         (PYNVVIDEOCODEC_VIDEO_BACKEND, ValueError),
     ],
 )
@@ -885,7 +885,7 @@ def test_video_backend_handles_edit_list_trimmed_video(
         )
 
         loader = VIDEO_LOADER_REGISTRY.load("opencv")
-        for backend in ["opencv", "pyav"]:
+        for backend in ["opencv"]:
             frames, metadata = loader.load_bytes(
                 video_data, num_frames=-1, backend=backend
             )
@@ -1137,97 +1137,6 @@ def dummy_video_path(tmp_path):
 
 
 # ============================================================================
-# PyAV Backend Tests
-# ============================================================================
-
-
-def test_pyav_backend_loads_frames(dummy_video_path, monkeypatch: pytest.MonkeyPatch):
-    """Test that the pyav codec backend can load frames from a valid video."""
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
-
-        with open(dummy_video_path, "rb") as f:
-            video_data = f.read()
-
-        loader = VIDEO_LOADER_REGISTRY.load("opencv")
-        frames, metadata = loader.load_bytes(video_data, num_frames=8, backend="pyav")
-
-        assert frames.ndim == 4
-        assert frames.shape[3] == 3  # RGB
-        assert frames.shape[0] == 8
-        assert frames.shape[0] == len(metadata["frames_indices"])
-        assert metadata["video_backend"] == "pyav"
-        assert "total_num_frames" in metadata
-        assert "fps" in metadata
-        assert "duration" in metadata
-
-
-def test_pyav_dynamic_backend_loads_frames(
-    dummy_video_path, monkeypatch: pytest.MonkeyPatch
-):
-    """Test that the pyav codec with dynamic sampling can load frames."""
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv_dynamic")
-
-        with open(dummy_video_path, "rb") as f:
-            video_data = f.read()
-
-        loader = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
-        frames, metadata = loader.load_bytes(
-            video_data, fps=2, max_duration=10, backend="pyav"
-        )
-
-        assert frames.ndim == 4
-        assert frames.shape[3] == 3  # RGB
-        assert frames.shape[0] > 0
-        assert frames.shape[0] == len(metadata["frames_indices"])
-        assert metadata["video_backend"] == "pyav_dynamic"
-
-
-def test_pyav_backend_returns_target_frames_not_keyframes():
-    """Regression test: PyAV must decode forward past the seek keyframe.
-
-    container.seek() snaps backward to the nearest keyframe. With a long GOP
-    (here: one keyframe at frame 0), a decoder that does not advance forward
-    to the target PTS collapses every sampled slot onto the keyframe. This
-    test encodes a per-frame marker on the green channel and verifies the
-    returned frames are distinct, ordered, and match the requested indices.
-    """
-    num_frames = 50
-    num_sampled = 4
-    height, width = 64, 64
-
-    video_bytes = create_long_gop_video(
-        num_frames=num_frames, width=width, height=height
-    )
-
-    loader = VIDEO_LOADER_REGISTRY.load("opencv")
-    frames, metadata = loader.load_bytes(
-        video_bytes, num_frames=num_sampled, backend="pyav"
-    )
-    assert frames.shape == (num_sampled, height, width, 3)
-
-    requested = list(metadata["frames_indices"])
-    assert len(requested) == num_sampled
-
-    actual = [int(f[height // 2, width // 2, 1]) for f in frames]
-
-    assert len(set(actual)) == num_sampled, (
-        f"PyAV returned only {len(set(actual))} distinct frames for "
-        f"{num_sampled} requested indices: markers={actual}, "
-        f"requested={requested}. Keyframe-snap regression."
-    )
-
-    assert actual == sorted(actual), f"Returned frames out of order: markers={actual}"
-
-    for marker, want_idx in zip(actual, requested):
-        assert abs(marker - want_idx) <= 10, (
-            f"Frame mismatch: requested index {want_idx}, "
-            f"got marker {marker} (tolerance ±10)"
-        )
-
-
-# ============================================================================
 # TorchCodec Backend Tests
 # ============================================================================
 
@@ -1298,11 +1207,10 @@ def test_torchcodec_backend_returns_target_frames_not_keyframes():
     """Regression test: torchcodec must return the requested frames, not the
     GOP keyframe they seek back to.
 
-    Mirrors ``test_pyav_backend_returns_target_frames_not_keyframes``: a long
-    GOP (single keyframe at frame 0) with a per-frame green-channel marker.
-    With ``seek_mode="exact"`` torchcodec resolves each index to the exact
-    frame, so the returned markers must be distinct, ordered, and match the
-    requested indices.
+    A long GOP (single keyframe at frame 0) with a per-frame green-channel
+    marker. With ``seek_mode="exact"`` torchcodec resolves each index to the
+    exact frame, so the returned markers must be distinct, ordered, and match
+    the requested indices.
     """
     pytest.importorskip("torchcodec")
     num_frames = 50
@@ -1384,33 +1292,6 @@ def test_torchcodec_backend_returns_target_frames_not_keyframes():
             119,
             id="molmo2-fps",
         ),
-        # uniform sampling + pyav codec (same frame counts as opencv)
-        pytest.param(
-            "opencv",
-            {"num_frames": 32, "backend": "pyav"},
-            32,
-            id="pyav-num_frames",
-        ),
-        pytest.param("opencv", {"fps": 2, "backend": "pyav"}, 120, id="pyav-fps"),
-        pytest.param(
-            "opencv",
-            {"num_frames": 500, "fps": 2, "backend": "pyav"},
-            120,
-            id="pyav-num_frames_wins_fps",
-        ),
-        # dynamic sampling + pyav codec
-        pytest.param(
-            "opencv_dynamic",
-            {"fps": 1, "max_duration": 60, "backend": "pyav"},
-            60,
-            id="pyav_dynamic-within_max_duration",
-        ),
-        pytest.param(
-            "opencv_dynamic",
-            {"fps": 2, "max_duration": 30, "backend": "pyav"},
-            60,
-            id="pyav_dynamic-exceeds_max_duration",
-        ),
         # glm46v dynamic FPS (1800 frames @ 30fps = 60s)
         # 60s falls in (30, 300] → target_fps=1.0, extract_t = 60*1.0*2 = 120
         pytest.param(
@@ -1418,12 +1299,6 @@ def test_torchcodec_backend_returns_target_frames_not_keyframes():
             {"backend": "opencv"},
             120,
             id="glm46v-60s",
-        ),
-        pytest.param(
-            "glm46v",
-            {"backend": "pyav"},
-            120,
-            id="glm46v-pyav-60s",
         ),
         # uniform sampling + torchcodec codec (same frame counts as opencv)
         pytest.param(

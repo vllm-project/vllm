@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
+
 import torch
 import torch.distributed as dist
 
@@ -11,6 +13,26 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
+
+
+@dataclass(frozen=True)
+class DPSyncState:
+    """What a `dispatch_cg_and_sync_dp` call agreed across DP ranks.
+
+    Every field is identical on every rank, so callers can branch on them
+    without disagreeing about whether to run a collective. Never add a per-rank
+    value here.
+    """
+
+    # Per-rank token counts, for the forward context. All entries hold the
+    # agreed padded count, unless `eager`, where nothing was padded.
+    num_tokens_across_dp: torch.Tensor
+    # Agreed uniform decode length. None means the ranks disagreed, which is an
+    # answer, not "unknown".
+    uniform_token_count: int | None
+    # Whether the ranks agreed to run eager. A dispatch reusing this must run
+    # eager too; no shape was agreed, so picking a graph per rank would diverge.
+    eager: bool
 
 
 def sync_cudagraph_and_dp_padding(
@@ -23,11 +45,11 @@ def sync_cudagraph_and_dp_padding(
     dp_rank: int,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
-) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
+) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """
     Coordinates the batch descriptor and DP padding across all ranks.
 
-    Returns (synced_batch_desc, num_tokens_across_dp).
+    Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
@@ -43,6 +65,13 @@ def sync_cudagraph_and_dp_padding(
     uniform_token_counts_across_dp = tensor[2]
     max_query_lens_across_dp = tensor[3]
 
+    # If ranks disagree on the uniform token count, or its 0 (means None) set to None
+    synced_uniform_token_count: int | None = int(uniform_token_counts_across_dp[0])
+    if synced_uniform_token_count == 0 or not torch.all(
+        uniform_token_counts_across_dp == synced_uniform_token_count
+    ):
+        synced_uniform_token_count = None
+
     if torch.all(num_tokens_across_dp == 0).item():
         synced_desc = BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE, num_tokens=0, num_reqs=0
@@ -53,24 +82,25 @@ def sync_cudagraph_and_dp_padding(
 
     # If any rank wants to run eager, all ranks run eager
     if synced_cg_mode == CUDAGraphMode.NONE:
-        return BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.NONE,
-            num_tokens=num_tokens,
-            num_reqs=num_reqs,
-            num_active_loras=desired_batch_desc.num_active_loras,
-        ), num_tokens_across_dp
+        return (
+            BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                num_active_loras=desired_batch_desc.num_active_loras,
+            ),
+            DPSyncState(
+                num_tokens_across_dp=num_tokens_across_dp,
+                uniform_token_count=synced_uniform_token_count,
+                eager=True,
+            ),
+        )
 
     assert cudagraph_manager is not None, (
         "cudagraph_manager should only be None during profile run, "
         "where synced_cg_mode must be NONE across all DP ranks"
     )
     synced_num_tokens = int(num_tokens_across_dp.max().item())
-    synced_uniform_token_count = uniform_token_counts_across_dp[0]
-    # If ranks disagree on the uniform token count, or its 0 (means None) set to None
-    if synced_uniform_token_count == 0 or not torch.all(
-        uniform_token_counts_across_dp == synced_uniform_token_count
-    ):
-        synced_uniform_token_count = None
 
     # Varlen decode graphs are selected by the query-length bound, so ranks must agree
     # on it or they pad to different token counts below.
@@ -92,7 +122,11 @@ def sync_cudagraph_and_dp_padding(
     # Update num_tokens_across_dp to reflect padded size.
     num_tokens_across_dp[:] = synced_desc.num_tokens
 
-    return synced_desc, num_tokens_across_dp
+    return synced_desc, DPSyncState(
+        num_tokens_across_dp=num_tokens_across_dp,
+        uniform_token_count=synced_uniform_token_count,
+        eager=False,
+    )
 
 
 def dispatch_cg_and_sync_dp(
@@ -105,8 +139,43 @@ def dispatch_cg_and_sync_dp(
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
-) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
-    if need_eager:
+    dp_sync: DPSyncState | None = None,
+) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
+    """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
+
+    Runs a collective when dp_size > 1 so every rank dispatches to the same
+    shape. Pass `dp_sync` from a dispatch already made over this same batch (a
+    drafter's prefill runs the target's batch shape) to reuse that agreement
+    instead, with no collective.
+
+    Args:
+        cudagraph_manager: Manager to dispatch against. May be None only when
+            `need_eager` is True (profile run).
+        num_reqs: Requests in this rank's batch.
+        num_tokens: Tokens in this rank's batch, already padded by the caller.
+        uniform_token_count: Per-request token count if this rank's batch is a
+            uniform decode, else None. `dp_sync.uniform_token_count` takes its
+            place when a sync is reused, since that one is agreed across ranks.
+        dp_size: Data-parallel world size. 1 skips all cross-rank work.
+        dp_rank: This rank's index in the DP group.
+        max_query_len: Upper bound on per-request query length, for selecting
+            varlen decode graphs. None means the graph must not constrain it.
+        need_eager: Force `CUDAGraphMode.NONE` instead of dispatching.
+        num_active_loras: Active LoRA count for this rank. Does not need
+            cross-rank agreement; it never changes a bucket's token count.
+        dp_sync: Agreement from a prior dispatch over this same batch, to reuse.
+            Must come from a batch with this same padded `num_tokens` and the
+            same `uniform_token_count`; `num_reqs` may differ, as neither
+            depends on it. Passing a sync from a different batch is a caller
+            error and trips an assert.
+
+    Returns:
+        (batch_desc, sync), where `sync` is this batch's agreement for a later
+        dispatch to reuse. It is None when `dp_size` is 1 or no rank has work.
+    """
+    reuse_eager = dp_sync is not None and dp_sync.eager
+
+    if need_eager or reuse_eager:
         batch_desc = BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE,
             num_tokens=num_tokens,
@@ -121,13 +190,32 @@ def dispatch_cg_and_sync_dp(
         batch_desc = cudagraph_manager.dispatch(
             num_reqs,
             num_tokens,
-            uniform_token_count,
+            dp_sync.uniform_token_count if dp_sync is not None else uniform_token_count,
             num_active_loras=num_active_loras,
             max_query_len=max_query_len,
         )
 
     if dp_size == 1:
         return batch_desc, None
+
+    if dp_sync is not None:
+        assert dp_sync.num_tokens_across_dp[dp_rank] == num_tokens, (
+            "reusing a DP sync taken over a different batch"
+        )
+        assert (
+            dp_sync.uniform_token_count is None
+            or uniform_token_count == dp_sync.uniform_token_count
+        ), "reusing a DP sync taken over a different batch"
+        if not dp_sync.eager and batch_desc.num_tokens != num_tokens:
+            # Capture sizes can differ between managers, so this one may
+            # pad further. Every rank pads alike, so report what will run.
+            dp_sync = replace(
+                dp_sync,
+                num_tokens_across_dp=torch.full_like(
+                    dp_sync.num_tokens_across_dp, batch_desc.num_tokens
+                ),
+            )
+        return batch_desc, dp_sync
 
     return sync_cudagraph_and_dp_padding(
         cudagraph_manager,

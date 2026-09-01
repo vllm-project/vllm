@@ -2,14 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
 import inspect
-from collections.abc import Callable
+from abc import abstractmethod
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from functools import cached_property, wraps
+from typing import Any, ClassVar, Generic, TypeVar, cast
 
 from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
     get_ast_full_name,
     get_function_source_node,
 )
+
+CompileKeyT = TypeVar("CompileKeyT")
+LaunchSpec = tuple[tuple[int, ...], dict[str, Any]]
 
 
 def triton_scalar_specialization_rep(value: int) -> int:
@@ -50,10 +56,16 @@ def triton_scalar_specialization_rep(value: int) -> int:
 
 @dataclass(frozen=True)
 class TritonWarmupTensor:
-    # Compile-only tensor descriptor for Triton pointer specialization.
+    """Compile-only tensor metadata used by Triton warmup.
+
+    ``strides=None`` represents compact row-major storage. Pass explicit strides
+    whenever the runtime tensor can be padded, transposed, or otherwise strided.
+    """
+
     dtype: Any
     aligned: bool = True
     shape: tuple[int, ...] = (1,)
+    strides: tuple[int, ...] | None = None
 
     def data_ptr(self) -> int:
         return 0 if self.aligned else 1
@@ -61,13 +73,81 @@ class TritonWarmupTensor:
     def ptr_range(self) -> int:
         return 0
 
-    def stride(self) -> tuple[int, ...]:
-        strides: list[int] = []
-        stride = 1
-        for size in reversed(self.shape):
-            strides.append(stride)
-            stride *= size
-        return tuple(reversed(strides))
+    def stride(self, dim: int | None = None) -> int | tuple[int, ...]:
+        if self.strides is None:
+            strides: list[int] = []
+            stride = 1
+            for size in reversed(self.shape):
+                strides.append(stride)
+                stride *= size
+            result = tuple(reversed(strides))
+        else:
+            result = self.strides
+        return result if dim is None else result[dim]
+
+
+class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
+    """Triton owner whose runtime launch specification is reused for warmup."""
+
+    kernel: ClassVar[Any]
+    _warming = False
+
+    @abstractmethod
+    def warmup_inputs(self, compile_key: CompileKeyT) -> dict[str, Any]:
+        """Return runtime-shaped inputs that reproduce one compile key."""
+        raise NotImplementedError
+
+    def compile(self, compile_key: CompileKeyT) -> None:
+        inputs = self.warmup_inputs(compile_key)
+        self._warming = True
+        try:
+            cast(Callable[..., None], self)(**inputs)
+        finally:
+            self._warming = False
+
+    @cached_property
+    def _kernel_param_names(self) -> frozenset[str]:
+        return frozenset(self.kernel.arg_names)
+
+    def launch(
+        self,
+        grid: tuple[int, ...],
+        inputs: Mapping[str, Any],
+        /,
+        **kwargs: Any,
+    ) -> Any:
+        for name, value in inputs.items():
+            target = name if name in self._kernel_param_names else f"{name}_ptr"
+            if target in self._kernel_param_names and target not in kwargs:
+                kwargs[target] = value
+        if self._warming:
+            warmup = getattr(self.kernel, "warmup", None)
+            assert warmup is not None
+            return warmup(grid=(1,), **kwargs)
+        return self.kernel[grid](**kwargs)
+
+
+def kernel_launcher(
+    call_fn: Callable[..., LaunchSpec],
+) -> Callable[..., None]:
+    """Launch a Triton kernel from a declarative ``__call__`` specification."""
+    signature = inspect.signature(call_fn)
+
+    @wraps(call_fn)
+    def wrapper(
+        self: VllmTritonJitKernel[Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        grid, launch_kwargs = call_fn(self, *args, **kwargs)
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        inputs = {
+            name: value for name, value in bound.arguments.items() if name != "self"
+        }
+        self.launch(grid, inputs, **launch_kwargs)
+
+    return wrapper
 
 
 @dataclass(frozen=True)

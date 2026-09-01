@@ -147,26 +147,22 @@ def test_fp4_env_defaults():
     """ROCm FP4 env defaults should stay stable for the AITER gates."""
     import vllm.envs as envs
 
-    assert envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM is False
     assert envs.VLLM_ROCM_USE_AITER_FP4BMM is True
 
 
 @pytest.mark.parametrize(
     (
         "use_aiter",
-        "use_fp4_asm_gemm",
         "use_fp4bmm",
     ),
     [
-        (True, True, True),
-        (True, True, False),
-        (True, False, True),
-        (False, True, True),
+        (True, True),
+        (True, False),
+        (False, True),
     ],
 )
 def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
     use_aiter,
-    use_fp4_asm_gemm,
     use_fp4bmm,
     monkeypatch,
 ):
@@ -182,15 +178,11 @@ def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
     _assert_aiter_supported()
 
     on_gfx950_value = on_gfx950()
-    expected_asm_gemm = use_aiter and use_fp4_asm_gemm and on_gfx950_value
+    expected_asm_gemm = use_aiter and on_gfx950_value
     expected_fp4bmm = use_aiter and use_fp4bmm and on_gfx950_value
 
     with monkeypatch.context() as mp:
         mp.setenv("VLLM_ROCM_USE_AITER", "1" if use_aiter else "0")
-        mp.setenv(
-            "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
-            "1" if use_fp4_asm_gemm else "0",
-        )
         mp.setenv("VLLM_ROCM_USE_AITER_FP4BMM", "1" if use_fp4bmm else "0")
         _reload_envs()
         rocm_aiter_ops.refresh_env_variables()
@@ -410,7 +402,7 @@ def test_aiter_fp4_gemm_preshuffled_tuned_shapes(shape):
     from aiter import per_1x32_f4_quant_hip
     from aiter.ops.shuffle import shuffle_weight
     from aiter.ops.triton.gemm_afp4wfp4 import (
-        gemm_afp4wfp4_preshuffled_weight_scales,
+        gemm_afp4wfp4_preshuffle,
     )
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
@@ -446,7 +438,7 @@ def test_aiter_fp4_gemm_preshuffled_tuned_shapes(shape):
 
     def run_preshuffled() -> torch.Tensor:
         y = torch.empty(M, N, device="cuda", dtype=torch.bfloat16)
-        return gemm_afp4wfp4_preshuffled_weight_scales(
+        return gemm_afp4wfp4_preshuffle(
             A_q.contiguous().view(torch.uint8),
             B_fp4.contiguous().view(torch.uint8).reshape(B_fp4.shape[0] // 16, -1),
             A_s,

@@ -14,6 +14,7 @@ use super::{Result, UnifiedParser, UnifiedParserOutput, token_id};
 use crate::reasoning::last_reasoning_boundary;
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
+use crate::utils::recursion::ParserRecursionGuard;
 use crate::utils::{incomplete, parse_buffered_event, partial_prefix_len, safe_text_len_mul};
 
 const REASONING_START: &str = "<|channel>thought\n";
@@ -442,12 +443,16 @@ fn gemma4_string<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
 
 /// Parse a nested Gemma4 object.
 fn gemma4_object(input: &mut &str) -> ModalResult<Map<String, Value>> {
-    delimited(literal("{"), gemma4_args, literal("}")).parse_next(input)
+    literal("{").parse_next(input)?;
+    let _guard = ParserRecursionGuard::enter()?;
+    terminated(gemma4_args, literal("}")).parse_next(input)
 }
 
 /// Parse a Gemma4 array value.
 fn gemma4_array_value(input: &mut &str) -> ModalResult<Vec<Value>> {
-    delimited(literal("["), gemma4_array_content, literal("]")).parse_next(input)
+    literal("[").parse_next(input)?;
+    let _guard = ParserRecursionGuard::enter()?;
+    terminated(gemma4_array_content, literal("]")).parse_next(input)
 }
 
 /// Parse Gemma4 array content.
@@ -519,6 +524,7 @@ mod tests {
     };
     use crate::tool::Tool;
     use crate::unified::{UnifiedParserError, UnifiedParserEvent, parsing_failed};
+    use crate::utils::recursion::MAX_PARSER_RECURSION_DEPTH;
 
     const CHANNEL_START_ID: u32 = 256;
     const CHANNEL_END_ID: u32 = 257;
@@ -718,6 +724,18 @@ mod tests {
     fn gemma4_parse_array_handles_bare_values() {
         let parsed = parse_gemma4_array("42,true,114.514").unwrap();
         assert_eq!(Value::Array(parsed), json!([42, true, 114.514]));
+    }
+
+    #[test]
+    fn gemma4_parser_rejects_excessive_recursion_and_recovers_input() {
+        let depth = MAX_PARSER_RECURSION_DEPTH * 2;
+        let nested_value = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+        let input = format!("<|tool_call>call:set{{value:{nested_value}}}<tool_call|>");
+        let mut parser = test_parser();
+
+        let error = parser.parse_chunk(&input).unwrap_err();
+        assert!(error.to_report_string().contains("parser recursion limit exceeded"));
+        assert_eq!(parser.reset(), input);
     }
 
     #[test]

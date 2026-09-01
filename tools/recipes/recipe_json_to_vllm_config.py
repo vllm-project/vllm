@@ -59,10 +59,36 @@ except ImportError as exc:
 
 DEFAULT_API_BASE = "https://recipes.vllm.ai"
 
-SHORT_ALIASES = {
-    "-tp": "tensor-parallel-size",
+VALUE_SHORT_ALIASES = {
+    "-q": "quantization",
     "-pp": "pipeline-parallel-size",
+    "-n": "nnodes",
+    "-r": "node-rank",
+    "-tp": "tensor-parallel-size",
+    "-dcp": "decode-context-parallel-size",
+    "-pcp": "prefill-context-parallel-size",
     "-dp": "data-parallel-size",
+    "-dpn": "data-parallel-rank",
+    "-dpr": "data-parallel-start-rank",
+    "-dpl": "data-parallel-size-local",
+    "-dpa": "data-parallel-address",
+    "-dpp": "data-parallel-rpc-port",
+    "-dpb": "data-parallel-backend",
+    "-asc": "api-server-count",
+}
+
+FLAG_SHORT_ALIASES = {
+    "-dph": "data-parallel-hybrid-lb",
+    "-dpe": "data-parallel-external-lb",
+    "-dpm": "data-parallel-multi-port-external-lb",
+    "-ep": "enable-expert-parallel",
+}
+
+DICT_SHORT_ALIASES = {
+    "-sc": "speculative-config",
+    "-dc": "diffusion-config",
+    "-cc": "compilation-config",
+    "-ac": "attention-config",
 }
 
 
@@ -464,6 +490,11 @@ def discover_recipe_source(
 
 def coerce(value: str) -> Any:
     """Convert CLI string values to useful YAML scalar/object types."""
+    # Recipes may preserve Python-style booleans in dotted config aliases,
+    # for example: -cc.pass_config.fuse_rope_kvcache=True.
+    if value in ("True", "False"):
+        return value == "True"
+
     try:
         return json.loads(value)
     except (json.JSONDecodeError, TypeError):
@@ -473,8 +504,19 @@ def coerce(value: str) -> Any:
 def is_option_token(token: str) -> bool:
     if token.startswith("--"):
         return True
-    if token in SHORT_ALIASES or token == "-O":
+
+    short_name = token.split("=", 1)[0]
+    if (
+        short_name in VALUE_SHORT_ALIASES
+        or short_name in FLAG_SHORT_ALIASES
+        or short_name in DICT_SHORT_ALIASES
+        or token == "-O"
+    ):
         return True
+
+    if any(token.startswith(f"{alias}.") for alias in DICT_SHORT_ALIASES):
+        return True
+
     return token.startswith("-O") and len(token) > 2
 
 
@@ -554,22 +596,85 @@ def argv_to_config(argv: list[Any]) -> dict[str, Any]:
             i += 2
             continue
 
-        # Selected common short aliases.
-        if token in SHORT_ALIASES:
-            if i + 1 >= len(argv):
-                raise ValueError(f"{token} is missing its value")
+        # Dotted dictionary aliases accepted by FlexibleArgumentParser:
+        #   -cc.mode=3
+        #   -cc.mode 3
+        #   -cc.pass_config.foo=True
+        #   -cc.custom_ops+ -quant_fp8
+        # The same syntax applies to -sc, -dc, and -ac.
+        dotted_alias = next(
+            (alias for alias in DICT_SHORT_ALIASES if token.startswith(f"{alias}.")),
+            None,
+        )
+        if dotted_alias is not None:
+            dotted = token[len(dotted_alias) + 1 :]
+            raw_key, separator, raw_value = dotted.partition("=")
+
+            append = raw_key.endswith("+")
+            if append:
+                raw_key = raw_key[:-1]
+
+            if not raw_key:
+                raise ValueError(f"{token} must contain a key after {dotted_alias}.")
+
+            if not separator:
+                if i + 1 >= len(argv):
+                    raise ValueError(f"{token} is missing its value")
+                # Consume the next token unconditionally. Dotted list values may
+                # themselves begin with "-", for example "-quant_fp8".
+                raw_value = argv[i + 1]
+                i += 2
+            else:
+                i += 1
+
+            value: Any = raw_value.split(",") if append else coerce(raw_value)
+
             merge_value(
                 config,
-                [SHORT_ALIASES[token]],
-                coerce(argv[i + 1]),
+                [DICT_SHORT_ALIASES[dotted_alias], *raw_key.split(".")],
+                value,
             )
+            continue
+
+        # Support -alias=value for value-bearing and whole-dict aliases.
+        if "=" in token:
+            short_name, raw_value = token.split("=", 1)
+            if short_name in VALUE_SHORT_ALIASES:
+                merge_value(
+                    config,
+                    [VALUE_SHORT_ALIASES[short_name]],
+                    coerce(raw_value),
+                )
+                i += 1
+                continue
+            if short_name in DICT_SHORT_ALIASES:
+                merge_value(
+                    config,
+                    [DICT_SHORT_ALIASES[short_name]],
+                    coerce(raw_value),
+                )
+                i += 1
+                continue
+
+        # Boolean short aliases are flags and do not consume a value.
+        if token in FLAG_SHORT_ALIASES:
+            merge_value(config, [FLAG_SHORT_ALIASES[token]], True)
+            i += 1
+            continue
+
+        # Scalar and whole-dictionary short aliases consume one value.
+        if token in VALUE_SHORT_ALIASES or token in DICT_SHORT_ALIASES:
+            if i + 1 >= len(argv):
+                raise ValueError(f"{token} is missing its value")
+            key = VALUE_SHORT_ALIASES.get(token) or DICT_SHORT_ALIASES[token]
+            merge_value(config, [key], coerce(argv[i + 1]))
             i += 2
             continue
 
         if not token.startswith("--"):
             raise ValueError(
                 f"Unexpected positional/short argument {token!r}. "
-                "The converter expects Recipes to emit long-form vLLM serve options."
+                "The converter accepts vLLM serve long options and known short aliases."
             )
 
         # --key=value

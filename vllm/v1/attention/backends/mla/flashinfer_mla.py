@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
@@ -28,6 +28,10 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
@@ -116,6 +120,32 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
     # Non-causal DSpark blocks are flattened to single-token rows in forward_mqa.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = True
+
+    def __init__(
+        self,
+        kv_cache_spec: "AttentionSpec",
+        layer_names: list[str],
+        vllm_config: "VllmConfig",
+        device: torch.device,
+    ) -> None:
+        parallel_config = vllm_config.parallel_config
+        dcp_size = parallel_config.decode_context_parallel_size
+        interleave_size = parallel_config.cp_kv_cache_interleave_size
+        if dcp_size > 1 and interleave_size != 1:
+            raise ValueError(
+                "FlashInfer MLA native DCP requires "
+                "cp_kv_cache_interleave_size=1; got "
+                f"{interleave_size}."
+            )
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            MLACommonMetadata,
+            supports_dcp_with_varlen=True,
+        )
 
 
 class FlashInferMLABackend(MLACommonBackend):
@@ -165,16 +195,8 @@ class FlashInferMLABackend(MLACommonBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        vllm_config = get_current_vllm_config()
-        speculative_config = vllm_config.speculative_config
-        if (
-            speculative_config is not None
-            and speculative_config.method == "dspark"
-            and vllm_config.parallel_config.decode_context_parallel_size > 1
-        ):
-            return "FlashInfer MLA does not support DSpark with DCP"
-
         # FlashInfer MLA kernel requires qk_nope_head_dim in [64, 128, 192]
+        vllm_config = get_current_vllm_config()
         if vllm_config.model_config is not None:
             hf_text_config = vllm_config.model_config.hf_text_config
             qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
@@ -188,13 +210,9 @@ class FlashInferMLABackend(MLACommonBackend):
 
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
-    # trtllm-gen MLA decode emits LSE in log2 (per flashinfer's own
-    # reference at flashinfer/trace/templates/attention.py:81:
-    # `logsumexp / log(2.0)`). Override the AttentionImplBase default
-    # so MLAAttention's DCP combine branches on the correct base
-    # (IS_BASE_E=False uses tl.exp2/tl.log2 natively, avoiding an FP
-    # multiply per decode step).
-    lse_base_on_e: bool = False
+    # DCP is the only path that consumes LSE. It uses monolithic CuTeDSL,
+    # whose public LSE contract is natural-log.
+    lse_base_on_e: bool = True
 
     def __init__(
         self,
@@ -271,8 +289,8 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         seq_lens = attn_metadata.decode.seq_lens
 
         if not attn_metadata.causal:
-            # FlashInfer decode has no causal flag. For TP-only DSpark, flatten
-            # each non-causal query block into independent single-token rows.
+            # FlashInfer decode has no causal flag. Flatten each non-causal
+            # query block into independent single-token rows.
             query_len = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
             q = q.unsqueeze(1)
             if query_len > 1:
@@ -303,10 +321,26 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         workspace_buffer = _get_workspace_buffer(return_lse)
         # Parallel gathers can change the runtime Q heads from TP-local num_heads.
         runtime_num_heads = q.shape[-2]
-        # trtllm-gen rejects MLA head counts it can't tile (e.g. 96);
-        # fall back to cute-dsl for those.
-        decode_backend = _select_mla_decode_backend(runtime_num_heads)
-        extra_kwargs = {}
+        extra_kwargs: dict[str, Any] = {}
+        decode_backend: str | None
+        if self.dcp_world_size > 1:
+            causal_seqlens_kv_global = attn_metadata.decode.dcp_tot_seq_lens
+            assert causal_seqlens_kv_global is not None
+            if not attn_metadata.causal and query_len > 1:
+                causal_seqlens_kv_global = causal_seqlens_kv_global.repeat_interleave(
+                    query_len
+                )
+            extra_kwargs.update(
+                enable_dcp=True,
+                cp_world=self.dcp_world_size,
+                cp_rank=self.dcp_rank,
+                causal_seqlens_kv_global=causal_seqlens_kv_global,
+            )
+            decode_backend = "cute-dsl"
+        else:
+            # trtllm-gen rejects MLA head counts it can't tile (e.g. 96);
+            # fall back to cute-dsl for those.
+            decode_backend = _select_mla_decode_backend(runtime_num_heads)
         if decode_backend:
             extra_kwargs["backend"] = decode_backend
         elif kv_c_and_k_pe_cache.shape[-2] in (32, 64):
@@ -343,6 +377,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         )
         if return_lse:
             o, lse = kernel_out
+            lse = lse.view(-1, lse.shape[-1])
         else:
             o, lse = kernel_out, None
 
