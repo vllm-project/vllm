@@ -15,15 +15,36 @@ def build_deepseek_v4_rope(
     compress_ratio: int,
 ) -> RotaryEmbedding:
     rope_parameters = config.rope_parameters
+    # Newer checkpoints nest per-layer-type rope dicts ({"main", "compress"});
+    # older ones ship a single flat dict shared by all layer types.
+    if isinstance(rope_parameters.get("main"), dict) and isinstance(
+        rope_parameters.get("compress"), dict
+    ):
+        key = "compress" if compress_ratio > 1 else "main"
+        rope_parameters = dict(rope_parameters[key])
+    else:
+        rope_parameters = dict(rope_parameters)
+
     rope_parameters["rope_theta"] = (
         config.compress_rope_theta if compress_ratio > 1 else config.rope_theta
     )
-    if rope_parameters["rope_type"] != "default":
-        rope_parameters["rope_type"] = (
-            "deepseek_yarn"
-            if rope_parameters.get("apply_yarn_scaling", True)
-            else "deepseek_llama_scaling"
-        )
+    if compress_ratio > 1:
+        # YaRN applies only to compressor (CSA/HCA) layers.
+        if rope_parameters["rope_type"] != "default":
+            rope_parameters["rope_type"] = (
+                "deepseek_yarn"
+                if rope_parameters.get("apply_yarn_scaling", True)
+                else "deepseek_llama_scaling"
+            )
+    else:
+        # Sliding-window layers use plain RoPE (theta=rope_theta, no YaRN).
+        # factor=1.0 makes the deepseek yarn inv_freq an exact identity while
+        # keeping the fp32 cos_sin_cache layout the fused kernels require.
+        # original_max_position_embeddings is overridden so the cache covers
+        # max_position_embeddings positions (cache len = original * factor).
+        rope_parameters["rope_type"] = "deepseek_yarn"
+        rope_parameters["factor"] = 1.0
+        rope_parameters["original_max_position_embeddings"] = max_position_embeddings
     rope_parameters["mscale"] = 0  # Disable mscale
     rope_parameters["mscale_all_dim"] = 0  # Disable mscale
     rope_parameters["is_deepseek_v4"] = True
