@@ -198,7 +198,7 @@ def resolve_moriio_transfer_ack(
 
 
 class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
-    cache_hit_source = CacheHitSource.P2P
+    _cache_hit_source = CacheHitSource.P2P
 
     def __init__(
         self,
