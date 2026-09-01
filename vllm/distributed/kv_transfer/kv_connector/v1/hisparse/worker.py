@@ -249,7 +249,7 @@ class HiSparseConnectorWorker:
         )
         self._dma_submitted = False
         self._per_layer_mirrored: set[int] = set()
-        self._submitted_mirror_layers = 0
+        self._submitted_mirror_layers: set[int] = set()
         self._layer_ready_events = tuple(torch.Event() for _ in cache_handles)
         self._forward_ready_event = torch.Event()
         self._slot_mapping_host = torch.empty(
@@ -259,6 +259,7 @@ class HiSparseConnectorWorker:
         )
         self._slot_mapping_ready_event = torch.Event()
         self._slot_mapping_pending = False
+        self._slot_mapping_source_ptr: int | None = None
         self._slot_mapping_materialized = True
         self._set_row_mirrors(())
         self.host_write_events = _create_hisparse_host_events(
@@ -367,7 +368,7 @@ class HiSparseConnectorWorker:
             self._enqueue_slot_mapping_copy()
         self._dma_submitted = False
         self._per_layer_mirrored.clear()
-        self._submitted_mirror_layers = 0
+        self._submitted_mirror_layers.clear()
         for handle in self.cache_handles:
             handle.decode_batch = False
             handle.all_context_pages_resident = getattr(
@@ -524,11 +525,14 @@ class HiSparseConnectorWorker:
             self._row_mirror_source_starts = np.empty((0, 0), dtype=np.int64)
         self._row_mirror_num_rows = int(self._row_mirror_counts.sum())
 
-    def _enqueue_slot_mapping_copy(self) -> None:
+    def _enqueue_slot_mapping_copy(
+        self, cache: HiSparseCacheHandle | None = None
+    ) -> None:
         self._slot_mapping_pending = False
         if not self.is_host_writer or not self._row_mirror_num_rows:
             return
-        cache = self.cache_handles[0]
+        if cache is None:
+            cache = self.cache_handles[0]
         slot_mapping = cache.mirror_slot_mapping
         if slot_mapping is None:
             raise RuntimeError("HiSparse host mirror has no destination slot mapping.")
@@ -545,8 +549,9 @@ class HiSparseConnectorWorker:
             self._slot_mapping_host[:num_rows].copy_(
                 slot_mapping[:num_rows], non_blocking=True
             )
-            self._slot_mapping_ready_event.record(stream)
+        self._slot_mapping_ready_event.record(stream)
         self._slot_mapping_pending = True
+        self._slot_mapping_source_ptr = slot_mapping.data_ptr()
 
     def _materialize_row_mirror_destinations(self) -> None:
         if not getattr(self, "_slot_mapping_pending", False):
@@ -568,12 +573,24 @@ class HiSparseConnectorWorker:
         return self._row_mirrors
 
     def _enqueue_row_dma(
-        self, layer_indices: range, ready_event: torch.Event | None = None
+        self, layer_indices: Sequence[int], ready_event: torch.Event | None = None
     ) -> None:
-        if not self._row_mirror_num_rows or not self.is_host_writer:
+        if (
+            not layer_indices
+            or not self._row_mirror_num_rows
+            or not self.is_host_writer
+        ):
             return
         if not getattr(self, "_slot_mapping_materialized", True):
-            self._enqueue_slot_mapping_copy()
+            cache = self.cache_handles[layer_indices[0]]
+            slot_mapping = cache.mirror_slot_mapping
+            if slot_mapping is None:
+                raise RuntimeError("HiSparse host mirror has no destination mapping.")
+            if (
+                not self._slot_mapping_pending
+                or self._slot_mapping_source_ptr != slot_mapping.data_ptr()
+            ):
+                self._enqueue_slot_mapping_copy(cache)
             self._materialize_row_mirror_destinations()
         mirrors = self._row_mirrors
         num_layers = len(layer_indices)
@@ -581,7 +598,7 @@ class HiSparseConnectorWorker:
         descriptors = self._acquire_dma_descriptors(descriptor_count)
         destination_starts = self._row_mirror_destination_starts
         row_counts = self._row_mirror_counts
-        decode_batch = self.cache_handles[0].decode_batch
+        decode_batch = self.cache_handles[layer_indices[0]].decode_batch
         staging_starts = np.cumsum(row_counts, dtype=np.int64) - row_counts
         for descriptor_offset, layer_index in enumerate(layer_indices):
             cache = self.cache_handles[layer_index]
@@ -657,11 +674,14 @@ class HiSparseConnectorWorker:
             return
         ready_event = self._layer_ready_events[layer_index]
         ready_event.record()
+        pending_layers = tuple(
+            sorted(self._per_layer_mirrored - self._submitted_mirror_layers)
+        )
         self._enqueue_row_dma(
-            range(self._submitted_mirror_layers, layer_index + 1),
+            pending_layers,
             ready_event=ready_event,
         )
-        self._submitted_mirror_layers = layer_index + 1
+        self._submitted_mirror_layers.update(pending_layers)
 
     def _record_transfer_completion(
         self, transfers: list[SparseKVPageTransfer]
@@ -742,26 +762,22 @@ class HiSparseConnectorWorker:
         self,
         ready_event: torch.Event | None = None,
     ) -> None:
-        cache = self.cache_handles[0]
-        if cache.num_actual_tokens == 0:
-            return
-        dst_slots = cache.mirror_slot_mapping
-        num_active_layers = next(
-            (
-                index
-                for index, handle in enumerate(self.cache_handles)
-                if handle.num_actual_tokens == 0
-            ),
-            len(self.cache_handles),
+        active_layer_indices = tuple(
+            index
+            for index, handle in enumerate(self.cache_handles)
+            if handle.num_actual_tokens != 0
         )
-        active_handles = self.cache_handles[:num_active_layers]
-        inactive_handles = self.cache_handles[num_active_layers:]
-        if any(handle.num_actual_tokens != 0 for handle in inactive_handles):
-            raise RuntimeError("HiSparse active cache layers must form a prefix.")
+        if not active_layer_indices:
+            return
+        cache = self.cache_handles[active_layer_indices[0]]
+        dst_slots = cache.mirror_slot_mapping
+        active_handles = [self.cache_handles[index] for index in active_layer_indices]
         mismatch = next(
             (
                 (index, handle)
-                for index, handle in enumerate(active_handles[1:], start=1)
+                for index, handle in zip(
+                    active_layer_indices[1:], active_handles[1:], strict=True
+                )
                 if handle.num_actual_tokens != cache.num_actual_tokens
                 or handle.num_decode_tokens != cache.num_decode_tokens
                 or handle.decode_batch != cache.decode_batch
@@ -809,7 +825,7 @@ class HiSparseConnectorWorker:
             return
         self._require_row_mirrors(num_rows)
         if self.is_host_writer:
-            expected_layers = set(range(num_active_layers))
+            expected_layers = set(active_layer_indices)
             if self._per_layer_mirrored:
                 if self._per_layer_mirrored != expected_layers:
                     raise RuntimeError(
@@ -817,18 +833,18 @@ class HiSparseConnectorWorker:
                         f"expected {sorted(expected_layers)}, got "
                         f"{sorted(self._per_layer_mirrored)}."
                     )
-                if (
-                    submitted_layers := getattr(
-                        self, "_submitted_mirror_layers", num_active_layers
-                    )
-                ) < num_active_layers:
+                submitted_layers = getattr(
+                    self, "_submitted_mirror_layers", expected_layers
+                )
+                pending_layers = tuple(sorted(expected_layers - submitted_layers))
+                if pending_layers:
                     self._enqueue_row_dma(
-                        range(submitted_layers, num_active_layers),
+                        pending_layers,
                         ready_event=ready_event,
                     )
-                    self._submitted_mirror_layers = num_active_layers
+                    self._submitted_mirror_layers.update(pending_layers)
             else:
-                self._enqueue_row_dma(range(num_active_layers), ready_event=ready_event)
+                self._enqueue_row_dma(active_layer_indices, ready_event=ready_event)
         num_decode_tokens = min(cache.num_decode_tokens, num_rows)
         if num_decode_tokens:
             assert cache.req_id_per_token is not None

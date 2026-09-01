@@ -988,7 +988,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor(g!)? swap_counts=None,"
       "                 Tensor? resident_block_table=None,"
       "                 int resident_block_size=0,"
-      "                 int resident_null_block=0) -> ()");
+      "                 int resident_null_block=0,"
+      "                 int num_rows=0,"
+      "                 int input_row_stride=1,"
+      "                 int input_row_offset=0,"
+      "                 int output_row_stride=1,"
+      "                 int output_row_offset=0) -> ()");
 
   ops.def(
       "hisparse_invalidate_written_slots(Tensor! device_global_indices,"

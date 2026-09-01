@@ -655,7 +655,9 @@ void hisparse_resolve_residency(
     std::optional<torch::stable::Tensor> const& swap_device_physical_rows,
     std::optional<torch::stable::Tensor> const& swap_counts,
     std::optional<torch::stable::Tensor> const& resident_block_table,
-    int64_t resident_block_size, int64_t resident_null_block);
+    int64_t resident_block_size, int64_t resident_null_block, int64_t num_rows,
+    int64_t input_row_stride, int64_t input_row_offset,
+    int64_t output_row_stride, int64_t output_row_offset);
 
 void hisparse_invalidate_written_slots(
     torch::stable::Tensor& device_global_indices,
