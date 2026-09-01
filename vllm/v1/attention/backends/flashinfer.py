@@ -490,6 +490,9 @@ class FlashInferBackend(AttentionBackend):
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is not None and kv_cache_dtype.startswith("nvfp4"):
+            if current_platform.is_device_capability_family(120):
+                # SM120: XQA decode (native nvfp4-KV) + fa2 prefill.
+                return supports_trtllm_attention(is_prefill=False)
             return (
                 current_platform.is_device_capability_family(100)
                 and supports_trtllm_attention(is_prefill=True)
@@ -764,7 +767,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
             self.is_kvcache_nvfp4 = self.cache_dtype.startswith("nvfp4")
             if self.is_kvcache_nvfp4:
-                if (
+                if current_platform.is_device_capability_family(120):
+                    # SM120: XQA decode + fa2 prefill.
+                    pass
+                elif (
                     force_use_trtllm_attention() is False
                     or not supports_trtllm_attention(is_prefill=True)
                     or not supports_trtllm_attention(is_prefill=False)
