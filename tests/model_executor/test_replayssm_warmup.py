@@ -11,6 +11,13 @@ import torch
 from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup import replayssm_warmup as warmup
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_flashinfer(),
+    reason="FlashInfer ReplaySSM warmup tests require CUDA and FlashInfer",
+)
 
 PREFILL_KWARGS = {
     "num_tokens": 128,
@@ -56,6 +63,7 @@ def _autotune_runner(
     ids=["v1", "v2", "clamped_to_state_capacity"],
 )
 def test_replayssm_autotune_decode_kwargs(runner_kwargs, expected_num_reqs):
+    query_len = runner_kwargs["query_len"]
     with patch.object(
         warmup, "flashinfer_replayssm_autotune_supported", return_value=True
     ):
@@ -63,12 +71,21 @@ def test_replayssm_autotune_decode_kwargs(runner_kwargs, expected_num_reqs):
             _autotune_runner(**runner_kwargs), PREFILL_KWARGS
         )
 
-    assert result is not None
-    num_reqs, kwargs = result
-    assert num_reqs == expected_num_reqs
-    assert kwargs.get("valid_dummy_state_slots", False) is runner_kwargs.get(
-        "use_v2_model_runner", False
-    )
+    expected_kwargs = {
+        **PREFILL_KWARGS,
+        "num_tokens": expected_num_reqs * query_len,
+        "uniform_decode": True,
+    }
+    if runner_kwargs.get("use_v2_model_runner"):
+        expected_kwargs["valid_dummy_state_slots"] = True
+    else:
+        expected_kwargs.update(
+            allow_microbatching=False,
+            force_attention=True,
+            profile_seq_lens=query_len + 1,
+        )
+
+    assert result == (expected_num_reqs, expected_kwargs)
 
 
 @pytest.mark.parametrize(
@@ -77,13 +94,11 @@ def test_replayssm_autotune_decode_kwargs(runner_kwargs, expected_num_reqs):
         (dict(use_replayssm=False), True),
         (dict(backend=MambaBackendEnum.TRITON), True),
         ({}, False),
-        (dict(num_blocks=1), True),
     ],
     ids=[
         "replayssm_disabled",
         "non_flashinfer_backend",
         "kernel_unavailable",
-        "no_non_padding_slot",
     ],
 )
 def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
@@ -94,6 +109,16 @@ def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
     ):
         result = warmup._replayssm_autotune_kwargs(
             _autotune_runner(**runner_kwargs), PREFILL_KWARGS
+        )
+    assert result is None
+
+
+def test_replayssm_autotune_kwargs_skipped_without_non_padding_slot():
+    with patch.object(
+        warmup, "flashinfer_replayssm_autotune_supported", return_value=True
+    ):
+        result = warmup._replayssm_autotune_kwargs(
+            _autotune_runner(num_blocks=1), PREFILL_KWARGS
         )
     assert result is None
 
