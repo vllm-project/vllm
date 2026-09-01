@@ -3,13 +3,13 @@
 `ECCPUConnector` extends the GPU-based encoder cache with a CPU tier: it offloads encoder outputs (`encoder_cache[mm_hash]`) to a shared `/dev/shm` mmap region so later steps and later requests reuse them instead of recomputing.
 GPU↔CPU copies run on pooled CUDA streams via `swap_blocks_batch`, asynchronously with model compute.
 
-Setting `ec_enable_nixl: true` additionally enables peer-to-peer (P2P) transfer: a consumer instance pulls an encoding directly out of a producer instance's CPU tier over NIXL instead of recomputing it locally — for E/PD disaggregation or encoder/decoder-instance sharing.
+Setting `ec_enable_nixl: true` in `ec_connector_extra_config` additionally enables peer-to-peer (P2P) transfer: a consumer instance pulls an encoding directly out of a producer instance's CPU tier over NIXL instead of recomputing it locally — for E/PD disaggregation or encoder/decoder-instance sharing.
 
 ## Prerequisites
 
 - `ECCPUConnector` requires the V2 model runner: `VLLM_USE_V2_MODEL_RUNNER=1`. It raises `ValueError` at construction otherwise.
-- Local CPU-tier offload (`ec_enable_nixl` unset or `false`) needs no extra packages — the gate-off code path (`cpu/connector.py`, `cpu/scheduler/`, `cpu/worker/`, `cpu/common.py`) imports no `nixl`/`zmq`/`msgspec`, enforced by a repo test (`test_no_nixl_imports.py`).
-- P2P NIXL mode (`ec_enable_nixl: true`) requires the `nixl` package: `uv pip install nixl` (pinned to `nixl==1.3.1` in `requirements/kv_connectors.txt`, shared with `NixlConnector`). Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for platform-specific installation. If `nixl` isn't importable, the connector raises `RuntimeError: ec_enable_nixl=True requires NIXL; install the nixl package or set ec_enable_nixl=False.`
+- Local CPU-tier offload (`ec_enable_nixl` unset or `false`) needs no extra packages — the gate-off code path (`cpu/connector.py`, `cpu/scheduler/`, `cpu/worker/`, `cpu/common.py`) imports no `nixl`/`zmq`/`msgspec`, enforced by a repo test (`tests/v1/ec_connector/unit/test_no_nixl_imports.py`).
+- P2P NIXL mode (`ec_enable_nixl: true`) requires the `nixl` package: `uv pip install nixl` (pinned to `nixl==1.3.2` in `requirements/kv_connectors.txt`, shared with `NixlConnector`). Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for platform-specific installation. If `nixl` isn't importable, the connector raises `RuntimeError: ec_enable_nixl requires NIXL; install the nixl package or remove ec_enable_nixl from ec_connector_extra_config.`
 
 ## Basic Usage
 
@@ -37,8 +37,7 @@ Producer — offloads to its CPU tier and serves reads from consumers:
 vllm serve <model> --ec-transfer-config '{
   "ec_connector": "ECCPUConnector",
   "ec_role": "ec_producer",
-  "ec_enable_nixl": true,
-  "ec_connector_extra_config": {"ec_cpu_bytes": 1073741824}
+  "ec_connector_extra_config": {"ec_enable_nixl": true, "ec_cpu_bytes": 1073741824}
 }'
 ```
 
@@ -50,8 +49,7 @@ Consumer — pulls encodings named in a request's `ec_transfer_params` before fa
 vllm serve <model> --ec-transfer-config '{
   "ec_connector": "ECCPUConnector",
   "ec_role": "ec_consumer",
-  "ec_enable_nixl": true,
-  "ec_connector_extra_config": {"ec_cpu_bytes": 1073741824}
+  "ec_connector_extra_config": {"ec_enable_nixl": true, "ec_cpu_bytes": 1073741824}
 }'
 ```
 
@@ -84,8 +82,7 @@ EC transfer is configured via `--ec-transfer-config` (CLI) or the `ec_transfer_c
 | --- | --- | --- | --- |
 | `ec_connector` | `str \| None` | `None` | Connector class name. Use `"ECCPUConnector"`. |
 | `ec_role` | `"ec_producer" \| "ec_consumer" \| "ec_both" \| None` | `None` | Required whenever `ec_connector` is set. `ec_producer` offloads GPU→CPU only, `ec_consumer` reloads CPU→GPU only, `ec_both` does both in the same process. |
-| `ec_enable_nixl` | `bool` | `False` | Enables NIXL P2P transfer in addition to local CPU offload. `False` imports no NIXL/ZMQ. |
-| `ec_connector_extra_config` | `dict[str, Any]` | `{}` | Connector-specific settings — see [`ec_connector_extra_config` Reference](#ec_connector_extra_config-reference). |
+| `ec_connector_extra_config` | `dict[str, Any]` | `{}` | Connector-specific settings, including `ec_enable_nixl` — see [`ec_connector_extra_config` Reference](#ec_connector_extra_config-reference). |
 | `engine_id` | `str \| None` | random UUID4 | Names the shared mmap file: `/dev/shm/vllm_ec_{engine_id}_dp{dp_rank}.mmap`. Also seeds the NIXL agent name when `ec_enable_nixl=True`. |
 | `ec_connector_module_path` | `str \| None` | `None` | Python module path to load an out-of-tree connector from, when `ec_connector` isn't in the built-in registry (`ECExampleConnector`, `ECCPUConnector`). |
 
@@ -93,6 +90,7 @@ EC transfer is configured via `--ec-transfer-config` (CLI) or the `ec_transfer_c
 
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
+| `ec_enable_nixl` | `bool` | No (default `false`) | Enables NIXL P2P transfer in addition to local CPU offload. Omitted or `false` imports no NIXL/ZMQ. Extra config is not type coerced, so a string value is parsed: `"true"`, `"1"`, `"yes"` enable it, anything else does not. |
 | `ec_cpu_bytes` | `int` | Yes | Total size, in bytes, of the shared CPU mmap region. `ECCPUConnector` raises `ValueError` if unset. Block count = `ec_cpu_bytes // block_size_bytes`, where `block_size_bytes = hidden_dim * dtype.element_size()` (`hidden_dim` accounts for Qwen3-VL deepstack: `out_hidden_size * (1 + num_deepstack_layers)`). |
 
 ### Environment Variables
