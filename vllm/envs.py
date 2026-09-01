@@ -264,6 +264,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
+    VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -315,6 +316,7 @@ if TYPE_CHECKING:
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
+    VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
@@ -1863,6 +1865,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "1"))
     ),
+    # Whether to use FlashInfer's single-node PCIe CUDA-IPC all-reduce.
+    # This backend has a strict single-stream contract and is opt-in while its
+    # integration is being qualified.
+    "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC": lambda: bool(
+        int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0"))
+    ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
         int(os.getenv("VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", "0"))
@@ -2111,6 +2119,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether enable XPU graph on Intel GPU
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
+    ),
+    # Force N-contiguous weight layout for all XPU unquantized linears.
+    "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
+        int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))
     ),
     # whether use xpu specific sample kernel
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
