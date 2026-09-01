@@ -469,6 +469,22 @@ def get_version_by_config(config: PretrainedConfig) -> tuple[int, ...]:
     return tuple(int(x) for x in version_str.split("."))
 
 
+_VIDEO_TO_IMAGE_KWARGS = {
+    "video_pixel_values": "pixel_values",
+    "video_image_sizes": "image_sizes",
+    "video_tgt_sizes": "tgt_sizes",
+    "video_embeds": "image_embeds",
+}
+
+
+def _image_kwargs_from_video(kwargs: Mapping[str, object]) -> dict[str, object]:
+    return {
+        _VIDEO_TO_IMAGE_KWARGS[k]: v
+        for k, v in kwargs.items()
+        if k in _VIDEO_TO_IMAGE_KWARGS
+    }
+
+
 def _minicpmv_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     return dict(
         pixel_values=MultiModalFieldConfig.batched("image"),
@@ -611,22 +627,24 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
-    def get_hf_processor(self, **kwargs: object):
+    def _get_checkpoint_image_processor(self, **kwargs: object):
         model_config = self.ctx.model_config
         processor_cls = self._image_processor_cls
         merged_kwargs = _merge_mm_kwargs(model_config, processor_cls, **kwargs)
 
-        # AutoProcessor only for tokenizer; its image_processor is resolved by
-        # class name and can pick the wrong checkpoint across MiniCPM-V versions.
-        hf_processor = self.ctx.get_hf_processor(**kwargs)
-
-        image_processor = cached_get_image_processor(
+        return cached_get_image_processor(
             model_config.model,
             revision=model_config.revision,
             trust_remote_code=model_config.trust_remote_code,
             processor_cls_overrides=processor_cls,
             **merged_kwargs,
         )
+
+    def get_hf_processor(self, **kwargs: object):
+        # AutoProcessor only for tokenizer; its image_processor is resolved by
+        # class name and can pick the wrong MiniCPM checkpoint.
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
+        image_processor = self._get_checkpoint_image_processor(**kwargs)
 
         from vllm.transformers_utils.processors.minicpmv import MiniCPMVProcessor
 
@@ -1050,7 +1068,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         tokenizer = self.info.get_tokenizer()
         for modality, pattern in placeholders:
             sub_pattern = tokenizer.decode(
-                tokenizer.encode(pattern, add_special_tokens=False)
+                cached_encode(tokenizer, pattern, add_special_tokens=False)
             )
             if sub_pattern != pattern:
                 additional_placeholders.append((modality, sub_pattern))
@@ -1274,7 +1292,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                 and "videos" not in modalities
             ):
                 modalities["videos"] = self._parse_and_validate_vision_input(
-                    "videos", **{k.removeprefix("video_"): v for k, v in kwargs.items()}
+                    "videos", **_image_kwargs_from_video(kwargs)
                 )
 
         return modalities

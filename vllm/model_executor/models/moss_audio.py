@@ -53,6 +53,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
@@ -1376,6 +1377,8 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = processor.tokenizer
+
         out_mm_data = out_mm_kwargs.get_data()
         audio_data_seqlens = out_mm_data.get("audio_data_seqlens")
         if audio_data_seqlens is None:
@@ -1431,11 +1434,13 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
             )
         ]
         for suffix in ("", "\n"):
-            tokenizer_target = processor.tokenizer.encode(
+            tokenizer_target = cached_encode(
+                tokenizer,
                 MOSS_AUDIO_PLACEHOLDER + suffix,
                 add_special_tokens=False,
             )
-            suffix_token_ids = processor.tokenizer.encode(
+            suffix_token_ids = cached_encode(
+                tokenizer,
                 suffix,
                 add_special_tokens=False,
             )
