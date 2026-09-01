@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+
 import torch
 
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
+
+
+def _batch_invariant_enabled() -> bool:
+    return os.environ.get("VLLM_BATCH_INVARIANT") == "1"
 
 
 def _torch_hc_prenorm_gemm(
@@ -37,8 +43,11 @@ def _hc_prenorm_gemm_outputs(
 
     use_deep_gemm = is_deep_gemm_supported() or not use_tilelang_fallback
     num_tokens = x.shape[0]
+    split_tokens = 1 if _batch_invariant_enabled() else num_tokens
     n_splits = (
-        compute_num_split(64, x.shape[1], cdiv(num_tokens, 64)) if use_deep_gemm else 1
+        compute_num_split(64, x.shape[1], cdiv(split_tokens, 64))
+        if use_deep_gemm
+        else 1
     )
     out = torch.empty(
         n_splits,
@@ -845,6 +854,31 @@ def mhc_fused_post_pre_tilelang(
         layer_input_cur: shape (..., hidden_size)
 
     """
+    if _batch_invariant_enabled() and x.shape[0] > 1:
+        token_outputs = [
+            mhc_fused_post_pre_tilelang(
+                x[index : index + 1],
+                residual[index : index + 1],
+                post_layer_mix[index : index + 1],
+                comb_res_mix[index : index + 1],
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                n_splits,
+                tile_n,
+                norm_weight,
+                norm_eps,
+            )
+            for index in range(x.shape[0])
+        ]
+        return tuple(
+            torch.cat(parts, dim=0) for parts in zip(*token_outputs, strict=True)
+        )
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _MHC_FUSED_TILELANG_KERNEL,
         _MHC_POST_TILELANG_KERNEL,

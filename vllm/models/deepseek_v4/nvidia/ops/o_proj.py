@@ -3,6 +3,10 @@
 import torch
 import torch.nn as nn
 
+from vllm import envs
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    w8a8_triton_block_scaled_mm,
+)
 from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
     fused_inv_rope_fp8_quant,
 )
@@ -70,13 +74,37 @@ def deep_gemm_fp8_o_proj(
             if hasattr(wo_a, "weight_scale")
             else wo_a.weight_scale_inv
         )
-        fp8_einsum(
-            "bhr,hdr->bhd",
-            (o_proj_input, o_scale),
-            (wo_a.weight, weight_scale),
-            z,
-            recipe=einsum_recipe,
-        )
+        if envs.VLLM_BATCH_INVARIANT and not tma_aligned_scales:
+            group_weight = wo_a.weight.reshape(n_groups, o_lora_rank, -1)
+            group_weight_scale = weight_scale.reshape(
+                n_groups,
+                o_lora_rank // 128,
+                group_weight.shape[-1] // 128,
+            )
+            z.copy_(
+                torch.stack(
+                    [
+                        w8a8_triton_block_scaled_mm(
+                            o_proj_input[:, group].contiguous(),
+                            group_weight[group],
+                            o_scale[:, group].contiguous(),
+                            group_weight_scale[group],
+                            block_size=[128, 128],
+                            output_dtype=torch.bfloat16,
+                        )
+                        for group in range(n_groups)
+                    ],
+                    dim=1,
+                )
+            )
+        else:
+            fp8_einsum(
+                "bhr,hdr->bhd",
+                (o_proj_input, o_scale),
+                (wo_a.weight, weight_scale),
+                z,
+                recipe=einsum_recipe,
+            )
     else:
         grouped_weight = wo_a.weight.view(n_groups, o_lora_rank, -1)
         torch.bmm(

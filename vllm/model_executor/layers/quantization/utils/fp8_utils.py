@@ -6,6 +6,7 @@ import functools
 import json
 import os
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -42,6 +43,126 @@ logger = init_logger(__name__)
 # shards are combined with .max(), so an unloaded shard must never win; the
 # smallest representable float32 guarantees that.
 FP8_SCALE_SENTINEL = torch.finfo(torch.float32).min
+
+_PACKAGED_BATCH_INVARIANT_KERNEL = (
+    Path(__file__).resolve().parents[4] / "_vllm_batch_invariant_C.so"
+)
+
+
+def _batch_invariant_kernel_path() -> Path:
+    override = os.environ.get("VLLM_BATCH_INVARIANT_KERNEL_LIB")
+    return Path(override).expanduser() if override else _PACKAGED_BATCH_INVARIANT_KERNEL
+
+
+@functools.cache
+def _load_batch_invariant_kernel_library(path: str) -> None:
+    library = Path(path).expanduser().resolve()
+    if not library.is_file():
+        raise RuntimeError(f"batch-invariant kernel library does not exist: {library}")
+    try:
+        torch.ops.load_library(str(library))
+        _ = torch.ops.vllm_batch_invariant.fused_silu_mul_per_token_group_quant
+        _ = torch.ops.vllm_batch_invariant.top_k_per_row_prefill
+    except (OSError, RuntimeError, AttributeError) as exc:
+        raise RuntimeError(
+            f"failed to load the batch-invariant kernel library: {library}"
+        ) from exc
+
+
+def is_batch_invariant_quant_kernel_enabled() -> bool:
+    path = _batch_invariant_kernel_path()
+    if not path.is_file():
+        return False
+    _load_batch_invariant_kernel_library(str(path))
+    return True
+
+
+def require_batch_invariant_kernel() -> None:
+    """Load the unified batch-invariant extension or fail closed."""
+    path = _batch_invariant_kernel_path()
+    _load_batch_invariant_kernel_library(str(path))
+
+
+def require_batch_invariant_quant_kernel() -> None:
+    """Load the batch-invariant extension before expert execution."""
+    require_batch_invariant_kernel()
+
+
+def fused_silu_mul_per_token_group_quant_fp8(
+    input: torch.Tensor,
+    *,
+    use_ue8m0: bool,
+    round_scale: bool | None = None,
+    clamp_limit: float | None = None,
+    masked_m: torch.Tensor | None,
+    output_q: torch.Tensor | None = None,
+    group_size: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the batch-invariant fused SiLU*up and per-token FP8 quant kernel."""
+    path = _batch_invariant_kernel_path()
+    _load_batch_invariant_kernel_library(str(path))
+    if round_scale is None:
+        round_scale = use_ue8m0
+    if use_ue8m0 and not round_scale:
+        raise ValueError("packed UE8M0 scales require round_scale=True")
+
+    if input.ndim not in (2, 3) or input.shape[-1] % (2 * group_size):
+        raise ValueError(
+            f"invalid batch-invariant activation shape: {tuple(input.shape)}"
+        )
+    if not input.is_contiguous() or input.dtype != torch.bfloat16:
+        raise ValueError("batch-invariant activation input must be contiguous BF16")
+
+    hidden = input.shape[-1] // 2
+    groups = hidden // group_size
+    if output_q is None:
+        output_q = torch.empty(
+            (*input.shape[:-1], hidden),
+            device=input.device,
+            dtype=torch.float8_e4m3fn,
+        )
+
+    if masked_m is None:
+        if input.ndim != 2:
+            raise ValueError("contiguous batch-invariant input must be 2D")
+        tokens = input.shape[0]
+        packed_groups = (groups + 3) // 4 if use_ue8m0 else groups
+        output_s = torch.empty_strided(
+            (tokens, packed_groups),
+            (1, tokens),
+            device=input.device,
+            dtype=torch.int32 if use_ue8m0 else torch.float32,
+        )
+    else:
+        if input.ndim != 3:
+            raise ValueError("masked batch-invariant input must be 3D")
+        experts, tokens = input.shape[:2]
+        if masked_m.shape != (experts,) or masked_m.dtype != torch.int32:
+            raise ValueError("masked_m must be int32 with one count per expert")
+        packed_groups = (groups + 3) // 4 if use_ue8m0 else groups
+        output_s = torch.empty_strided(
+            (experts, tokens, packed_groups),
+            (tokens * packed_groups, 1, tokens),
+            device=input.device,
+            dtype=torch.int32 if use_ue8m0 else torch.float32,
+        )
+    output_s.zero_()
+
+    torch.ops.vllm_batch_invariant.fused_silu_mul_per_token_group_quant(
+        input,
+        output_q,
+        output_s,
+        group_size,
+        1e-10,
+        -448.0,
+        448.0,
+        0.0 if clamp_limit is None else float(clamp_limit),
+        round_scale,
+        use_ue8m0,
+        True,
+        masked_m,
+    )
+    return output_q, output_s
 
 
 def is_fp8(x: torch.dtype | torch.Tensor) -> bool:

@@ -1192,6 +1192,10 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
+        # Batch-invariant alignment uses the same explicit pre/block/post
+        # sequence as the training implementation and the mature AMD path.
+        # The default rollout path keeps the fused implementation.
+        self.use_fused_mhc = not envs.VLLM_BATCH_INVARIANT
 
         if vllm_config.kernel_config.enable_jit_warmup:
             from vllm.model_executor.kernels.mhc.tilelang_kernels import (
@@ -1240,6 +1244,71 @@ class DeepseekV4DecoderLayer(nn.Module):
                 hc_mult=self.hc_mult,
             )
 
+    def _forward_unfused_post_pre(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, None, None, None]:
+        attn_norm_weight = self.attn_norm.weight.data
+        attn_norm_eps = self.attn_norm.variance_epsilon
+        residual = x
+        if x.dim() == 2:
+            assert self.hc_attn_fn_broadcast is not None
+            residual, post, comb, x = mhc_pre_broadcast_tilelang(
+                x,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
+                fn_broadcast=self.hc_attn_fn_broadcast,
+            )
+        else:
+            post, comb, x = mhc_pre_tilelang(
+                x,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
+            )
+
+        if self.use_sequence_parallel:
+            x = sp_all_gather(x)[: positions.shape[0]]
+        x = self.attn(positions, x, None)
+        if self.use_sequence_parallel:
+            x = sp_reduce_scatter(x)
+        x = mhc_post_tilelang(x, residual, post, comb)
+
+        residual = x
+        post, comb, x = mhc_pre_tilelang(
+            x,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            self.rms_norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
+            norm_weight=self.ffn_norm.weight.data,
+            norm_eps=self.ffn_norm.variance_epsilon,
+        )
+        x = self.ffn(x, input_ids)
+        x = mhc_post_tilelang(x, residual, post, comb)
+        return x, None, None, None
+
     def forward(
         self,
         x: torch.Tensor,
@@ -1248,7 +1317,14 @@ class DeepseekV4DecoderLayer(nn.Module):
         post_mix: torch.Tensor | None = None,
         res_mix: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        if not self.use_fused_mhc:
+            return self._forward_unfused_post_pre(x, positions, input_ids)
         attn_norm_weight = self.attn_norm.weight.data
         attn_norm_eps = self.attn_norm.variance_epsilon
         if residual is None:
@@ -1432,6 +1508,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         else:
             self._mtp_hidden_buffer = None
 
+        self.finalize_mhc_broadcast_weights()
+
         if vllm_config.kernel_config.enable_jit_warmup and get_pp_group().is_last_rank:
             from vllm.model_executor.kernels.mhc.tilelang_kernels import (
                 _HC_HEAD_FUSED_TILELANG_KERNEL,
@@ -1513,16 +1591,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 residual,
             )
             if idx + 1 in self.aux_hidden_state_layers:
-                # Reconstruct the aux hidden state for draft models
-                aux_recon = mhc_post_tilelang(
-                    hidden_states, residual, post_mix, res_mix
+                # The unfused BI path already returns reconstructed streams.
+                aux_recon = (
+                    mhc_post_tilelang(hidden_states, residual, post_mix, res_mix)
+                    if layer.use_fused_mhc
+                    else hidden_states
                 )
                 aux_hidden_state = aux_recon.mean(dim=1)
                 if self.use_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
                 aux_hidden_states.append(aux_hidden_state)
                 final_aux_recon = aux_recon
-        if layer is not None:
+        if layer is not None and layer.use_fused_mhc:
             # Reuse if the last layer was captured as an aux hidden state
             if self.end_layer in self.aux_hidden_state_layers:
                 hidden_states = final_aux_recon
@@ -1658,9 +1738,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 elif "attn_sink" in name:
                     if is_pp_missing_parameter(name, self):
                         continue
+                    param = params_dict[name]
                     narrow_weight = loaded_weight[head_rank_start:head_rank_end]
                     n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
+                    padded_weight = loaded_weight.new_full(param.shape, -float("inf"))
+                    padded_weight[:n].copy_(narrow_weight)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, padded_weight)
                     loaded_params.add(name)
                     continue
                 else:
@@ -1736,7 +1822,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 .view(-1, layer.hc_mult, layer.hidden_size)
                 .sum(dim=1)
             )
-            if layer.hc_attn_fn_broadcast is None:
+            if broadcast.is_meta:
+                return
+            if layer.hc_attn_fn_broadcast is None or layer.hc_attn_fn_broadcast.is_meta:
                 layer.hc_attn_fn_broadcast = broadcast
             else:
                 layer.hc_attn_fn_broadcast.copy_(broadcast)
@@ -1936,6 +2024,9 @@ class DeepseekV4ForCausalLM(
 
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
+        self.model.finalize_mhc_broadcast_weights()
+
+    def finalize_weights_after_layerwise_reload(self) -> None:
         self.model.finalize_mhc_broadcast_weights()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:

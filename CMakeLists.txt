@@ -392,6 +392,26 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 endif() # _C HIP endif
 
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  # Batch-invariant kernels use the regular PyTorch C++ API and are loaded as
+  # one dispatcher-only library. Keep Top-K and activation quantization in the
+  # same target so enabling deterministic execution never depends on two
+  # independently versioned extension ABIs.
+  define_extension_target(
+    _vllm_batch_invariant_C
+    DESTINATION vllm
+    LANGUAGE CUDA
+    SOURCES
+      "csrc/batch_invariant/fused_silu_mul_per_token_group_quant.cu"
+      "csrc/batch_invariant/top_k.cu"
+      "csrc/batch_invariant/torch_bindings.cpp"
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES})
+  target_compile_options(_vllm_batch_invariant_C PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-std=c++20>
+    $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20>)
+endif()
+
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)

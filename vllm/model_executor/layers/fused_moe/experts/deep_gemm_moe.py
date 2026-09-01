@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -21,8 +22,11 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    fused_silu_mul_per_token_group_quant_fp8,
+    is_batch_invariant_quant_kernel_enabled,
     per_token_group_quant_fp8,
     per_token_group_quant_fp8_packed_for_deepgemm,
+    require_batch_invariant_quant_kernel,
     silu_mul_per_token_group_quant_fp8_colmajor,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -44,6 +48,7 @@ from vllm.utils.deep_gemm import (
     m_grouped_fp8_fp4_gemm_nt_contiguous,
     m_grouped_fp8_gemm_nt_contiguous,
     mk_alignment_scope,
+    supports_deep_gemm_batch_invariance,
 )
 from vllm.utils.import_utils import has_deep_gemm
 
@@ -126,6 +131,8 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
 
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
+        if envs.VLLM_BATCH_INVARIANT:
+            require_batch_invariant_quant_kernel()
         # MXFP8: FP8 e4m3 values + UE8M0 1x32 block scales (Blackwell). Reuses
         # the same grouped GEMM (aliased to fp8_fp4) with recipe (1, 32).
         self.mxfp8 = quant_config.block_shape == [1, 32]
@@ -154,6 +161,10 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_current_device() -> bool:
         return is_deep_gemm_supported()
+
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        return supports_deep_gemm_batch_invariance()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -238,6 +249,31 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         )
+
+        if (
+            is_batch_invariant_quant_kernel_enabled()
+            and activation == MoEActivation.SILU
+            and self.gemm1_alpha == 1.0
+            and self.gemm1_beta == 0.0
+        ):
+            if scale_fmt not in (
+                DeepGemmQuantScaleFMT.FLOAT32,
+                DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
+                DeepGemmQuantScaleFMT.UE8M0,
+            ):
+                raise RuntimeError(
+                    "batch-invariant kernel supports FLOAT32 or packed UE8M0 "
+                    f"scales, got {scale_fmt}"
+                )
+            return fused_silu_mul_per_token_group_quant_fp8(
+                input,
+                output_q=output,
+                use_ue8m0=scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
+                round_scale=scale_fmt != DeepGemmQuantScaleFMT.FLOAT32,
+                clamp_limit=self.gemm1_clamp_limit,
+                masked_m=None,
+                group_size=block_k,
+            )
 
         # 1. DeepGemm UE8M0: fused gate+mul+clamp+quant+pack
         if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
