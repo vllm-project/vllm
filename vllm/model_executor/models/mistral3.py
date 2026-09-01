@@ -196,6 +196,7 @@ class Mistral3HFEncoderInfo(PixtralHFEncoderInfo):
             image_height = math.floor(image_height / ratio)
 
         patch_size = self.vision_config.patch_size
+        assert isinstance(self.hf_config, Mistral3Config)
         spatial_merge_size = self.hf_config.spatial_merge_size
 
         # The HF processor rounds each dimension up to the vision patch size
