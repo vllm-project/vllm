@@ -636,6 +636,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     num_tokens_padded,
                 )
                 for attn_group in attn_groups:
+                    # Producer-before-consumer in captured graph order: the
+                    # seq_lens increment (_update_draft_inputs_kernel, at the
+                    # end of _generate_draft above) must precede this hook
+                    # reading the indexer's decode.global_seq_lens alias.
+                    # Capture is single-stream, so submission order (textual
+                    # here) is graph order; multi-stream capture would need
+                    # an explicit dependency instead.
                     attn_group.update_draft_decode_metadata(attn_metadata)
 
     def _generate_draft(
