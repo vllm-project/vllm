@@ -19,7 +19,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
 from vllm.triton_utils import tl, triton
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
@@ -169,10 +168,7 @@ def _select_cfg(M, N, K):
         if M >= 4096 and K >= 1024 and K % 256 == 0 and occ >= 256:
             # Triton 3.8.x has TRITON_HIP_USE_ASYNC_COPY enabled on gfx950 by
             # default which uses an extra LDS buffer, need num_stages=2.
-            if on_gfx950():
-                return 128, 128, 256, 8, 2
-            else:
-                return 128, 128, 256, 8, 3
+            return 128, 128, 256, 8, 2
         return 128, 128, 128, 8, 3
     # large-K (K >= 2048). BLOCK_K is K-divisibility-guarded (the K-loop is unmasked):
     # served large-K is 2048/6144 (%256==0), but fall back to 128 (always divides, since
@@ -194,10 +190,7 @@ def _select_cfg(M, N, K):
     if K % 256 == 0 and (1280 < N <= 1536 or (occ >= 128 and (K >= 4096 or M >= 4096))):
         # Triton 3.8.x has TRITON_HIP_USE_ASYNC_COPY enabled on gfx950 by
         # default which uses an extra LDS buffer, need num_stages=2.
-        if on_gfx950():
-            return 128, 128, 256, 8, 2
-        else:
-            return 128, 128, 256, 8, 3
+        return 128, 128, 256, 8, 2
     # small local-N (e.g. TP=8 shared_gate_up N=768): a 64-wide BLOCK_N doubles the
     # N-tile count -> better CU fill than 128x128 at this mid-large M (~1.4x there).
     if N <= 1024 and K % 256 == 0:
