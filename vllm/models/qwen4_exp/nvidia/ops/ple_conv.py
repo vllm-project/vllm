@@ -20,8 +20,7 @@ from typing import Literal
 import torch
 
 from vllm.triton_utils import tl, triton
-
-NULL_BLOCK_ID = tl.constexpr(0)
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 BLOCK_C = 512
 
@@ -51,6 +50,7 @@ def _ple_conv_kernel(
     SPEC_QUERY_LEN: tl.constexpr,
     MODE: tl.constexpr,
     HAS_INIT: tl.constexpr,
+    NULL_STATE_ID: tl.constexpr,
 ):
     t = tl.program_id(0)
     pid_c = tl.program_id(1)
@@ -88,7 +88,7 @@ def _ple_conv_kernel(
             slot_off = tl.full([], 0, tl.int32)
 
     sid = tl.load(state_idx_ptr + r).to(tl.int64)
-    state_ok = sid != NULL_BLOCK_ID
+    state_ok = sid != NULL_STATE_ID
     sid_safe = tl.where(state_ok, sid, 0)
     if HAS_INIT:
         has_init = tl.load(has_init_ptr + r, mask=state_ok, other=0) != 0
@@ -167,6 +167,7 @@ def _ple_conv_writeback_kernel(
     STATE_WIDTH: tl.constexpr,
     MODE: tl.constexpr,
     HAS_INIT: tl.constexpr,
+    NULL_STATE_ID: tl.constexpr,
 ):
     r = tl.program_id(0)
     pid_c = tl.program_id(1)
@@ -174,7 +175,7 @@ def _ple_conv_writeback_kernel(
     c_mask = c_offs < C
 
     sid = tl.load(state_idx_ptr + r).to(tl.int64)
-    state_ok = sid != NULL_BLOCK_ID
+    state_ok = sid != NULL_STATE_ID
     if not state_ok:
         return
 
@@ -312,6 +313,7 @@ def ple_conv(
         SPEC_QUERY_LEN=kernel_spec_query_len,
         MODE=mode,
         HAS_INIT=has_initial_states_arg,
+        NULL_STATE_ID=NULL_BLOCK_ID,
         num_warps=num_warps,
     )
     _ple_conv_writeback_kernel[(num_reqs, triton.cdiv(C, BLOCK_C))](
@@ -333,5 +335,6 @@ def ple_conv(
         STATE_WIDTH=state_width,
         MODE=mode,
         HAS_INIT=has_initial_states_arg,
+        NULL_STATE_ID=NULL_BLOCK_ID,
         num_warps=num_warps,
     )
