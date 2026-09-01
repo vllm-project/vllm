@@ -561,6 +561,19 @@ class KVConnectorBase_V1(ABC):
         """
         return False, None
 
+    def register_finished_partial_tail(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        """Register finish-time partial-tail sources before block cleanup.
+
+        Returns True when the connector accepts responsibility for the sources
+        and the request's blocks must remain alive until ``get_finished()``.
+        """
+        return False
+
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """
         Take the KV cache events from the connector.
