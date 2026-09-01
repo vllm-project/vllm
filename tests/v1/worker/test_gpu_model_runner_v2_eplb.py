@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
@@ -60,6 +61,7 @@ def _make_runner(**overrides: Any) -> Any:
     runner.parallel_config = SimpleNamespace(
         enable_eplb=True,
         enable_elastic_ep=False,
+        enable_batch_sharded_sampling=False,
         eplb_config=SimpleNamespace(log_balancedness=True),
     )
     runner.vllm_config = SimpleNamespace(
@@ -83,6 +85,7 @@ def _make_runner(**overrides: Any) -> Any:
         post_forward=lambda *_, **__: None,
     )
     runner.eplb = eplb.EPLBController(runner.parallel_config, runner.device)
+    runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.pooling_runner = None
     runner.execute_model_state = None
     for key, value in overrides.items():
@@ -93,7 +96,6 @@ def _make_runner(**overrides: Any) -> Any:
 def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
     FakeEplbState.instances.clear()
     model = SimpleNamespace(is_moe=True)
-    prepared: list[object] = []
 
     monkeypatch.setattr(mrv2, "DeviceMemoryProfiler", FakeMemoryProfiler)
     monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
@@ -102,7 +104,6 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
         "get_model_loader",
         lambda load_config: SimpleNamespace(load_model=lambda **_: model),
     )
-    monkeypatch.setattr(mrv2, "prepare_communication_buffer_for_model", prepared.append)
     monkeypatch.setattr(
         mrv2,
         "init_model_state",
@@ -110,8 +111,10 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
     )
     monkeypatch.setattr(
         eplb,
-        "is_mixture_of_experts",
-        lambda loaded_model: getattr(loaded_model, "is_moe", False),
+        "get_mixture_of_experts_model",
+        lambda loaded_model: (
+            loaded_model if getattr(loaded_model, "is_moe", False) else None
+        ),
     )
 
     runner = _make_runner(is_last_pp_rank=False)
@@ -119,7 +122,6 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
 
     assert runner.model is model
     assert runner.model_state is not None
-    assert prepared == [model]
     assert runner.eplb_state is not None
     assert runner.eplb_state.add_model_calls == [(model, runner.model_config)]
     assert runner.eplb_state.async_started is True
@@ -128,7 +130,6 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
 def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
     FakeEplbState.instances.clear()
     model = SimpleNamespace(is_moe=True)
-    prepared: list[object] = []
 
     monkeypatch.setattr(mrv2, "DeviceMemoryProfiler", FakeMemoryProfiler)
     monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
@@ -137,19 +138,17 @@ def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
         "get_model_loader",
         lambda load_config: SimpleNamespace(load_model=lambda **_: model),
     )
-    monkeypatch.setattr(mrv2, "prepare_communication_buffer_for_model", prepared.append)
     monkeypatch.setattr(
         mrv2,
         "init_model_state",
         lambda *args: SimpleNamespace(num_new_sampled_tokens_per_step=1),
     )
-    monkeypatch.setattr(eplb, "is_mixture_of_experts", lambda *_: True)
+    monkeypatch.setattr(eplb, "get_mixture_of_experts_model", lambda model: model)
 
     runner = _make_runner(is_last_pp_rank=False)
     mrv2.GPUModelRunner.load_model(runner, load_dummy_weights=True)
 
     assert runner.load_config.load_format == "dummy"
-    assert prepared == []
     assert runner.eplb_state is not None
     assert runner.eplb_state.add_model_calls == []
     assert runner.eplb_state.async_started is False
@@ -159,17 +158,16 @@ def test_v2_setup_eplb_from_mapping_rebuilds_state(monkeypatch):
     FakeEplbState.instances.clear()
     FakeEplbState.from_mapping_kwargs = None
     monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
-    monkeypatch.setattr(eplb, "is_mixture_of_experts", lambda *_: True)
+    monkeypatch.setattr(eplb, "get_mixture_of_experts_model", lambda model: model)
 
     runner = _make_runner(model=SimpleNamespace(is_moe=True))
     mapping = torch.tensor([[0, 1, 2, 3]], dtype=torch.int64)
-    mrv2.GPUModelRunner.setup_eplb_from_mapping(runner, mapping, 2)
+    mrv2.GPUModelRunner.setup_eplb_from_mapping(runner, mapping)
 
     assert runner.eplb_state is not None
     assert runner.eplb_state.built_from_mapping is True
     assert FakeEplbState.from_mapping_kwargs is not None
     assert FakeEplbState.from_mapping_kwargs["expanded_physical_to_logical"] is mapping
-    assert FakeEplbState.from_mapping_kwargs["num_valid_physical_experts"] == 2
 
 
 def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
@@ -183,9 +181,10 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         slot_mappings_by_layer=None,
         hidden_states=None,
         aux_hidden_states=None,
+        dp_sync=None,
         finished_req_ids=set(),
+        ec_connector_output=None,
         routed_experts=None,
-        num_tokens_across_dp=None,
     )
     runner.req_states = SimpleNamespace()
 

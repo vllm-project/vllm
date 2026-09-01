@@ -281,6 +281,7 @@ target "_ci-rocm" {
   args = {
     ARG_PYTORCH_ROCM_ARCH = PYTORCH_ROCM_ARCH
     CI_BASE_IMAGE         = CI_BASE_IMAGE
+    ROCM_SMOKE_ID         = BUILDKITE_BUILD_ID
     max_jobs              = CI_MAX_JOBS
   }
 }
@@ -295,6 +296,15 @@ target "test-rocm-ci" {
     IMAGE_TAG_LATEST,
   ])
   output = ["type=registry"]
+}
+
+# Validate the test image in the shared BuildKit graph and export only the
+# success marker. This avoids pulling the multi-GB image into the host daemon.
+target "smoke-test-rocm-ci" {
+  inherits   = ["_common-rocm", "_ci-rocm"]
+  target     = "export_test_smoke"
+  cache-from = get_cache_from_rocm()
+  output     = ["type=local,dest=./build/rocm-smoke-export"]
 }
 
 # Cache-only target for the source-scoped ROCm native build stage.
@@ -338,33 +348,28 @@ group "test-rocm-ci-with-artifacts" {
   targets = ["rust-rocm-ci", "csrc-rocm-ci", "export-wheel-rocm"]
 }
 
-# Full test image + wheel export. Kept for fallback/debugging when a pushed
-# per-commit image is useful.
+# Full test image + wheel export. Kept for fallback/debugging when a pushed,
+# build-scoped image is useful.
 group "test-rocm-ci-with-wheel" {
-  targets = ["rust-rocm-ci", "csrc-rocm-ci", "test-rocm-ci", "export-wheel-rocm"]
+  targets = [
+    "rust-rocm-ci",
+    "csrc-rocm-ci",
+    "test-rocm-ci",
+    "smoke-test-rocm-ci",
+    "export-wheel-rocm",
+  ]
 }
 
-# Image tags for the ci_base build. ci-bake-rocm.sh rewrites CI_BASE_IMAGE_TAG
-# to the primary tag for this build. Builds always publish a content-scoped tag
-# when the ci_base content hash is available. Builds with BUILDKITE_COMMIT also
-# publish a commit-scoped tag, either as the primary tag or an additional alias.
-# NIGHTLY=1 builds on the stable branch can additionally set
-# CI_BASE_IMAGE_TAG_STABLE to refresh rocm/vllm-dev:ci_base.
+# Primary output tag for the ci_base build. In Buildkite this is a unique,
+# build-scoped tag; ci-bake-rocm.sh validates it before creating content and
+# stable aliases.
 variable "CI_BASE_IMAGE_TAG" {
   default = "rocm/vllm-dev:ci_base"
 }
 
-# Supplemental tags only. ci-bake-rocm.sh leaves these empty when the same ref
-# is already the primary CI_BASE_IMAGE_TAG.
-variable "CI_BASE_IMAGE_TAG_COMMIT_EXTRA" {
-  default = ""
-}
-
-variable "CI_BASE_IMAGE_TAG_CONTENT_EXTRA" {
-  default = ""
-}
-
-variable "CI_BASE_IMAGE_TAG_STABLE" {
+# Versioned, content-addressed trusted ref. Preview builds import it read-only;
+# the wrapper creates their source-scoped content alias after validation.
+variable "CI_BASE_TRUSTED_CONTENT_REF" {
   default = ""
 }
 
@@ -403,21 +408,23 @@ target "deepep-rocm-ci" {
 # Uses inline cache metadata on the ci_base image itself instead of exporting a
 # separate registry cache artifact.
 target "ci-base-rocm-ci" {
-  inherits   = ["_common-rocm", "_ci-rocm", "_labels"]
+  inherits   = ["_common-rocm"]
   target     = "ci_base"
+  args = {
+    max_jobs = CI_MAX_JOBS
+  }
   cache-from = concat(
     compact([
       CI_BASE_IMAGE_TAG != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG}" : "",
-      CI_BASE_IMAGE_TAG_COMMIT_EXTRA != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_COMMIT_EXTRA}" : "",
-      CI_BASE_IMAGE_TAG_CONTENT_EXTRA != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_CONTENT_EXTRA}" : "",
-      CI_BASE_IMAGE_TAG_STABLE != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_STABLE}" : "",
+      CI_BASE_TRUSTED_CONTENT_REF != "" ? "type=registry,ref=${CI_BASE_TRUSTED_CONTENT_REF}" : "",
     ]),
     # Import upstream dependency caches so NIXL/ROCShmem/DeepEP stages
     # are cache hits even when ci_base itself needs rebuilding.
     get_cache_from_rocm_deps(),
   )
   cache-to = ["type=inline"]
-  tags     = compact([CI_BASE_IMAGE_TAG, CI_BASE_IMAGE_TAG_COMMIT_EXTRA, CI_BASE_IMAGE_TAG_CONTENT_EXTRA, CI_BASE_IMAGE_TAG_STABLE])
+  tags     = compact([CI_BASE_IMAGE_TAG])
+  attest   = ["type=provenance,disabled=true"]
   output   = ["type=registry"]
 }
 
