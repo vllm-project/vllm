@@ -35,9 +35,6 @@ from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
-from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
-    sparse_mla_triton_warmup,
-)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -154,7 +151,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
         fa4_cutedsl_warmup(worker)
-        sparse_mla_triton_warmup(worker)
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())

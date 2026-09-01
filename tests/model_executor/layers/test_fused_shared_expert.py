@@ -553,6 +553,7 @@ def test_models_fse_init(
                     method="mtp",
                     parallel_drafting=False,
                     enable_adaptive_verification=False,
+                    use_dspark=lambda: False,
                 )
                 mtp = DeepSeekV4MTP(vllm_config=vllm_config)
         assert model.is_fused_shared_expert_enabled is (fse_enabled and not exclude)
