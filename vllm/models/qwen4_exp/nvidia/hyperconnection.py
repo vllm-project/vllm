@@ -58,8 +58,8 @@ class GatedResidual(nn.Module):
 
     Weights: the norm owns the grouped GemmaRMSNorm affine; the projections
     are vLLM Linear modules (merged replicated linear for down+inject), so
-    GEMM dispatch (e.g. the low-latency skinny GEMM) applies through the
-    standard quant_method mechanism.
+    the configured low-latency GEMM applies through the standard quant_method
+    mechanism.
     """
 
     def __init__(
@@ -89,7 +89,7 @@ class GatedResidual(nn.Module):
         )
 
         # -- vLLM Linear weights --------------------------------------------
-        # The merged skinny-GEMM shape is physically padded to 16 rows to ensure
+        # The merged small-M GEMM shape is physically padded to 16 rows to ensure
         # good alignment and performant implementation chosen by CuBLAS heuristics.
         self.pad_size = (-(self.lora_rank + self.hc_count)) % 16 if use_combine else 0
         if use_combine:

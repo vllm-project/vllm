@@ -55,14 +55,13 @@ def parse_config(value: str) -> Config:
     )
 
 
-def production_residual_config(m: int) -> Config | None:
-    """The measured Latent-MoE residual config for M, from the K3 table."""
-    from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
+def heuristic_residual_config(m: int) -> Config:
+    """The config the shape-dynamic skinny GEMM picks for M on its own."""
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
+        ShapeDynamicSkinnyGemm,
+    )
 
-    spec = KIMI_K3_PROJECTIONS.get((N, K))
-    config = spec.residual_config(m) if spec is not None else None
-    if config is None:
-        return None
+    config = ShapeDynamicSkinnyGemm._config(m, N, K)
     return Config(
         config.block_size,
         config.outputs_per_block,
@@ -73,11 +72,8 @@ def production_residual_config(m: int) -> Config | None:
 
 def candidate_configs(mode: str, selected: Config | None, m: int) -> list[Config]:
     if mode == "selected":
-        if selected is not None:
-            return [selected]
-        # No explicit --config: fall back to the production table for this M.
-        config = production_residual_config(m)
-        return [config] if config is not None else []
+        # No explicit --config: use the kernel's own heuristic for this M.
+        return [selected if selected is not None else heuristic_residual_config(m)]
     if mode == "baseline":
         return [Config(224, 4, 2)]
     return [

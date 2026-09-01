@@ -275,7 +275,9 @@ class KernelConfig:
     Layer types without an implementation from the requested backend use
     automatic selection.
 
-    - "auto": Automatically select the best backend based on model and hardware
+    - "auto": Automatically select the best backend based on model and hardware.
+      Unquantized BF16 layers use the FlashInfer CuTe-DSL `mm_bf16` kernel
+      wherever it is supported
     - "cutlass": Use CUTLASS-based kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuTe-DSL kernels

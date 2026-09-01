@@ -35,7 +35,6 @@ import math
 from typing import TYPE_CHECKING, cast
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from vllm import _custom_ops as ops
@@ -74,9 +73,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_and_maybe_dequant_weights,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
+from vllm.model_executor.layers.utils import dispatch_configured_unquantized_gemm
 from vllm.model_executor.utils import replace_parameter
 from vllm.models.common.ops import fused_q_kv_rmsnorm
-from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_decode_q_concat_kv_cache_insert,
     fused_mla_key_concat_ds_mla_insert,
@@ -364,6 +363,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
 
         vllm_config = get_current_vllm_config()
+        self._gemm_impl = dispatch_configured_unquantized_gemm()
         parallel_config = vllm_config.parallel_config
         assert parallel_config.prefill_context_parallel_size == 1, (
             "Kimi-K3 MultiHeadLatentAttention does not support prefill context "
@@ -511,8 +511,13 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
     def _unquantized_gemm(
         self, hidden_states: torch.Tensor, weight: torch.Tensor
     ) -> torch.Tensor:
-        out = try_low_latency_gemm(hidden_states, weight)
-        return out if out is not None else F.linear(hidden_states, weight)
+        """GEMM on a slice of the fused QKV-A/gate weight.
+
+        The merged projection's weight is contiguous and the slices are taken
+        along its rows, so they stay contiguous and the configured GEMM claims
+        them; they just cannot go through the Linear module, not being layers.
+        """
+        return self._gemm_impl(self, hidden_states, weight, None)
 
     def _apply_q_lora_attention(
         self,

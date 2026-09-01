@@ -4,7 +4,6 @@
 
 import functools
 from collections.abc import Callable
-from dataclasses import dataclass
 
 import torch
 
@@ -98,18 +97,6 @@ def default_unquantized_gemm(
     return torch.nn.functional.linear(x, weight, bias)
 
 
-_FlashInferBf16RuntimeCheck = Callable[
-    [torch.Tensor, torch.Tensor, torch.Tensor | None], bool
-]
-
-
-@dataclass(frozen=True)
-class _FlashInferBf16Backend:
-    flashinfer_backend: str
-    is_supported: Callable[[], bool]
-    can_implement: _FlashInferBf16RuntimeCheck
-
-
 def _can_use_flashinfer_cutedsl_bf16(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -157,47 +144,18 @@ def _can_use_flashinfer_cutedsl_bf16(
     )
 
 
-_FLASHINFER_BF16_BACKENDS = {
-    "flashinfer_cutedsl": _FlashInferBf16Backend(
-        flashinfer_backend="cute-dsl",
-        is_supported=is_flashinfer_cutedsl_bf16_gemm_supported,
-        can_implement=_can_use_flashinfer_cutedsl_bf16,
-    ),
-}
-
-
-def _get_flashinfer_bf16_backend(vllm_backend: str) -> _FlashInferBf16Backend:
-    backend_spec = _FLASHINFER_BF16_BACKENDS.get(vllm_backend)
-    if backend_spec is None:
-        supported = ", ".join(sorted(_FLASHINFER_BF16_BACKENDS))
-        raise ValueError(
-            f"Unsupported vLLM FlashInfer BF16 backend {vllm_backend!r}; "
-            f"supported backends: {supported}"
-        )
-    return backend_spec
-
-
 def cuda_flashinfer_bf16_gemm_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
     pdl: bool,
-    vllm_backend: str,
 ) -> torch.Tensor:
-    backend_spec = _get_flashinfer_bf16_backend(vllm_backend)
-    if not backend_spec.can_implement(x, weight, bias):
+    if not _can_use_flashinfer_cutedsl_bf16(x, weight, bias):
         return torch.nn.functional.linear(x, weight, bias)
 
     k = x.shape[-1]
     n = weight.shape[0]
-    x_2d = x.view(-1, k)
-    out_2d = flashinfer_bf16_mm(
-        x_2d,
-        weight.t(),
-        bias,
-        pdl,
-        backend_spec.flashinfer_backend,
-    )
+    out_2d = flashinfer_bf16_mm(x.view(-1, k), weight.t(), bias, pdl, "cute-dsl")
     return out_2d.view(*x.shape[:-1], n)
 
 
@@ -206,7 +164,6 @@ def cuda_flashinfer_bf16_gemm_fake(
     weight: torch.Tensor,
     bias: torch.Tensor | None,
     pdl: bool,
-    vllm_backend: str,
 ) -> torch.Tensor:
     return x.new_empty((*x.shape[:-1], weight.shape[0]))
 
@@ -217,16 +174,14 @@ def cuda_flashinfer_bf16_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
     *,
-    vllm_backend: str,
     pdl: bool,
 ) -> torch.Tensor:
-    return torch.ops.vllm.cuda_flashinfer_bf16_gemm(
-        x,
-        weight,
-        bias,
-        pdl,
-        vllm_backend,
-    )
+    # The op is registered for CUDA only, so keep CPU activations (weight
+    # transforms, offloaded layers) on the torch path rather than failing to
+    # dispatch. torch.compile specializes this away.
+    if not x.is_cuda:
+        return torch.nn.functional.linear(x, weight, bias)
+    return torch.ops.vllm.cuda_flashinfer_bf16_gemm(x, weight, bias, pdl)
 
 
 direct_register_custom_op(
@@ -558,6 +513,25 @@ def cpu_unquantized_gemm(
     return layer.cpu_linear(x, weight, bias)
 
 
+def dispatch_configured_unquantized_gemm() -> Callable[..., torch.Tensor]:
+    """Unquantized GEMM for the current config's ``--linear-backend``.
+
+    Resolve this once per layer at construction: it is the only way a caller
+    honours the configured backend, and it keeps the lookup off the hot path.
+    """
+    from vllm.config import get_current_vllm_config_or_none
+
+    config = get_current_vllm_config_or_none()
+    backend = config.kernel_config.linear_backend if config is not None else "auto"
+    return dispatch_unquantized_gemm(backend)
+
+
+# --linear-backend values whose unquantized BF16 GEMM is FlashInfer CuTeDSL.
+# "auto" is included: CuTeDSL mm_bf16 is the default for eligible layers.
+_FLASHINFER_CUTEDSL_BF16_BACKENDS = frozenset({"auto", "flashinfer_cutedsl"})
+
+
+@functools.cache
 def dispatch_unquantized_gemm(
     linear_backend: str = "auto",
 ) -> Callable[..., torch.Tensor]:
@@ -568,26 +542,24 @@ def dispatch_unquantized_gemm(
     elif not current_platform.is_cuda():
         return default_unquantized_gemm
 
-    backend_spec = _FLASHINFER_BF16_BACKENDS.get(linear_backend)
-    if backend_spec is None:
+    if linear_backend not in _FLASHINFER_CUTEDSL_BF16_BACKENDS:
         return default_unquantized_gemm
 
-    if not backend_spec.is_supported():
-        logger.warning_once(
-            "--linear-backend=%s requested FlashInfer mm_bf16 backend %r, "
-            "but it is unavailable on the current hardware or environment; "
-            "using automatic selection for unquantized linear layers.",
-            linear_backend,
-            backend_spec.flashinfer_backend,
-        )
+    if not is_flashinfer_cutedsl_bf16_gemm_supported():
+        if linear_backend != "auto":
+            logger.warning_once(
+                "--linear-backend=%s requested the FlashInfer CuTeDSL mm_bf16 "
+                "backend, but it is unavailable on the current hardware or "
+                "environment; using automatic selection for unquantized "
+                "linear layers.",
+                linear_backend,
+            )
         return default_unquantized_gemm
 
     logger.info_once(
-        "Using FlashInfer %s for eligible unquantized BF16 GEMMs.",
-        backend_spec.flashinfer_backend,
+        "Using FlashInfer CuTeDSL mm_bf16 for eligible unquantized BF16 GEMMs."
     )
     return functools.partial(
         cuda_flashinfer_bf16_gemm,
-        vllm_backend=linear_backend,
         pdl=current_platform.is_arch_support_pdl(),
     )

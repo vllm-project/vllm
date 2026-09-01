@@ -17,6 +17,10 @@ from vllm.distributed.device_communicators.flashinfer_pcie_ipc_all_reduce import
     warmup_flashinfer_pcie_ipc_allreduce,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.utils import (
+    default_unquantized_gemm,
+    dispatch_unquantized_gemm,
+)
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
@@ -254,10 +258,17 @@ _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
 
 
 def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
+    """Token counts to autotune with.
+
+    FlashInfer autotunes every token count up to the one it is run with, so the
+    max batch size alone would be enough. The CuTeDSL BF16 GEMM is the
+    exception: it only claims layers up to
+    ``_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS``, so it needs a second, small run.
+    """
     max_tokens = runner.scheduler_config.max_num_batched_tokens
     linear_backend = runner.vllm_config.kernel_config.linear_backend
     if (
-        linear_backend == "flashinfer_cutedsl"
+        dispatch_unquantized_gemm(linear_backend) is not default_unquantized_gemm
         and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
     ):
         return max_tokens, _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
