@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer GQA builder: reorder threshold under DCP with spec decode."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from vllm.platforms import current_platform
@@ -19,7 +21,7 @@ from vllm.v1.attention.backends.flashinfer import (
     FlashInferMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import PerLayerParameters
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
 
 
 def test_flashinfer_gqa_dcp_spec_decode_clamps_reorder_threshold(monkeypatch):
@@ -73,3 +75,28 @@ def test_flashinfer_gqa_dcp_spec_decode_clamps_reorder_threshold(monkeypatch):
         builder.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.TRTLLM_GEN
     )
     assert builder.reorder_batch_threshold == 1
+
+
+def test_flashinfer_resolves_group_cache_dtype_without_mutating_config(monkeypatch):
+    vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto"))
+
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "get_kv_cache_dtype_from_layers",
+        lambda *_args, **_kwargs: "fp8",
+    )
+    kv_cache_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+    )
+    cache_dtype = flashinfer_backend._get_group_cache_dtype(
+        kv_cache_spec,
+        ["draft.layer.0"],
+        vllm_config,  # type: ignore[arg-type]
+    )
+
+    assert cache_dtype == "fp8"
+    assert vllm_config.cache_config.cache_dtype == "auto"
