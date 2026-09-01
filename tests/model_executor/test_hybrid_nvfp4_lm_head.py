@@ -13,6 +13,7 @@ from vllm.model_executor.layers.hybrid_nvfp4_lm_head import (
     HybridNvfp4LmHead,
     _attach_state,
     release_hybrid_nvfp4_lm_head,
+    refresh_hybrid_nvfp4_lm_head,
     select_lm_head_candidates,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -77,6 +78,38 @@ class _TopKHybridState(_RecordingHybridState):
         return exact[:, : candidate_indices.shape[1]].expand(
             hidden_states.shape[0], -1
         )
+
+
+class _PenaltyAwareHybridState(_RecordingHybridState):
+    """Small state that exposes candidate ordering to the penalty test."""
+
+    def can_use(self, *args, **kwargs) -> bool:
+        self.can_use_called = True
+        return True
+
+    def candidate_count_for_topk(self, top_k: int) -> int:
+        del top_k
+        return 2
+
+    def coarse_logits(self, hidden_states, bias):
+        del bias
+        return torch.tensor(
+            [[5.0, 4.0, 3.0, 2.0]],
+            dtype=torch.bfloat16,
+            device=hidden_states.device,
+        ).expand(hidden_states.shape[0], -1)
+
+    def select_candidates(self, coarse_logits, *, top_k):
+        del top_k
+        return torch.argsort(
+            coarse_logits, dim=-1, descending=True, stable=True
+        )[:, :2]
+
+    def refine_logits(self, hidden_states, weight, candidate_indices, bias):
+        del hidden_states, weight, bias
+        # Match the coarse values so the only ordering change comes from the
+        # presence penalty applied before candidate selection.
+        return 5.0 - candidate_indices.to(torch.float32)
 
 
 def _make_lm_head(*, added_embeddings: int = 0) -> SimpleNamespace:
@@ -157,6 +190,25 @@ def test_tp_argmax_reduction_handles_ties_and_nan(monkeypatch, default_vllm_conf
     )
 
     assert torch.equal(result, torch.tensor([3, 4], dtype=torch.int64))
+
+
+def test_tp_argmax_reduction_all_negative_inf_prefers_lower_token_id(
+    monkeypatch, default_vllm_config
+):
+    processor = _make_processor()
+    gathered = torch.tensor([[-float("inf"), 7.0, -float("inf"), 3.0]])
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.logits_processor.tensor_model_parallel_all_gather",
+        lambda pair, dim: gathered,
+    )
+
+    result = processor.reduce_local_argmax(
+        torch.tensor([-float("inf"), -float("inf")]),
+        torch.tensor([7, 3]),
+        tp_size=2,
+    )
+
+    assert torch.equal(result, torch.tensor([3], dtype=torch.int64))
 
 
 def test_large_vocab_argmax_reduction_keeps_int64_ids(monkeypatch, default_vllm_config):
@@ -495,6 +547,83 @@ def test_tied_hybrid_state_releases_after_last_attachment():
     assert not hasattr(weight, "_hybrid_nvfp4_lm_head_shared_state")
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_refresh_hybrid_state_updates_derived_buffers_in_place(monkeypatch):
+    device = torch.device("cuda")
+    layer = nn.Module()
+    layer.weight = nn.Parameter(
+        torch.zeros((4, 4), dtype=torch.bfloat16, device=device),
+        requires_grad=False,
+    )
+    state = HybridNvfp4LmHead(
+        weight=torch.ones((4, 2), dtype=torch.uint8, device=device),
+        scale=torch.ones((4, 1), dtype=torch.float32, device=device),
+        global_scale=torch.ones((), dtype=torch.float32, device=device),
+        input_size=4,
+        output_size=4,
+        candidates=2,
+    )
+    _attach_state(layer, state)
+    old_ptrs = tuple(value.data_ptr() for value in (state.weight, state.scale))
+
+    def fake_quantize(weight):
+        assert weight is layer.weight
+        return (
+            torch.full_like(state.weight, 7),
+            torch.full_like(state.scale, 2.0),
+            torch.tensor(3.0, dtype=torch.float32, device=device),
+        )
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.hybrid_nvfp4_lm_head._quantize_lm_head_weight",
+        fake_quantize,
+    )
+
+    try:
+        assert refresh_hybrid_nvfp4_lm_head(layer, candidates=3)
+        assert tuple(
+            value.data_ptr() for value in (state.weight, state.scale)
+        ) == old_ptrs
+        assert torch.equal(state.weight, torch.full_like(state.weight, 7))
+        assert torch.equal(state.scale, torch.full_like(state.scale, 2.0))
+        assert torch.equal(
+            state.global_scale,
+            torch.tensor(3.0, dtype=torch.float32, device=device),
+        )
+        assert state.candidates == 3
+    finally:
+        release_hybrid_nvfp4_lm_head(layer)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_refresh_hybrid_state_releases_on_shape_change():
+    device = torch.device("cuda")
+    layer = nn.Module()
+    layer.weight = nn.Parameter(
+        torch.zeros((4, 4), dtype=torch.bfloat16, device=device),
+        requires_grad=False,
+    )
+    state = HybridNvfp4LmHead(
+        weight=torch.ones((4, 2), dtype=torch.uint8, device=device),
+        scale=torch.ones((4, 1), dtype=torch.float32, device=device),
+        global_scale=torch.ones((), dtype=torch.float32, device=device),
+        input_size=4,
+        output_size=4,
+        candidates=2,
+    )
+    _attach_state(layer, state)
+    layer.weight = nn.Parameter(
+        torch.zeros((5, 4), dtype=torch.bfloat16, device=device),
+        requires_grad=False,
+    )
+
+    assert not refresh_hybrid_nvfp4_lm_head(layer)
+    assert not hasattr(layer, "_hybrid_nvfp4_lm_head_state")
+    assert not hasattr(layer, "_hybrid_nvfp4_lm_head_weight")
+    assert not hasattr(layer, "_hybrid_nvfp4_lm_head_scale")
+    assert not hasattr(layer, "_hybrid_nvfp4_lm_head_global_scale")
+
+
 def test_hybrid_state_row_limit_fails_closed():
     state = HybridNvfp4LmHead(
         weight=torch.ones((4, 2), dtype=torch.uint8),
@@ -570,6 +699,32 @@ def test_presence_penalty_compact_helper_uses_unique_output_ids(default_vllm_con
     assert torch.equal(candidate_logits, torch.tensor([[3.5, 3.0]]))
 
 
+def test_presence_penalty_is_applied_before_hybrid_candidate_selection(
+    monkeypatch, default_vllm_config
+):
+    processor = _make_processor()
+    lm_head = _make_lm_head()
+    state = _PenaltyAwareHybridState()
+    lm_head._hybrid_nvfp4_lm_head_state = state
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+
+    values, token_ids = processor.get_topk_candidates(
+        lm_head,
+        torch.zeros(1, 4, dtype=torch.bfloat16),
+        top_k=1,
+        top_p=1.0,
+        temperature=1.0,
+        presence_penalties=torch.tensor([3.0]),
+        output_token_ids=torch.tensor([[0, 1]], dtype=torch.int64),
+    )
+
+    # Without the pre-selection penalty, candidates would be [0, 1] and the
+    # result would remain token 0.  Applying it first admits token 2.
+    assert torch.equal(token_ids, torch.tensor([[2]], dtype=torch.int64))
+    assert torch.equal(values, torch.tensor([[3.0]]))
+    assert state.can_use_called
+
+
 def _sampling_gate_stub(
     *,
     temperature: float,
@@ -629,6 +784,24 @@ def test_sampling_gate_matches_supported_penalty_modes():
     sampler, input_batch = _sampling_gate_stub(
         temperature=0.7, top_k=8, top_p=0.9, frequency=0.1
     )
+    assert Sampler.get_vocab_parallel_sampling_params(sampler, input_batch) is None
+
+
+def test_sampling_gate_keeps_presence_penalty_greedy_on_exact_path():
+    sampler, input_batch = _sampling_gate_stub(
+        temperature=0.0, top_k=1, top_p=1.0, presence=0.5
+    )
+
+    # The current hybrid greedy implementation has no penalty metadata.  Do
+    # not silently ignore presence penalty by entering the approximate path.
+    assert Sampler.get_vocab_parallel_sampling_params(sampler, input_batch) is None
+
+
+def test_sampling_gate_rejects_top_k_above_compact_limit():
+    sampler, input_batch = _sampling_gate_stub(
+        temperature=0.7, top_k=65, top_p=1.0
+    )
+
     assert Sampler.get_vocab_parallel_sampling_params(sampler, input_batch) is None
 
 
