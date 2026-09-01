@@ -152,6 +152,14 @@ class KVCacheCoordinator(ABC):
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
 
+        # Sparse retention must key off "some group's lookup applies the EAGLE
+        # drop", not "this group holds draft layers": the coordinator reconciles
+        # every group to ONE hit length, so a drop anywhere shortens the
+        # candidate offered to all of them. A group that kept only its own
+        # boundary state would then sit above every reachable candidate.
+        for manager in self.single_type_managers:
+            manager.lookup_drops_eagle_block = bool(self.eagle_group_ids)
+
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
         # 0 = keep only the latest replay boundary; None = dense;

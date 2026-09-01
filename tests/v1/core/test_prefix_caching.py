@@ -3569,7 +3569,10 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
     assert [len(blocks) for blocks in computed_blocks.blocks] == [3, 12]
 
 
-def test_hybrid_mamba_retention_mtp_boundary_reachable_after_eagle_drop():
+@pytest.mark.parametrize("annotate_eagle_groups", [None, "full_only", "both"])
+def test_hybrid_mamba_retention_mtp_boundary_reachable_after_eagle_drop(
+    annotate_eagle_groups,
+):
     """Verify Mamba latest-only retention serves an MTP/EAGLE lookup.
 
     The full-attention EAGLE lookup drops one block below what it matched, so
@@ -3579,8 +3582,18 @@ def test_hybrid_mamba_retention_mtp_boundary_reachable_after_eagle_drop():
     boundary state leaves every retained state one block above every reachable
     candidate, and the reconciled hit is always zero (found live on
     GLM-5.3-Flash MTP: 0 hits across 16,897 queries).
+
+    Parametrized over how the groups are annotated, because the three cases
+    reach the manager's ``use_eagle`` bit by different routes and only one of
+    them is what production hits today: ``None`` is the coordinator's flag-all
+    fallback (no model annotator exists for glm5_next, so this is the live
+    path), ``full_only`` is a single annotated group (what a future annotator
+    would produce), and ``both`` is the hand-flagged case.
     """
     block_size = 32
+    num_spec = 3
+    full_is_eagle = annotate_eagle_groups in ("full_only", "both")
+    mamba_is_eagle = annotate_eagle_groups == "both"
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
         kv_cache_tensors=[],
@@ -3593,7 +3606,7 @@ def test_hybrid_mamba_retention_mtp_boundary_reachable_after_eagle_drop():
                     head_size=1,
                     dtype=torch.float16,
                 ),
-                is_eagle_group=True,
+                is_eagle_group=full_is_eagle,
             ),
             KVCacheGroupSpec(
                 ["mamba_mtp"],
@@ -3602,8 +3615,9 @@ def test_hybrid_mamba_retention_mtp_boundary_reachable_after_eagle_drop():
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
                     mamba_cache_mode="align",
+                    num_speculative_blocks=num_spec,
                 ),
-                is_eagle_group=True,
+                is_eagle_group=mamba_is_eagle,
             ),
         ],
     )
@@ -3630,6 +3644,7 @@ def test_hybrid_mamba_retention_mtp_boundary_reachable_after_eagle_drop():
             chunk_end - req0.num_computed_tokens,
             num_computed_tokens,
             computed_blocks,
+            num_lookahead_tokens=num_spec,
         )
         assert blocks is not None
         req0.num_computed_tokens = chunk_end
@@ -3653,6 +3668,92 @@ def test_hybrid_mamba_retention_mtp_boundary_reachable_after_eagle_drop():
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert num_computed_tokens == 2 * block_size
     assert [len(blocks) for blocks in computed_blocks.blocks] == [2, 2]
+
+
+def test_hybrid_mamba_retention_eagle_backoff_is_one_alignment_unit():
+    """The EAGLE back-off is one ALIGNMENT unit, which is not one Mamba block.
+
+    When the groups' block sizes differ, the scheduler alignment is their LCM,
+    and the full-attention finder subtracts ``min(alignment, its block_size)``
+    and re-floors -- landing one alignment unit below the boundary regardless.
+    Backing off one Mamba block instead retains a state at the wrong offset:
+    Mamba's own finder then rejects it (its hit must be alignment-aligned) and
+    the reconciled hit stays 0, so the extra block is dead weight.
+
+    Here alignment is 64 and the Mamba block is 32, so the reachable position
+    is two Mamba blocks below the boundary, not one.
+    """
+    mamba_block = 32
+    full_block = 64  # scheduler alignment = lcm(64, 32) = 64 = 2 mamba blocks
+    kv_cache_config = KVCacheConfig(
+        num_blocks=200,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=full_block,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+                is_eagle_group=True,
+            ),
+            KVCacheGroupSpec(
+                ["mamba_mtp"],
+                MambaSpec(
+                    block_size=mamba_block,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+                is_eagle_group=True,
+            ),
+        ],
+    )
+    # hash_block_size must divide every group's block size, so it is the
+    # smaller (Mamba) block; the scheduler alignment is still the LCM, 64.
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=mamba_block,
+        retention_interval=0,
+        use_eagle=True,
+    )
+
+    # 255 tokens: replay boundary floor(254 / 64) * 64 = 192. In Mamba blocks
+    # that is index 5; the EAGLE-reachable position 192 - 64 = 128 is index 3.
+    token_ids = [i for i in range(7) for _ in range(mamba_block)] + [7] * 31
+    req0 = make_request("0", token_ids, mamba_block, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    for chunk_end in (64, 128, 192, 255):
+        blocks = manager.allocate_slots(
+            req0,
+            chunk_end - req0.num_computed_tokens,
+            num_computed_tokens,
+            computed_blocks,
+        )
+        assert blocks is not None
+        req0.num_computed_tokens = chunk_end
+
+    pool = manager.block_pool
+    cached_mamba = {
+        i
+        for i in range(len(req0.block_hashes))
+        if pool.get_cached_block(req0.block_hashes[i], kv_cache_group_ids=[1])
+        is not None
+    }
+    # Index 3 is the one a post-drop lookup can ask for; index 4 (one block
+    # below the boundary) is what a block-sized back-off would have kept.
+    assert 3 in cached_mamba, f"reachable state missing; cached={sorted(cached_mamba)}"
+    assert 4 not in cached_mamba, "one-block back-off retained an unreachable state"
+
+    manager.free(req0)
+    req1 = make_request("1", token_ids, mamba_block, sha256)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == 128
 
 
 def test_block_lookup_cache_single_block_per_key():
