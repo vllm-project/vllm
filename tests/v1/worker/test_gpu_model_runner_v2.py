@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock, call
 
 import pytest
 import torch
@@ -16,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
@@ -213,3 +215,20 @@ def test_append_block_ids_rejects_write_past_row_capacity():
         )
 
     assert block_tables.num_blocks.np[0, 1] == 3
+
+
+def test_kv_connector_builds_worker_metadata_after_polling_completions():
+    """Transfer completions must be included in the current worker metadata."""
+    connector = MagicMock()
+    connector.has_connector_metadata.return_value = True
+    connector.get_finished.return_value = (set(), set())
+
+    active_connector = ActiveKVConnector.__new__(ActiveKVConnector)
+    active_connector._disabled = False
+    active_connector.kv_connector = connector
+
+    active_connector.post_forward(set())
+
+    assert connector.method_calls.index(call.get_finished(set())) < (
+        connector.method_calls.index(call.build_connector_worker_meta())
+    )

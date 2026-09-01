@@ -10,10 +10,12 @@ import os
 import threading
 import time
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
+import vllm.utils.host_memory as host_memory_module
+import vllm.v1.kv_offload.cpu.shared_offload_region as region_module
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
@@ -223,6 +225,85 @@ def _mp_barrier_construct_and_hold(
 def iid():
     """Fresh instance ID for each test."""
     return str(uuid.uuid4())
+
+
+# ---------------------------------------------------------------------------
+# pin — incremental CUDA registration
+# ---------------------------------------------------------------------------
+
+
+def _cuda_result(value: int) -> MagicMock:
+    result = MagicMock()
+    result.value = value
+    return result
+
+
+def test_pin_registers_and_unregisters_each_chunk(monkeypatch, iid):
+    """Incremental pinning must register and later unregister every range."""
+    cudart = MagicMock()
+    cudart.cudaHostRegister.return_value = _cuda_result(0)
+    cudart.cudaHostUnregister.return_value = _cuda_result(0)
+    sleep = MagicMock()
+    monkeypatch.setattr(region_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(region_module.torch.cuda, "cudart", lambda: cudart)
+    monkeypatch.setattr(region_module.time, "sleep", sleep)
+
+    with _region(iid, num_blocks=5) as r:
+        base_ptr = r._base.data_ptr()
+        r.pin(chunk_size_bytes=2 * PAGE_SIZE)
+
+        assert r.is_pinned
+        assert cudart.cudaHostRegister.call_args_list == [
+            call(base_ptr, 2 * PAGE_SIZE, 0),
+            call(base_ptr + 2 * PAGE_SIZE, 2 * PAGE_SIZE, 0),
+            call(base_ptr + 4 * PAGE_SIZE, PAGE_SIZE, 0),
+        ]
+        assert sleep.call_args_list == [
+            call(host_memory_module._HOST_REGISTER_YIELD_SECONDS),
+            call(host_memory_module._HOST_REGISTER_YIELD_SECONDS),
+        ]
+
+    assert cudart.cudaHostUnregister.call_args_list == [
+        call(base_ptr + 4 * PAGE_SIZE),
+        call(base_ptr + 2 * PAGE_SIZE),
+        call(base_ptr),
+    ]
+
+
+def test_pin_rolls_back_registered_chunks_on_failure(monkeypatch, iid):
+    """A failed chunk must leave the region completely unregistered."""
+    cudart = MagicMock()
+    cudart.cudaHostRegister.side_effect = [_cuda_result(0), _cuda_result(2)]
+    cudart.cudaHostUnregister.return_value = _cuda_result(0)
+    monkeypatch.setattr(region_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(region_module.torch.cuda, "cudart", lambda: cudart)
+    monkeypatch.setattr(region_module.time, "sleep", MagicMock())
+
+    with _region(iid, num_blocks=5) as r:
+        base_ptr = r._base.data_ptr()
+        r.pin(chunk_size_bytes=2 * PAGE_SIZE)
+
+        assert not r.is_pinned
+        assert r._registered_ptrs == []
+        cudart.cudaHostUnregister.assert_called_once_with(base_ptr)
+
+
+def test_pin_without_chunk_size_uses_one_registration(monkeypatch, iid):
+    """Synchronous initialization keeps the monolithic fast path."""
+    cudart = MagicMock()
+    cudart.cudaHostRegister.return_value = _cuda_result(0)
+    cudart.cudaHostUnregister.return_value = _cuda_result(0)
+    sleep = MagicMock()
+    monkeypatch.setattr(region_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(region_module.torch.cuda, "cudart", lambda: cudart)
+    monkeypatch.setattr(region_module.time, "sleep", sleep)
+
+    with _region(iid, num_blocks=5) as r:
+        base_ptr = r._base.data_ptr()
+        r.pin()
+
+        cudart.cudaHostRegister.assert_called_once_with(base_ptr, r.total_size_bytes, 0)
+        sleep.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

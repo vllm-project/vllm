@@ -10,12 +10,14 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    ConnectorInitState,
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
     SupportsHMA,
 )
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.manager import (
@@ -121,6 +123,16 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 )
             disk_path = None
 
+        async_init = extra_config.get("async_init", False)
+        if not isinstance(async_init, bool):
+            raise ValueError("async_init must be a boolean")
+        if async_init and disk_mode:
+            raise ValueError(
+                'async_init is not supported with kv_offload_backend="disk"'
+            )
+        if async_init and not current_platform.is_cuda():
+            raise ValueError("async_init is only supported on CUDA")
+
         self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
         self.worker_handler: SimpleCPUOffloadWorker | None = None
 
@@ -131,15 +143,20 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             )
             return
 
+        if async_init:
+            self.enable_async_init()
+
         logger.info(
             "SimpleCPUOffloadConnector: role=%s, "
-            "per_rank=%.2f GB, world_size=%d, mode=%s, backend=%s, disk=%s",
+            "per_rank=%.2f GB, world_size=%d, mode=%s, backend=%s, disk=%s, "
+            "async_init=%s",
             role.name,
             cpu_capacity_per_rank / (1024**3),
             world_size,
             "lazy" if lazy_offload else "eager",
             kv_offload_backend,
             disk_path or "none",
+            async_init,
         )
 
         if role == KVConnectorRole.SCHEDULER:
@@ -168,6 +185,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_capacity_bytes=disk_capacity_bytes,
                 disk_buffer_slots=disk_buffer_slots,
                 use_page_cache=use_page_cache,
+                async_init=async_init,
             )
 
     # --- Worker-side methods ---
@@ -227,6 +245,15 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         if self.worker_handler is not None:
             return self.worker_handler.build_connector_worker_meta()
         return None
+
+    def get_connector_init_state(self) -> ConnectorInitState | None:
+        if self.worker_handler is not None:
+            return self.worker_handler.get_init_state()
+        return None
+
+    def shutdown(self) -> None:
+        if self.worker_handler is not None:
+            self.worker_handler.shutdown()
 
     # --- Scheduler-side methods ---
 

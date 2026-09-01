@@ -386,6 +386,24 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda_alike(monkeypatch):
     assert worker_calls[0]["mmap_region"] is region
 
 
+def test_cpu_spec_async_init_pins_shared_region_incrementally(monkeypatch):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    spec = _create_spec(
+        cpu_bytes_to_use=SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT * 8,
+        worker_kv_bytes_per_block=SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+    )
+    assert isinstance(spec, CPUOffloadingSpec)
+    region = MagicMock()
+    monkeypatch.setattr(spec, "_create_region", MagicMock(return_value=region))
+    monkeypatch.setattr(cpu_spec_module, "PIN_MEMORY", True)
+
+    assert spec._create_pinned_region(0) is region
+    region.pin.assert_called_once_with(
+        chunk_size_bytes=cpu_spec_module._ASYNC_HOST_REGISTER_CHUNK_SIZE_BYTES
+    )
+
+
 def test_cpu_spec_create_worker_uses_tensor_path_off_cuda_alike(monkeypatch):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
