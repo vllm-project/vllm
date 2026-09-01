@@ -10,16 +10,6 @@ from vllm.v1.metrics.reader import Counter
 from ...models.utils import check_logprobs_close
 from ...utils import large_gpu_mark, multi_gpu_test
 
-try:
-    from flashinfer.mamba.checkpointing_ssu import (
-        CheckpointingSSURunner,
-        allocate_checkpointing_ssu_scratch,  # noqa: F401
-    )
-
-    HAS_FLASHINFER_CHECKPOINTING_SSU = callable(CheckpointingSSURunner)
-except ImportError:
-    HAS_FLASHINFER_CHECKPOINTING_SSU = False
-
 # Mamba2 (Nemotron-3) hybrid.
 MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
 MODELS = [
@@ -90,12 +80,11 @@ def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
     _check_replayssm_parity(vllm_runner, model_name, tensor_parallel_size=2)
 
 
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
 @pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_flashinfer_decode_matches_baseline(vllm_runner, model_name):
+def test_replayssm_flashinfer_decode_matches_baseline_v2(
+    vllm_runner, model_name, monkeypatch
+):
+    pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
     _check_replayssm_parity(
         vllm_runner,
         model_name,
