@@ -7,7 +7,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from functools import partial, reduce
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -15,7 +15,10 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_config_builder import KVCacheConfigBuilder
-from vllm.v1.core.kv_cache_utils import _kv_cache_device_name
+from vllm.v1.core.kv_cache_utils import (
+    _kv_cache_device_name,
+    update_kv_cache_capacity,
+)
 from vllm.v1.hisparse.layout import (
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
@@ -43,6 +46,10 @@ from vllm.v1.kv_cache_interface import (
     replace_as,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.worker_base import CompilationTimes
+
 
 logger = init_logger(__name__)
 
@@ -1801,3 +1808,65 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
         return get_kv_cache_config_from_groups(
             vllm_config, kv_cache_groups, num_blocks * bytes_per_block
         )
+
+
+def shrink_kv_cache_configs(
+    vllm_config: VllmConfig, kv_cache_configs: list[KVCacheConfig], num_blocks: int
+) -> None:
+    """Lower ``num_blocks`` of every config in place after measured sizing. The
+    tensors' ``size`` follows (their strides and offsets keep describing the
+    reservation). Raises if ``max_model_len`` no longer fits.
+    """
+    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+
+    builder = get_kv_cache_config_builder(vllm_config)
+    for kv_cache_config in kv_cache_configs:
+        assert num_blocks <= kv_cache_config.num_blocks
+        kv_cache_config.kv_cache_tensors = [
+            replace(tensor, size=num_blocks * tensor.size // kv_cache_config.num_blocks)
+            for tensor in kv_cache_config.kv_cache_tensors
+        ]
+        groups = kv_cache_config.kv_cache_groups
+        if groups:
+            # The null block is held back by the BlockPool, as in the capacity
+            # check of `get_kv_cache_configs`.
+            _check_enough_kv_cache_memory(
+                (num_blocks - 1)
+                * _pool_bytes_per_block_from_builder(builder, vllm_config, groups),
+                partial(
+                    _max_memory_usage_bytes_from_groups, builder, vllm_config, groups
+                ),
+                vllm_config.model_config.max_model_len,
+                partial(
+                    _estimate_max_model_len_from_groups, builder, vllm_config, groups
+                ),
+            )
+        kv_cache_config.num_blocks = num_blocks
+
+
+def finalize_extensible_kv_cache(
+    vllm_config: VllmConfig,
+    kv_cache_configs: list[KVCacheConfig],
+    scheduler_kv_cache_config: KVCacheConfig,
+    compilation_times: list["CompilationTimes"],
+) -> int:
+    """Settle the KV cache size from the memory workers measured after warmup.
+
+    Every rank must agree on one block count, so the minimum becomes the
+    scheduler's ``num_blocks``; the caller commits it on the workers.
+    """
+    num_blocks = min(
+        (
+            times.num_kv_blocks
+            for times in compilation_times
+            if times.num_kv_blocks is not None
+        ),
+        default=scheduler_kv_cache_config.num_blocks,
+    )
+    num_blocks = min(num_blocks, scheduler_kv_cache_config.num_blocks)
+    shrink_kv_cache_configs(
+        vllm_config, kv_cache_configs + [scheduler_kv_cache_config], num_blocks
+    )
+    vllm_config.cache_config.num_gpu_blocks = num_blocks
+    update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
+    return num_blocks

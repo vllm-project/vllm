@@ -24,7 +24,7 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.serial_utils import run_method
-from vllm.v1.worker.worker_base import WorkerWrapperBase
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerWrapperBase
 
 logger = init_logger(__name__)
 
@@ -199,9 +199,22 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     def determine_available_memory(self) -> list[int]:  # in bytes
         # we need to get the min across all ranks.
         memory = super().determine_available_memory()
+        return [self._all_reduce_min(memory[0])]
+
+    def compile_or_warm_up_model(self) -> list[CompilationTimes]:
+        # Every rank's engine must size the KV cache identically.
+        return [
+            times
+            if times.num_kv_blocks is None
+            else times._replace(num_kv_blocks=self._all_reduce_min(times.num_kv_blocks))
+            for times in super().compile_or_warm_up_model()
+        ]
+
+    @staticmethod
+    def _all_reduce_min(value: int) -> int:
         from vllm.distributed.parallel_state import get_world_group
 
         cpu_group = get_world_group().cpu_group
-        memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)
-        dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
-        return [memory_tensor.item()]
+        tensor = torch.tensor([value], device="cpu", dtype=torch.int64)
+        dist.all_reduce(tensor, group=cpu_group, op=dist.ReduceOp.MIN)
+        return int(tensor.item())
