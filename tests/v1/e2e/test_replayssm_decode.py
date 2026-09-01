@@ -29,6 +29,7 @@ except ImportError:
 
 # Mamba2 (Nemotron-3) hybrid.
 MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+MAMBA2_MTP_MODEL = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
 MODELS = [
     pytest.param(MAMBA2_MODEL, marks=large_gpu_mark(min_gb=40)),
 ]
@@ -210,6 +211,59 @@ def test_replayssm_flashinfer_matches_triton_replayssm(vllm_runner, model_name):
         outputs_1_lst=flashinfer,
         name_0="replayssm_triton",
         name_1="replayssm_flashinfer",
+    )
+
+
+@pytest.mark.skipif(
+    not HAS_FLASHINFER_CHECKPOINTING_SSU,
+    reason="flashinfer.mamba.checkpointing_ssu not available",
+)
+@large_gpu_mark(min_gb=40)
+def test_replayssm_flashinfer_mtp_v2(vllm_runner, monkeypatch):
+    common = dict(
+        max_model_len=1024,
+        trust_remote_code=True,
+        enable_prefix_caching=False,
+        mamba_cache_mode="none",
+        mamba_backend="flashinfer",
+        disable_log_stats=False,
+        speculative_config={"method": "mtp", "num_speculative_tokens": 3},
+    )
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+            envs.disable_envs_cache()
+            with vllm_runner(MAMBA2_MTP_MODEL, **common) as llm:
+                assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
+                baseline = llm.generate_greedy_logprobs(
+                    PROMPTS, max_tokens=32, num_logprobs=5
+                )
+            with vllm_runner(
+                MAMBA2_MTP_MODEL,
+                use_replayssm=True,
+                replayssm_buffer_len=16,
+                **common,
+            ) as llm:
+                assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
+                replay = llm.generate_greedy_logprobs(
+                    PROMPTS, max_tokens=32, num_logprobs=5
+                )
+                draft_count = sum(
+                    metric.value
+                    for metric in llm.llm.get_metrics()
+                    if isinstance(metric, Counter)
+                    and metric.name == "vllm:spec_decode_num_drafts"
+                )
+    finally:
+        envs.disable_envs_cache()
+
+    assert any(len(token_ids) > 16 for token_ids, _ in replay)
+    assert draft_count > 0
+    check_logprobs_close(
+        outputs_0_lst=baseline,
+        outputs_1_lst=replay,
+        name_0="baseline_mtp_v2",
+        name_1="replayssm_flashinfer_mtp_v2",
     )
 
 

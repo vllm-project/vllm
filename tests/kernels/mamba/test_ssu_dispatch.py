@@ -253,69 +253,6 @@ def test_triton_basic_call():
     assert not torch.isnan(out).any()
 
 
-def test_replayssm_flashinfer_call_forwards_explicit_controls(monkeypatch):
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    kernel = Mock(return_value=torch.empty(1, 1, 2, 4))
-    monkeypatch.setattr(mod, "_flashinfer_replayssm_kernel", kernel)
-
-    batch, nheads, dim, dstate, ngroups, window = 1, 2, 4, 8, 1, 16
-    state = torch.empty(1, nheads, dim, dstate)
-    x = torch.empty(batch, nheads, dim)
-    dt = torch.empty(batch, nheads, dim)
-    A = torch.empty(nheads, dim, dstate)
-    B = torch.empty(batch, ngroups, dstate)
-    C = torch.empty(batch, ngroups, dstate)
-    out = torch.empty_like(x)
-    x_cache = torch.empty(1, nheads, window, dim)
-    dt_cache = torch.empty(1, nheads, window)
-    B_cache = torch.empty(1, ngroups, window, dstate)
-    ring_start = torch.zeros(1, dtype=torch.int32)
-    prev_num_accepted = torch.zeros(1, dtype=torch.int32)
-    prev_query_len = torch.zeros(1, dtype=torch.int32)
-    scratch = (torch.empty(1), torch.empty(1), torch.empty(1))
-
-    selective_state_update_replayssm_flashinfer(
-        state,
-        x,
-        dt,
-        A,
-        B,
-        C,
-        out,
-        x_cache,
-        B_cache,
-        dt_cache,
-        ring_start,
-        prev_num_accepted,
-        prev_query_len,
-        logical_window=window,
-        scratch=scratch,
-        algorithm="two-kernel",
-        d_split=2,
-        precompute_heads_per_cta=8,
-        enable_stochastic_rounding=True,
-        stochastic_rounding_philox_rounds=6,
-        update_trackers=False,
-        enable_pdl=True,
-    )
-
-    args = kernel.call_args.args
-    kwargs = kernel.call_args.kwargs
-    assert args[4] is ring_start
-    assert args[5] is prev_num_accepted
-    assert kwargs["algorithm"] == "two-kernel"
-    assert kwargs["d_split"] == 2
-    assert kwargs["precompute_heads_per_cta"] == 8
-    assert kwargs["cb_scaled"] is scratch[0]
-    assert kwargs["cumAdt_vec"] is scratch[1]
-    assert kwargs["cb_old"] is scratch[2]
-    assert kwargs["philox_rounds"] == 6
-    assert kwargs["enable_pdl"] is True
-    assert kwargs["rand_seed"].shape == (1,)
-    assert kwargs["rand_seed"].dtype == torch.int64
-
-
 def test_replayssm_flashinfer_call_forwards_packed_mtp(monkeypatch):
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
 

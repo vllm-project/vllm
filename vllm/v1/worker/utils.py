@@ -448,6 +448,7 @@ def allocate_replayssm_caches(
     caches: dict[str, tuple[torch.Tensor, ...]] = {}
     for group in kv_cache_config.kv_cache_groups:
         group_spec = group.kv_cache_spec
+        layer_specs: Iterable[tuple[str, KVCacheSpec]]
         if isinstance(group_spec, UniformTypeKVCacheSpecs):
             layer_specs = group_spec.kv_cache_specs.items()
         else:
