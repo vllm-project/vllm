@@ -296,6 +296,11 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
         FlashInferCuteDslNvFp4LinearKernel,
     )
 
+    skip_ops: set[str] = set()
+    if runner.cache_config.enable_extensible_kv_cache:
+        # The trtllm-gen MLA decode sweep reads arbitrary block ids, which
+        # an extensible KV cache has not committed yet.
+        skip_ops.add("trtllm_batch_decode_mla")
     for module in runner.get_model().modules():
         for holder_name in ("quant_method", "scheme"):
             kernel = getattr(getattr(module, holder_name, None), "kernel", None)
@@ -303,8 +308,8 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
             # fallback is already the heuristic; all mm_fp4 backends share
             # the "fp4_gemm" op name, so skip only when cute-dsl is selected.
             if isinstance(kernel, FlashInferCuteDslNvFp4LinearKernel):
-                return {"fp4_gemm"}
-    return None
+                skip_ops.add("fp4_gemm")
+    return skip_ops or None
 
 
 _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32

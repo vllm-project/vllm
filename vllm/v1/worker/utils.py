@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
@@ -391,12 +391,16 @@ def allocate_kv_cache(
     device: torch.device,
     layout: KVCacheLayout,
     kernel_block_sizes: list[int] | None = None,
+    allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
 
     Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
     block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
     groups overlay each other, so tensors may address the same bytes.
+
+    ``allocate`` replaces the default zeroed backing allocation: it takes the
+    size in bytes and returns a one-byte-per-element tensor.
     """
     if not kv_cache_config.kv_cache_tensors:
         return {}
@@ -404,21 +408,10 @@ def allocate_kv_cache(
     sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
     raw_size = sizes.pop()
-    # wvSplitKrc's process-lifetime static workspaces (csrc/rocm/skinny_gemms.cu)
-    # are created lazily on the first qualifying GEMM. Force that now, before
-    # the giant backing allocation below: if one landed in this segment's
-    # rounding tail it would pin the whole segment at engine shutdown.
-    if current_platform.is_rocm():
-        warmup_rocm_skinny_gemm_workspaces(device)
-        # Pad to the page granularity MoRIIO needs to register the shared
-        # backing as a single RDMA memory region. Other platforms keep the
-        # exact-size allocation: NIXL and SimpleCPUOffload rely on
-        # storage.nbytes() matching the logical KV size (see #53974).
-        page_size = 4096
-        buf_size = ((raw_size + page_size - 1) // page_size) * page_size
+    if allocate is not None:
+        buf = allocate(raw_size)
     else:
-        buf_size = raw_size
-    buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
+        buf = _allocate_kv_cache_buffer(raw_size, device)
 
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:
@@ -453,6 +446,24 @@ def allocate_kv_cache(
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches
+
+
+def _allocate_kv_cache_buffer(raw_size: int, device: torch.device) -> torch.Tensor:
+    # wvSplitKrc's process-lifetime static workspaces (csrc/rocm/skinny_gemms.cu)
+    # are created lazily on the first qualifying GEMM. Force that now, before
+    # the giant backing allocation below: if one landed in this segment's
+    # rounding tail it would pin the whole segment at engine shutdown.
+    if current_platform.is_rocm():
+        warmup_rocm_skinny_gemm_workspaces(device)
+        # Pad to the page granularity MoRIIO needs to register the shared
+        # backing as a single RDMA memory region. Other platforms keep the
+        # exact-size allocation: NIXL and SimpleCPUOffload rely on
+        # storage.nbytes() matching the logical KV size (see #53974).
+        page_size = 4096
+        buf_size = ((raw_size + page_size - 1) // page_size) * page_size
+    else:
+        buf_size = raw_size
+    return torch.zeros(buf_size, dtype=torch.int8, device=device)
 
 
 def prepare_kernel_block_sizes(
