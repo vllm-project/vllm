@@ -14,6 +14,7 @@ from .utils import (
     create_request,
     create_scheduler,
     create_vllm_config,
+    make_kv_cache_config,
 )
 
 
@@ -377,3 +378,42 @@ def test_hybrid_load_failure_uses_runtime_manager_block_sizes(
 
     assert affected == {"hybrid-request"}
     assert request.num_computed_tokens == expected_computed_tokens
+
+
+def test_async_load_failure_with_hybrid_cache_groups():
+    """Exercise recovery with block tables from a real hybrid coordinator."""
+    vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
+    kv_cache_config = make_kv_cache_config(
+        block_size=16,
+        num_blocks=100,
+        mamba_enabled=True,
+        mamba_cache_mode="align",
+    )
+    scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
+    request = create_request(num_tokens=64)
+    scheduler.add_request(request)
+
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(
+            {request.request_id: 48},
+            async_load=True,
+        )
+    )
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+    block_ids_by_group = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    assert len(block_ids_by_group) == 2
+
+    model_runner_output = create_model_runner_output(
+        reqs=[],
+        finished_recving=set(),
+        invalid_block_ids={block_ids_by_group[1][2]},
+        use_eos=True,
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.num_computed_tokens == 32
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert scheduler.failed_recving_kv_req_ids == {request.request_id}
