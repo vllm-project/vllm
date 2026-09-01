@@ -2,11 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Zentorch int4 weight-quantized linear kernels for AMD Zen CPUs.
 
-Serves a W4 checkpoint either as W4A16 (weight-only, dequantized to bf16) or as
-DA8W4/W4A8, which reuses the same int4 weights but quantizes activations to int8
-per token at runtime so the GEMM runs as int8 x int8. DA8W4 is preferred and
-``VLLM_CPU_INT4_W4A8=0`` forces W4A16.
-
 Selected by ``choose_mp_linear_kernel`` ahead of the generic oneDNN-backed
 ``CPUWNA16LinearKernel``. When ``can_implement`` rejects a layer, the selector
 falls through to the next kernel in ``_POSSIBLE_KERNELS[PlatformEnum.CPU]``.
@@ -105,18 +100,10 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         return num_groups > 0 and in_features % num_groups == 0
 
     def _zentorch_da8w4_eligible(self, layer: torch.nn.Module) -> bool:
-        """Eligibility predicate for running a W4 layer as DA8W4 (W4A8).
-
-        DA8W4 consumes the same checkpoint as the W4A16 path, so the W4A16
-        checks apply on top of the symmetric/bf16 requirements below. Any
-        failure leaves ``layer`` untouched for the W4A16 path.
-        """
         if not envs.VLLM_CPU_INT4_W4A8:
             return False
 
-        if not has_zentorch_op(
-            ["zentorch_woq_repack_weight", "zentorch_dynamic_qlinear"]
-        ):
+        if not has_zentorch_op(["zentorch_dynamic_qlinear"]):
             return False
 
         # DA8W4 is symmetric-only, and the kernel rejects f32 activations.
@@ -138,7 +125,6 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         return group_size % 4 == 0 and in_features % 2 == 0
 
     def _process_da8w4_weights(self, layer: torch.nn.Module) -> None:
-        """Repack CT int4 weights into the packed-s4 layout DA8W4 consumes."""
         if self.w_zp_name is not None:
             setattr(layer, self.w_zp_name, None)
         if self.w_gidx_name is not None:

@@ -2,14 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Zentorch fused MoE experts for AMD Zen CPUs."""
 
+from collections.abc import Callable
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
+from vllm.model_executor.kernels.linear.zentorch_utils import (
+    _ZENTORCH_MOE_ACTIVATIONS,
+    _moe_activation_to_str,
+    has_zentorch_op,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.experts.cpu_moe import select_experts
@@ -21,16 +28,30 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 
 
 class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
-    """DA8W4 (W4A8) group-quantized monolithic MoE experts.
-
-    Runs the same int4 checkpoint as the W4A16 CPU experts, repacked to s4, but
-    quantizes activations to int8 per token so the expert GEMMs run as int8 x
-    int8 on ZenDNN.
-    """
+    """DA8W4 (W4A8) group-quantized monolithic MoE experts."""
 
     # swiglu_oai_mul reads gate/up interleaved, not in the half-split order the
     # weight loader leaves behind.
     requires_interleaved_w13 = True
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+        # Defaults hold until process_weights_after_loading sees the layer.
+        self.renormalize = moe_config.routing_method in (
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+        )
+        self.custom_routing_function: Callable | None = None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Capture the router config that the monolithic apply() signature
+        cannot carry; Custom routing has no other source for it."""
+        self.renormalize = layer.renormalize
+        self.custom_routing_function = layer.custom_routing_function
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -71,12 +92,7 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
-        )
+        return _moe_activation_to_str(activation) in _ZENTORCH_MOE_ACTIVATIONS
 
     @staticmethod
     def _supports_parallel_config(
@@ -104,6 +120,7 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.Default,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.Custom,
         ]
 
     @staticmethod
@@ -139,18 +156,24 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
                 "apply_router_weight_on_input=True."
             )
 
+        if (
+            self.moe_config.routing_method == RoutingMethodType.Custom
+            and self.custom_routing_function is None
+        ):
+            raise RuntimeError(
+                "ZentorchExpertsInt4 needs the model's custom_routing_function "
+                "for RoutingMethodType.Custom."
+            )
+
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             use_grouped_topk=num_expert_group is not None,
             top_k=self.moe_config.experts_per_token,
-            renormalize=self.moe_config.routing_method
-            in (
-                RoutingMethodType.Renormalize,
-                RoutingMethodType.RenormalizeNaive,
-            ),
+            renormalize=self.renormalize,
             topk_group=topk_group,
             num_expert_group=num_expert_group,
+            custom_routing_function=self.custom_routing_function,
             scoring_func="softmax",
             routed_scaling_factor=(
                 routed_scaling_factor if routed_scaling_factor is not None else 1.0
@@ -169,7 +192,7 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
             topk_weights,
             topk_ids,
             False,  # skip_weighted
-            str(activation.value).lower(),
+            _moe_activation_to_str(activation),
             self.w1_scale,
             self.w2_scale,
         )

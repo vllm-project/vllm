@@ -10,6 +10,7 @@ import pytest
 import torch
 from compressed_tensors.compressors.pack_quantized.helpers import pack_to_int32
 
+from tests.kernels.quant_utils import ref_dynamic_per_token_quant
 from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
     MPLinearLayerConfig,
 )
@@ -70,10 +71,8 @@ def _dynamic_quant_matmul(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
 ) -> torch.Tensor:
     """DA8W4 reference: per-token int8 activation quant against a bf16 weight."""
-    x_f32 = x.float()
-    scale = x_f32.abs().amax(dim=-1, keepdim=True) / 127.0
-    x_q = (x_f32 / scale).round().clamp(-127, 127)
-    out = (x_q @ weight.t()) * scale
+    x_q, scale = ref_dynamic_per_token_quant(x.float(), torch.int8)
+    out = (x_q.float() @ weight.t()) * scale
     if bias is not None:
         out = out + bias.float()
     return out
@@ -457,6 +456,9 @@ def test_zen_cpu_backend_maps_to_experts_class():
 
 
 def test_zen_experts_support_predicates():
+    from vllm.model_executor.kernels.linear.zentorch_utils import (
+        _ZENTORCH_MOE_ACTIVATIONS,
+    )
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
         ZentorchExpertsInt4,
@@ -470,10 +472,45 @@ def test_zen_experts_support_predicates():
     assert ZentorchExpertsInt4._supports_quant_scheme(kInt4Static, None)
     assert ZentorchExpertsInt4._supports_quant_scheme(kInt4Static32, None)
     assert not ZentorchExpertsInt4._supports_quant_scheme(kInt8StaticChannelSym, None)
-    assert ZentorchExpertsInt4._supports_activation(MoEActivation.SILU)
-    assert ZentorchExpertsInt4._supports_activation(MoEActivation.SWIGLUOAI)
+    for act in MoEActivation:
+        expected = act.value in _ZENTORCH_MOE_ACTIVATIONS
+        assert ZentorchExpertsInt4._supports_activation(act) == expected
     assert ZentorchExpertsInt4.requires_interleaved_w13
     assert not ZentorchExpertsInt4._supports_no_act_and_mul()
+
+
+def test_zen_experts_take_custom_routing():
+    """Models with their own router (gemma-4) reach select_experts through the
+    config captured off the layer, since apply() cannot be handed the callable."""
+    from types import SimpleNamespace
+
+    from tests.kernels.moe.test_cpu_fused_moe import _StubMoELayer
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
+        ZentorchExpertsInt4,
+    )
+
+    assert ZentorchExpertsInt4._supports_routing_method(
+        RoutingMethodType.Custom, None, None
+    )
+
+    def routing_fn(**kwargs):
+        raise AssertionError("not called")
+
+    layer = _StubMoELayer(
+        torch.zeros(NUM_EXPERTS, 2 * INTERMEDIATE, HIDDEN),
+        torch.zeros(NUM_EXPERTS, HIDDEN, INTERMEDIATE),
+        MoEActivation.SILU,
+    )
+    layer.renormalize = True
+    layer.custom_routing_function = routing_fn
+
+    experts = SimpleNamespace(renormalize=False, custom_routing_function=None)
+    ZentorchExpertsInt4.process_weights_after_loading(experts, layer)
+
+    assert experts.custom_routing_function is routing_fn
+    assert experts.renormalize is True
 
 
 def _swigluoai_perm(activation, experts_cls=None):

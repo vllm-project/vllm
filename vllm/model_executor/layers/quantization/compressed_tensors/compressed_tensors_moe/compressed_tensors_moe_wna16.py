@@ -525,6 +525,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             **marlin_args,
         )
 
+        if self.wna16_backend == WNA16MoEBackend.ZEN_CPU:
+            # Monolithic experts route inside apply(), so like the unquantized
+            # CPU path they need the router config that only the layer carries.
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             swigluoai_w13_interleave_perm,

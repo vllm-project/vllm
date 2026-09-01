@@ -135,8 +135,6 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
 def _act_order_reason(
     quant_config: QuantizationConfig | QuantizationArgs,
 ) -> str | None:
-    """Reason to refuse an activation-ordered checkpoint, for the backends that
-    carry no g_idx through to their kernel."""
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 
     if isinstance(quant_config, AutoGPTQConfig) and quant_config.desc_act:
