@@ -38,6 +38,11 @@ def build_offloading_config(
     engine_id = kv_transfer_config.engine_id
 
     parallel_config = vllm_config.parallel_config
+    # Only prefix-cacheable groups can serve offload hits: block hashes are
+    # computed over prefix-cacheable groups only (resolve_kv_cache_block_sizes),
+    # so non-cacheable scratch groups (e.g. CircularBufferSpec) have no valid
+    # hash granularity and must not be offloaded. Original group indices are
+    # preserved via group_idx.
     groups = tuple(
         OffloadingGroupConfig(
             tokens_per_block=(
@@ -49,8 +54,10 @@ def build_offloading_config(
                 )
             ),
             layer_names=tuple(group.layer_names),
+            group_idx=group_idx,
         )
-        for group in kv_cache_config.kv_cache_groups
+        for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
+        if group.kv_cache_spec.prefix_cacheable
     )
 
     _, tokens_per_hash = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
@@ -85,8 +92,8 @@ def build_offloading_config(
 
         assert len(unique_tokens_per_block) == 1, (
             "If 'block_size' is specified in kv_connector_extra_config, "
-            "there must be at least one KV cache group, "
-            "and all groups must have the same block size."
+            "there must be at least one prefix-cacheable KV cache group, "
+            "and all prefix-cacheable groups must have the same block size."
         )
 
         tokens_per_block = unique_tokens_per_block.pop()

@@ -599,6 +599,9 @@ class OffloadingSpec(ABC):
             self.extra_config.get("offload_prompt_only", True)
         )
 
+        # Aligned with config.groups, which covers prefix-cacheable KV cache
+        # groups only; use OffloadingGroupConfig.group_idx for the original
+        # index into KVCacheConfig.kv_cache_groups.
         self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)
         self.tokens_per_hash = config.cache.tokens_per_hash
         self.blocks_per_chunk = config.cache.blocks_per_chunk

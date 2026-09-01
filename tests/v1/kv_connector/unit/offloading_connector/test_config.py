@@ -14,11 +14,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    OffloadingConnectorScheduler,
+    RequestOffloadState,
     SchedulerOffloadConfig,
     is_store_reachable_swa_chunk,
 )
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
@@ -31,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_offload.base import GPULoadStoreSpec, get_offload_group_idx
 
 
 def _make_vllm_config(
@@ -750,3 +754,161 @@ def test_blocks_per_chunk_must_be_positive():
 
     with pytest.raises(ValueError, match="greater than 0"):
         build_offloading_config(config, _make_kv_cache_config())
+
+
+def _make_scratch_hybrid_kv_cache_config() -> KVCacheConfig:
+    """Hybrid layout with a non-prefix-cacheable scratch group.
+
+    Mirrors sparse-MLA hybrids (e.g. GLM-5.3-Flash) where a CircularBufferSpec
+    ring holds pre-compression keys: its block size (4) does not divide the
+    hash granularity of the prefix-cacheable groups (16).
+    """
+    return KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full_layer"], _full_attention_spec()),
+            KVCacheGroupSpec(
+                ["scratch_layer"],
+                CircularBufferSpec(
+                    block_size=4,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba_layer"],
+                MambaSpec(
+                    block_size=16,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+
+
+def test_scratch_group_does_not_crash_config_translation():
+    """A non-prefix-cacheable scratch group whose block size does not divide
+    tokens_per_hash previously tripped the divisibility assert at boot. It
+    must be excluded from the offload groups, keeping original indices."""
+    offloading_config = build_offloading_config(
+        _make_vllm_config(), _make_scratch_hybrid_kv_cache_config()
+    )
+
+    assert [group.group_idx for group in offloading_config.groups] == [0, 2]
+    assert tuple(group.tokens_per_block for group in offloading_config.groups) == (
+        16,
+        16,
+    )
+    assert offloading_config.cache.tokens_per_hash == 16
+
+
+def test_scratch_group_gets_no_offload_keys():
+    """The scheduler side must neither look up nor key the scratch group,
+    while per-group runtime state still spans every KV cache group."""
+    config = _make_vllm_config()
+    config.speculative_config = None
+    kv_cache_config = _make_scratch_hybrid_kv_cache_config()
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    spec = MockOffloadingSpec(offloading_config)
+
+    scheduler_config = SchedulerOffloadConfig.from_spec(spec, config, kv_cache_config)
+    assert scheduler_config.num_kv_cache_groups == 3
+    assert [gc.group_idx for gc in scheduler_config.kv_group_configs] == [0, 2]
+    assert not scheduler_config.supports_partial_tail
+
+    scheduler = OffloadingConnectorScheduler(spec, config, kv_cache_config)
+    assert scheduler._lookup_groups == (0, 2)
+
+    req = MagicMock()
+    req.kv_transfer_params = None
+    req.block_hashes = [b"hash-0", b"hash-1"]
+    req_state = RequestOffloadState(
+        config=scheduler_config,
+        req=req,
+        req_context=MagicMock(),
+        offloading_context=MagicMock(),
+    )
+    assert len(req_state.group_states) == 3
+
+    req_state.update_offload_keys()
+    assert not req_state.group_states[1].offload_keys
+    assert {
+        get_offload_group_idx(key)
+        for group_state in req_state.group_states
+        for key in group_state.offload_keys
+    } == {0, 2}
+
+
+def test_prefix_cacheable_misaligned_group_still_asserts():
+    """The divisibility assert must keep guarding prefix-cacheable groups: a
+    mamba group outside "align" mode backs the hash granularity off to the
+    scheduler block size (the LCM), which neither group's block size divides."""
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full_layer"], _full_attention_spec()),
+            KVCacheGroupSpec(
+                ["mamba_layer"],
+                MambaSpec(
+                    block_size=24,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                ),
+            ),
+        ],
+    )
+
+    with pytest.raises(AssertionError, match="not divisible"):
+        build_offloading_config(_make_vllm_config(), kv_cache_config)
+
+
+def test_scratch_group_gets_no_load_slots():
+    """update_state_after_alloc must emit full-length GPULoadStoreSpec group
+    arrays (matching the worker's per-group layout) with a zero-sized entry
+    for the scratch group, and draw no load keys or destination blocks from
+    it."""
+    config = _make_vllm_config()
+    config.speculative_config = None
+    kv_cache_config = _make_scratch_hybrid_kv_cache_config()
+    spec = MockOffloadingSpec(build_offloading_config(config, kv_cache_config))
+    scheduler = OffloadingConnectorScheduler(spec, config, kv_cache_config)
+
+    request = MagicMock()
+    request.request_id = "req"
+    request.kv_transfer_params = None
+    request.block_hashes = [b"hash-0", b"hash-1"]
+    scheduler.on_new_request(request)
+    req_status = scheduler._req_status["req"]
+    req_status.update_offload_keys()
+    req_status.num_locally_computed_tokens = 0
+
+    def _pending_block(block_id: int) -> MagicMock:
+        block = MagicMock()
+        block.block_id = block_id
+        block.is_null = False
+        block.block_hash = None
+        return block
+
+    blocks = MagicMock()
+    blocks.blocks = (
+        [_pending_block(11), _pending_block(12)],  # full attention (group 0)
+        [_pending_block(31)],  # scratch ring (group 1)
+        [_pending_block(21), _pending_block(22)],  # mamba (group 2)
+    )
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=32)
+
+    [load_job] = scheduler._current_batch_load_jobs.values()
+    dst_spec = load_job.dst_spec
+    assert isinstance(dst_spec, GPULoadStoreSpec)
+    assert dst_spec.group_sizes == [2, 0, 2]
+    assert dst_spec.block_indices == [0, 0, 0]
+    assert dst_spec.block_ids.tolist() == [11, 12, 21, 22]
+    assert {get_offload_group_idx(key) for key in load_job.src_spec.offload_keys} == {
+        0,
+        2,
+    }

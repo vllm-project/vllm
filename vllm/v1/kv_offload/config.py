@@ -14,6 +14,10 @@ class OffloadingGroupConfig:
     tokens_per_block: int
     # Layer names belonging to this group.
     layer_names: tuple[str, ...]
+    # Index of this group in KVCacheConfig.kv_cache_groups. Offload keys embed
+    # this index, and GPULoadStoreSpec.group_sizes stays indexed by it, so it
+    # is preserved even when non-prefix-cacheable groups are filtered out.
+    group_idx: int
 
 
 @dataclass(frozen=True)

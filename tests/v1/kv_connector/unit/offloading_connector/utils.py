@@ -314,12 +314,18 @@ class RequestRunner:
         assert isinstance(manager, MagicMock)
         self.manager: MagicMock = manager
 
-        num_kv_groups = len(kv_cache_config.kv_cache_groups)
-        assert len(self.connector_scheduler.config.kv_group_configs) == num_kv_groups
-        for group_config, kv_cache_group in zip(
-            self.connector_scheduler.config.kv_group_configs,
-            kv_cache_config.kv_cache_groups,
-        ):
+        # The connector only builds group configs for prefix-cacheable groups,
+        # preserving their original group indices.
+        eligible_groups = [
+            (group_idx, kv_cache_group)
+            for group_idx, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups)
+            if kv_cache_group.kv_cache_spec.prefix_cacheable
+        ]
+        kv_group_configs = self.connector_scheduler.config.kv_group_configs
+        assert [group_config.group_idx for group_config in kv_group_configs] == [
+            group_idx for group_idx, _ in eligible_groups
+        ]
+        for group_config, (_, kv_cache_group) in zip(kv_group_configs, eligible_groups):
             tokens_per_block = kv_cache_group.kv_cache_spec.block_size
             assert group_config.tokens_per_block == tokens_per_block
             assert group_config.tokens_per_chunk == tokens_per_block * blocks_per_chunk
