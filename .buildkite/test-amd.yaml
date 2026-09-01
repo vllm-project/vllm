@@ -1054,7 +1054,6 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/ --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
@@ -1070,7 +1069,6 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
@@ -1089,6 +1087,7 @@ steps:
   - tests/tool_use
   - tests/entrypoints/tool_parsers
   - tests/entrypoints/anthropic
+  - tests/entrypoints/cohere
   - tests/entrypoints/generate
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -1096,6 +1095,7 @@ steps:
   - pytest -v -s entrypoints/tool_parsers
   - pytest -v -s entrypoints/generate
   - pytest -v -s entrypoints/anthropic
+  - pytest -v -s entrypoints/cohere
 
 - label: ":amd: (MI300) Entrypoints Integration (Responses API)" # TBD
   timeout_in_minutes: 180
@@ -2714,7 +2714,7 @@ steps:
   dind: false
   agent_pool: mi300_2
   num_gpus: 2
-  working_dir: "/vllm-workspace/tests"
+  working_dir: "/vllm-workspace/"
   source_file_dependencies:
   - vllm/config/speculative.py
   - vllm/distributed/kv_transfer/kv_connector/
@@ -2738,7 +2738,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s v1/kv_connector/extract_hidden_states_integration
+  - pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration
 
 - label: ":amd: (MI300) V1 Attention Shard %N" # TBD
   timeout_in_minutes: 180
@@ -3181,7 +3181,6 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
@@ -3197,7 +3196,6 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion

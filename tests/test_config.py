@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
@@ -17,8 +19,11 @@ import vllm.config.vllm as vllm_config_module
 import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
+    CacheConfig,
     CompilationConfig,
+    DeviceConfig,
     KernelConfig,
+    KVTransferConfig,
     ModelConfig,
     ObservabilityConfig,
     ParallelConfig,
@@ -36,9 +41,18 @@ from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import (
+    get_pooling_config,
+    try_get_dense_modules,
+)
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value), encoding="utf-8")
 
 
 def test_kda_recoverssm_derivation_is_revalidated():
@@ -100,6 +114,32 @@ def test_per_request_spec_decode_metrics_requires_spec_decode():
             )
 
 
+def test_pd_dcp_interleave_size_is_adjusted_to_block_size(caplog):
+    config = VllmConfig(
+        cache_config=CacheConfig(block_size=16),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            decode_context_parallel_size=2,
+            cp_kv_cache_interleave_size=3,
+            distributed_executor_backend="mp",
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="NixlConnector",
+            kv_role="kv_both",
+        ),
+    )
+
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+    )
+    with caplog.at_level(logging.INFO):
+        config.adjust_dcp_kv_cache_interleave_size(kv_cache_config)
+
+    assert config.parallel_config.cp_kv_cache_interleave_size == 16
+    assert "automatically adjusted from 3 to block_size 16" in caplog.text
+
+
 def test_compile_config_repr_succeeds():
     # setup: VllmBackend mutates the config object
     config = VllmConfig()
@@ -130,27 +170,35 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
 
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
-    """ROCm keeps DeepSeek V3.2 and V4 on their compiled MRV1 paths."""
+    """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
+    MRV1 paths and off breakable cudagraphs by default."""
     from vllm.config.vllm import (
+        ROCM_DEFAULT_MRV1_ARCHITECTURES,
         default_breakable_cudagraph_architectures,
-        default_v2_model_runner_architectures,
     )
     from vllm.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
     # The lookup is lru_cached against a fixed platform.
-    default_v2_model_runner_architectures.cache_clear()
     default_breakable_cudagraph_architectures.cache_clear()
     try:
-        v2_architectures = default_v2_model_runner_architectures()
-        breakable_architectures = default_breakable_cudagraph_architectures()
+        assert "DeepseekV32ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
+        assert "DeepseekV4ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
+        assert "GlmMoeDsaForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
 
-        assert "DeepseekV32ForCausalLM" not in v2_architectures
-        assert "DeepseekV4ForCausalLM" not in v2_architectures
+        breakable_architectures = default_breakable_cudagraph_architectures()
         assert "DeepseekV32ForCausalLM" not in breakable_architectures
         assert "DeepseekV32MTPModel" not in breakable_architectures
+        assert "GlmMoeDsaForCausalLM" not in breakable_architectures
+
+        # The carve-out takes effect via the runner-selection property
+        # (warning_once args must be hashable for its lru_cache).
+        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"])
+        )
+        assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
-        default_v2_model_runner_architectures.cache_clear()
         default_breakable_cudagraph_architectures.cache_clear()
 
 
@@ -169,17 +217,13 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     from vllm.compilation.breakable_cudagraph import (
         is_breakable_cudagraph_enabled,
     )
-    from vllm.config.vllm import (
-        default_breakable_cudagraph_architectures,
-        default_v2_model_runner_architectures,
-    )
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
     from vllm.platforms import current_platform
 
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
-    default_v2_model_runner_architectures.cache_clear()
     default_breakable_cudagraph_architectures.cache_clear()
 
     model_config = SimpleNamespace(
@@ -200,10 +244,6 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         ),
     )
     config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash2_draft = lambda: False
-    config._is_default_v2_model_runner_model = lambda: (
-        VllmConfig._is_default_v2_model_runner_model(config)
-    )
     config._get_v2_model_runner_unsupported_features = lambda: []
     config._uses_breakable_cudagraph_by_default = lambda: (
         VllmConfig._uses_breakable_cudagraph_by_default(config)
@@ -217,7 +257,6 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         assert config.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
     finally:
         os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
-        default_v2_model_runner_architectures.cache_clear()
         default_breakable_cudagraph_architectures.cache_clear()
 
 
@@ -229,7 +268,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         ("DeepseekV32MTPModel", False, True),
         ("DeepseekV32MTPModel", True, False),
         ("GlmMoeDsaForCausalLM", False, True),
-        ("GlmMoeDsaForCausalLM", True, True),
+        ("GlmMoeDsaForCausalLM", True, False),
     ],
 )
 def test_dsa_breakable_cudagraph_platform_default(
@@ -387,7 +426,7 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
     [
         (
             SimpleNamespace(
-                model="Qwen/Qwen3-1.7B-Base",
+                model="Qwen/Qwen3-32B",
                 architectures=["Qwen3ForCausalLM"],
                 runner_type="generate",
                 is_moe=False,
@@ -397,8 +436,8 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
         ),
         (
             SimpleNamespace(
-                model="Qwen/Qwen3-32B",
-                architectures=["Qwen3ForCausalLM"],
+                model="Qwen/Qwen2-7B-Instruct",
+                architectures=["Qwen2ForCausalLM"],
                 runner_type="generate",
                 is_moe=False,
                 is_quantized=False,
@@ -459,6 +498,16 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
             SimpleNamespace(
                 model="deepseek-ai/DeepSeek-V2-Chat",
                 architectures=["DeepseekV2ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V3",
+                architectures=["DeepseekV3ForCausalLM"],
                 runner_type="generate",
                 is_moe=True,
                 is_quantized=False,
@@ -533,7 +582,7 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
                 is_moe=True,
                 is_quantized=False,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
@@ -554,7 +603,7 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
                 is_quantized=False,
                 is_hybrid=True,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
@@ -565,7 +614,7 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
                 is_quantized=False,
                 is_attention_free=True,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
@@ -602,20 +651,37 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
         ),
     ],
 )
-def test_is_default_v2_model_runner_model(model_config, expected, monkeypatch):
-    from vllm.config.vllm import default_v2_model_runner_architectures
+def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
     from vllm.platforms import current_platform
 
     # The expectations below are the platform-independent defaults; ROCm's
-    # DeepSeek V4 carve-out is covered by test_rocm_defaults_deepseek_v4_to_mrv1.
+    # DeepSeek carve-out is covered by test_rocm_keeps_compiled_deepseek_defaults.
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
-    default_v2_model_runner_architectures.cache_clear()
     config = SimpleNamespace(model_config=model_config)
+    config._get_v2_model_runner_unsupported_features = lambda: []
 
-    try:
-        assert VllmConfig._is_default_v2_model_runner_model(config) is expected
-    finally:
-        default_v2_model_runner_architectures.cache_clear()
+    assert VllmConfig.use_v2_model_runner.fget(config) is expected
+
+
+def test_v1_model_runner_rejects_v2_only_features():
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            enable_batch_sharded_sampling=False,
+        ),
+        speculative_config=None,
+        model_config=None,
+    )
+    config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash2_draft = lambda: False
+    config._get_v1_model_runner_unsupported_features = lambda: (
+        VllmConfig._get_v1_model_runner_unsupported_features(config)
+    )
+
+    with pytest.raises(ValueError, match="prefill context parallel"):
+        VllmConfig._validate_v1_model_runner(config)
 
 
 @pytest.mark.skip_global_cleanup
@@ -750,6 +816,10 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
 
 def test_data_parallel_rpc_port_has_fixed_default():
     assert ParallelConfig().data_parallel_rpc_port == 29550
+
+
+def test_all2all_backend_has_portable_default():
+    assert ParallelConfig().all2all_backend == "allgather_reducescatter"
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])
@@ -970,6 +1040,103 @@ def test_get_pooling_config():
     assert model_config.pooler_config.use_activation
     assert model_config.pooler_config.seq_pooling_type == "MEAN"
     assert model_config.pooler_config.tok_pooling_type == "ALL"
+
+
+@pytest.mark.parametrize(
+    ("pooling_module_type", "normalize_module_type", "pooling_config", "expected"),
+    [
+        (
+            "sentence_transformers.models.Pooling",
+            "sentence_transformers.models.Normalize",
+            {"pooling_mode_mean_tokens": True},
+            {"use_activation": True, "seq_pooling_type": "MEAN"},
+        ),
+        (
+            "sentence_transformers.sentence_transformer.modules.pooling.Pooling",
+            "sentence_transformers.sentence_transformer.modules.normalize.Normalize",
+            {"pooling_mode": "lasttoken"},
+            {"use_activation": True, "seq_pooling_type": "LAST"},
+        ),
+        (
+            "sentence_transformers.sentence_transformer.modules.pooling.Pooling",
+            "sentence_transformers.base.modules.normalize.Normalize",
+            {"pooling_mode": "mean"},
+            {"use_activation": True, "seq_pooling_type": "MEAN"},
+        ),
+    ],
+)
+def test_get_pooling_config_supports_sentence_transformers_schemas(
+    tmp_path,
+    caplog,
+    pooling_module_type,
+    normalize_module_type,
+    pooling_config,
+    expected,
+):
+    modules = [
+        {"idx": 1, "name": "1", "path": "1_Pooling", "type": pooling_module_type},
+        {
+            "idx": 2,
+            "name": "2",
+            "path": "2_Normalize",
+            "type": normalize_module_type,
+        },
+    ]
+    _write_json(tmp_path / "modules.json", modules)
+    _write_json(tmp_path / "1_Pooling" / "config.json", pooling_config)
+
+    with caplog.at_level(logging.WARNING):
+        config = get_pooling_config(str(tmp_path))
+
+    assert config == expected
+    assert "Unable to determine Sentence Transformers pooling type" not in caplog.text
+
+
+def test_get_pooling_config_warns_when_pooling_mode_is_unknown(tmp_path, caplog):
+    modules = [
+        {
+            "idx": 1,
+            "name": "1",
+            "path": "1_Pooling",
+            "type": "sentence_transformers.models.Pooling",
+        }
+    ]
+    _write_json(tmp_path / "modules.json", modules)
+    _write_json(
+        tmp_path / "1_Pooling" / "config.json",
+        {"pooling_mode": "unsupported"},
+    )
+
+    with caplog.at_level(logging.WARNING):
+        config = get_pooling_config(str(tmp_path))
+
+    assert config == {"use_activation": False}
+    assert "Unable to determine Sentence Transformers pooling type" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "dense_module_type",
+    [
+        "sentence_transformers.models.Dense",
+        "sentence_transformers.base.modules.dense.Dense",
+    ],
+)
+def test_get_dense_modules_supports_sentence_transformers_schemas(
+    tmp_path, dense_module_type
+):
+    modules = [{"idx": 2, "name": "2", "path": "2_Dense", "type": dense_module_type}]
+    dense_config = {
+        "in_features": 768,
+        "out_features": 3072,
+        "bias": False,
+        "activation_function": "torch.nn.modules.linear.Identity",
+    }
+    _write_json(tmp_path / "modules.json", modules)
+    _write_json(tmp_path / "2_Dense" / "config.json", dense_config)
+
+    assert try_get_dense_modules(str(tmp_path)) == [
+        {**dense_config, "folder": "2_Dense"}
+    ]
 
 
 @pytest.mark.skipif(
@@ -1703,6 +1870,7 @@ def test_validate_mamba_align_subblock_prefill():
             long_prefill_token_threshold=4096,
             disable_chunked_mm_input=False,
         ),
+        kv_transfer_config=None,
     )
 
     VllmConfig.validate_block_size(config)
@@ -2090,6 +2258,23 @@ def test_draft_sample_method_probabilistic_is_accepted():
         draft_sample_method="probabilistic",
     )
     assert speculative_config.draft_sample_method == "probabilistic"
+
+
+@pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
+def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
+    disable_eagle_block_drop: bool,
+):
+    # Start from an ngram config to avoid loading model metadata: these predicates
+    # depend only on the speculative method and the new switch.
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=3,
+        disable_eagle_block_drop=disable_eagle_block_drop,
+    )
+    speculative_config.method = "eagle3"
+
+    assert speculative_config.use_eagle()
+    assert speculative_config.use_eagle_block_drop() is not disable_eagle_block_drop
 
 
 def test_draft_sample_method_gumbel_is_rejected():
