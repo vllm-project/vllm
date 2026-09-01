@@ -12,7 +12,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
-_DECODE_TILE_GROUPING_THRESHOLD = 32
+_DECODE_BLOCK_N = 64
 
 
 @triton.jit
@@ -264,21 +264,33 @@ def _expand_qsa_indices_kernel(
     )
 
 
+def _decode_tiles_per_program(num_requests: int, columns: int) -> int:
+    programs = num_requests * triton.cdiv(columns, _DECODE_BLOCK_N)
+    if programs < 16384:
+        return 1
+    if programs < 32768:
+        return 2
+    if programs < 131072:
+        return 4
+    return 8
+
+
 def _qsa_decode_warmup_profiles(
     max_dql: int,
     max_num_reqs: int,
     max_num_batched_tokens: int,
+    columns: int,
 ) -> tuple[tuple[int, int], ...]:
-    profiles = []
-    grouped_requests = _DECODE_TILE_GROUPING_THRESHOLD + 1
+    profiles: list[tuple[int, int]] = []
     for dql in range(1, max_dql + 1):
-        if dql <= max_num_batched_tokens:
-            profiles.append((dql, 1))
-        if (
-            max_num_reqs >= grouped_requests
-            and dql * grouped_requests <= max_num_batched_tokens
-        ):
-            profiles.append((dql, grouped_requests))
+        max_reqs = min(max_num_reqs, max_num_batched_tokens // dql)
+        requests_by_grouping: dict[int, int] = {}
+        for num_requests in range(1, max_reqs + 1):
+            tiles_per_program = _decode_tiles_per_program(num_requests, columns)
+            requests_by_grouping.setdefault(tiles_per_program, num_requests)
+        profiles.extend(
+            (dql, num_requests) for num_requests in requests_by_grouping.values()
+        )
     return tuple(profiles)
 
 
@@ -294,17 +306,18 @@ def warmup_qsa_mqa_paged_decode(
 ) -> tuple[tuple[int, int], ...]:
     """Compile every reachable decode specialization without launching it."""
 
+    page_size = k_cache.shape[1]
+    page_table_width = page_table.shape[1]
+    columns = page_table_width * page_size
     profiles = _qsa_decode_warmup_profiles(
         max_decode_query_len,
         max_num_reqs,
         max_num_batched_tokens,
+        columns,
     )
     if not profiles:
         return ()
 
-    page_size = k_cache.shape[1]
-    page_table_width = page_table.shape[1]
-    columns = page_table_width * page_size
     k_cache_ptr = TritonWarmupTensor(k_cache.dtype, shape=tuple(k_cache.shape))
     page_table_ptr = TritonWarmupTensor(
         page_table.dtype,
@@ -322,8 +335,7 @@ def warmup_qsa_mqa_paged_decode(
             torch.float32,
             shape=(num_rows, columns),
         )
-        block_n = 64
-        tiles_per_program = 1 if num_requests <= _DECODE_TILE_GROUPING_THRESHOLD else 8
+        tiles_per_program = _decode_tiles_per_program(num_requests, columns)
         _qsa_mqa_paged_uniform_kernel.warmup(
             q_ptr,
             k_cache_ptr,
@@ -339,13 +351,13 @@ def warmup_qsa_mqa_paged_decode(
             NUM_HEADS=num_heads,
             HEAD_DIM=head_dim,
             DECODE_QUERY_LEN=decode_query_len,
-            BLOCK_N=block_n,
+            BLOCK_N=_DECODE_BLOCK_N,
             TILES_PER_PROG=tiles_per_program,
             STAGES=2,
             num_warps=2,
             grid=(
                 num_requests,
-                triton.cdiv(columns, block_n * tiles_per_program),
+                triton.cdiv(columns, _DECODE_BLOCK_N * tiles_per_program),
             ),
         )
     return profiles
@@ -367,13 +379,13 @@ def _prefill_logits(
 
     columns = page_table.shape[1] * k_cache.shape[1]
     logits = torch.empty((num_queries, columns), dtype=torch.float32, device=q.device)
-    TILE_R = 32
+    TILE_R = 64
     BLOCK_N = 64
-    k_tiles = 8
+    K_TILES = 16
     grid = (
         page_table.shape[0],
         triton.cdiv(min(num_queries, max_query_len), TILE_R),
-        triton.cdiv(columns, BLOCK_N * k_tiles),
+        triton.cdiv(columns, BLOCK_N * K_TILES),
     )
     _qsa_mqa_paged_prefill_kernel[grid](
         q,
@@ -394,7 +406,7 @@ def _prefill_logits(
         HEAD_DIM=q.shape[2],
         TILE_R=TILE_R,
         BLOCK_N=BLOCK_N,
-        K_TILES=k_tiles,
+        K_TILES=K_TILES,
         STAGES=2,
         num_warps=4,
     )
@@ -418,9 +430,8 @@ def expand_qsa_block_indices(
     assert visible_blocks.shape == query_positions.shape
     assert out.shape == (block_indices.shape[0], output_width)
     column_block = 256
-    _expand_qsa_indices_kernel[
-        (block_indices.shape[0], triton.cdiv(output_width, column_block))
-    ](
+    grid = (block_indices.shape[0], triton.cdiv(output_width, column_block))
+    _expand_qsa_indices_kernel[grid](
         block_indices,
         query_positions,
         visible_blocks,
@@ -444,7 +455,7 @@ def _topk(
 ) -> None:
     block_topk = token_topk // compress_ratio
     use_cooperative_topk = (
-        logits.shape[0] <= 32
+        logits.shape[0] <= 64
         and logits.stride(0) % 4 == 0
         and current_platform.has_device_capability(90)
         and not current_platform.is_device_capability_family(120)
@@ -498,11 +509,12 @@ def qsa_select_paged_decode(
 
     columns = page_table.shape[1] * k_cache.shape[1]
     logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
-    block_n = 64
-    tiles_per_program = 1 if num_requests <= _DECODE_TILE_GROUPING_THRESHOLD else 8
-    _qsa_mqa_paged_uniform_kernel[
-        (num_requests, triton.cdiv(columns, block_n * tiles_per_program))
-    ](
+    tiles_per_program = _decode_tiles_per_program(num_requests, columns)
+    grid = (
+        num_requests,
+        triton.cdiv(columns, _DECODE_BLOCK_N * tiles_per_program),
+    )
+    _qsa_mqa_paged_uniform_kernel[grid](
         q,
         k_cache,
         page_table,
@@ -517,7 +529,7 @@ def qsa_select_paged_decode(
         NUM_HEADS=q.shape[1],
         HEAD_DIM=q.shape[2],
         DECODE_QUERY_LEN=decode_query_len,
-        BLOCK_N=block_n,
+        BLOCK_N=_DECODE_BLOCK_N,
         TILES_PER_PROG=tiles_per_program,
         STAGES=2,
         num_warps=2,
