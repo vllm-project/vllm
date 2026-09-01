@@ -223,7 +223,8 @@ class StructuredOutputManager:
         spec_tokens: Sequence[int],
         spec_tokens_committed: bool = False,
     ) -> int:
-        """Return the first constrained index within `spec_tokens`.
+        """Return the index into `spec_tokens` where tokens should
+        start being constrained by the grammar.
         Returns `len(spec_tokens) + 1` if no token should be constrained after
         accepting all `spec_tokens`.
 
@@ -274,10 +275,10 @@ class StructuredOutputManager:
             if num_spec_tokens <= 0:
                 return len(spec_tokens) + 1
 
-            simulated = [*request.all_token_ids, *islice(spec_tokens, num_spec_tokens)]
-            if not reasoner.is_reasoning_end_streaming(
-                simulated, islice(spec_tokens, num_spec_tokens)
-            ):
+            delta_ids = spec_tokens[:num_spec_tokens]
+            simulated = request.all_token_ids.copy()
+            simulated.extend(delta_ids)
+            if not reasoner.is_reasoning_end_streaming(simulated, delta_ids):
                 return len(spec_tokens) + 1
 
         for i in range(num_spec_tokens - 1, 0, -1):

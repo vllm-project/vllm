@@ -186,6 +186,8 @@ class Parser:
         Used by structured engines like `xgrammar` to check if the
         reasoning content ends in the model output.
 
+        Must be a pure function of the input_ids.
+
         Args:
             input_ids: The token IDs of the model output.
 
@@ -198,6 +200,8 @@ class Parser:
     ) -> bool:
         """
         Check if the reasoning content ends during a decode step.
+
+        Must be a pure function of the input_ids and delta_ids.
 
         Args:
             input_ids: The entire model output token IDs.

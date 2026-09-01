@@ -305,7 +305,7 @@ def test_is_reasoning_end_streaming_reopened_block_is_not_ended():
 
 
 def test_is_reasoning_end_streaming_accepts_an_iterator_delta():
-    """`should_advance` may hand over an islice rather than a list."""
+    """StructuredOutputManager may hand over an islice rather than a list."""
     parser = KimiK3ReasoningParser(DummyTokenizer())
     full = [*OPEN_IDS, 5, *CLOSE_IDS]
 

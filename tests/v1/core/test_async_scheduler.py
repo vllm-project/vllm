@@ -265,7 +265,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     request = create_requests(num_requests=1, num_tokens=1)[0]
     request.structured_output_request = Mock()
     request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
-    request.structured_output_request.grammar.accept_tokens.return_value = False
     request.status = RequestStatus.RUNNING
     request.num_computed_tokens = request.num_tokens
     request.num_output_placeholders = 1
