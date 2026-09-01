@@ -2,7 +2,7 @@ group: Spec Decode XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: V1 Spec Decode
+- label: ':nvidia: (H200 MIG 35GB) V1 Spec Decode'
   device: intel_gpu
   timeout_in_minutes: 40
   working_dir: .
@@ -20,8 +20,10 @@ steps:
   source_file_dependencies:
   - vllm/config/
   - vllm/distributed/
+  - '!vllm/distributed/kv_transfer/'
   - vllm/inputs/
   - vllm/model_executor/
+  - vllm/models/qwen4_exp/
   - vllm/platforms/
   - vllm/sampling_params.py
   - vllm/transformers_utils/
@@ -34,7 +36,7 @@ steps:
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
     pytest -v -s -m not slow_test v1/spec_decode || true'
-- label: 'Spec Decode Eagle 1: DeepSeek + Qwen'
+- label: ':nvidia: (H200 MIG 35GB) Spec Decode Eagle 1: DeepSeek + Qwen'
   device: intel_gpu
   timeout_in_minutes: 25
   working_dir: .
@@ -57,7 +59,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/eagle/ -k deepseek_eagle or qwen3_eagle3 || true'
-- label: 'Spec Decode Eagle 2: Llama 3 + Qwen VL + Other'
+- label: ':nvidia: (H200 MIG 35GB) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other'
   device: intel_gpu
   timeout_in_minutes: 25
   working_dir: .
@@ -80,10 +82,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/eagle/ -k not deepseek_eagle and not qwen3_eagle3 || true'
-- label: Spec Decode Eagle Nightly (B200)
+- label: ':nvidia: (B200) Spec Decode Eagle Nightly'
   device: intel_gpu
   timeout_in_minutes: 25
-  optional: true
+  optional: false
   working_dir: .
   no_plugin: true
   env:
@@ -104,7 +106,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/eagle/ || true'
-- label: Spec Decode Speculators + MTP
+- label: ':nvidia: (H200 MIG 35GB) Spec Decode Speculators + MTP'
   device: intel_gpu
   timeout_in_minutes: 50
   working_dir: .
@@ -131,7 +133,7 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/speculators/ || true &&
     pytest -v -s v1/e2e/spec_decode/mtp/ || true'
-- label: Spec Decode Ngram + Suffix
+- label: ':nvidia: (H200 MIG 35GB) Spec Decode N-Gram + Suffix'
   device: intel_gpu
   timeout_in_minutes: 20
   working_dir: .
@@ -157,7 +159,7 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/ngram_suffix/ || true &&
     python3 spec_decode/test_custom_proposer.py || true'
-- label: Spec Decode Draft Model
+- label: ':nvidia: (H200 MIG 18GB) Spec Decode Draft Model'
   device: intel_gpu
   timeout_in_minutes: 45
   working_dir: .
@@ -180,11 +182,11 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/draft_model/ || true'
-- label: Speculators Correctness Nightly (H100)
+- label: ':nvidia: (H100) Speculators Correctness Nightly'
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 1
-  optional: true
+  optional: false
   working_dir: .
   no_plugin: true
   env:
@@ -208,11 +210,11 @@ steps:
     'export VLLM_ALLOW_INSECURE_SERIALIZATION=1 || true &&
     cd tests &&
     pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test || true'
-- label: Spec Decode DeepSeek MTP Parallel Load (2xB200-2xMI300)
+- label: ':nvidia: (B200) Spec Decode DeepSeek MTP Parallel Load'
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2
-  optional: true
+  optional: false
   working_dir: .
   no_plugin: true
   env:
@@ -236,10 +238,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py || true'
-- label: Spec Decode AL DFlash Nightly
+- label: ':nvidia: (H200 MIG 35GB) Spec Decode AL DFlash Nightly'
   device: intel_gpu
   timeout_in_minutes: 90
-  optional: true
+  optional: false
   working_dir: .
   no_plugin: true
   env:
@@ -262,10 +264,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ || true'
-- label: Spec Decode AL DSpark Nightly
+- label: ':nvidia: (H200 MIG 35GB) Spec Decode AL DSpark Nightly'
   device: intel_gpu
   timeout_in_minutes: 60
-  optional: true
+  optional: false
   working_dir: .
   no_plugin: true
   env:
@@ -288,10 +290,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/acceptance_rates/dspark/ || true'
-- label: Spec Decode AL MTP + Other Acceptance Nightly
+- label: ':nvidia: (H200 MIG 35GB) Spec Decode AL MTP + Other Acceptance Nightly'
   device: intel_gpu
   timeout_in_minutes: 60
-  optional: true
+  optional: false
   working_dir: .
   no_plugin: true
   env:

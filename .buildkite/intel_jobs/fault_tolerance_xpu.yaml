@@ -2,7 +2,7 @@ group: Fault Tolerance XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: Fault Tolerance E2E (2xH100)
+- label: ':nvidia: (H100) Fault Tolerance E2E'
   device: intel_gpu
   timeout_in_minutes: 35
   num_devices: 2

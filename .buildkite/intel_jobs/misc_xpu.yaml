@@ -2,7 +2,7 @@ group: Miscellaneous XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: V1 Sample + Logits
+- label: ':nvidia: (H200 MIG 18GB) V1 Sample + Logits'
   device: intel_gpu
   timeout_in_minutes: 83
   working_dir: .
@@ -49,7 +49,7 @@ steps:
     pytest -v -s v1/test_oracle.py || true &&
     pytest -v -s v1/test_request.py || true &&
     pytest -v -s v1/test_outputs.py || true'
-- label: V1 Core + KV + Metrics
+- label: ':nvidia: (H200 MIG 35GB) V1 Core + KV + Metrics'
   device: intel_gpu
   timeout_in_minutes: 80
   working_dir: .
@@ -122,7 +122,7 @@ steps:
     pytest -v -s -m not cpu_test v1/metrics --ignore="v1/metrics/test_ray_metrics.py" || true &&
     pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api || true &&
     pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine || true'
-- label: Extract Hidden States Integration
+- label: ':nvidia: (H200 MIG 18GB) Extract Hidden States Integration'
   device: intel_gpu
   timeout_in_minutes: 20
   working_dir: .
@@ -136,7 +136,7 @@ steps:
     gpu: 1+
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s v1/kv_connector/extract_hidden_states_integration
+  - pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration
   source_file_dependencies:
   - vllm/v1/spec_decode/extract_hidden_states.py
   - vllm/model_executor/models/extract_hidden_states.py
@@ -147,9 +147,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
-    cd tests &&
-    pytest -v -s v1/kv_connector/extract_hidden_states_integration || true'
-- label: Extract Hidden States Integration (2 GPUs)
+    pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration || true'
+- label: ':nvidia: (L4) Extract Hidden States Integration'
   device: intel_gpu
   timeout_in_minutes: 20
   num_devices: 2
@@ -175,9 +174,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
-    cd tests &&
-    pytest -v -s -m distributed v1/kv_connector/extract_hidden_states_integration || true'
-- label: Regression
+    pytest -v -s -m distributed tests/v1/kv_connector/extract_hidden_states_integration || true'
+- label: ':nvidia: (H200 MIG 18GB) Regression'
   device: intel_gpu
   timeout_in_minutes: 30
   working_dir: .
@@ -212,7 +210,7 @@ steps:
     'pip install modelscope\<1.38 || true &&
     cd tests &&
     pytest -v -s test_regression.py || true'
-- label: Metrics, Tracing (2 GPUs)
+- label: ':nvidia: (L4) Metrics, Tracing'
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 2
@@ -252,10 +250,10 @@ steps:
     cd tests &&
     pytest -v -s v1/tracing || true &&
     pytest -v -s tracing || true'
-- label: Python-only Installation
+- label: ':nvidia: (H200 MIG 18GB) Python-only Installation'
   device: intel_gpu
   timeout_in_minutes: 20
-  optional: true
+  optional: false
   depends_on: null
   working_dir: .
   no_plugin: true
@@ -276,7 +274,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     bash standalone_tests/python_only_compile.sh || true'
-- label: Async Engine, Inputs, Utils, Worker
+- label: ':nvidia: (H200 MIG 35GB) Async Engine, Inputs, Utils, Worker'
   device: intel_gpu
   timeout_in_minutes: 25
   working_dir: .
@@ -318,7 +316,7 @@ steps:
     pytest -v -s detokenizer || true &&
     pytest -v -s -m "not cpu_test" ./multimodal || true &&
     pytest -v -s utils_ || true'
-- label: Batch Invariance (A100)
+- label: ':nvidia: (A100) Batch Invariance'
   device: intel_gpu
   timeout_in_minutes: 60
   working_dir: .
@@ -347,7 +345,7 @@ steps:
     cd tests &&
     pytest -v -s v1/determinism/test_batch_invariance.py || true &&
     VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA || true'
-- label: Batch Invariance (H100)
+- label: ':nvidia: (H100) Batch Invariance'
   device: intel_gpu
   timeout_in_minutes: 60
   working_dir: .
@@ -380,7 +378,7 @@ steps:
     pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py || true &&
     VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA || true &&
     VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN || true'
-- label: Batch Invariance (B200)
+- label: ':nvidia: (B200) Batch Invariance'
   device: intel_gpu
   timeout_in_minutes: 45
   working_dir: .
@@ -397,6 +395,7 @@ steps:
   - pip install pytest-timeout pytest-forked
   - pytest -v -s v1/determinism/test_batch_invariance.py
   - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+  - pytest -v -s v1/determinism/test_batch_invariance_vlm.py
   - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
   - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
   - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
@@ -415,17 +414,18 @@ steps:
     cd tests &&
     pytest -v -s v1/determinism/test_batch_invariance.py || true &&
     pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py || true &&
+    pytest -v -s v1/determinism/test_batch_invariance_vlm.py || true &&
     VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA || true &&
     VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN || true &&
     pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py || true &&
     pytest -v -s v1/determinism/test_matmul_batch_invariant.py || true &&
     pytest -v -s v1/determinism/test_cutlass_batch_invariance.py || true &&
     pytest -v -s v1/determinism/test_online_batch_invariance.py || true'
-- label: Acceptance Length Test (Large Models)
+- label: ':nvidia: (H200 MIG 35GB) Acceptance Length (Large Models)'
   device: intel_gpu
   timeout_in_minutes: 20
   num_gpus: 1
-  optional: true
+  optional: false
   working_dir: .
   no_plugin: true
   env:
