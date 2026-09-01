@@ -249,8 +249,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         config: Qwen4ExpTextConfig,
         embedding_dim: int,
         ple_dense_layer_id: int,
-        max_total_tokens: int,
-        max_num_reqs: int,
         prefix: str,
         layer_name: str,
         quant_config: QuantizationConfig | None = None,
@@ -317,20 +315,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 quant_config, f"{prefix}.ngram_embedding"
             ),
         )
-        self.register_buffer(
-            "positions_buffer",
-            torch.arange(max_total_tokens, dtype=torch.int64),
-            persistent=False,
-        )
-        self.register_buffer(
-            "padded_buffer",
-            torch.full(
-                (max_num_reqs, max_total_tokens),
-                self.eos_token_id,
-                dtype=torch.int64,
-            ),
-            persistent=False,
-        )
 
     @staticmethod
     def _shift_precompute(
@@ -377,16 +361,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         input_ids = input_ids.reshape(-1)
         num_reqs = query_start_loc.numel() - 1
         num_tokens = input_ids.shape[0]
-        if num_tokens > self.positions_buffer.numel():
-            raise ValueError(
-                f"PLE received {num_tokens} tokens, but its workspace supports "
-                f"at most {self.positions_buffer.numel()}"
-            )
-        if num_reqs > self.padded_buffer.shape[0]:
-            raise ValueError(
-                f"PLE received {num_reqs} requests, but its workspace supports "
-                f"at most {self.padded_buffer.shape[0]}"
-            )
 
         if input_ids.is_cuda:
             return ple_ngram_ids(
@@ -401,9 +375,13 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             )
         input_ids = input_ids.long()
         query_start_loc = query_start_loc.long()
-        positions = self.positions_buffer[:num_tokens]
-        packed = self.padded_buffer[:num_reqs, :num_tokens]
-        packed.fill_(self.eos_token_id)
+        positions = torch.arange(num_tokens, device=input_ids.device, dtype=torch.int64)
+        packed = torch.full(
+            (num_reqs, num_tokens),
+            self.eos_token_id,
+            device=input_ids.device,
+            dtype=torch.int64,
+        )
         request_indices = torch.searchsorted(query_start_loc, positions, right=True) - 1
         request_indices.clamp_(max=num_reqs - 1)
         columns = (positions - query_start_loc[request_indices]).clamp(
@@ -563,8 +541,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             config,
             int(config.ple_embed_dim),
             self.ple_dense_layer_id,
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            vllm_config.scheduler_config.max_num_seqs,
             prefix=f"{prefix}.ple_embedding",
             layer_name=prefix,
             quant_config=quant_config,
