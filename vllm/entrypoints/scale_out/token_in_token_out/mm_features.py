@@ -36,6 +36,59 @@ def merge_mm_kwargs_items(
     return MultiModalKwargsItem({**kwargs_item, **metadata_item})
 
 
+def _encode_metadata_items(
+    items: list[MultiModalKwargsItem | None],
+    *,
+    declared: Collection[str],
+) -> list[str | None]:
+    """Serialize placeholder-metadata and ``keep_on_cpu`` fields per item."""
+    metadata_items: list[str | None] = []
+    for item in items:
+        if item is None:
+            metadata_items.append(None)
+            continue
+
+        metadata_item = MultiModalKwargsItem(
+            {
+                key: elem
+                for key, elem in item.items()
+                if elem.field.keep_on_cpu or key in declared
+            }
+        )
+        metadata_items.append(
+            encode_mm_kwargs_item(metadata_item) if metadata_item else None
+        )
+    return metadata_items
+
+
+def _encode_mm_kwargs_with_metadata(
+    raw_mm_kwargs: dict[str, list[MultiModalKwargsItem | None]],
+    *,
+    metadata_fields_for: Callable[[str], Collection[str]] | None = None,
+) -> tuple[dict[str, list[str | None]], dict[str, list[str | None]] | None]:
+    """Serialize full kwargs and their metadata-only subsets per modality."""
+    kwargs_data: dict[str, list[str | None]] = {}
+    metadata_by_modality: dict[str, list[str | None]] = {}
+
+    for modality, items in raw_mm_kwargs.items():
+        kwargs_data[modality] = [
+            encode_mm_kwargs_item(item) if item is not None else None
+            for item in items
+        ]
+
+        declared = (
+            set(metadata_fields_for(modality))
+            if metadata_fields_for is not None
+            else set()
+        )
+        metadata_items = _encode_metadata_items(items, declared=declared)
+        if any(item is not None for item in metadata_items):
+            metadata_by_modality[modality] = metadata_items
+
+    mm_metadata = metadata_by_modality or None
+    return kwargs_data, mm_metadata
+
+
 def mm_kwargs_from_features(
     features: MultiModalFeatures,
 ) -> dict[str, list[MultiModalKwargsItem | None]]:
@@ -91,43 +144,10 @@ def extract_mm_features(
     kwargs_data: dict[str, list[str | None]] | None = None
     mm_metadata: dict[str, list[str | None]] | None = None
     if raw_mm_kwargs := mm_engine_input.get("mm_kwargs"):
-        kwargs_data = {}
-        metadata_by_modality: dict[str, list[str | None]] = {}
-        for modality, items in raw_mm_kwargs.items():
-            kwargs_data[modality] = [
-                encode_mm_kwargs_item(item) if item is not None else None
-                for item in items
-            ]
-
-            declared = (
-                set(metadata_fields_for(modality))
-                if metadata_fields_for is not None
-                else set()
-            )
-            metadata_items: list[str | None] = []
-            has_metadata = False
-            for item in items:
-                if item is None:
-                    metadata_items.append(None)
-                    continue
-
-                metadata_item = MultiModalKwargsItem(
-                    {
-                        key: elem
-                        for key, elem in item.items()
-                        if elem.field.keep_on_cpu or key in declared
-                    }
-                )
-                has_metadata = has_metadata or bool(metadata_item)
-                metadata_items.append(
-                    encode_mm_kwargs_item(metadata_item) if metadata_item else None
-                )
-
-            if has_metadata:
-                metadata_by_modality[modality] = metadata_items
-
-        if metadata_by_modality:
-            mm_metadata = metadata_by_modality
+        kwargs_data, mm_metadata = _encode_mm_kwargs_with_metadata(
+            raw_mm_kwargs,
+            metadata_fields_for=metadata_fields_for,
+        )
 
     return MultiModalFeatures(
         mm_hashes=mm_hashes,

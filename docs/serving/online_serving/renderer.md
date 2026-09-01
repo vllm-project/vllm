@@ -34,3 +34,79 @@ should split those fields:
   connector. Omitting `kwargs_data` without `ec_transfer_params` is rejected.
 - Legacy clients that ignore `mm_metadata` and keep sending `kwargs_data`
   continue to work.
+
+## Example
+
+The example below shows how a disaggregated encode / prefill coordinator can
+split a multimodal render response. The render step returns both
+`kwargs_data` (encoder tensors plus metadata) and `mm_metadata` (metadata
+only). Encode keeps the full payload; prefill drops `kwargs_data` after the
+EC connector has published embeddings.
+
+```python
+import httpx
+
+MODEL = "Qwen/Qwen3-VL-2B-Instruct"
+RENDER = "http://localhost:8100"  # vllm launch render ...
+ENCODE = "http://localhost:8200"  # encode worker
+PREFILL = "http://localhost:8300"  # prefill worker
+
+chat_request = {
+    "model": MODEL,
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "<data-url>"}},
+                {"type": "text", "text": "Describe this image."},
+            ],
+        }
+    ],
+}
+
+with httpx.Client(timeout=120.0) as client:
+    # 1. Render: preprocess into token IDs and multimodal features.
+    render_response = client.post(
+        f"{RENDER}/v1/chat/completions/render", json=chat_request
+    ).json()
+
+    features = render_response["features"]
+    # features["kwargs_data"]["image"][0]  -> pixel_values + image_grid_thw
+    # features["mm_metadata"]["image"][0]  -> image_grid_thw only
+
+    # 2. Encode: send full kwargs_data so the encoder can run vision towers.
+    encode_response = client.post(
+        f"{ENCODE}/inference/v1/generate",
+        json={
+            "token_ids": render_response["token_ids"],
+            "features": {
+                "mm_hashes": features["mm_hashes"],
+                "mm_placeholders": features["mm_placeholders"],
+                "kwargs_data": features["kwargs_data"],
+            },
+            "sampling_params": {"max_tokens": 1},
+        },
+    ).json()
+    ec_transfer_params = encode_response["ec_transfer_params"]
+
+    # 3. Prefill: omit kwargs_data; load embeddings via EC connector.
+    prefill_response = client.post(
+        f"{PREFILL}/inference/v1/generate",
+        json={
+            "token_ids": render_response["token_ids"],
+            "features": {
+                "mm_hashes": features["mm_hashes"],
+                "mm_placeholders": features["mm_placeholders"],
+                "mm_metadata": features["mm_metadata"],
+            },
+            "ec_transfer_params": ec_transfer_params,
+            "sampling_params": {"max_tokens": 64},
+        },
+    ).json()
+
+print(prefill_response["choices"][0]["token_ids"])
+```
+
+Single-process clients can keep passing the full render response to
+`/inference/v1/generate` unchanged; `mm_metadata` is optional and ignored
+when `kwargs_data` is present.
