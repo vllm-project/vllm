@@ -123,8 +123,11 @@ class ColQwen3_5Model(
 
     The model produces L2-normalized per-token embeddings by:
     1. Running the Qwen3.5 backbone (vision + language) to get hidden states
-    2. Projecting hidden states through a linear layer (hidden_size -> embed_dim)
-    3. L2-normalizing the projected embeddings
+    2. Projection and L2-normalization via the pooler (TokenEmbeddingPoolerHead)
+
+    Attributes:
+        custom_text_proj: Linear projection from hidden_size to embed_dim.
+            This is passed to the pooler as pooler.head.projector.
     """
 
     # Mark this as a pooling model so vLLM routes to pooler path
