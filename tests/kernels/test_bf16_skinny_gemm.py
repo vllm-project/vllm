@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for BF16 skinny GEMMs and the Kimi-K3 SM90/SM100/SM103 selectors."""
+"""Tests for BF16 skinny GEMMs and model-specific selectors."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +17,7 @@ from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
 from vllm.models.deepseek_v32.nvidia import glm52_low_latency_gemm as glm52_gemm
 from vllm.models.kimi_k3.nvidia import low_latency_gemm as k3_gemm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
+from vllm.models.qwen4_exp.nvidia import low_latency_gemm as qwen4_exp_gemm
 
 # Keyed by local (N, K): (cute token counts, dsv3 token counts). 1536x7168 is
 # the unified shared_gate_up_proj/mla_g_proj entry (dsv3 M1..16).
@@ -75,6 +76,12 @@ GLM_CUTE_CASES = [
     (spec, config)
     for spec in glm52_gemm.GLM52_PROJECTIONS.values()
     for _, config in spec.cute_configs
+]
+
+QWEN4_EXP_SM90_CASES = [
+    (n, k, num_tokens, config)
+    for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS.items()
+    for num_tokens, config in plans.items()
 ]
 
 EXPECTED_CUTE_CONFIGS = {
@@ -528,6 +535,43 @@ def test_low_latency_table_capability_routing(
     assert k3_gemm._low_latency_table() is None
 
 
+def test_qwen4_exp_hopper_plans_are_valid() -> None:
+    plans = qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS
+
+    assert len(plans) == 9
+    assert sum(map(len, plans.values())) == 31
+    assert (320, 10240) in plans
+    assert (10240, 320) not in plans
+    for (n, k), shape_plans in plans.items():
+        for num_tokens, config in shape_plans.items():
+            assert config.num_rows == num_tokens
+            assert n % config.outputs_per_block == 0
+            assert k % (config.block_size * config.vector_width) == 0
+            assert config.static_k in (None, k)
+
+
+@pytest.mark.parametrize(
+    "capability,expected_plans",
+    [
+        ((10, 3), qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS),
+        ((9, 0), qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS),
+        ((8, 0), {}),
+    ],
+)
+def test_qwen4_exp_gemm_capability_routing(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
+    expected_plans: dict[tuple[int, int], dict[int, SkinnyGemmConfig]],
+) -> None:
+    monkeypatch.setattr(
+        qwen4_exp_gemm.current_platform,
+        "is_device_capability",
+        lambda target: capability == target,
+    )
+
+    assert qwen4_exp_gemm._gemm_plans() == expected_plans
+
+
 def test_installation_is_shape_specific_and_unquantized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -643,7 +687,7 @@ def _require_capability_and_cute(capability: tuple[int, int]) -> None:
         not torch.cuda.is_available()
         or torch.cuda.get_device_capability() != capability
     ):
-        pytest.skip(f"Kimi-K3 selection requires SM{capability[0]}{capability[1]}")
+        pytest.skip(f"CuTe DSL selection requires SM{capability[0]}{capability[1]}")
     if not k3_gemm.shape_dynamic_skinny_gemm.is_available():
         pytest.skip("CuTe DSL is not available")
 
@@ -677,6 +721,29 @@ def test_glm_cute_selected_shapes(
     assert output is not None
     reference = x.float() @ weight.float().t()
     torch.testing.assert_close(output.float(), reference, rtol=2e-2, atol=2e-1)
+
+
+@pytest.mark.parametrize("n,k,num_tokens,config", QWEN4_EXP_SM90_CASES)
+def test_qwen4_exp_sm90_selected_shapes(
+    n: int,
+    k: int,
+    num_tokens: int,
+    config: SkinnyGemmConfig,
+) -> None:
+    _require_capability_and_cute((9, 0))
+    torch.manual_seed(42 + num_tokens)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+
+    selected = qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS[(n, k)][num_tokens]
+    assert selected == config
+    output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
+
+    reference = torch.nn.functional.linear(x, weight)
+    cosine = torch.nn.functional.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    ).item()
+    assert cosine > 0.999
 
 
 def test_glm52_q_b_nonpacked_single_row_falls_back() -> None:
