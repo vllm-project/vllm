@@ -200,6 +200,7 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
     ids=[
         "fp8_per_tensor",
         "fp8_per_block",
+        "fp8_per_channel",
         "per_layer_kind_overrides",
         "targets",
         "ignore",
