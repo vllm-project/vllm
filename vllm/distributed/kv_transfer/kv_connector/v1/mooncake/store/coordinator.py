@@ -98,6 +98,7 @@ class MooncakeStoreCoordinator:
             kv_cache_groups, hash_block_size, dcp_world_size
         )
         self.use_eagle = use_eagle
+        self.dcp_world_size = dcp_world_size
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
@@ -286,6 +287,7 @@ class MooncakeStoreCoordinator:
                 use_eagle=use_eagle,
                 retention_interval=retention_interval,
                 reachable_boundaries=reachable_boundaries,
+                dcp_world_size=self.dcp_world_size,
             )
             if mask is not None:
                 assert len(mask) == end_chunk - start_chunk

@@ -4287,6 +4287,143 @@ def test_swa_reachable_block_mask_pins_shared_prefix():
     assert retained(0, 0, block_size) == {14}
 
 
+def test_swa_reachable_block_mask_with_dcp_scaling():
+    """DCP shards each block's KV across ranks, scaling the effective block size.
+    Verify that dcp_world_size > 1 scales block size in reachability calculations,
+    producing different masks than dcp_world_size=1."""
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    block_size = 16
+    sliding_window = 32  # need = cdiv(31, 16) = 2
+
+    def get_mask(dcp_world_size):
+        spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=sliding_window,
+        )
+        m = SlidingWindowManager.reachable_block_mask(
+            start_block=0,
+            end_block=16,
+            alignment_tokens=64,  # alignment constraint
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=64,  # sparse: 1 state per 64-token segment
+            reachable_boundaries=(255,),
+            dcp_world_size=dcp_world_size,
+        )
+        return None if m is None else {i for i, v in enumerate(m) if v}
+
+    # With dcp_world_size=1: effective block_size = 16
+    # per_segment = 64 // 16 = 4 blocks per segment
+    # need = 2, so 2 < 4 -> sparse retention with coarser granularity
+    mask_no_dcp = get_mask(dcp_world_size=1)
+
+    # With dcp_world_size=2: effective block_size = 32
+    # per_segment = 64 // 32 = 2 blocks per segment
+    # need = 2, so 2 >= 2 -> different retention granularity
+    mask_with_dcp = get_mask(dcp_world_size=2)
+
+    # DCP scaling changes block_size, altering segment granularity
+    assert mask_no_dcp is not None
+    assert mask_with_dcp is not None
+    # Different DCP world sizes should produce different masks
+    assert mask_no_dcp != mask_with_dcp, (
+        "DCP scaling should change retention granularity"
+    )
+
+
+def test_mamba_reachable_block_mask_with_dcp_scaling():
+    """Verify DCP scaling affects Mamba state-snapshot retention.
+    When block_size scales, retention segment granularity changes."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    block_size = 16
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=(1, 1),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+    def get_mask(dcp_world_size):
+        m = MambaManager.reachable_block_mask(
+            start_block=0,
+            end_block=16,
+            alignment_tokens=64,
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=64,  # sparse: one state per 64-token segment
+            reachable_boundaries=(255,),
+            dcp_world_size=dcp_world_size,
+        )
+        return None if m is None else {i for i, v in enumerate(m) if v}
+
+    # With dcp_world_size=1: effective block_size = 16
+    # per_segment = 64 // 16 = 4 blocks per segment
+    mask_no_dcp = get_mask(dcp_world_size=1)
+
+    # With dcp_world_size=2: effective block_size = 32
+    # per_segment = 64 // 32 = 2 blocks per segment
+    mask_with_dcp = get_mask(dcp_world_size=2)
+
+    # Both should be non-None (sparse retention), but different granularity
+    assert mask_no_dcp is not None
+    assert mask_with_dcp is not None
+    assert mask_no_dcp != mask_with_dcp, "DCP scaling should change segment granularity"
+
+
+def test_mamba_reachable_block_mask_with_dcp_exceeding_segment():
+    """
+    When DCP scales block_size beyond retention_interval, dense
+    caching can trigger.
+    """
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    block_size = 8
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=(1, 1),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+    # Without DCP: effective block_size = 8, per_segment = 64 // 8 = 8
+    # Sparse retention with 8 blocks per segment
+    mask_no_dcp = MambaManager.reachable_block_mask(
+        start_block=0,
+        end_block=16,
+        alignment_tokens=64,
+        kv_cache_spec=spec,
+        use_eagle=False,
+        retention_interval=64,
+        reachable_boundaries=(255,),
+        dcp_world_size=1,
+    )
+
+    # With DCP=16: effective block_size = 128, per_segment = 64 // 128 = 0
+    # per_segment becomes 0 (block_size > segment_size)
+    # This triggers dense caching (early return None at line 1048-1050)
+    mask_with_dcp = MambaManager.reachable_block_mask(
+        start_block=0,
+        end_block=16,
+        alignment_tokens=64,
+        kv_cache_spec=spec,
+        use_eagle=False,
+        retention_interval=64,
+        reachable_boundaries=(255,),
+        dcp_world_size=16,
+    )
+
+    # DCP scaling can trigger transition from sparse to dense
+    assert mask_no_dcp is not None, "Small DCP should enable sparse retention"
+    assert mask_with_dcp is None, (
+        "Large DCP can scale block_size > segment, triggering dense"
+    )
+
+
 def test_swa_shared_prefix_reuse_under_zero_retention():
     """SWA cross-request analog: a partial shared prefix's sliding-window tail
     must stay reusable under ``prefix_cache_retention_interval=0``. Without

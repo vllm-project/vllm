@@ -465,6 +465,7 @@ class SingleTypeKVCacheManager(ABC):
             use_eagle=self.use_eagle,
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
+            dcp_world_size=self.dcp_world_size,
         )
         self.block_pool.cache_full_blocks(
             request=request,
@@ -488,6 +489,7 @@ class SingleTypeKVCacheManager(ABC):
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
+        dcp_world_size: int = 1,
     ) -> list[bool] | None:
         """Per-block mask for ``cache_full_blocks``. ``None`` means cache
         every (non-null) block — the default for full attention.
@@ -1013,6 +1015,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
+        dcp_world_size: int = 1,
     ) -> list[bool] | None:
         assert isinstance(kv_cache_spec, SlidingWindowSpec)
         if alignment_tokens is None:
@@ -1020,7 +1023,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             return None
         assert alignment_tokens % kv_cache_spec.block_size == 0
 
-        block_size = kv_cache_spec.block_size
+        block_size = kv_cache_spec.block_size * dcp_world_size
         # Contiguous blocks a hit needs at a boundary (incl. the EAGLE peek).
         need = cls._contiguous_blocks_for_hit(
             window_size=kv_cache_spec.sliding_window,
@@ -1475,6 +1478,7 @@ class MambaManager(SingleTypeKVCacheManager):
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
+        dcp_world_size: int = 1,
     ) -> list[bool] | None:
         """Sparse Mamba state-snapshot retention.
 
@@ -1492,7 +1496,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # Dense caching (default) or no alignment constraint imposed.
             return None
         assert isinstance(kv_cache_spec, MambaSpec)
-        block_size = kv_cache_spec.block_size
+        block_size = kv_cache_spec.block_size * dcp_world_size
         mask = [False] * (end_block - start_block)
 
         # (1) Segment-boundary states. A Mamba hit needs exactly the single

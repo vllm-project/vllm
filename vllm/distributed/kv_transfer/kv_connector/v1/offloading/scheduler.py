@@ -157,6 +157,7 @@ class SchedulerOffloadConfig(NamedTuple):
     supports_partial_tail: bool
     alignment_tokens: int | None = None
     retention_interval: int | None = None
+    dcp_world_size: int = 1
 
     @classmethod
     def from_spec(
@@ -297,6 +298,7 @@ class SchedulerOffloadConfig(NamedTuple):
             supports_partial_tail=supports_partial_tail,
             alignment_tokens=alignment_tokens,
             retention_interval=retention_interval,
+            dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
         )
 
 
@@ -1395,6 +1397,7 @@ class OffloadingConnectorScheduler:
                     use_eagle=group_config.is_eagle_group,
                     retention_interval=self.config.retention_interval,
                     reachable_boundaries=reachable_boundaries,
+                    dcp_world_size=self.config.dcp_world_size,
                 )
 
                 for key_idx, (offload_key, block_id) in enumerate(
