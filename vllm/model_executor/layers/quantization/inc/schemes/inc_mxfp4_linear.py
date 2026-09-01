@@ -59,7 +59,26 @@ class INCMxfp4LinearMethod(INCLinearScheme):
         params_dtype: torch.dtype,
         **extra_weight_attrs: Any,
     ) -> None:
-        del input_size, output_size
+        del output_size
+        if self.rotation_block_size is not None and (
+            input_size_per_partition % self.rotation_block_size
+        ):
+            if input_size_per_partition != input_size:
+                raise ValueError(
+                    f"AutoRound rotation block_size={self.rotation_block_size} "
+                    "does not evenly divide this layer's tensor-parallel shard "
+                    f"width={input_size_per_partition} (full input_size="
+                    f"{input_size}). Hadamard rotation blocks that span "
+                    "multiple tensor-parallel shards are not supported; "
+                    "either use tensor_parallel_size=1 for this checkpoint, "
+                    "or re-quantize with a rotation block_size that evenly "
+                    "divides the per-shard width."
+                )
+            raise ValueError(
+                f"Linear input width {input_size_per_partition} is not "
+                "divisible by AutoRound rotation "
+                f"block_size={self.rotation_block_size}"
+            )
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
@@ -103,11 +122,6 @@ class INCMxfp4LinearMethod(INCLinearScheme):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.rotation_block_size is not None:
-            if x.shape[-1] % self.rotation_block_size:
-                raise ValueError(
-                    f"Linear input width {x.shape[-1]} is not divisible by "
-                    f"AutoRound rotation block_size={self.rotation_block_size}"
-                )
             if current_platform.is_xpu() and x.is_xpu:
                 return self._apply_xpu_rotation(layer, x, bias)
             original_shape = x.shape

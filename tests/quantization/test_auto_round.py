@@ -987,6 +987,108 @@ def test_inc_mxfp4_linear_method_registers_and_processes_weights(
     assert captured["processed_layer"] is layer
 
 
+def test_inc_mxfp4_linear_rotation_rejects_tp_shard_crossing_block(
+    monkeypatch,
+) -> None:
+    """A rotation block spanning multiple TP shards is not supported.
+
+    E.g. a checkpoint-wide block_size=64 on a 64-wide layer is valid without
+    TP, but under tensor_parallel_size=2 each shard only sees 32 of the 64
+    input channels, so the block straddles two ranks. This must fail fast at
+    weight-creation time with a message that points at the TP mismatch, not
+    a generic "not divisible" error.
+    """
+
+    class DummyKernel:
+        pass
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_mxfp4_linear.init_mxfp4_linear_kernel",
+        lambda **kwargs: DummyKernel(),
+    )
+
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_linear import (  # noqa: E501
+        INCMxfp4LinearMethod,
+    )
+
+    method = INCMxfp4LinearMethod(
+        make_layer_config(group_size=32, data_type="mx_fp"),
+        rotation_block_size=64,
+    )
+
+    with pytest.raises(ValueError, match="tensor-parallel shard"):
+        method.create_weights(
+            torch.nn.Module(),
+            input_size_per_partition=32,
+            output_partition_sizes=[16],
+            input_size=64,
+            output_size=16,
+            params_dtype=torch.bfloat16,
+        )
+
+
+def test_inc_mxfp4_linear_rotation_validates_shard_alignment(monkeypatch) -> None:
+    """Divisibility is still enforced without TP, and an aligned TP shard is
+    accepted — covering the two codepaths the shard-aware check must not
+    regress.
+    """
+
+    class DummyKernel:
+        pass
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_mxfp4_linear.init_mxfp4_linear_kernel",
+        lambda **kwargs: DummyKernel(),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_linear import (  # noqa: E501
+        INCMxfp4LinearMethod,
+    )
+
+    # No TP sharding (input_size_per_partition == input_size): a block_size
+    # that just does not fit the layer's width is a plain, generic error.
+    misaligned_method = INCMxfp4LinearMethod(
+        make_layer_config(group_size=32, data_type="mx_fp"),
+        rotation_block_size=48,
+    )
+    with pytest.raises(ValueError, match="not divisible by"):
+        misaligned_method.create_weights(
+            torch.nn.Module(),
+            input_size_per_partition=64,
+            output_partition_sizes=[16],
+            input_size=64,
+            output_size=16,
+            params_dtype=torch.bfloat16,
+        )
+
+    # TP shards the input, but the block_size still evenly divides the
+    # per-shard width, so this must be accepted.
+    aligned_method = INCMxfp4LinearMethod(
+        make_layer_config(group_size=32, data_type="mx_fp"),
+        rotation_block_size=32,
+    )
+    layer = torch.nn.Module()
+    aligned_method.create_weights(
+        layer,
+        input_size_per_partition=32,
+        output_partition_sizes=[16],
+        input_size=64,
+        output_size=16,
+        params_dtype=torch.bfloat16,
+    )
+    assert layer.input_size_per_partition == 32
+
+
 def test_inc_mxfp4_linear_applies_rotation_before_kernel(monkeypatch) -> None:
     captured = {}
 
