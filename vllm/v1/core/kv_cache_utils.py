@@ -1048,10 +1048,10 @@ def is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
 class KVCacheBlockBudget:
     """The pool size and the per-request block cost it is divided by."""
 
+    # Blocks in the shared pool, i.e. `KVCacheConfig.num_blocks`.
     num_gpu_blocks: int
-    """Blocks in the shared pool, i.e. `KVCacheConfig.num_blocks`."""
+    # Blocks one request claims from each group, in `kv_cache_groups` order.
     blocks_per_group: list[int]
-    """Blocks one request claims from each group, in `kv_cache_groups` order."""
 
     @property
     def num_blocks_per_request(self) -> int:
