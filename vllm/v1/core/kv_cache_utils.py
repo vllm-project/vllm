@@ -675,6 +675,28 @@ def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCache
     return replace(spec, block_size=block_size)
 
 
+def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> int:
+    """Return the DCP size that owns this group's block geometry.
+
+    Full-attention KV (including MLA) is sharded across DCP ranks, so prefix
+    hashing and manager ``block_size`` use the process DCP size. Other specs
+    keep replicated per-rank state (Mamba, sliding window, chunked-local) and
+    must keep ``dcp_world_size=1`` even when the process runs with DCP > 1.
+
+    Draft MLA groups on the sharded DSpark path are ``FullAttentionSpec`` /
+    ``MLAAttentionSpec`` and therefore keep the process DCP size. A replicated
+    draft group would need a different spec, not this helper.
+    """
+    if dcp_world_size <= 1:
+        return 1
+    inner = spec
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        inner = next(iter(spec.kv_cache_specs.values()))
+    if isinstance(inner, FullAttentionSpec):
+        return dcp_world_size
+    return 1
+
+
 def resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
@@ -1819,7 +1841,7 @@ def _annotate_eagle_groups(
         use_deepseek_v4_fallback: Enable rule 2 for a DeepseekV4 packed group.
     """
     spec_config = vllm_config.speculative_config
-    if spec_config is None or not spec_config.use_eagle():
+    if spec_config is None or not spec_config.use_eagle_block_drop():
         return
 
     for group in kv_cache_groups:

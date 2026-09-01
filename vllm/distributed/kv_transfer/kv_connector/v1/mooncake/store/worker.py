@@ -1593,16 +1593,17 @@ class MooncakeStoreWorker:
             for group in kv_cache_config.transfer_groups
         ]
         spec_cfg = getattr(vllm_config, "speculative_config", None)
-        use_eagle = bool(
-            spec_cfg.use_eagle()
-            if spec_cfg is not None and callable(getattr(spec_cfg, "use_eagle", None))
+        use_eagle_block_drop = bool(
+            spec_cfg.use_eagle_block_drop()
+            if spec_cfg is not None
+            and callable(getattr(spec_cfg, "use_eagle_block_drop", None))
             else False
         )
         self.coord = MooncakeStoreCoordinator(
             self._kv_cache_groups,
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
-            use_eagle=use_eagle,
+            use_eagle=use_eagle_block_drop,
             retention_interval=kv_cache_config.prefix_cache_retention_interval,
             dcp_world_size=self.dcp_size,
         )
