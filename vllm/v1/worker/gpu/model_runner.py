@@ -71,6 +71,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.notifications import has_pending_worker_notifications
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -1909,6 +1910,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+            worker_notifications_pending=has_pending_worker_notifications(),
         )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
@@ -2028,6 +2030,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
             ec_connector_output=ec_connector_output,
+            worker_notifications_pending=has_pending_worker_notifications(),
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,

@@ -27,9 +27,13 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.notifications import (
     MAX_BUFFERED_NOTIFICATIONS,
     CustomNotification,
+    EngineNotification,
+    LoRALoadEvent,
+    has_pending_worker_notifications,
     publish_worker_notification,
     take_worker_notifications,
 )
+from vllm.v1.outputs import ModelRunnerOutput
 
 from ...utils import create_new_process_for_each_test
 
@@ -456,3 +460,104 @@ def test_custom_notification_reaches_frontend(monkeypatch: pytest.MonkeyPatch):
         ]
     finally:
         client.shutdown()
+
+
+def test_lora_load_event_round_trips_through_msgpack():
+    """Tagged map inside the array_like outputs; omit_defaults trims empties."""
+    event = LoRALoadEvent(
+        gpu_adapters=["alpha"],
+        cpu_adapters=["alpha", "beta"],
+        pinned_adapters=["alpha"],
+    )
+    encoded = msgspec.msgpack.encode(
+        EngineCoreOutputs(engine_index=1, engine_notifications=[event])
+    )
+
+    as_array = msgspec.msgpack.decode(encoded)
+    assert as_array[-1] == [
+        {
+            "type": "lora_load_event",
+            "gpu_adapters": ["alpha"],
+            "cpu_adapters": ["alpha", "beta"],
+            "pinned_adapters": ["alpha"],
+        }
+    ]
+    decoded = msgspec.msgpack.decode(encoded, type=EngineCoreOutputs)
+    assert decoded.engine_notifications == [event]
+
+    empty = msgspec.msgpack.decode(msgspec.msgpack.encode(LoRALoadEvent()))
+    assert empty == {"type": "lora_load_event"}
+
+
+def test_unknown_notification_tag_fails_fast():
+    """The union is version-lockstep with the engine, like the rest of
+    EngineCoreOutputs; a skipped event would hide a deployment mismatch."""
+    future_event = msgspec.msgpack.encode({"type": "graceful_shutdown", "step": 1})
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.msgpack.decode(future_event, type=EngineNotification)
+
+
+def test_doorbell_check_does_not_drain():
+    publish_worker_notification(CustomNotification(key="my_plugin"))
+    assert has_pending_worker_notifications()
+    assert has_pending_worker_notifications(), "the check must not consume"
+    take_worker_notifications()
+    assert not has_pending_worker_notifications()
+
+
+def test_step_gathers_when_output_rank_rings_doorbell():
+    """The step path gathers only on the doorbell, so a quiet step costs no
+    rpc, and a rung one delivers in the same step's outputs."""
+    event = LoRALoadEvent(gpu_adapters=["alpha"], cpu_adapters=["alpha"])
+    rpcs: list[str] = []
+
+    def collective_rpc(method):
+        rpcs.append(method)
+        return [[event], []]
+
+    engine_core = _bare_engine_core()
+    engine_core.model_executor = SimpleNamespace(collective_rpc=collective_rpc)
+
+    quiet = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+    outputs: dict[int, EngineCoreOutputs] = {}
+    engine_core._collect_step_notifications(quiet, outputs)
+    assert rpcs == []
+    assert outputs == {}
+
+    rung = ModelRunnerOutput(
+        req_ids=[], req_id_to_index={}, worker_notifications_pending=True
+    )
+    engine_core._collect_step_notifications(rung, outputs)
+    assert rpcs == ["take_notifications"]
+    assert outputs[0].engine_notifications == [event]
+
+
+@pytest.mark.parametrize(
+    ("method", "arg"),
+    [("add_lora", "lora-request"), ("remove_lora", 7), ("pin_lora", 7)],
+)
+def test_lora_rpcs_gather_after_the_executor_call(method, arg):
+    """Adapter changes on an idle engine have no step to ring the doorbell,
+    so the rpc itself triggers the gather, after the executor mutation."""
+    event = LoRALoadEvent(cpu_adapters=["alpha"])
+    calls: list[tuple] = []
+
+    def executor_op(value):
+        calls.append((method, value))
+        return "executor-result"
+
+    def collective_rpc(name):
+        calls.append(("collective_rpc", name))
+        return [[event]]
+
+    engine_core = _bare_engine_core()
+    engine_core.model_executor = SimpleNamespace(
+        collective_rpc=collective_rpc, **{method: executor_op}
+    )
+
+    assert getattr(engine_core, method)(arg) == "executor-result"
+    assert calls == [(method, arg), ("collective_rpc", "take_notifications")]
+
+    outputs: dict[int, EngineCoreOutputs] = {}
+    engine_core._flush_notifications(outputs)
+    assert outputs[0].engine_notifications == [event]
