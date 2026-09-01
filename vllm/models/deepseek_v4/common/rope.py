@@ -28,20 +28,15 @@ def build_deepseek_v4_rope(
     rope_parameters["rope_theta"] = (
         config.compress_rope_theta if compress_ratio > 1 else config.rope_theta
     )
-    if compress_ratio > 1:
+    if compress_ratio > 1 and rope_parameters["rope_type"] != "default":
         # YaRN applies only to compressor (CSA/HCA) layers.
-        if rope_parameters["rope_type"] != "default":
-            rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
-            )
+        rope_parameters["rope_type"] = (
+            "deepseek_yarn"
+            if rope_parameters.get("apply_yarn_scaling", True)
+            else "deepseek_llama_scaling"
+        )
     else:
         # Sliding-window layers use plain RoPE (theta=rope_theta, no YaRN).
-        # factor=1.0 makes the deepseek yarn inv_freq an exact identity while
-        # keeping the fp32 cos_sin_cache layout the fused kernels require.
-        # original_max_position_embeddings is overridden so the cache covers
-        # max_position_embeddings positions (cache len = original * factor).
         rope_parameters["rope_type"] = "deepseek_yarn"
         rope_parameters["factor"] = 1.0
         rope_parameters["original_max_position_embeddings"] = max_position_embeddings
