@@ -21,6 +21,7 @@ from pydantic import (
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
+    BadWordsParam,
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
@@ -321,7 +322,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     allowed_token_ids: list[int] | None = None
-    bad_words: list[str] = Field(default_factory=list)
+    bad_words: BadWordsParam = Field(default_factory=list)
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]

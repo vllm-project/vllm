@@ -31,6 +31,10 @@ StopTokenIdsParam: TypeAlias = (
     Annotated[list[int], Field(max_length=envs.VLLM_MAX_STOP_TOKEN_IDS)] | None
 )
 
+BadWordsParam: TypeAlias = (
+    Annotated[list[str], Field(max_length=envs.VLLM_MAX_NUM_BAD_WORDS)] | None
+)
+
 # `top_logprobs` is nullable in the OpenAI spec; null means the same as omitted.
 TopLogprobsParam: TypeAlias = Annotated[
     int,
