@@ -35,7 +35,7 @@ class _PendingPleOffloadRequest:
     """Bind request metadata to its MRV2 D2H completion event."""
 
     request: PleOffloadRequest
-    d2h_done_event: torch.cuda.Event | None
+    d2h_done_event: torch.cuda.Event
 
 
 def _cuda_check(result: Any, operation: str) -> Any:
@@ -47,10 +47,7 @@ def _cuda_check(result: Any, operation: str) -> Any:
 
 
 class PleOffloadConnector:
-    """Connect a GPU runner to the shared PLE CPU worker.
-
-    MRV1 and MRV2 share the same CPU-input and CUDA-output IPC protocol.
-    """
+    """Connect a model runner V2 GPU worker to the PLE CPU worker."""
 
     def __init__(
         self,
@@ -68,8 +65,7 @@ class PleOffloadConnector:
         self.tp_rank = get_tp_group().rank_in_group
         self._layers = self._setup_layers(vllm_config, model)
 
-        # Both runner paths stage into the same shared buffers. TP0 registers
-        # them with CUDA so MRV2 can use asynchronous D2H copies.
+        # TP0 registers shared buffers with CUDA for asynchronous D2H copies.
         scheduler_config = vllm_config.scheduler_config
         self._input_ids_buf = torch.empty(
             scheduler_config.max_num_batched_tokens,
@@ -97,15 +93,11 @@ class PleOffloadConnector:
         self._input_ids_source = input_ids_source
         self._query_start_loc_source = query_start_loc_source
         self._ngram_context_source = ngram_context_source
-        self._uses_cuda_inputs = self._input_ids_source.is_cuda
         self._validate_input_sources()
 
         self._pinned_input_buffers: list[torch.Tensor] = []
-        request_queue_size = (
-            vllm_config.max_concurrent_batches if self._uses_cuda_inputs else 1
-        )
         self._request_queue: queue.Queue[_PendingPleOffloadRequest | None] = (
-            queue.Queue(maxsize=request_queue_size)
+            queue.Queue(maxsize=vllm_config.max_concurrent_batches)
         )
         self._request_thread: threading.Thread | None = None
         self._request_thread_ready = threading.Event()
@@ -124,12 +116,11 @@ class PleOffloadConnector:
                 # sharing strategy, so register only the final addresses.
                 with torch.accelerator.device_index(self.device.index):
                     self._pin_input_buffers()
-                    if self._uses_cuda_inputs:
-                        self._d2h_event_pool = queue.Queue(
-                            maxsize=vllm_config.max_concurrent_batches
-                        )
-                        for _ in range(vllm_config.max_concurrent_batches):
-                            self._d2h_event_pool.put_nowait(torch.cuda.Event())
+                    self._d2h_event_pool = queue.Queue(
+                        maxsize=vllm_config.max_concurrent_batches
+                    )
+                    for _ in range(vllm_config.max_concurrent_batches):
+                        self._d2h_event_pool.put_nowait(torch.cuda.Event())
                 self._start_request_thread(ipc_addr)
         except Exception:
             self.close()
@@ -291,40 +282,16 @@ class PleOffloadConnector:
         request = pending.request
         event_pool = self._d2h_event_pool
         event = pending.d2h_done_event
-        if self._uses_cuda_inputs:
-            assert event_pool is not None, "PLE D2H event pool is not initialized"
-            assert event is not None, "MRV2 request is missing its D2H event"
-            with (
-                torch.accelerator.device_index(self.device.index),
-                torch.cuda.nvtx.range("ple_offload.wait_d2h"),
-            ):
-                event.synchronize()
-        else:
-            assert pending.d2h_done_event is None
-            self._copy_cpu_inputs(request)
+        assert event_pool is not None, "PLE D2H event pool is not initialized"
+        with (
+            torch.accelerator.device_index(self.device.index),
+            torch.cuda.nvtx.range("ple_offload.wait_d2h"),
+        ):
+            event.synchronize()
 
         with torch.cuda.nvtx.range("ple_offload.send_request"):
             socket.send(msgspec.msgpack.encode(request))
-        if event is not None:
-            assert event_pool is not None
-            event_pool.put_nowait(event)
-
-    def _copy_cpu_inputs(self, request: PleOffloadRequest) -> None:
-        """Stage MRV1's existing CPU mirrors in the notifier thread."""
-        num_tokens = request.num_tokens
-        num_reqs = request.num_reqs
-        with torch.cuda.nvtx.range("ple_offload.copy_input_ids"):
-            self._input_ids_buf[:num_tokens].copy_(self._input_ids_source[:num_tokens])
-        with torch.cuda.nvtx.range("ple_offload.copy_query_start_loc"):
-            self._query_start_loc_buf[: num_reqs + 1].copy_(
-                self._query_start_loc_source[: num_reqs + 1]
-            )
-        if self._ngram_context_buf is not None:
-            assert self._ngram_context_source is not None
-            with torch.cuda.nvtx.range("ple_offload.copy_ngram_context"):
-                self._ngram_context_buf[:num_reqs].copy_(
-                    self._ngram_context_source[:num_reqs]
-                )
+        event_pool.put_nowait(event)
 
     def _validate_input_sources(self) -> None:
         """Validate fixed runner sources against shared input buffers."""
@@ -348,10 +315,9 @@ class PleOffloadConnector:
                 )
             )
 
-        expected_device = self.device if self._uses_cuda_inputs else torch.device("cpu")
         for name, source, buffer in sources:
             if (
-                source.device != expected_device
+                source.device != self.device
                 or source.dtype != buffer.dtype
                 or source.ndim != buffer.ndim
                 or source.shape[0] < buffer.shape[0]
@@ -364,7 +330,7 @@ class PleOffloadConnector:
         request: PleOffloadRequest,
         d2h_done_event: torch.cuda.Event,
     ) -> None:
-        """Stage MRV2 inputs on the model stream and record completion."""
+        """Stage inputs on the model stream and record D2H completion."""
         with torch.accelerator.device_index(self.device.index):
             stream = torch.cuda.current_stream(self.device)
             with torch.cuda.nvtx.range("ple_offload.copy_input_ids"):
@@ -402,18 +368,14 @@ class PleOffloadConnector:
             num_tokens=num_tokens,
             num_reqs=num_reqs,
         )
-        d2h_done_event = None
-        if self._uses_cuda_inputs:
-            assert self._d2h_event_pool is not None, (
-                "PLE D2H event pool is not initialized"
-            )
-            try:
-                d2h_done_event = self._d2h_event_pool.get_nowait()
-            except queue.Empty as exc:
-                raise RuntimeError(
-                    "PLE has more MRV2 requests than configured concurrent batches"
-                ) from exc
-            self._enqueue_cuda_inputs(request, d2h_done_event)
+        assert self._d2h_event_pool is not None, "PLE D2H event pool is not initialized"
+        try:
+            d2h_done_event = self._d2h_event_pool.get_nowait()
+        except queue.Empty as exc:
+            raise RuntimeError(
+                "PLE has more requests than configured concurrent batches"
+            ) from exc
+        self._enqueue_cuda_inputs(request, d2h_done_event)
         self._request_queue.put_nowait(
             _PendingPleOffloadRequest(request, d2h_done_event)
         )

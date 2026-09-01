@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import queue
+import threading
 from contextlib import nullcontext
+from multiprocessing.reduction import ForkingPickler
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import msgspec
 import pytest
 import torch
+import torch.multiprocessing as torch_mp
 
 import vllm.envs as envs
+import vllm.v1.ple_offload.connector as ple_offload_connector_module
 import vllm.v1.worker.gpu_worker as gpu_worker_module
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.model_executor.layers import ple_offload_layer
@@ -181,6 +187,153 @@ def test_ple_connector_initializes_metadata_only_for_dummy_load(
     assert list(layers) == ["ple"]
 
 
+def test_ple_connector_rejects_cpu_input_sources() -> None:
+    """Require model runner V2 CUDA inputs for asynchronous staging."""
+    connector = PleOffloadConnector.__new__(PleOffloadConnector)
+    connector.device = torch.device("cuda:0")
+    connector._input_ids_buf = torch.empty(4, dtype=torch.int32)
+    connector._query_start_loc_buf = torch.empty(3, dtype=torch.int32)
+    connector._ngram_context_buf = None
+    connector._input_ids_source = torch.empty(4, dtype=torch.int32)
+    connector._query_start_loc_source = torch.empty(3, dtype=torch.int32)
+    connector._ngram_context_source = None
+
+    with pytest.raises(ValueError, match="PLE input_ids source is incompatible"):
+        connector._validate_input_sources()
+
+
+def test_ple_offload_uses_event_per_inflight_batch() -> None:
+    """Keep async batches from overwriting each other's event state."""
+    connector = PleOffloadConnector.__new__(PleOffloadConnector)
+    connector.tp_rank = 0
+    connector.dp_rank = 0
+    connector._request_queue = queue.Queue(maxsize=2)
+    connector._d2h_event_pool = queue.Queue(maxsize=2)
+    first_event = Mock()
+    second_event = Mock()
+    connector._d2h_event_pool.put_nowait(first_event)
+    connector._d2h_event_pool.put_nowait(second_event)
+    enqueue_cuda_inputs = Mock()
+    connector._enqueue_cuda_inputs = enqueue_cuda_inputs  # type: ignore[method-assign]
+
+    connector._launch(num_reqs=2, num_tokens=4)
+    connector._launch(num_reqs=1, num_tokens=2)
+
+    first_pending = connector._request_queue.get_nowait()
+    second_pending = connector._request_queue.get_nowait()
+    assert first_pending is not None
+    assert second_pending is not None
+    assert first_pending.d2h_done_event is first_event
+    assert second_pending.d2h_done_event is second_event
+    assert first_pending.request.num_tokens == 4
+    assert second_pending.request.num_tokens == 2
+    enqueue_calls = enqueue_cuda_inputs.call_args_list
+    assert enqueue_calls[0].args[1] is first_event
+    assert enqueue_calls[1].args[1] is second_event
+    assert connector._d2h_event_pool.empty()
+    with pytest.raises(RuntimeError, match="configured concurrent batches"):
+        connector._launch(num_reqs=1, num_tokens=1)
+
+    connector.tp_rank = 1
+    connector._launch(num_reqs=1, num_tokens=1)
+    assert enqueue_cuda_inputs.call_count == 2
+    assert connector._request_queue.empty()
+
+
+def test_ple_offload_request_thread_failure_exits_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Treat a request-thread failure as a fatal worker error."""
+    connector = PleOffloadConnector.__new__(PleOffloadConnector)
+    connector._zmq_ctx = None
+    connector._request_thread_ready = threading.Event()
+    exit_mock = Mock(side_effect=SystemExit(1))
+    monkeypatch.setattr(ple_offload_connector_module.os, "_exit", exit_mock)
+
+    with pytest.raises(SystemExit):
+        connector._request_loop("inproc://unused")
+
+    exit_mock.assert_called_once_with(1)
+
+
+@pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU is required")
+def test_ple_offload_copies_into_pinned_shared_buffers() -> None:
+    """Keep D2H asynchronous without a second CPU staging buffer."""
+    socket = Mock()
+    connector = PleOffloadConnector.__new__(PleOffloadConnector)
+    connector.device = torch.device("cuda:0")
+    connector.tp_rank = 0
+    connector.dp_rank = 0
+    original_strategy = torch_mp.get_sharing_strategy()
+    try:
+        torch_mp.set_sharing_strategy("file_descriptor")
+        connector._input_ids_buf = torch.full(
+            (4,), -99, dtype=torch.int32
+        ).share_memory_()
+        connector._query_start_loc_buf = torch.full(
+            (3,), -99, dtype=torch.int32
+        ).share_memory_()
+        connector._ngram_context_buf = torch.full(
+            (2, 3), -99, dtype=torch.int32
+        ).share_memory_()
+        input_buffers = (
+            connector._input_ids_buf,
+            connector._query_start_loc_buf,
+            connector._ngram_context_buf,
+        )
+        initial_ptrs = tuple(buffer.data_ptr() for buffer in input_buffers)
+
+        torch_mp.set_sharing_strategy("file_system")
+        ForkingPickler.dumps(input_buffers)
+    finally:
+        torch_mp.set_sharing_strategy(original_strategy)
+    final_ptrs = tuple(buffer.data_ptr() for buffer in input_buffers)
+    assert final_ptrs != initial_ptrs
+
+    connector._pinned_input_buffers = []
+    connector._request_queue = queue.Queue(maxsize=2)
+
+    with torch.accelerator.device_index(connector.device.index):
+        connector._input_ids_source = torch.tensor(
+            [7, -1, 11, -1], dtype=torch.int32, device=connector.device
+        )
+        connector._query_start_loc_source = torch.tensor(
+            [0, 2, 4], dtype=torch.int32, device=connector.device
+        )
+        connector._ngram_context_source = torch.tensor(
+            [[1, 2, 3], [4, 5, 6]],
+            dtype=torch.int32,
+            device=connector.device,
+        )
+        connector._validate_input_sources()
+        connector._pin_input_buffers()
+        assert (
+            tuple(buffer.data_ptr() for buffer in connector._pinned_input_buffers)
+            == final_ptrs
+        )
+        connector._d2h_event_pool = queue.Queue(maxsize=2)
+        connector._d2h_event_pool.put_nowait(torch.cuda.Event())
+        connector._d2h_event_pool.put_nowait(torch.cuda.Event())
+        try:
+            connector._launch(num_reqs=2, num_tokens=4)
+
+            request = connector._request_queue.get_nowait()
+            assert request is not None
+            connector._process_request(request, socket)
+
+            assert connector._input_ids_buf.tolist() == [7, -1, 11, -1]
+            assert connector._query_start_loc_buf.tolist() == [0, 2, 4]
+            assert connector._ngram_context_buf.tolist() == [
+                [1, 2, 3],
+                [4, 5, 6],
+            ]
+            assert connector._d2h_event_pool.qsize() == 2
+            socket.send.assert_called_once()
+        finally:
+            torch.accelerator.synchronize(connector.device)
+            connector._unpin_input_buffers()
+
+
 def test_ple_offload_wait_only_waits_for_done(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -312,21 +465,28 @@ def test_ple_offload_requires_ple_layers(
 
 
 @pytest.mark.parametrize(
-    ("architecture", "enable_expert_parallel", "unsupported_setting"),
+    (
+        "architecture",
+        "use_v2_model_runner",
+        "enable_expert_parallel",
+        "unsupported_setting",
+    ),
     [
-        ("Qwen4ExpForCausalLM", False, None),
-        ("Qwen4ExpForConditionalGeneration", True, None),
-        ("UnsupportedArchitecture", True, "architecture"),
+        ("Qwen4ExpForCausalLM", True, False, None),
+        ("Qwen4ExpForConditionalGeneration", True, True, None),
+        ("UnsupportedArchitecture", True, True, "architecture"),
+        ("Qwen4ExpForCausalLM", False, False, "model runner V1"),
     ],
 )
 def test_ple_offload_accepts_supported_configurations(
     monkeypatch: pytest.MonkeyPatch,
     architecture: str,
+    use_v2_model_runner: bool,
     enable_expert_parallel: bool,
     unsupported_setting: str | None,
 ) -> None:
     worker = Worker.__new__(Worker)
-    worker.use_v2_model_runner = True
+    worker.use_v2_model_runner = use_v2_model_runner
     worker.parallel_config = SimpleNamespace(
         distributed_executor_backend="mp",
         nnodes=1,

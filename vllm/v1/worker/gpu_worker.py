@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import regex as re
@@ -137,6 +137,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -246,6 +247,8 @@ class Worker(WorkerBase):
         """Reject unsupported PLE offload execution modes."""
         parallel_config = self.parallel_config
         unsupported = []
+        if not self.use_v2_model_runner:
+            unsupported.append("model runner V1")
         if not current_platform.is_cuda():
             unsupported.append(f"device={current_platform.device_type}")
         if parallel_config.nnodes != 1:
@@ -599,11 +602,10 @@ class Worker(WorkerBase):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
         # Model loading constructs the PLE placeholders whose CUDA buffers are
-        # registered by the shared MRV1/MRV2 offload client.
+        # registered by the model runner V2 offload client.
         if self._ple_offload_enabled:
-            self.model_runner._setup_ple_offload(
-                self.parallel_config._ple_offload_ipc_path
-            )
+            model_runner = cast("GPUModelRunnerV2", self.model_runner)
+            model_runner._setup_ple_offload(self.parallel_config._ple_offload_ipc_path)
 
         if self.vllm_config.weight_transfer_config is not None:
             self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
