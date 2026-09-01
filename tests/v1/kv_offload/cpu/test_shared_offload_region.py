@@ -42,6 +42,7 @@ def _make_region(
     cpu_page_size: int = PAGE_SIZE,
     num_workers: int = 1,
     rank: int = 0,
+    barrier=None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
@@ -50,6 +51,7 @@ def _make_region(
         rank=rank,
         kv_bytes_per_block=num_workers * cpu_page_size,
         cpu_page_size=cpu_page_size,
+        barrier=barrier,
     )
 
 
@@ -173,12 +175,46 @@ def _mp_race_construct_and_write(
             kv_bytes_per_block=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
         )
-        t = region.create_next_view(cpu_page_size)
+        t = region.create_next_worker_view(cpu_page_size)
         t[:, :] = fill_value
         done_queue.put({"rank": rank, "error": None})
         cleanup_queue.get()  # wait for parent's verification to finish
         del t  # release view before cleanup to avoid BufferError
         region.cleanup()
+    except Exception as e:
+        done_queue.put({"rank": rank, "error": repr(e)})
+
+
+def _mp_barrier_construct_and_hold(
+    engine_id: str,
+    rank: int,
+    num_workers: int,
+    barrier,
+    fill_value: int,
+    done_queue,
+) -> None:
+    """Construct with a real cross-process barrier, write, then hold the
+    mapping (no cleanup) until the parent SIGKILLs this process."""
+    try:
+        region = SharedOffloadRegion(
+            engine_id=engine_id,
+            num_blocks=2,
+            rank=rank,
+            kv_bytes_per_block=num_workers * PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            barrier=lambda: barrier.wait(30),
+        )
+        t = region.create_next_worker_view(PAGE_SIZE)
+        t[:, :] = fill_value
+        done_queue.put(
+            {
+                "rank": rank,
+                "error": None,
+                "inode": os.fstat(region.fd).st_ino,
+                "path_exists": os.path.exists(region.mmap_path),
+            }
+        )
+        time.sleep(60)  # hold the mapping until killed
     except Exception as e:
         done_queue.put({"rank": rank, "error": repr(e)})
 
@@ -190,110 +226,112 @@ def iid():
 
 
 # ---------------------------------------------------------------------------
-# create_next_view — shape, stride and storage offset
+# create_next_worker_view — shape, stride and storage offset
 # ---------------------------------------------------------------------------
 
 
-def test_create_next_view_shape_and_stride(iid):
+def test_create_next_worker_view_shape_and_stride(iid):
     """Returned tensor must have shape (num_blocks, tensor_page_size) and
     stride (row_stride, 1) where row_stride = cpu_page_size * num_workers."""
     with _region(iid, num_blocks=4, cpu_page_size=2 * PAGE_SIZE) as r:
-        t = r.create_next_view(PAGE_SIZE)
+        t = r.create_next_worker_view(PAGE_SIZE)
         assert t.shape == (4, PAGE_SIZE)
         # num_workers=1 → row_stride = cpu_page_size
         assert t.stride() == (2 * PAGE_SIZE, 1)
         del t
 
 
-def test_create_next_view_storage_offset_rank0(iid):
+def test_create_next_worker_view_storage_offset_rank0(iid):
     """rank=0 worker's first tensor must start at byte 0 of the mmap."""
     with _region(iid, cpu_page_size=PAGE_SIZE, num_workers=2, rank=0) as r:
-        t = r.create_next_view(PAGE_SIZE)
+        t = r.create_next_worker_view(PAGE_SIZE)
         assert t.data_ptr() == r._base.data_ptr()  # storage_offset == 0
         del t
 
 
-def test_create_next_view_storage_offset_rank1(iid):
+def test_create_next_worker_view_storage_offset_rank1(iid):
     """rank=1 worker's first tensor must start cpu_page_size bytes into the mmap."""
     with _multi_region(iid, num_workers=2, num_blocks=4) as (r0, r1):
-        t1 = r1.create_next_view(PAGE_SIZE)
+        t1 = r1.create_next_worker_view(PAGE_SIZE)
         assert t1.data_ptr() == r1._base.data_ptr() + PAGE_SIZE
         del t1
 
 
-def test_create_next_view_row_stride_with_multiple_workers(iid):
+def test_create_next_worker_view_row_stride_with_multiple_workers(iid):
     """With num_workers=4, row_stride must be 4 * cpu_page_size."""
     with _region(iid, num_blocks=2, num_workers=4) as r:
-        t = r.create_next_view(PAGE_SIZE)
+        t = r.create_next_worker_view(PAGE_SIZE)
         assert t.stride(0) == 4 * PAGE_SIZE
         del t
 
 
 # ---------------------------------------------------------------------------
-# create_next_view — cursor advancement
+# create_next_worker_view — cursor advancement
 # ---------------------------------------------------------------------------
 
 
-def test_create_next_view_cursor_advances(iid):
-    """Each call to create_next_view must advance _worker_offset by tensor_page_size."""
+def test_create_next_worker_view_cursor_advances(iid):
+    """Each create_next_worker_view call must advance _worker_offset by
+    tensor_page_size."""
     with _region(iid, cpu_page_size=3 * PAGE_SIZE) as r:
         assert r._worker_offset == 0
-        r.create_next_view(PAGE_SIZE)
+        r.create_next_worker_view(PAGE_SIZE)
         assert r._worker_offset == PAGE_SIZE
-        r.create_next_view(PAGE_SIZE)
+        r.create_next_worker_view(PAGE_SIZE)
         assert r._worker_offset == 2 * PAGE_SIZE
-        r.create_next_view(PAGE_SIZE)
+        r.create_next_worker_view(PAGE_SIZE)
         assert r._worker_offset == 3 * PAGE_SIZE  # exactly at area end
 
 
-def test_create_next_view_exact_fill_succeeds(iid):
+def test_create_next_worker_view_exact_fill_succeeds(iid):
     """Allocations whose total exactly equals cpu_page_size must all succeed."""
     with _region(iid, cpu_page_size=2 * PAGE_SIZE) as r:
-        r.create_next_view(PAGE_SIZE)  # first half
-        r.create_next_view(PAGE_SIZE)  # fills to area end — must not raise
+        r.create_next_worker_view(PAGE_SIZE)  # first half
+        r.create_next_worker_view(PAGE_SIZE)  # fills to area end — must not raise
 
 
 # ---------------------------------------------------------------------------
-# create_next_view — overflow guard
+# create_next_worker_view — overflow guard
 # ---------------------------------------------------------------------------
 
 
-def test_create_next_view_single_overflow_raises(iid):
+def test_create_next_worker_view_single_overflow_raises(iid):
     """A single allocation larger than cpu_page_size must raise AssertionError."""
     with (
         _region(iid) as r,
         pytest.raises(AssertionError, match="exceeds worker area end"),
     ):
-        r.create_next_view(PAGE_SIZE + 1)
+        r.create_next_worker_view(PAGE_SIZE + 1)
 
 
-def test_create_next_view_cumulative_overflow_raises(iid):
+def test_create_next_worker_view_cumulative_overflow_raises(iid):
     """Successive allocations that cumulatively exceed cpu_page_size must raise."""
     with _region(iid, cpu_page_size=2 * PAGE_SIZE) as r:
-        r.create_next_view(PAGE_SIZE)  # ok — half used
-        r.create_next_view(PAGE_SIZE)  # ok — full
+        r.create_next_worker_view(PAGE_SIZE)  # ok — half used
+        r.create_next_worker_view(PAGE_SIZE)  # ok — full
         with pytest.raises(AssertionError, match="exceeds worker area end"):
-            r.create_next_view(1)  # one byte too many
+            r.create_next_worker_view(1)  # one byte too many
 
 
-def test_create_next_view_overflow_does_not_mutate_cursor(iid):
-    """A failed create_next_view must leave _worker_offset unchanged."""
+def test_create_next_worker_view_overflow_does_not_mutate_cursor(iid):
+    """A failed create_next_worker_view must leave _worker_offset unchanged."""
     with _region(iid) as r:
         offset_before = r._worker_offset
         with pytest.raises(AssertionError):
-            r.create_next_view(PAGE_SIZE + 1)
+            r.create_next_worker_view(PAGE_SIZE + 1)
         assert r._worker_offset == offset_before
 
 
 # ---------------------------------------------------------------------------
-# create_next_view — data correctness and layout
+# create_next_worker_view — data correctness and layout
 # ---------------------------------------------------------------------------
 
 
-def test_create_next_view_write_visible_in_raw_mmap(iid):
-    """Writes into a create_next_view view must appear at the correct raw mmap offset"""
+def test_create_next_worker_view_write_visible_in_raw_mmap(iid):
+    """Writes into a create_next_worker_view view must appear at the correct
+    raw mmap offset"""
     with _region(iid, num_blocks=4) as r:
-        t = r.create_next_view(PAGE_SIZE)
+        t = r.create_next_worker_view(PAGE_SIZE)
         t[2, :] = 42  # write to block row 2
 
         raw = memoryview(r.mmap_obj)
@@ -303,11 +341,11 @@ def test_create_next_view_write_visible_in_raw_mmap(iid):
         del raw, t
 
 
-def test_create_next_view_multi_tensor_layout(iid):
+def test_create_next_worker_view_multi_tensor_layout(iid):
     """Two tensors from the same worker land at consecutive byte offsets per row."""
     with _region(iid, num_blocks=2, cpu_page_size=2 * PAGE_SIZE) as r:
-        ta = r.create_next_view(PAGE_SIZE)
-        tb = r.create_next_view(PAGE_SIZE)
+        ta = r.create_next_worker_view(PAGE_SIZE)
+        tb = r.create_next_worker_view(PAGE_SIZE)
 
         ta[:, :] = 1
         tb[:, :] = 2
@@ -322,8 +360,8 @@ def test_create_next_view_multi_tensor_layout(iid):
         del raw, ta, tb
 
 
-def test_create_next_view_multiprocess_slots(iid):
-    """Each worker process calls create_next_view and writes distinct data;
+def test_create_next_worker_view_multiprocess_slots(iid):
+    """Each worker process calls create_next_worker_view and writes distinct data;
     the parent verifies each slot lands at the correct interleaved offset."""
     num_workers = 2
     num_blocks = 4
@@ -356,7 +394,7 @@ def test_create_next_view_multiprocess_slots(iid):
         )
         child.start()
 
-        t0 = region.create_next_view(PAGE_SIZE)
+        t0 = region.create_next_worker_view(PAGE_SIZE)
         t0[:, :] = 11
 
         result = done_queue.get(timeout=30)
@@ -379,13 +417,13 @@ def test_create_next_view_multiprocess_slots(iid):
         _cleanup_file(region.mmap_path)
 
 
-def test_create_next_view_worker_isolation(iid):
+def test_create_next_worker_view_worker_isolation(iid):
     """Writes by worker 0 must not affect worker 1's slot and vice versa."""
     num_workers = 2
     num_blocks = 4
     with _multi_region(iid, num_workers=num_workers, num_blocks=num_blocks) as regions:
-        t0 = regions[0].create_next_view(PAGE_SIZE)
-        t1 = regions[1].create_next_view(PAGE_SIZE)
+        t0 = regions[0].create_next_worker_view(PAGE_SIZE)
+        t1 = regions[1].create_next_worker_view(PAGE_SIZE)
 
         t0[:, :] = 11
         t1[:, :] = 22
@@ -712,14 +750,14 @@ def test_cleanup_idempotent(iid):
     r.cleanup()  # must be a no-op
 
 
-def test_cleanup_after_create_next_view_releases_mmap(iid):
-    """cleanup() must close the mmap even after create_next_view was called.
-    create_next_view returns a view that shares storage with _base; both must be
+def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
+    """cleanup() must close the mmap even after create_next_worker_view was called.
+    create_next_worker_view returns a view that shares storage with _base; both must be
     released before mmap.close() can succeed."""
     r = _make_region(iid)
     mmap_obj = r.mmap_obj
 
-    t = r.create_next_view(PAGE_SIZE)
+    t = r.create_next_worker_view(PAGE_SIZE)
     del t
 
     r.cleanup()
@@ -838,3 +876,122 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
 
     mock_unlink.assert_called_once_with(mmap_path)
     mock_close.assert_called_once_with(9999)
+
+
+# ---------------------------------------------------------------------------
+# Unlink-after-barrier — leak immunity to hard kills
+# ---------------------------------------------------------------------------
+
+
+def test_backing_file_unlinked_after_barrier(iid):
+    """The file must exist until the barrier releases (late joiners need the
+    name) and be gone right after, so no exit path can leak it."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    seen_at_barrier = []
+
+    region = _make_region(
+        iid, barrier=lambda: seen_at_barrier.append(os.path.exists(path))
+    )
+    try:
+        assert seen_at_barrier == [True], "file must exist during rendezvous"
+        assert not os.path.exists(path), "name must be dropped after the barrier"
+        assert region._creator is False, "nothing left for cleanup() to unlink"
+        t = region.create_next_worker_view(PAGE_SIZE)
+        t[:, :] = 7
+        assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
+        del t
+    finally:
+        region.cleanup()
+        _cleanup_file(path)
+
+
+def test_barrier_failure_unlinks_creator_and_raises(iid):
+    """A failed rendezvous must remove the creator's file and re-raise, not
+    leave a stub that wedges the next start in _wait_for_file_size."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    with pytest.raises(RuntimeError, match="peer died"):
+        _make_region(iid, barrier=MagicMock(side_effect=RuntimeError("peer died")))
+    assert not os.path.exists(path)
+
+
+def test_mp_barrier_unlinks_file_and_survives_sigkill(iid):
+    """With a real cross-process barrier every worker maps one shared inode,
+    the name is gone while they run, and SIGKILL leaks nothing."""
+    num_workers = 2
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    ctx = get_mp_context()
+    barrier = ctx.Barrier(num_workers)
+    done_queue = ctx.Queue()
+    procs = [
+        ctx.Process(
+            target=_mp_barrier_construct_and_hold,
+            args=(iid, rank, num_workers, barrier, rank + 1, done_queue),
+        )
+        for rank in range(num_workers)
+    ]
+    try:
+        for p in procs:
+            p.start()
+        results = [done_queue.get(timeout=30) for _ in range(num_workers)]
+        for r in results:
+            assert r["error"] is None, f"rank {r['rank']}: {r['error']}"
+        assert len({r["inode"] for r in results}) == 1, "workers split onto two files"
+        assert not any(r["path_exists"] for r in results)
+        assert not os.path.exists(path)
+    finally:
+        for p in procs:
+            p.kill()  # SIGKILL: no cleanup() runs
+            p.join(timeout=10)
+
+    assert not os.path.exists(path), "SIGKILL must not leak the file"
+    with _region(iid) as restarted:
+        assert restarted._creator is True, "restart must be able to create anew"
+
+
+def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch):
+    """A worker that dies before the rendezvous must still arrive at the
+    barrier, or its peers block in the collective until it times out."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    monkeypatch.setattr(
+        region,
+        "check_shm_free_space",
+        MagicMock(side_effect=RuntimeError("Insufficient space")),
+    )
+    barrier = MagicMock()
+
+    with pytest.raises(RuntimeError, match="Insufficient space"):
+        _make_region(iid, barrier=barrier)
+
+    barrier.assert_called_once_with()
+    assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+
+
+def test_mmap_failure_unlinks_creator_before_releasing_peers(iid, monkeypatch):
+    """A creator that fails after sizing the file must drop it before arriving
+    at the barrier, so the next start does not land on a stale file."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    monkeypatch.setattr("mmap.mmap", MagicMock(side_effect=OSError("mmap")))
+    seen_at_barrier = []
+
+    with pytest.raises(OSError, match="mmap"):
+        _make_region(iid, barrier=lambda: seen_at_barrier.append(os.path.exists(path)))
+
+    assert seen_at_barrier == [False], "file must be gone before peers release"
+
+
+def test_barrier_release_failure_keeps_original_error(iid, monkeypatch):
+    """When releasing the peers fails too, the setup error that explains the
+    failure must be the one that propagates."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    monkeypatch.setattr(
+        region,
+        "check_shm_free_space",
+        MagicMock(side_effect=RuntimeError("Insufficient space")),
+    )
+
+    with pytest.raises(RuntimeError, match="Insufficient space"):
+        _make_region(iid, barrier=MagicMock(side_effect=TimeoutError("barrier")))
+
+    assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")

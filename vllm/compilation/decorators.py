@@ -106,8 +106,10 @@ def support_torch_compile(
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None,
-    mark_unbacked_dims: dict[str, int | list[int]] | None,
+    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None = None,
+    mark_unbacked_dims: dict[str, int | list[int]] | None = None,
+    enable_if: Callable[[VllmConfig], bool] | None = None,
+    is_encoder: bool = False,
 ) -> Callable[[type[_T]], type[_T]]: ...
 
 
@@ -588,6 +590,15 @@ def _support_torch_compile(
             *args,
             **kwargs,
         )
+
+        # Tensors that enter the graph through the forward context rather than
+        # model args (e.g. the MoE padding mask) need their batch dim marked
+        # dynamic too, otherwise AOT-compiled artifacts bake a static guard
+        # for the compile-time batch size.
+        if is_forward_context_available():
+            is_padding = get_forward_context().is_padding
+            if is_padding is not None:
+                torch._dynamo.mark_dynamic(is_padding, 0)
 
         original_code_object = self.original_code_object()
         logger.debug("Start compiling function %s", original_code_object)
