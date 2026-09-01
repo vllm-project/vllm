@@ -1021,9 +1021,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         if alignment_tokens is None:
             # Fast path: when the coordinator imposes no alignment constraint.
             return None
-        assert alignment_tokens % kv_cache_spec.block_size == 0
-
         block_size = kv_cache_spec.block_size * dcp_world_size
+        assert alignment_tokens % block_size == 0
+
         # Contiguous blocks a hit needs at a boundary (incl. the EAGLE peek).
         need = cls._contiguous_blocks_for_hit(
             window_size=kv_cache_spec.sliding_window,
@@ -1496,7 +1496,10 @@ class MambaManager(SingleTypeKVCacheManager):
             # Dense caching (default) or no alignment constraint imposed.
             return None
         assert isinstance(kv_cache_spec, MambaSpec)
-        block_size = kv_cache_spec.block_size * dcp_world_size
+        # Mamba uses TP, not DCP: each rank holds the full recurrent state, so a
+        # state block spans kv_cache_spec.block_size tokens regardless of DCP.
+        assert dcp_world_size == 1, "DCP not support mamba now."
+        block_size = kv_cache_spec.block_size
         mask = [False] * (end_block - start_block)
 
         # (1) Segment-boundary states. A Mamba hit needs exactly the single
