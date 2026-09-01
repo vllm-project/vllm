@@ -98,7 +98,9 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        return True
+        # apply() passes select_experts' global ids straight to the kernel, so
+        # every expert has to be resident on the rank.
+        return not moe_parallel_config.use_ep
 
     @staticmethod
     def _supports_quant_scheme(
