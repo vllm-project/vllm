@@ -110,12 +110,7 @@ def _is_compatible(
 
 
 def has_compiled_submodule(model: nn.Module) -> bool:
-    """Whether any submodule is an active @support_torch_compile module.
-
-    The decorator applies to an inner module (e.g. LlamaModel inside
-    LlamaForCausalLM); decorated-but-skipped modules (do_not_compile, e.g.
-    enable_if=False) produce no CUDAGraphWrapper and don't count.
-    """
+    """Whether any submodule is an active @support_torch_compile module."""
     return any(
         isinstance(m, TorchCompileWithNoGuardsWrapper)
         and not getattr(m, "do_not_compile", True)
