@@ -69,7 +69,7 @@ logger = init_logger(__name__)
 # TODO(rocm): These models are either unsupported by MRV2 or slower with
 # MRV2 on AMD GPUs.
 ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
-    {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM"}
+    {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM", "GlmMoeDsaForCausalLM"}
 )
 
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
@@ -78,7 +78,11 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
         "DeepSeekV4MTPModel",
+        "Dots3NoteForCausalLM",
+        "Dots3NoteMTPModel",
         "GlmMoeDsaForCausalLM",
+        "HYV4ForCausalLM",
+        "HYV4MTPModel",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
         "KimiK3ForConditionalGeneration",
@@ -96,10 +100,10 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES - {
-            "DeepseekV32ForCausalLM",
-            "DeepseekV32MTPModel",
-        }
+        # Breakable CUDA graphs currently regress performance on ROCm, so no
+        # architecture opts in by default here. Users can still force it with
+        # VLLM_USE_BREAKABLE_CUDAGRAPH=1.
+        return frozenset()
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
@@ -434,7 +438,7 @@ class VllmConfig:
     remaining requests are aborted once the timeout is reached.
     """
 
-    def compute_hash(self) -> str:
+    def compute_hash(self, include_version: bool = True) -> str:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -445,14 +449,18 @@ class VllmConfig:
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
+
+        Args:
+            include_version: Include the vLLM version in the hash.
         """
         factors: list[Any] = []
 
         # summarize vllm config
         vllm_factors: list[Any] = []
-        from vllm import __version__
+        if include_version:
+            from vllm import __version__
 
-        vllm_factors.append(__version__)
+            vllm_factors.append(__version__)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
             if (
@@ -615,6 +623,27 @@ class VllmConfig:
             # num_speculative_tokens lookahead slots.
             return self.num_speculative_tokens
         return 0
+
+    @property
+    def uniform_decode_query_len(self) -> int:
+        """Query length of every request in a uniform decode batch.
+
+        A decode step submits one query for the newly sampled token plus one
+        for each draft token, so the widest uniform decode batch the scheduler
+        can build is `max_num_seqs * uniform_decode_query_len` tokens. Anything
+        that has to cover a decode batch reads this, so the sizing rule cannot
+        drift between the places that apply it.
+
+        This deliberately does not derive from the KV slots a drafter reserves
+        past the target's query range, which is a *reservation* contract rather
+        than a query-length one. The two do not differ by a constant: DFlash
+        reserves `num_speculative_tokens + 1` slots yet still verifies `1 +
+        num_speculative_tokens` queries, while EAGLE reserves
+        `num_speculative_tokens` and verifies the same `1 + n`. Deriving one
+        from the other would under-size EAGLE by a full request width, which is
+        the failure this property exists to prevent.
+        """
+        return 1 + self.num_speculative_tokens
 
     @property
     def use_v2_model_runner(self) -> bool:
@@ -1118,6 +1147,30 @@ class VllmConfig:
         self._verify_sampling_replay_config()
         self._verify_trace_replay_config()
 
+        # A NIXL side is either fully replicated or fully DCP-sharded; MLA only.
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.has_connector("NixlConnector")
+        ):
+            assert self.parallel_config.prefill_context_parallel_size == 1, (
+                "NIXL does not support prefill context parallelism."
+            )
+            dcp_size = self.parallel_config.decode_context_parallel_size
+            tp_size = self.parallel_config.tensor_parallel_size
+            assert dcp_size in (1, tp_size), (
+                f"decode_context_parallel_size={dcp_size} must be 1 or equal "
+                f"to tensor_parallel_size={tp_size} when using NixlConnector."
+            )
+            if self.model_config is not None:
+                assert self.model_config.use_mla or dcp_size == 1, (
+                    "PD with decode_context_parallel_size > 1 is only "
+                    "supported for MLA models."
+                )
+                assert not (self.model_config.is_hybrid and dcp_size > 1), (
+                    "PD with decode_context_parallel_size > 1 is not "
+                    "supported for hybrid Mamba/SSM models."
+                )
+
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
 
@@ -1607,6 +1660,7 @@ class VllmConfig:
             self._validate_v1_model_runner()
 
         self._validate_batch_sharded_sampling()
+        self._validate_adaptive_verification()
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
@@ -1894,8 +1948,10 @@ class VllmConfig:
 
         ```python
         default_max_graph_size = 1024 if is_data_center_blackwell else 512
-        max_graph_size = min(max_num_seqs * decode_query_len * 2,
-                             default_max_graph_size)
+        decode_query_len = self.uniform_decode_query_len
+        max_graph_size = min(
+            max_num_seqs * decode_query_len * 2, default_max_graph_size
+        )
         # 1, 2, 4, then multiples of 8 up to 256 and then multiples of 16
         # up to max_graph_size
         cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
@@ -1903,7 +1959,9 @@ class VllmConfig:
 
         `max_num_batched_tokens` is also appended to the list if it fits
         within `max_cudagraph_capture_size`, so the max batch size is captured
-        even when off-stride.
+        even when off-stride. Uniform decode sizes are appended when they fit
+        within the platform's default capture ceiling, since they need not land
+        on an 8- or 16-token stride.
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
         will be the final sizes to capture cudagraph (in ascending order).
@@ -1942,17 +2000,99 @@ class VllmConfig:
             max_cudagraph_capture_size = (
                 self.compilation_config.max_cudagraph_capture_size
             )
+            # Decode sizes to cover, in tokens. Populated only when a request
+            # is more than one token wide and only when the default is computed
+            # here, so an explicit capture range is left exactly as configured.
+            uniform_decode_sizes: list[int] = []
             if max_cudagraph_capture_size is None:
                 from vllm.platforms import current_platform
 
-                decode_query_len = 1 + self.num_speculative_tokens
                 default_max_graph_size = (
                     1024 if current_platform.is_device_capability_family(100) else 512
                 )
+                decode_query_len = self.uniform_decode_query_len
+                max_num_seqs = self.scheduler_config.max_num_seqs
                 max_cudagraph_capture_size = min(
-                    self.scheduler_config.max_num_seqs * decode_query_len * 2,
-                    default_max_graph_size,
+                    max_num_seqs * decode_query_len * 2, default_max_graph_size
                 )
+                if decode_query_len > 1:
+                    # A uniform decode batch is decode_query_len tokens per
+                    # request, so the widest one is far outside this ceiling.
+                    # Coverage comes from appending the decode sizes rather than
+                    # extending the token-strided grid. Extending that grid to
+                    # the widest decode size produces 581 sizes at
+                    # max_num_seqs=512 and 16 draft tokens, versus 100 with the
+                    # request-count grid.
+                    #
+                    # The grid would not buy decode coverage anyway. Dispatch
+                    # requires an exact multiple of decode_query_len, so a
+                    # token-strided entry is only usable when it happens to be
+                    # one; at query length 17 a captured 560 rounds to 561 and
+                    # is rejected. Scaling a request-count grid keeps every
+                    # entry usable and the count comparable to the non-
+                    # speculative case.
+                    def request_counts(max_reqs: int) -> list[int]:
+                        # At most the platform default number of requests,
+                        # mirroring the one-token-per-request decode ceiling.
+                        max_reqs = min(max_reqs, default_max_graph_size)
+                        counts = [n for n in (1, 2, 4) if n <= max_reqs]
+                        counts += list(range(8, min(max_reqs + 1, 256), 8))
+                        counts += list(range(256, max_reqs + 1, 16))
+                        return sorted(set(counts + [max_reqs]))
+
+                    # Dynamic speculative decoding picks the draft width from
+                    # the batch size, so a decode step is only uniform within a
+                    # tier and each tier needs its own sizes. Scaling by the
+                    # widest one alone leaves the narrower tiers short: the
+                    # manager rounds a capture size up to a multiple of the
+                    # tier's query length and drops it once the implied request
+                    # count exceeds max_num_seqs, so at query length 3 sizes
+                    # built from 17 stop covering at 227 of 256 requests.
+                    decode_tiers = [(decode_query_len, max_num_seqs)]
+                    speculative_config = self.speculative_config
+                    if (
+                        speculative_config is not None
+                        and speculative_config.uses_dynamic_speculative_decoding()
+                    ):
+                        from vllm.v1.spec_decode.dynamic.utils import (
+                            build_dynamic_sd_schedule_lookup,
+                        )
+
+                        schedule = (
+                            speculative_config.num_speculative_tokens_per_batch_size
+                        )
+                        assert schedule is not None
+                        # Read the tiers off the dense lookup the scheduler
+                        # runs on, so the clamp against num_speculative_tokens
+                        # and the carry-forward through gaps and the tail
+                        # cannot drift from it. Validation lives elsewhere; an
+                        # invalid schedule keeps the single-tier default.
+                        try:
+                            dense_schedule = build_dynamic_sd_schedule_lookup(
+                                schedule,
+                                vllm_max_batch_size=max_num_seqs,
+                                vllm_num_speculative_tokens=self.num_speculative_tokens,
+                            )
+                        except ValueError:
+                            pass
+                        else:
+                            # Ascending batch size, so the last write per
+                            # query length is the widest batch running at it.
+                            widest_batch: dict[int, int] = {}
+                            for batch_size, num_spec in enumerate(
+                                dense_schedule[1:], start=1
+                            ):
+                                widest_batch[num_spec + 1] = batch_size
+                            decode_tiers = list(widest_batch.items())
+
+                    uniform_decode_sizes = sorted(
+                        {
+                            n * query_len
+                            for query_len, tier_max_reqs in decode_tiers
+                            for n in request_counts(tier_max_reqs)
+                            if n * query_len <= max_cudagraph_capture_size
+                        }
+                    )
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
 
@@ -2000,6 +2140,12 @@ class VllmConfig:
                     and max_num_tokens not in cudagraph_capture_sizes
                 ):
                     cudagraph_capture_sizes.append(max_num_tokens)
+                # Preserve the platform's default capture ceiling. Larger
+                # uniform decode batches fall back to eager execution unless
+                # users explicitly configure wider capture sizes.
+                cudagraph_capture_sizes += [
+                    size for size in uniform_decode_sizes if size <= max_num_tokens
+                ]
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
@@ -2007,6 +2153,8 @@ class VllmConfig:
                 self.parallel_config.tensor_parallel_size > 1
                 and self.compilation_config.pass_config.enable_sp
             ):
+                # Sequence parallelism only captures TP-divisible sizes, so a
+                # wider non-divisible decode batch cannot be captured under SP.
                 cudagraph_capture_sizes = self.update_sizes_for_sequence_parallelism(
                     cudagraph_capture_sizes
                 )
@@ -2444,34 +2592,6 @@ class VllmConfig:
             ):
                 unsupported.append("EAGLE3 with pipeline parallelism")
 
-            if (
-                speculative_config.enable_adaptive_verification
-                and self.lora_config is not None
-            ):
-                # The per-token LoRA mapping is built from CPU placeholder boundaries,
-                # while the trimmed batch's true boundaries are decided on the GPU.
-                unsupported.append("adaptive verification with LoRA")
-
-            if (
-                speculative_config.enable_adaptive_verification
-                and self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-            ):
-                # The draft budget divides by step costs profiled from captured
-                # cudagraphs; eager execution captures none.
-                unsupported.append(
-                    "adaptive verification with enforce_eager/cudagraph_mode=none"
-                )
-
-            if (
-                speculative_config.enable_adaptive_verification
-                and self.parallel_config.pipeline_parallel_size > 1
-            ):
-                # Cost curves and confidences currently only exist on the last PP rank;
-                # earlier ranks would diverge on the trimmed batch shape.
-                # TODO: we should be able to support adaptive verification with PP by
-                # broadcasting the cost curves and confidences to all ranks.
-                unsupported.append("adaptive verification with pipeline parallelism")
-
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
 
@@ -2503,8 +2623,11 @@ class VllmConfig:
             unsupported.append("prefill context parallel")
 
         # DSpark is implemented only by the V2 GPU model runner.
-        if self.speculative_config and self.speculative_config.method == "dspark":
-            unsupported.append("dspark speculative decoding")
+        if self.speculative_config:
+            if self.speculative_config.method == "dspark":
+                unsupported.append("dspark speculative decoding")
+            if self.speculative_config.enable_adaptive_verification:
+                unsupported.append("adaptive draft verification")
 
         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only).
         if self._dflash_needs_multi_kv_group():
@@ -2523,6 +2646,36 @@ class VllmConfig:
             unsupported.append("batch-sharded sampling")
 
         return unsupported
+
+    def _validate_adaptive_verification(self) -> None:
+        spec_config = self.speculative_config
+        if not spec_config or not spec_config.enable_adaptive_verification:
+            return
+
+        if self.lora_config is not None:
+            # The per-token LoRA mapping is built from CPU placeholder boundaries,
+            # while the trimmed batch's true boundaries are decided on the GPU.
+            raise ValueError(
+                "Adaptive verification is not currently compatible with LoRA"
+            )
+
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+            # The draft budget divides by step costs profiled from captured
+            # cudagraphs; eager execution captures none.
+            raise ValueError(
+                "Adaptive verification is not currently compatible with "
+                "enforce_eager/cudagraph_mode=none"
+            )
+
+        if self.parallel_config.pipeline_parallel_size > 1:
+            # Cost curves and confidences currently only exist on the last PP rank;
+            # earlier ranks would diverge on the trimmed batch shape.
+            # TODO: we should be able to support adaptive verification with PP by
+            # broadcasting the cost curves and confidences to all ranks.
+            raise ValueError(
+                "Adaptive verification is not currently compatible "
+                "with pipeline parallelism"
+            )
 
     def _validate_batch_sharded_sampling(self) -> None:
         """Validate `enable_batch_sharded_sampling` against the rest of the config."""
@@ -2590,6 +2743,52 @@ class VllmConfig:
                 f"Model Runner V1 does not support: {', '.join(unsupported)}"
             )
 
+    def adjust_dcp_kv_cache_interleave_size(
+        self, kv_cache_config: "KVCacheConfig"
+    ) -> None:
+        """Normalize DCP interleave size against the resolved block_size for PD.
+
+        Called by each worker (via ensure_kv_transfer_initialized), once it knows its
+        own final block_size via kv_cache_config.
+        """
+        dcp_size = self.parallel_config.decode_context_parallel_size
+        if dcp_size <= 1:
+            return
+        # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
+        # scaling by dcp_size (we need the local block_size here).
+        local_block_size = min(
+            g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
+        )
+        if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
+            self.parallel_config.cp_kv_cache_interleave_size
+            != self.parallel_config.dcp_kv_cache_interleave_size
+        ):
+            self.parallel_config.cp_kv_cache_interleave_size = (
+                self.parallel_config.dcp_kv_cache_interleave_size
+            )
+            logger.warning_once(
+                "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
+                "_interleave_size. And dcp-kv-cache-interleave-size will be "
+                "deprecated when PCP is fully supported."
+            )
+
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.kv_connector is not None
+            and self.parallel_config.cp_kv_cache_interleave_size != local_block_size
+        ):
+            interleave = self.parallel_config.cp_kv_cache_interleave_size
+            self.parallel_config.cp_kv_cache_interleave_size = local_block_size
+            logger.info_once(
+                "When using PD disaggregation with DCP "
+                "(decode_context_parallel_size=%d), "
+                "cp_kv_cache_interleave_size is automatically adjusted "
+                "from %d to block_size %d for block-level alignment.",
+                dcp_size,
+                interleave,
+                local_block_size,
+            )
+
     def validate_block_size(self) -> None:
         """Validate block_size against DCP and mamba constraints.
 
@@ -2598,20 +2797,14 @@ class VllmConfig:
         """
         block_size = self.cache_config.block_size
 
-        # DCP interleave-size compatibility
-        if self.parallel_config.decode_context_parallel_size > 1:
-            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
-                self.parallel_config.cp_kv_cache_interleave_size
-                != self.parallel_config.dcp_kv_cache_interleave_size
-            ):
-                self.parallel_config.cp_kv_cache_interleave_size = (
-                    self.parallel_config.dcp_kv_cache_interleave_size
-                )
-                logger.warning_once(
-                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
-                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
-                    "deprecated when PCP is fully supported."
-                )
+        # Skip DCP interleave-size compatibility when a KV connector is configured:
+        # cp_kv_cache_interleave_size is pinned to block_size for PD by each worker
+        pd_active = (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.kv_connector is not None
+            and self.kv_transfer_config.is_kv_transfer_instance
+        )
+        if self.parallel_config.decode_context_parallel_size > 1 and not pd_active:
             assert (
                 self.parallel_config.cp_kv_cache_interleave_size <= block_size
                 and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0
@@ -2620,7 +2813,6 @@ class VllmConfig:
                 "than or equal to and divisible by cp_kv_cache_interleave_size "
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
-
         # Mamba cache align-mode constraints
         if self.cache_config.mamba_cache_mode == "align":
             assert not self.scheduler_config.disable_chunked_mm_input, (
@@ -2633,14 +2825,18 @@ class VllmConfig:
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
         if self.model_config is None:
             return self
+        # The ds_mla layouts are MLA-only by construction; the plain nvfp4
+        # layout (head_size//2 + head_size//16) does not apply to MLA.
         if (
             self.cache_config.cache_dtype.startswith("nvfp4")
+            and not self.cache_config.cache_dtype.endswith("_ds_mla")
             and self.model_config.use_mla
         ):
             raise ValueError(
                 "nvfp4 KV cache is not supported with MLA (Multi-head Latent "
                 "Attention) backends. Please use a different --kv-cache-dtype "
-                "(e.g., 'fp8' or 'auto') for MLA models such as DeepSeek."
+                "(e.g., 'fp8', 'auto', or 'nvfp4_ds_mla' with a sparse MLA "
+                "backend) for MLA models such as DeepSeek."
             )
         return self
 
@@ -2697,13 +2893,28 @@ class VllmConfig:
                 raise ValueError(
                     "RecoverSSM currently requires pipeline_parallel_size=1"
                 )
+            if self.mamba_config.backend != MambaBackendEnum.TRITON:
+                raise ValueError("RecoverSSM requires --mamba-backend triton")
         elif self.cache_config.mamba_cache_mode == "all":
             raise ValueError(
                 "--use-replayssm supports prefix caching only in align mode; "
                 "pass --mamba-cache-mode align"
             )
-        if self.mamba_config.backend != MambaBackendEnum.TRITON:
-            raise ValueError("--use-replayssm requires --mamba-backend triton")
+        elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
+            if self.cache_config.mamba_cache_mode == "align":
+                raise ValueError(
+                    "FlashInfer ReplaySSM does not support "
+                    "--mamba-cache-mode align yet; use none"
+                )
+        elif self.mamba_config.backend != MambaBackendEnum.TRITON:
+            raise ValueError(
+                "--use-replayssm requires --mamba-backend triton or flashinfer"
+            )
+        elif self.use_v2_model_runner:
+            raise ValueError(
+                "Triton ReplaySSM requires Model Runner V1; use "
+                "--mamba-backend flashinfer or Model Runner V1"
+            )
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance

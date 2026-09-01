@@ -352,6 +352,10 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
 ) -> CacheDType:
     backend_name = attn_backend.get_name()
     if backend_name == "FLASHMLA_SPARSE" and is_quantized_kv_cache(kv_cache_dtype):
+        # The NVFP4 DS-MLA format is used as-is; any other quantized dtype
+        # (fp8, fp8_e4m3, ...) is served via the fp8_ds_mla format.
+        if kv_cache_dtype == "nvfp4_ds_mla":
+            return kv_cache_dtype
         return "fp8_ds_mla"
     if backend_name == "FLASHINFER_MLA_SPARSE_SM120" and kv_cache_dtype in (
         "auto",
@@ -373,12 +377,18 @@ def _get_kv_b_proj_input_dtype(
         return None
     if weight_dtype == current_platform.fp8_dtype():
         from vllm.model_executor.layers.quantization.modelopt import (
-            ModelOptFp8PbWoLinearMethod,
+            ModelOptLinearMethod,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kFp8Static128BlockSym,
         )
 
         quant_method = getattr(kv_b_proj, "quant_method", None)
         # FP8_PB_WO dynamically quantizes BF16/FP16 inputs in the linear method.
-        if isinstance(quant_method, ModelOptFp8PbWoLinearMethod):
+        if (
+            isinstance(quant_method, ModelOptLinearMethod)
+            and quant_method.spec.weight is kFp8Static128BlockSym
+        ):
             return quant_method.input_dtype
         if not use_fp8_prefill:
             return None
@@ -604,6 +614,33 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.use_sparse = use_sparse
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            backend_name = self.attn_backend.get_name()
+            if backend_name in (
+                "FLASHMLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE_SM120",
+                "DEEPSEEK_V32_INDEXER",
+            ):
+                from vllm.v1.attention.backends.mla.compressor_utils import (
+                    _COMPRESSED_SLOT_MAPPING_KERNEL,
+                )
+                from vllm.v1.attention.backends.mla.indexer import (
+                    _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+                    _PREPARE_UNIFORM_DECODE_KERNEL,
+                )
+
+                _COMPRESSED_SLOT_MAPPING_KERNEL.register_warmup()
+                _PREPARE_UNIFORM_DECODE_KERNEL.register_warmup()
+                _BUILD_PREFILL_CHUNK_METADATA_KERNEL.register_warmup()
+
+                if backend_name != "DEEPSEEK_V32_INDEXER":
+                    from vllm.v1.attention.backends.mla.sparse_swa import (
+                        _COMPUTE_PREFILL_METADATA_KERNEL,
+                    )
+
+                    _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
+
         self.dcp_manager: MLADCPManager | None = None
         if self.impl.dcp_world_size > 1:
             query_dtype = (
@@ -652,6 +689,26 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
+        if (
+            self._vllm_config.kernel_config.enable_jit_warmup
+            and self.attn_backend.get_name()
+            in (
+                "FLASHMLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE_SM120",
+                "DEEPSEEK_V32_INDEXER",
+            )
+        ):
+            from vllm.v1.attention.backends.mla.sparse_utils import (
+                _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL,
+            )
+
+            row_width = self.kv_cache.shape[-1]
+            assert self.kv_cache.stride(0) % row_width == 0
+            _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL.register_warmup(
+                self._vllm_config,
+                block_stride_rows=self.kv_cache.stride(0) // row_width,
+            )
 
     @property
     def chunked_prefill_workspace_size(self) -> int:
@@ -814,7 +871,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
+        if fp8_attention and self.kv_cache_dtype not in (
+            # Opaque per-token byte formats stay as raw uint8
+            "fp8_ds_mla",
+            "nvfp4_ds_mla",
+        ):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         assert (
@@ -827,25 +888,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         use_mha = True
 
         if self.impl.is_sparse and num_mha_tokens > 0:
-            prefill = getattr(attn_metadata, "prefill", None)
-            use_dense_mha = getattr(prefill, "use_dense_mha", False)
-            prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
-            use_masked_mha = (
-                self.prefill_backend is not None
-                and self.impl.masked_mha_available  # type: ignore[attr-defined]
-                and self.impl.dcp_world_size <= 1
-                and prefill is not None
-                and _use_masked_mha(
-                    backend_name=self.attn_backend.get_name(),
-                    tensor_parallel_size=self._vllm_config.parallel_config.tensor_parallel_size,
-                    query_len=prefill.max_query_len,
-                    seq_len=prefill_max_seq_len,
-                )
-                and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
-            )
-            use_mha = (use_dense_mha or use_masked_mha) and not (
-                self._vllm_config.attention_config.sparse_mla_force_mqa
-            )
+            use_mha = self._use_sparse_mha(attn_metadata)
             if not use_mha:
                 num_mqa_tokens = q.size(0)
                 num_mha_tokens = 0
@@ -1063,6 +1106,31 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             output_padded[num_actual_toks:].zero_()
         return output_padded
 
+    def _use_sparse_mha(self, attn_metadata: "MLACommonMetadata") -> bool:
+        prefill = attn_metadata.prefill
+        if prefill is None:
+            return False
+        use_masked_mha = (
+            self.prefill_backend is not None
+            and self.impl.masked_mha_available  # type: ignore[attr-defined]
+            and self.impl.dcp_world_size <= 1
+            and _use_masked_mha(
+                backend_name=self.attn_backend.get_name(),
+                tensor_parallel_size=(
+                    self._vllm_config.parallel_config.tensor_parallel_size
+                ),
+                qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                query_len=prefill.max_query_len,
+                seq_len=attn_metadata.prefill_max_seq_len,  # type: ignore[attr-defined]
+                has_context=prefill.chunked_context is not None,
+            )
+            and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
+        )
+        return (prefill.use_dense_mha or use_masked_mha) and not (
+            self._vllm_config.attention_config.sparse_mla_force_mqa
+        )
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # Let per-backend impls do their own weight packing first (no-op
         # unless overridden), mirroring Attention.process_weights_after_loading.
@@ -1208,9 +1276,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
-            # fp8_ds_mla: 656-byte custom layout (kv_lora_rank=512 +
-            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
-            state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
+            # ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token
+            # blob, so the size is not derivable from head_size.
+            # See flashmla_sparse.py.
+            state_content_bytes={"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(
+                self.kv_cache_dtype
+            ),
         )
         if self.sliding_window is not None:
             return SlidingWindowMLASpec(
@@ -1619,36 +1690,121 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
     )
 
 
-_DSV32_MASKED_MHA_THRESHOLDS: dict[str, dict[int, tuple[int | None, ...]]] = {
-    "FLASHMLA_SPARSE": {
-        1: (1536, 4096, None, None, None),
-        2: (512, 1024, 4096, None, None),
-        4: (512, 1024, 1536, 8192, None),
-        8: (512, 512, 1024, 2048, 16384),
+_MaskedMHARanges = tuple[tuple[int, int], ...]
+
+_MASKED_MHA_THRESHOLDS: dict[
+    tuple[int, int],
+    dict[str, dict[int, tuple[_MaskedMHARanges, _MaskedMHARanges | None]]],
+] = {
+    (192, 128): {
+        "FLASHMLA_SPARSE": {
+            1: (((2048, 1536), (4096, 4096)), None),
+            2: (((2048, 512), (4096, 1024), (8192, 4096)), None),
+            4: (
+                ((2048, 512), (4096, 1024), (8192, 1536), (16384, 8192)),
+                None,
+            ),
+            8: (
+                (
+                    (2048, 512),
+                    (4096, 512),
+                    (8192, 1024),
+                    (16384, 2048),
+                    (32768, 16384),
+                ),
+                None,
+            ),
+        },
+        "FLASHINFER_MLA_SPARSE": {
+            8: (
+                (
+                    (2048, 512),
+                    (4096, 1024),
+                    (8192, 1024),
+                    (16384, 2048),
+                    (32768, 32768),
+                ),
+                None,
+            ),
+        },
     },
-    "FLASHINFER_MLA_SPARSE": {
-        8: (512, 1024, 1024, 2048, 32768),
+    (256, 256): {
+        "FLASHMLA_SPARSE": {
+            1: (((8 * 1024, 0),), ()),
+            2: (
+                ((20 * 1024, 0),),
+                ((6 * 1024, 4 * 1024), (10 * 1024, 8 * 1024)),
+            ),
+            4: (
+                ((48 * 1024, 0),),
+                (
+                    (8 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (24 * 1024, 16 * 1024),
+                    (34 * 1024, 32 * 1024),
+                ),
+            ),
+            8: (
+                ((112 * 1024, 0),),
+                (
+                    (8 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (32 * 1024, 16 * 1024),
+                    (48 * 1024, 32 * 1024),
+                ),
+            ),
+        },
+        "FLASHINFER_MLA_SPARSE": {
+            4: (
+                ((36 * 1024, 0),),
+                (
+                    (12 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (24 * 1024, 16 * 1024),
+                    (28 * 1024, 24 * 1024),
+                ),
+            ),
+            8: (
+                ((64 * 1024, 0),),
+                (
+                    (20 * 1024, 4 * 1024),
+                    (24 * 1024, 8 * 1024),
+                    (32 * 1024, 16 * 1024),
+                    (48 * 1024, 32 * 1024),
+                    (56 * 1024, 40 * 1024),
+                    (64 * 1024, 48 * 1024),
+                    (72 * 1024, 56 * 1024),
+                ),
+            ),
+        },
     },
 }
-_DSV32_SEQ_LEN_BUCKETS = (2048, 4096, 8192, 16384, 32768)
 
 
 def _use_masked_mha(
     *,
     backend_name: str,
     tensor_parallel_size: int,
+    qk_head_dim: int,
+    v_head_dim: int,
     query_len: int,
     seq_len: int,
+    has_context: bool,
 ) -> bool:
-    thresholds = _DSV32_MASKED_MHA_THRESHOLDS.get(backend_name, {}).get(
-        tensor_parallel_size
+    thresholds = (
+        _MASKED_MHA_THRESHOLDS.get((qk_head_dim, v_head_dim), {})
+        .get(backend_name, {})
+        .get(tensor_parallel_size)
     )
     if thresholds is None:
         return False
-    for bucket_idx, bucket_seq_len in enumerate(_DSV32_SEQ_LEN_BUCKETS):
-        if seq_len <= bucket_seq_len:
-            min_query_len = thresholds[bucket_idx]
-            return min_query_len is not None and query_len >= min_query_len
+    pure_prefill_ranges, context_ranges = thresholds
+    ranges = pure_prefill_ranges
+    if has_context and context_ranges is not None:
+        ranges = context_ranges
+    for max_seq_len, min_query_len in ranges:
+        if seq_len <= max_seq_len:
+            return query_len >= min_query_len
     return False
 
 
@@ -2693,6 +2849,18 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,
                 )
+            elif current_platform.is_cpu():
+                assert not is_quantized_kv_cache(self.kv_cache_dtype), (
+                    "CPU MLA context gather fallback only supports "
+                    f"non-quantized KV cache, got {self.kv_cache_dtype}"
+                )
+                ops.gather_mla_context_cache_cpu(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace[:toks],
+                    block_table=block_table,
+                    starts=chunk.starts,
+                    cu_seq_lens=chunk.cu_seq_lens,
+                )
             elif not use_fp8_prefill:
                 ops.gather_and_maybe_dequant_cache(
                     src_cache=kv_c_and_k_pe_cache,
@@ -3053,9 +3221,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         parallel_config = get_current_vllm_config().parallel_config
         # Avoid requiring an initialized DCP group in tests.
         self.dcp_world_size: int = parallel_config.decode_context_parallel_size
-        self.cp_kv_cache_interleave_size: int = (
-            parallel_config.cp_kv_cache_interleave_size
-        )
 
     @abstractmethod
     def forward_mqa(
