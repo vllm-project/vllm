@@ -539,6 +539,146 @@ def test_propose_releases_decode_dp_sync_when_prefill_fails(monkeypatch):
     future.release.assert_called_once_with()
 
 
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_propose_consumes_prestarted_decode_dp_sync(monkeypatch):
+    speculator, input_batch, future, order = _make_async_sync_propose_speculator(
+        monkeypatch
+    )
+    target_sync = DPSyncState(
+        torch.tensor([2, 2]),
+        2,
+        False,
+        generation=7,
+        live_num_reqs_across_dp=(0, 1),
+        execution_num_reqs=1,
+    )
+    prestart = speculator.maybe_start_decode_dp_sync(
+        input_batch,
+        target_sync,
+        dummy_run=False,
+        is_profile=False,
+    )
+    assert prestart is not None
+    assert order == ["start"]
+
+    output = speculator.propose(
+        input_batch=input_batch,
+        attn_metadata={},
+        slot_mappings={},
+        last_hidden_states=torch.zeros(2, 3),
+        aux_hidden_states=None,
+        num_sampled=torch.ones(1, dtype=torch.int32),
+        num_rejected=torch.zeros(1, dtype=torch.int32),
+        last_sampled=torch.zeros(1, dtype=torch.int64),
+        next_prefill_tokens=torch.zeros(1, dtype=torch.int64),
+        temperature=torch.ones(1),
+        seeds=torch.zeros(1, dtype=torch.int64),
+        dp_sync=target_sync,
+        dp_sync_prestart=prestart,
+    )
+
+    assert torch.equal(output, speculator.draft_tokens)
+    assert speculator._decode_dp_sync.start.call_count == 1
+    assert order == [
+        "start",
+        "prefill",
+        "prepare_decode",
+        "finish",
+        "decode",
+        "release",
+    ]
+    future.release.assert_called_once_with()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_propose_rejects_prestart_signature_drift(monkeypatch):
+    speculator, input_batch, future, order = _make_async_sync_propose_speculator(
+        monkeypatch
+    )
+    target_sync = DPSyncState(
+        torch.tensor([2, 2]),
+        2,
+        False,
+        generation=7,
+        live_num_reqs_across_dp=(0, 1),
+        execution_num_reqs=1,
+    )
+    prestart = speculator.maybe_start_decode_dp_sync(
+        input_batch,
+        target_sync,
+        dummy_run=False,
+        is_profile=False,
+    )
+    assert prestart is not None
+
+    with pytest.raises(RuntimeError, match="signature changed"):
+        speculator.propose(
+            input_batch=input_batch,
+            attn_metadata={},
+            slot_mappings={},
+            last_hidden_states=torch.zeros(2, 3),
+            aux_hidden_states=None,
+            num_sampled=torch.ones(1, dtype=torch.int32),
+            num_rejected=torch.zeros(1, dtype=torch.int32),
+            last_sampled=torch.zeros(1, dtype=torch.int64),
+            next_prefill_tokens=torch.zeros(1, dtype=torch.int64),
+            temperature=torch.ones(1),
+            seeds=torch.zeros(1, dtype=torch.int64),
+            dp_sync=target_sync,
+            dummy_run=True,
+            dp_sync_prestart=prestart,
+        )
+
+    assert order == ["start", "release"]
+    future.release.assert_called_once_with()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_prestart_releases_when_proposal_setup_fails(monkeypatch):
+    speculator, input_batch, future, order = _make_async_sync_propose_speculator(
+        monkeypatch
+    )
+    target_sync = DPSyncState(
+        torch.tensor([2, 2]),
+        2,
+        False,
+        generation=7,
+        live_num_reqs_across_dp=(0, 1),
+        execution_num_reqs=1,
+    )
+    prestart = speculator.maybe_start_decode_dp_sync(
+        input_batch,
+        target_sync,
+        dummy_run=False,
+        is_profile=False,
+    )
+    assert prestart is not None
+    speculator._copy_request_inputs.side_effect = RuntimeError("setup failed")
+
+    with pytest.raises(RuntimeError, match="setup failed"):
+        speculator.propose(
+            input_batch=input_batch,
+            attn_metadata={},
+            slot_mappings={},
+            last_hidden_states=torch.zeros(2, 3),
+            aux_hidden_states=None,
+            num_sampled=torch.ones(1, dtype=torch.int32),
+            num_rejected=torch.zeros(1, dtype=torch.int32),
+            last_sampled=torch.zeros(1, dtype=torch.int64),
+            next_prefill_tokens=torch.zeros(1, dtype=torch.int64),
+            temperature=torch.ones(1),
+            seeds=torch.zeros(1, dtype=torch.int64),
+            dp_sync=target_sync,
+            dp_sync_prestart=prestart,
+        )
+
+    assert order == ["start", "release"]
+    future.release.assert_called_once_with()
+
+
 def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
     monkeypatch,
 ):

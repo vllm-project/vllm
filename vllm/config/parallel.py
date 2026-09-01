@@ -246,6 +246,12 @@ class ParallelConfig:
     and one-sided FlashInfer configuration.
     """
 
+    enable_speculator_dp_sync_pipeline: bool = False
+    """Prestart speculative continuation DP sync before target forward.
+
+    Requires ``enable_dp_execution_contract`` and is experimental.
+    """
+
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 

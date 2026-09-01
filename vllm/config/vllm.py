@@ -1074,6 +1074,14 @@ class VllmConfig:
 
     def _verify_dp_execution_contract(self) -> None:
         parallel_config = self.parallel_config
+        if (
+            parallel_config.enable_speculator_dp_sync_pipeline
+            and not parallel_config.enable_dp_execution_contract
+        ):
+            raise ValueError(
+                "enable_speculator_dp_sync_pipeline requires "
+                "enable_dp_execution_contract"
+            )
         if not parallel_config.enable_dp_execution_contract:
             return
 
@@ -1117,6 +1125,13 @@ class VllmConfig:
             and not self.speculative_config.use_eagle()
         ):
             unsupported.append(f"speculative method {self.speculative_config.method!r}")
+        if parallel_config.enable_speculator_dp_sync_pipeline:
+            if self.speculative_config is None:
+                unsupported.append("speculative decoding disabled")
+            elif self.speculative_config.use_multi_module_mtp():
+                unsupported.append("multi-module MTP")
+            elif self.num_speculative_tokens <= 1:
+                unsupported.append("num_speculative_tokens <= 1")
 
         if unsupported:
             raise ValueError(

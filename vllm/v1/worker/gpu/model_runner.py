@@ -187,6 +187,7 @@ def _release_target_dp_sync_on_error(
         try:
             return func(self, *args, **kwargs)
         except BaseException:
+            self._release_pending_speculator_dp_sync()
             self._release_pending_target_dp_sync()
             raise
 
@@ -203,6 +204,7 @@ def _release_target_dp_sync_after(
         try:
             return func(self, *args, **kwargs)
         finally:
+            self._release_pending_speculator_dp_sync()
             self._release_pending_target_dp_sync()
 
     return wrapped
@@ -278,6 +280,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else None
         )
         self._pending_target_dp_sync: DPSyncFuture | None = None
+        self.speculator_dp_sync_pipeline_enabled = (
+            self.parallel_config.enable_speculator_dp_sync_pipeline
+        )
+        self._pending_speculator_dp_sync: Any | None = None
 
         # Detect EP all2all peer faults to prevent emitting corrupted output.
         # Only meaningful for MoE + DP with an FT-capable all2all backend.
@@ -408,6 +414,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if future is not None:
             future.release()
             self._pending_target_dp_sync = None
+
+    def _release_pending_speculator_dp_sync(self) -> None:
+        prestart = self._pending_speculator_dp_sync
+        if prestart is not None:
+            prestart.release()
+            self._pending_speculator_dp_sync = None
 
     def init_routed_experts_capturer(self) -> None:
         """Initialize target-model capture on every participating worker."""
@@ -848,10 +860,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         dp_sync = self.execute_model_state.dp_sync
         target_dp_future = self.execute_model_state.target_dp_future
+        speculator_dp_prestart = self.execute_model_state.speculator_dp_prestart
         self.execute_model_state = None
         if target_dp_future is not None:
             assert self._pending_target_dp_sync is None
             self._pending_target_dp_sync = target_dp_future
+        if speculator_dp_prestart is not None:
+            assert self._pending_speculator_dp_sync is None
+            self._pending_speculator_dp_sync = speculator_dp_prestart
 
         self.step_timing.forward_end()
 
@@ -865,6 +881,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states=hidden_states,
                 aux_hidden_states=aux_hidden_states,
                 dp_sync=dp_sync,
+                dp_sync_prestart=speculator_dp_prestart,
                 skip_attn=skip_attn,
                 is_profile=is_profile,
             )
@@ -883,6 +900,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor | None,
         aux_hidden_states: list[torch.Tensor] | None,
         dp_sync: DPSyncState | None,
+        dp_sync_prestart: Any | None,
         skip_attn: bool,
         is_profile: bool,
     ) -> None:
@@ -906,6 +924,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if hasattr(self.model, "get_mtp_target_hidden_states"):
             pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
             spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]
+        propose_kwargs = {}
+        if dp_sync_prestart is not None:
+            propose_kwargs["dp_sync_prestart"] = dp_sync_prestart
         with use_workspace_lane(self._draft_workspace_lane):
             self.speculator.propose(
                 input_batch=input_batch,
@@ -932,6 +953,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_attn_for_dummy_run=skip_attn,
                 mm_inputs=mm_inputs,
                 is_profile=is_profile,
+                **propose_kwargs,
             )
 
     @torch.inference_mode()
@@ -1642,6 +1664,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dp_idle: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         assert self._pending_target_dp_sync is None
+        assert self._pending_speculator_dp_sync is None
         assert not dp_idle or (dummy_run and self.dp_execution_contract_enabled), (
             "dp_idle is reserved for execution-contract dummy calls"
         )
@@ -1899,6 +1922,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
             del intermediate_tensors
 
+        speculator_dp_prestart = None
+        if (
+            self.speculator_dp_sync_pipeline_enabled
+            and self.speculator is not None
+            and self.pcp_manager is None
+            and not is_profile
+            and (not dummy_run or dp_idle)
+        ):
+            start_dp_sync = getattr(
+                self.speculator,
+                "maybe_start_decode_dp_sync",
+                None,
+            )
+            if start_dp_sync is not None:
+                speculator_dp_prestart = start_dp_sync(
+                    input_batch,
+                    dp_sync,
+                    dummy_run=execution_padding_only,
+                    is_profile=False,
+                )
+                self._pending_speculator_dp_sync = speculator_dp_prestart
+
         # Update the EPLB meta.
         self.eplb.prepare_forward(self.model_config, input_batch.num_tokens)
 
@@ -1985,10 +2030,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     hidden_states=hidden_states,
                     aux_hidden_states=aux_hidden_states,
                     dp_sync=dp_sync,
+                    dp_sync_prestart=speculator_dp_prestart,
                     skip_attn=skip_attn_for_dummy_run,
                     is_profile=is_profile,
                 )
                 self.step_timing.drafter_end()
+            self._release_pending_speculator_dp_sync()
             self._release_pending_target_dp_sync()
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
@@ -2005,10 +2052,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ec_connector_output=ec_connector_output,
             routed_experts=routed_experts,
             target_dp_future=target_dp_future,
+            speculator_dp_prestart=speculator_dp_prestart,
         )
         if target_dp_future is not None:
             # sample_tokens(), pool(), or _dummy_run() now owns the buffer.
             self._pending_target_dp_sync = None
+        if speculator_dp_prestart is not None:
+            # sample_tokens() now owns the prestarted speculator agreement.
+            self._pending_speculator_dp_sync = None
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
@@ -2035,10 +2086,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         routed_experts = self.execute_model_state.routed_experts
         target_dp_future = self.execute_model_state.target_dp_future
+        speculator_dp_prestart = self.execute_model_state.speculator_dp_prestart
         self.execute_model_state = None
         if target_dp_future is not None:
             assert self._pending_target_dp_sync is None
             self._pending_target_dp_sync = target_dp_future
+        if speculator_dp_prestart is not None:
+            assert self._pending_speculator_dp_sync is None
+            self._pending_speculator_dp_sync = speculator_dp_prestart
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: hidden_states is None because this rank produced
@@ -2143,6 +2198,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+            propose_kwargs = {}
+            if speculator_dp_prestart is not None:
+                propose_kwargs["dp_sync_prestart"] = speculator_dp_prestart
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
@@ -2158,7 +2216,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.sampler.sampling_states.seeds.gpu,
                     dp_sync=dp_sync,
                     mm_inputs=mm_inputs,
+                    **propose_kwargs,
                 )
+            self._pending_speculator_dp_sync = None
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
@@ -2239,9 +2299,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         state = getattr(self, "execute_model_state", None)
-        if state is not None and state.target_dp_future is not None:
-            state.target_dp_future.release()
+        if state is not None:
+            if state.target_dp_future is not None:
+                state.target_dp_future.release()
+            if state.speculator_dp_prestart is not None:
+                state.speculator_dp_prestart.release()
             self.execute_model_state = None
+        self._release_pending_speculator_dp_sync()
         self._release_pending_target_dp_sync()
         torch.accelerator.synchronize()
         self.cudagraph_manager = None
@@ -2317,6 +2381,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     routed_experts: RoutedExpertsTensors | None
     target_dp_future: DPSyncFuture | None
+    speculator_dp_prestart: Any | None
 
 
 class BatchReqState(NamedTuple):

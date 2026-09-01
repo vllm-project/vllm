@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -16,6 +19,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import (
     DPSyncCoordinator,
+    DPSyncFuture,
     DPSyncState,
     dispatch_cg_and_sync_dp,
 )
@@ -28,6 +32,53 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class SpeculatorDPSyncSignature:
+    """Immutable target facts that identify one continuation agreement."""
+
+    parent_generation: int | None
+    live_num_reqs: int
+    execution_num_reqs: int
+    target_num_tokens: int
+    max_query_len: int
+    uniform_token_count: int | None
+    has_prefill: bool
+    num_speculative_steps: int
+    dummy_run: bool
+    need_eager: bool
+
+
+@dataclass
+class SpeculatorDPSyncPrestart:
+    """Single-owner handle for a continuation agreement issued early."""
+
+    signature: SpeculatorDPSyncSignature
+    future: DPSyncFuture
+    _released: bool = False
+
+    def release(self) -> None:
+        if not self._released:
+            self.future.release()
+            self._released = True
+
+
+def _release_dp_sync_prestart_after(
+    func: Callable[..., torch.Tensor],
+) -> Callable[..., torch.Tensor]:
+    """Release a handed-off prestart even when proposal setup fails."""
+
+    @functools.wraps(func)
+    def wrapped(*args, **kwargs):
+        prestart = kwargs.get("dp_sync_prestart")
+        try:
+            return func(*args, **kwargs)
+        finally:
+            if prestart is not None:
+                prestart.release()
+
+    return wrapped
 
 
 class AutoRegressiveSpeculator(DraftModelSpeculator):
@@ -163,6 +214,73 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             decode_query_len=1,
         )
 
+    def _make_dp_sync_signature(
+        self,
+        input_batch: InputBatch,
+        dp_sync: DPSyncState | None,
+        *,
+        dummy_run: bool,
+        is_profile: bool,
+    ) -> SpeculatorDPSyncSignature:
+        num_reqs = input_batch.num_reqs
+        live_num_reqs = num_reqs
+        execution_num_reqs = num_reqs
+        parent_generation = None
+        if dp_sync is not None:
+            parent_generation = dp_sync.generation
+            if dp_sync.execution_num_reqs is not None:
+                execution_num_reqs = dp_sync.execution_num_reqs
+                if dp_sync.live_num_reqs_across_dp:
+                    live_num_reqs = dp_sync.live_num_reqs_across_dp[self.dp_rank]
+
+        max_query_len = int(input_batch.num_scheduled_tokens.max())
+        uniform_token_count = get_uniform_decode_token_count(
+            num_reqs,
+            input_batch.num_tokens,
+            max_query_len,
+            input_batch.has_prefill,
+        )
+        return SpeculatorDPSyncSignature(
+            parent_generation=parent_generation,
+            live_num_reqs=live_num_reqs,
+            execution_num_reqs=execution_num_reqs,
+            target_num_tokens=input_batch.num_tokens_after_padding,
+            max_query_len=max_query_len,
+            uniform_token_count=uniform_token_count,
+            has_prefill=input_batch.has_prefill,
+            num_speculative_steps=self.num_speculative_steps,
+            dummy_run=dummy_run,
+            need_eager=is_profile,
+        )
+
+    def maybe_start_decode_dp_sync(
+        self,
+        input_batch: InputBatch,
+        dp_sync: DPSyncState | None,
+        *,
+        dummy_run: bool,
+        is_profile: bool,
+    ) -> SpeculatorDPSyncPrestart | None:
+        """Issue draft-continuation agreement before target forward."""
+        if self.num_speculative_steps <= 1 or self._decode_dp_sync is None:
+            return None
+
+        signature = self._make_dp_sync_signature(
+            input_batch,
+            dp_sync,
+            dummy_run=dummy_run,
+            is_profile=is_profile,
+        )
+        future = self._decode_dp_sync.start(
+            self.decode_cudagraph_manager,
+            signature.live_num_reqs,
+            signature.live_num_reqs,
+            uniform_token_count=1,
+            need_eager=is_profile,
+            parent_generation=signature.parent_generation,
+        )
+        return SpeculatorDPSyncPrestart(signature, future)
+
     def capture(self) -> None:
         logger.info("Capturing model for speculator...")
         # Reset indices to zeros to prevent stale values from prior
@@ -217,6 +335,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.on_multi_step_decode_end(self.max_num_reqs)
 
     @torch.inference_mode()
+    @_release_dp_sync_prestart_after
     def propose(
         self,
         input_batch: InputBatch,
@@ -243,6 +362,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        dp_sync_prestart: SpeculatorDPSyncPrestart | None = None,
     ) -> torch.Tensor:
         num_tokens = input_batch.num_tokens
         num_tokens_padded = input_batch.num_tokens_after_padding
@@ -319,25 +439,28 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             # The continuation shape depends only on num_reqs, so its CPU
             # collective can overlap draft prefill and decode input preparation.
             # It is resolved below before any continuation work is launched.
-            live_num_reqs = num_reqs
-            if (
-                prefill_batch_sync is not None
-                and prefill_batch_sync.execution_num_reqs is not None
-                and prefill_batch_sync.live_num_reqs_across_dp
-            ):
-                live_num_reqs = prefill_batch_sync.live_num_reqs_across_dp[self.dp_rank]
-            decode_dp_future = self._decode_dp_sync.start(
-                self.decode_cudagraph_manager,
-                live_num_reqs,
-                live_num_reqs,
-                uniform_token_count=1,
-                need_eager=is_profile,
-                parent_generation=(
-                    prefill_batch_sync.generation
-                    if prefill_batch_sync is not None
-                    else None
-                ),
+            signature = self._make_dp_sync_signature(
+                input_batch,
+                prefill_batch_sync,
+                dummy_run=dummy_run,
+                is_profile=is_profile,
             )
+            if dp_sync_prestart is not None:
+                if dp_sync_prestart.signature != signature:
+                    raise RuntimeError(
+                        "Speculator DP sync prestart signature changed: "
+                        f"started={dp_sync_prestart.signature}, current={signature}"
+                    )
+                decode_dp_future = dp_sync_prestart.future
+            else:
+                decode_dp_future = self._decode_dp_sync.start(
+                    self.decode_cudagraph_manager,
+                    signature.live_num_reqs,
+                    signature.live_num_reqs,
+                    uniform_token_count=1,
+                    need_eager=is_profile,
+                    parent_generation=signature.parent_generation,
+                )
         try:
             self._prepare_eplb_forward(num_tokens)
 
@@ -417,7 +540,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
             return self.draft_tokens[:num_reqs]
         finally:
-            if decode_dp_future is not None:
+            if decode_dp_future is not None and dp_sync_prestart is None:
                 decode_dp_future.release()
 
     @torch.inference_mode()

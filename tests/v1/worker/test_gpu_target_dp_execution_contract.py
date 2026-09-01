@@ -22,6 +22,8 @@ pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 def _runner(monkeypatch, order):
     runner = object.__new__(GPUModelRunner)
     runner._pending_target_dp_sync = None
+    runner._pending_speculator_dp_sync = None
+    runner.speculator_dp_sync_pipeline_enabled = False
     runner.execute_model_state = None
     runner.dp_execution_contract_enabled = True
     runner.input_buffers = InputBuffers(4, 16, torch.device("cpu"))
@@ -155,6 +157,82 @@ def test_target_dp_sync_overlaps_local_input_preparation(monkeypatch):
     future.release.assert_not_called()
 
 
+def test_speculator_dp_sync_prestarts_before_target_forward(monkeypatch):
+    order: list[str] = []
+    runner = _runner(monkeypatch, order)
+    runner.speculator_dp_sync_pipeline_enabled = True
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=2,
+        num_reqs=1,
+        uniform_token_count=2,
+    )
+    sync = DPSyncState(
+        torch.tensor([2, 2]),
+        2,
+        False,
+        generation=4,
+        live_num_tokens_across_dp=(2, 2),
+        live_num_reqs_across_dp=(1, 1),
+        execution_num_reqs=1,
+    )
+    future = _future(order, batch_desc, sync)
+    coordinator = Mock()
+
+    def start_target(*args, **kwargs):
+        order.append("target_start")
+        return future
+
+    coordinator.start.side_effect = start_target
+    runner._target_dp_sync = coordinator
+
+    prestart = Mock()
+    speculator = Mock()
+
+    def start_speculator(*args, **kwargs):
+        order.append("speculator_start")
+        return prestart
+
+    speculator.maybe_start_decode_dp_sync.side_effect = start_speculator
+    runner.speculator = speculator
+
+    batch_state = SimpleNamespace(
+        num_tokens=2,
+        num_scheduled_tokens=np.array([2], dtype=np.int32),
+        is_prefilling_np=np.array([False]),
+    )
+    runner.gather_batch_req_state = Mock(return_value=(batch_state, 2))
+    input_batch = InputBatch.make_dummy(1, 2, runner.input_buffers)
+
+    def prepare_inputs(*args):
+        order.append("prepare_local")
+        args[-1].result(runner.cudagraph_manager)
+        return input_batch
+
+    runner.prepare_inputs = Mock(side_effect=prepare_inputs)
+
+    output = runner.execute_model(_scheduler_output(2, 1))
+
+    assert output is None
+    assert order == [
+        "target_start",
+        "prepare_local",
+        "finish",
+        "speculator_start",
+        "forward",
+    ]
+    assert runner.execute_model_state is not None
+    assert runner.execute_model_state.speculator_dp_prestart is prestart
+    assert runner._pending_speculator_dp_sync is None
+    speculator.maybe_start_decode_dp_sync.assert_called_once_with(
+        input_batch,
+        sync,
+        dummy_run=False,
+        is_profile=False,
+    )
+    prestart.release.assert_not_called()
+
+
 def test_zero_token_rank_executes_one_sentinel_and_releases(monkeypatch):
     order: list[str] = []
     runner = _runner(monkeypatch, order)
@@ -198,6 +276,68 @@ def test_zero_token_rank_executes_one_sentinel_and_releases(monkeypatch):
     runner.kv_connector.pre_forward.assert_not_called()
     assert runner.execute_model_state is None
     assert runner._pending_target_dp_sync is None
+
+
+def test_zero_token_rank_consumes_prestarted_speculator_sync(monkeypatch):
+    order: list[str] = []
+    runner = _runner(monkeypatch, order)
+    runner.speculator_dp_sync_pipeline_enabled = True
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=4,
+        num_reqs=2,
+        uniform_token_count=2,
+    )
+    sync = DPSyncState(
+        torch.tensor([4, 4]),
+        2,
+        False,
+        generation=5,
+        live_num_tokens_across_dp=(0, 4),
+        live_num_reqs_across_dp=(0, 2),
+        execution_num_reqs=2,
+    )
+    future = _future(order, batch_desc, sync)
+    coordinator = Mock()
+
+    def start_target(*args, **kwargs):
+        order.append("target_start")
+        return future
+
+    coordinator.start.side_effect = start_target
+    runner._target_dp_sync = coordinator
+
+    prestart = Mock()
+    speculator = Mock()
+
+    def start_speculator(*args, **kwargs):
+        order.append("speculator_start")
+        return prestart
+
+    speculator.maybe_start_decode_dp_sync.side_effect = start_speculator
+    runner.speculator = speculator
+
+    def dummy_speculator(**kwargs):
+        order.append("speculator_execute")
+        assert kwargs["dp_sync_prestart"] is prestart
+
+    runner._execute_dummy_speculator_stage = Mock(side_effect=dummy_speculator)
+    prestart.release.side_effect = lambda: order.append("speculator_release")
+
+    output = runner.execute_model(_scheduler_output(0, 0))
+
+    assert output == "empty"
+    assert order == [
+        "target_start",
+        "finish",
+        "speculator_start",
+        "forward",
+        "speculator_execute",
+        "speculator_release",
+        "release",
+    ]
+    prestart.release.assert_called_once_with()
+    assert runner._pending_speculator_dp_sync is None
 
 
 def test_engine_core_dummy_contributes_zero_live_work(monkeypatch):
@@ -309,6 +449,167 @@ def test_target_dp_sync_releases_when_forward_fails(monkeypatch):
 
     assert order == ["start", "finish", "forward", "release"]
     assert runner._pending_target_dp_sync is None
+
+
+def test_prestarted_speculator_sync_releases_when_target_forward_fails(monkeypatch):
+    order: list[str] = []
+    runner = _runner(monkeypatch, order)
+    runner.speculator_dp_sync_pipeline_enabled = True
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=2,
+        num_reqs=1,
+        uniform_token_count=2,
+    )
+    sync = DPSyncState(
+        torch.tensor([2, 2]),
+        2,
+        False,
+        generation=7,
+        live_num_tokens_across_dp=(2, 2),
+        live_num_reqs_across_dp=(1, 1),
+        execution_num_reqs=1,
+    )
+    future = _future(order, batch_desc, sync)
+    coordinator = Mock()
+
+    def start_target(*args, **kwargs):
+        order.append("target_start")
+        return future
+
+    coordinator.start.side_effect = start_target
+    runner._target_dp_sync = coordinator
+
+    prestart = Mock()
+    prestart.release.side_effect = lambda: order.append("speculator_release")
+    speculator = Mock()
+
+    def start_speculator(*args, **kwargs):
+        order.append("speculator_start")
+        return prestart
+
+    speculator.maybe_start_decode_dp_sync.side_effect = start_speculator
+    runner.speculator = speculator
+
+    batch_state = SimpleNamespace(
+        num_tokens=2,
+        num_scheduled_tokens=np.array([2], dtype=np.int32),
+        is_prefilling_np=np.array([False]),
+    )
+    runner.gather_batch_req_state = Mock(return_value=(batch_state, 2))
+    input_batch = InputBatch.make_dummy(1, 2, runner.input_buffers)
+
+    def prepare_inputs(*args):
+        args[-1].result(runner.cudagraph_manager)
+        return input_batch
+
+    runner.prepare_inputs = Mock(side_effect=prepare_inputs)
+
+    def fail_forward(desc):
+        order.append("forward")
+        raise RuntimeError("forward failed")
+
+    runner.cudagraph_manager.run_fullgraph.side_effect = fail_forward
+
+    with pytest.raises(RuntimeError, match="forward failed"):
+        runner.execute_model(_scheduler_output(2, 1))
+
+    assert order == [
+        "target_start",
+        "finish",
+        "speculator_start",
+        "forward",
+        "speculator_release",
+        "release",
+    ]
+    prestart.release.assert_called_once_with()
+    assert runner._pending_speculator_dp_sync is None
+    assert runner._pending_target_dp_sync is None
+
+
+@pytest.mark.parametrize(
+    ("dummy_run", "dp_idle", "is_profile"),
+    [(True, False, False), (False, False, True)],
+)
+def test_speculator_dp_pipeline_keeps_capture_and_profile_at_safe_issue_point(
+    monkeypatch, dummy_run, dp_idle, is_profile
+):
+    order: list[str] = []
+    runner = _runner(monkeypatch, order)
+    runner.speculator_dp_sync_pipeline_enabled = True
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=2,
+        num_reqs=1,
+        uniform_token_count=2,
+    )
+    sync = DPSyncState(
+        torch.tensor([2, 2]),
+        2,
+        False,
+        generation=8,
+        live_num_tokens_across_dp=(2, 2),
+        live_num_reqs_across_dp=(1, 1),
+        execution_num_reqs=1,
+    )
+    future = _future(order, batch_desc, sync)
+    coordinator = Mock()
+    coordinator.start.return_value = future
+    runner._target_dp_sync = coordinator
+    runner.speculator = Mock()
+    runner._execute_dummy_speculator_stage = Mock()
+    batch_state = SimpleNamespace(
+        num_tokens=2,
+        num_scheduled_tokens=np.array([2], dtype=np.int32),
+        is_prefilling_np=np.array([False]),
+    )
+    runner.gather_batch_req_state = Mock(return_value=(batch_state, 2))
+    input_batch = InputBatch.make_dummy(1, 2, runner.input_buffers)
+    runner.prepare_inputs = Mock(return_value=input_batch)
+
+    runner.execute_model(
+        _scheduler_output(2, 1),
+        dummy_run=dummy_run,
+        dp_idle=dp_idle,
+        is_profile=is_profile,
+    )
+
+    runner.speculator.maybe_start_decode_dp_sync.assert_not_called()
+
+
+def test_prestarted_speculator_sync_releases_when_sampling_fails(monkeypatch):
+    order: list[str] = []
+    runner = _runner(monkeypatch, order)
+    prestart = Mock()
+    prestart.release.side_effect = lambda: order.append("speculator_release")
+    runner.execute_model_state = SimpleNamespace(
+        input_batch=Mock(),
+        attn_metadata={},
+        slot_mappings_by_layer={},
+        hidden_states=torch.zeros(1, 4),
+        aux_hidden_states=None,
+        dp_sync=Mock(),
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        routed_experts=None,
+        target_dp_future=None,
+        speculator_dp_prestart=prestart,
+    )
+    runner.pp_handler = None
+    runner.sample = Mock(side_effect=RuntimeError("sampling failed"))
+    monkeypatch.setattr(
+        model_runner_module.pcp,
+        "maybe_restore_pcp_for_sampling",
+        lambda manager, hidden_states, input_batch: (hidden_states, input_batch),
+    )
+
+    with pytest.raises(RuntimeError, match="sampling failed"):
+        runner.sample_tokens(None)
+
+    assert order == ["speculator_release"]
+    prestart.release.assert_called_once_with()
+    assert runner._pending_speculator_dp_sync is None
+    assert runner.execute_model_state is None
 
 
 def test_target_dp_sync_releases_when_all_ranks_are_idle(monkeypatch):

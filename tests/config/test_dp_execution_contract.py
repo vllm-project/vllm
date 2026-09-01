@@ -14,6 +14,7 @@ pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 def _config():
     parallel = SimpleNamespace(
         enable_dp_execution_contract=True,
+        enable_speculator_dp_sync_pipeline=False,
         data_parallel_size=2,
         enable_expert_parallel=True,
         all2all_backend="flashinfer_nvlink_one_sided",
@@ -71,3 +72,33 @@ def test_dp_execution_contract_requires_padding_mask(monkeypatch):
 
     with pytest.raises(ValueError, match="VLLM_MOE_SKIP_PADDING=0"):
         VllmConfig._verify_dp_execution_contract(config)
+
+
+def test_speculator_dp_pipeline_requires_execution_contract():
+    config = _config()
+    config.parallel_config.enable_dp_execution_contract = False
+    config.parallel_config.enable_speculator_dp_sync_pipeline = True
+
+    with pytest.raises(ValueError, match="requires enable_dp_execution_contract"):
+        VllmConfig._verify_dp_execution_contract(config)
+
+
+def test_speculator_dp_pipeline_requires_speculative_decoding():
+    config = _config()
+    config.parallel_config.enable_speculator_dp_sync_pipeline = True
+
+    with pytest.raises(ValueError, match="speculative decoding disabled"):
+        VllmConfig._verify_dp_execution_contract(config)
+
+
+def test_speculator_dp_pipeline_accepts_autoregressive_speculator():
+    config = _config()
+    config.parallel_config.enable_speculator_dp_sync_pipeline = True
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        use_eagle=lambda: True,
+        use_multi_module_mtp=lambda: False,
+    )
+    config.num_speculative_tokens = 3
+
+    VllmConfig._verify_dp_execution_contract(config)
