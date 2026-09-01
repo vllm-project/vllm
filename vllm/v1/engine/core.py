@@ -804,6 +804,14 @@ class EngineCore:
             reset_running_requests, reset_connector
         )
 
+    def get_runtime_config(self) -> dict[str, int]:
+        return self.scheduler.get_runtime_config()
+
+    def update_runtime_config(
+        self, max_num_running_seqs: int | None = None
+    ) -> dict[str, int]:
+        return self.scheduler.update_runtime_config(max_num_running_seqs)
+
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.
 

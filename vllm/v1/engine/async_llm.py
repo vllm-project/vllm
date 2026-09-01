@@ -1043,6 +1043,14 @@ class AsyncLLM(EngineClient):
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()
 
+    async def get_runtime_config(self) -> dict[str, int]:
+        return await self.engine_core.get_runtime_config_async()
+
+    async def update_runtime_config(
+        self, max_num_running_seqs: int | None = None
+    ) -> dict[str, int]:
+        return await self.engine_core.update_runtime_config_async(max_num_running_seqs)
+
     async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         if level >= 1:
             await self.renderer.clear_mm_cache_async()

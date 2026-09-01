@@ -122,6 +122,62 @@ def test_add_requests():
         assert len(scheduler.waiting) == i + 1
 
 
+def test_runtime_max_num_running_seqs_drains_down():
+    scheduler = create_scheduler(max_num_seqs=4)
+    for request in create_requests(num_requests=5):
+        scheduler.add_request(request)
+
+    first_output = scheduler.schedule()
+    assert len(first_output.scheduled_new_reqs) == 4
+    assert len(scheduler.running) == 4
+    assert len(scheduler.waiting) == 1
+
+    runtime_config = scheduler.update_runtime_config(max_num_running_seqs=2)
+    assert runtime_config == {
+        "max_num_running_seqs": 2,
+        "max_num_seqs_capacity": 4,
+    }
+
+    second_output = scheduler.schedule()
+    assert not second_output.scheduled_new_reqs
+    assert len(scheduler.running) == 4
+    assert len(scheduler.waiting) == 1
+
+    scheduler.finish_requests(
+        [request.request_id for request in scheduler.running[:3]],
+        RequestStatus.FINISHED_ABORTED,
+    )
+    third_output = scheduler.schedule()
+    assert len(third_output.scheduled_new_reqs) == 1
+    assert len(scheduler.running) == 2
+    assert not scheduler.waiting
+
+
+def test_runtime_max_num_running_seqs_can_increase_to_capacity():
+    scheduler = create_scheduler(max_num_seqs=4)
+    scheduler.update_runtime_config(max_num_running_seqs=2)
+    for request in create_requests(num_requests=4):
+        scheduler.add_request(request)
+
+    first_output = scheduler.schedule()
+    assert len(first_output.scheduled_new_reqs) == 2
+    assert len(scheduler.waiting) == 2
+
+    scheduler.update_runtime_config(max_num_running_seqs=4)
+    second_output = scheduler.schedule()
+    assert len(second_output.scheduled_new_reqs) == 2
+    assert len(scheduler.running) == 4
+    assert not scheduler.waiting
+
+
+@pytest.mark.parametrize("value", [0, 5, True, 1.5])
+def test_runtime_max_num_running_seqs_rejects_invalid_values(value):
+    scheduler = create_scheduler(max_num_seqs=4)
+
+    with pytest.raises(ValueError, match="max_num_running_seqs"):
+        scheduler.update_runtime_config(max_num_running_seqs=value)
+
+
 def test_finish_request():
     scheduler = create_scheduler()
     requests = create_requests(num_requests=10)

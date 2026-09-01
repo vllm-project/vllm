@@ -116,7 +116,8 @@ class Scheduler(SchedulerInterface):
         # Track requests scheduled in prior step (MRV1-only).
         self.prev_step_scheduled_req_ids: set[str] = set()
 
-        # Scheduling constraints.
+        # Scheduling constraints. max_num_seqs is the allocation-time capacity;
+        # max_num_running_reqs is a live admission cap within that capacity.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = (
             self.scheduler_config.max_num_scheduled_tokens
@@ -1228,7 +1229,9 @@ class Scheduler(SchedulerInterface):
 
         assert token_budget >= 0
         assert input_budget >= 0
-        assert len(self.running) <= self.max_num_running_reqs
+        # A runtime cap reduction drains down naturally: requests already running
+        # keep their slots, while no new requests are admitted above the live cap.
+        assert len(self.running) <= self.scheduler_config.max_num_seqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
@@ -2579,6 +2582,37 @@ class Scheduler(SchedulerInterface):
             - self.num_waiting_for_streaming_input
         )
         return num_waiting + len(self.running)
+
+    def get_runtime_config(self) -> dict[str, int]:
+        return {
+            "max_num_running_seqs": self.max_num_running_reqs,
+            "max_num_seqs_capacity": self.scheduler_config.max_num_seqs,
+        }
+
+    def update_runtime_config(
+        self, max_num_running_seqs: int | None = None
+    ) -> dict[str, int]:
+        if max_num_running_seqs is None:
+            return self.get_runtime_config()
+        if isinstance(max_num_running_seqs, bool) or not isinstance(
+            max_num_running_seqs, int
+        ):
+            raise ValueError("max_num_running_seqs must be an integer")
+        if not 1 <= max_num_running_seqs <= self.scheduler_config.max_num_seqs:
+            raise ValueError(
+                "max_num_running_seqs must be between 1 and the startup "
+                f"max_num_seqs capacity ({self.scheduler_config.max_num_seqs})"
+            )
+
+        old_value = self.max_num_running_reqs
+        self.max_num_running_reqs = max_num_running_seqs
+        logger.info(
+            "Updated max_num_running_seqs from %d to %d (capacity: %d)",
+            old_value,
+            max_num_running_seqs,
+            self.scheduler_config.max_num_seqs,
+        )
+        return self.get_runtime_config()
 
     def has_finished_requests(self) -> bool:
         if self.finished_req_ids:
