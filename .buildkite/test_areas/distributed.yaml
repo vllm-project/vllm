@@ -6,6 +6,7 @@ steps:
   key: distributed-comm-ops
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed
@@ -17,10 +18,27 @@ steps:
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
 
+- label: ":nvidia: (L4) Sharded RDT Weight Transfer"
+  key: sharded-rdt-weight-transfer
+  device: l4
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/distributed/weight_transfer/
+  - tests/distributed/test_sharded_rdt_plan.py
+  - tests/distributed/test_sharded_rdt_producer.py
+  - tests/distributed/test_sharded_rdt_trainer.py
+  commands:
+  - pytest -v -s distributed/test_sharded_rdt_plan.py
+  - pytest -v -s distributed/test_sharded_rdt_producer.py
+  - pytest -v -s distributed/test_sharded_rdt_trainer.py
+
 - label: ":nvidia: (L4) Distributed DP Basic"
   key: distributed-dp-tests-2-gpus
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/
@@ -63,6 +81,7 @@ steps:
   key: distributed-compile-rpc-tests-2-gpus
   timeout_in_minutes: 65
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/compilation/
@@ -85,6 +104,7 @@ steps:
   key: distributed-torchrun-shutdown-tests-2-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/
@@ -107,8 +127,9 @@ steps:
 
 - label: ":nvidia: (L4) Distributed Torchrun + Examples"
   key: distributed-torchrun-examples-4-gpus
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   working_dir: "/vllm-workspace"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -137,11 +158,21 @@ steps:
   # rlhf examples (each launches its own `vllm serve` and tears it down)
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_ipc.py
+  # sharded RDT: 2 FSDP2 trainer ranks -> 2 vLLM DP ranks with EP. Its data
+  # plane is NIXL, which ships only in the kv-connector set, and the script
+  # also drops the nixl-cu wheel variant that does not match this image. Kept
+  # last so the commands above run in an unmodified environment. RDT_MODEL swaps
+  # the script's reference MoE for a tiny one: no weights are downloaded either
+  # way, but every trainer rank builds the model before sharding it, and the
+  # default does not fit an L4.
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
 
 - label: ":nvidia: (L4) Distributed DP Extended"
   key: distributed-dp-tests-4-gpus
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -165,6 +196,7 @@ steps:
   key: distributed-compile-comm-4-gpus
   timeout_in_minutes: 70
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -242,13 +274,23 @@ steps:
   working_dir: "/vllm-workspace/"
   num_devices: 2
   commands:
+    - pytest -v -s tests/distributed/test_custom_all_gather_reduce_scatter.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem.py
-    - pytest -v -s tests/kernels/test_kimi_k3_gemm_rs.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
 
-    
+- label: ":nvidia: (B200) Kimi-K3 GEMM-RS/AR"
+  key: kimi-k3-gemm-rs-ar-2xb200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  working_dir: "/vllm-workspace/"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/models/kimi_k3/nvidia/ops/cute_dsl/gemm_rs_ar.py
+    - tests/kernels/test_kimi_k3_gemm_rs_ar.py
+  commands:
+    - pytest -v -s tests/kernels/test_kimi_k3_gemm_rs_ar.py
 
 - label: ":nvidia: (L4) Distributed 2-Node"
   key: 2-node-test-4-gpus
@@ -273,6 +315,7 @@ steps:
   key: pipeline-context-parallelism-4-gpus
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -289,6 +332,7 @@ steps:
   key: rayexecutorv2-4-gpus
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/v1/executor/ray_executor_v2.py
