@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
+import vllm.utils.host_memory as host_memory_module
 import vllm.v1.kv_offload.cpu.shared_offload_region as region_module
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
@@ -258,8 +259,8 @@ def test_pin_registers_and_unregisters_each_chunk(monkeypatch, iid):
             call(base_ptr + 4 * PAGE_SIZE, PAGE_SIZE, 0),
         ]
         assert sleep.call_args_list == [
-            call(region_module._HOST_REGISTER_YIELD_SECONDS),
-            call(region_module._HOST_REGISTER_YIELD_SECONDS),
+            call(host_memory_module._HOST_REGISTER_YIELD_SECONDS),
+            call(host_memory_module._HOST_REGISTER_YIELD_SECONDS),
         ]
 
     assert cudart.cudaHostUnregister.call_args_list == [

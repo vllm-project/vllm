@@ -2,13 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side handler for SimpleCPUOffloadConnector."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import ConnectorInitState
 from vllm.logger import init_logger
+from vllm.utils.host_memory import HOST_REGISTER_CHUNK_SIZE_BYTES, host_unregister
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.kv_offload.async_host_buffer import AsyncHostBuffer
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
@@ -21,6 +24,37 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
+
+
+class _CpuCaches(NamedTuple):
+    """CPU KV tensors plus their registered ranges, for unpinning on release."""
+
+    tensors: dict[str, torch.Tensor]
+    registered_ptrs: list[int]
+
+
+def _allocate_cpu_caches(
+    plan: dict[str, tuple[tuple[int, ...], torch.dtype]],
+    pin_memory: bool,
+    chunk_size_bytes: int | None = None,
+) -> _CpuCaches:
+    """Allocate zeroed CPU tensors and page-lock them via cudaHostRegister."""
+    tensors: dict[str, torch.Tensor] = {}
+    registered: list[int] = []
+    try:
+        for name, (shape, dtype) in plan.items():
+            tensor = torch.zeros(shape, dtype=dtype, device="cpu")
+            if pin_memory:
+                registered += pin_tensor(tensor, chunk_size_bytes)
+            tensors[name] = tensor
+    except BaseException:
+        host_unregister(registered)
+        raise
+    return _CpuCaches(tensors, registered)
+
+
+def _release_cpu_caches(caches: _CpuCaches) -> None:
+    host_unregister(caches.registered_ptrs)
 
 
 class SimpleCPUOffloadWorker:
@@ -36,6 +70,7 @@ class SimpleCPUOffloadWorker:
         disk_capacity_bytes: int = 0,
         disk_buffer_slots: int = 2,
         use_page_cache: bool = False,
+        async_init: bool = False,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -45,6 +80,14 @@ class SimpleCPUOffloadWorker:
         self.disk_buffer_slots = disk_buffer_slots
         self.use_page_cache = use_page_cache
         self.disk_mode = kv_offload_backend == "disk"
+        assert not (async_init and self.disk_mode)
+
+        self._async_init = async_init
+        self._cpu_init: AsyncHostBuffer[_CpuCaches] | None = None
+        self._alloc_plan: dict[str, tuple[tuple[int, ...], torch.dtype]] | None = None
+        self._pin_memory = False
+        self._nothing_to_offload = False
+        self._init_failed = False
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -93,6 +136,7 @@ class SimpleCPUOffloadWorker:
         """
         if not kv_caches:
             logger.warning("No KV caches to offload.")
+            self._nothing_to_offload = True
             return
 
         self.device = next(iter(kv_caches.values())).device
@@ -200,25 +244,79 @@ class SimpleCPUOffloadWorker:
                 "Pinned memory not available. CPU offload performance may be degraded."
             )
 
-        self.cpu_kv_caches = {}
-        for name, gpu_tensor in unique_gpu_caches.items():
-            cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
-            # Allocate non-pinned first, then pin via cudaHostRegister to
-            # bypass PyTorch's CUDACachingHostAllocator which rounds up to
-            # the next power of 2 (e.g. 100 GB -> 128 GB).
-            tensor = torch.zeros(cpu_shape, dtype=gpu_tensor.dtype, device="cpu")
-            if pin_memory:
-                pin_tensor(tensor)
-            self.cpu_kv_caches[name] = tensor
+        alloc_plan = {
+            name: ((self.num_cpu_blocks,) + gpu_tensor.shape[1:], gpu_tensor.dtype)
+            for name, gpu_tensor in unique_gpu_caches.items()
+        }
+        if self._async_init:
+            # Defer the background build to the first get_init_state poll:
+            # engine warmup captures CUDA graphs after register_kv_caches, and
+            # a concurrent cudaHostRegister invalidates an in-progress capture.
+            # get_init_state only runs from the step path, after all capture.
+            self._alloc_plan = alloc_plan
+            self._pin_memory = pin_memory
+            return
 
-        self._backend = DmaCopyBackend()
-        self._backend.init(
-            unique_gpu_caches,
+        self.cpu_kv_caches = _allocate_cpu_caches(alloc_plan, pin_memory).tensors
+        self._init_cpu_backend()
+
+    def _init_cpu_backend(self) -> None:
+        assert self.gpu_kv_caches is not None
+        assert self.cpu_kv_caches is not None
+        backend = DmaCopyBackend()
+        backend.init(
+            self.gpu_kv_caches,
             self.cpu_kv_caches,
-            device,
+            self.device,
             self.load_stream,
             self.store_stream,
         )
+        self._backend = backend
+
+    def get_init_state(self) -> ConnectorInitState | None:
+        """Drive asynchronous CPU-cache initialization and report its state."""
+        if not self._async_init:
+            return None
+        if self._init_failed:
+            raise RuntimeError("Asynchronous CPU KV cache initialization failed")
+        if self._backend is not None or self._nothing_to_offload:
+            return ConnectorInitState.READY
+        if self._cpu_init is None:
+            if self._alloc_plan is None:
+                return ConnectorInitState.INITIALIZING
+            logger.info("Starting asynchronous CPU KV cache initialization")
+            alloc_plan, pin_memory = self._alloc_plan, self._pin_memory
+            self._alloc_plan = None
+            self._cpu_init = AsyncHostBuffer(
+                allocate=lambda: _allocate_cpu_caches(
+                    alloc_plan, pin_memory, HOST_REGISTER_CHUNK_SIZE_BYTES
+                ),
+                cleanup=_release_cpu_caches,
+                thread_name="vllm-simple-kv-offload-init",
+            )
+            return ConnectorInitState.INITIALIZING
+        caches = self._cpu_init.poll()
+        if self._cpu_init.failed:
+            self._init_failed = True
+            raise RuntimeError("Asynchronous CPU KV cache initialization failed")
+        if caches is None:
+            return ConnectorInitState.INITIALIZING
+        self.cpu_kv_caches = caches.tensors
+        try:
+            self._init_cpu_backend()
+        except BaseException:
+            self._init_failed = True
+            self.cpu_kv_caches = None
+            if caches.registered_ptrs:
+                host_unregister(caches.registered_ptrs)
+            raise
+        logger.info("Asynchronous CPU KV cache initialization completed")
+        return ConnectorInitState.READY
+
+    def shutdown(self) -> None:
+        """Release CPU caches that were prepared but never adopted."""
+        if self._cpu_init is not None:
+            self._cpu_init.close()
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata

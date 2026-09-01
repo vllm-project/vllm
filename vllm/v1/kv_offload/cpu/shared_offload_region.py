@@ -15,13 +15,17 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.host_memory import madvise
+from vllm.utils.host_memory import (
+    HostRegisterError,
+    host_register_chunked,
+    host_unregister,
+    madvise,
+)
 
 logger = init_logger(__name__)
 
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
-_HOST_REGISTER_YIELD_SECONDS = 0.001
 
 
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
@@ -254,38 +258,19 @@ class SharedOffloadRegion:
             )
             return
 
-        if chunk_size_bytes is not None and (
-            chunk_size_bytes <= 0 or chunk_size_bytes % self.page_size != 0
-        ):
-            raise ValueError("chunk_size_bytes must be a positive page multiple")
-
         assert self._base is not None
-        base_ptr = self._base.data_ptr()
-        chunk_size = chunk_size_bytes or self.total_size_bytes
-        cudart = torch.cuda.cudart()
         try:
-            for offset in range(0, self.total_size_bytes, chunk_size):
-                size = min(chunk_size, self.total_size_bytes - offset)
-                ptr = base_ptr + offset
-                result = cudart.cudaHostRegister(ptr, size, 0).value
-                if result != 0:
-                    self._unregister_pinned_ranges()
-                    logger.warning(
-                        "cudaHostRegister failed for rank=%d (code=%d) — "
-                        "transfers will still work but may be slower (unpinned DMA)",
-                        self.rank,
-                        result,
-                    )
-                    return
-                self._registered_ptrs.append(ptr)
-                if (
-                    chunk_size_bytes is not None
-                    and offset + size < self.total_size_bytes
-                ):
-                    time.sleep(_HOST_REGISTER_YIELD_SECONDS)
-        except BaseException:
-            self._unregister_pinned_ranges()
-            raise
+            self._registered_ptrs = host_register_chunked(
+                self._base.data_ptr(), self.total_size_bytes, chunk_size_bytes
+            )
+        except HostRegisterError as e:
+            logger.warning(
+                "%s for rank=%d — transfers will still work but may be "
+                "slower (unpinned DMA)",
+                e,
+                self.rank,
+            )
+            return
         logger.debug(
             "cudaHostRegister rank=%d %.2f GB in %d range(s)",
             self.rank,
@@ -296,15 +281,7 @@ class SharedOffloadRegion:
 
     def _unregister_pinned_ranges(self) -> None:
         if current_platform.is_cuda_alike():
-            cudart = torch.cuda.cudart()
-            for ptr in reversed(self._registered_ptrs):
-                result = cudart.cudaHostUnregister(ptr).value
-                if result != 0:
-                    logger.warning(
-                        "cudaHostUnregister failed for rank=%d (code=%d)",
-                        self.rank,
-                        result,
-                    )
+            host_unregister(self._registered_ptrs)
         self._registered_ptrs.clear()
         self.is_pinned = False
 

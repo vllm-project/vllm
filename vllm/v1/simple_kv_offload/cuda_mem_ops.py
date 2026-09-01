@@ -11,6 +11,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.host_memory import host_register_chunked
 
 logger = init_logger(__name__)
 
@@ -21,16 +22,17 @@ CU_MEMCPY_SRC_ACCESS_ORDER_STREAM = 1
 CU_MEMCPY_SRC_ACCESS_ORDER_ANY = 3
 
 
-def pin_tensor(tensor: torch.Tensor) -> None:
+def pin_tensor(tensor: torch.Tensor, chunk_size_bytes: int | None = None) -> list[int]:
     """Pin a CPU tensor via cudaHostRegister.
 
     This bypasses PyTorch's CUDACachingHostAllocator which rounds
     every ``pin_memory=True`` allocation up to the next power of 2
     (e.g. 100 GB becomes 128 GB).
+
+    Returns the registered chunk pointers, for
+    [host_unregister][vllm.utils.host_memory.host_unregister] on teardown.
     """
-    err = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.nbytes, 0)
-    if err.value != 0:
-        raise RuntimeError(f"cudaHostRegister failed: {err}")
+    return host_register_chunked(tensor.data_ptr(), tensor.nbytes, chunk_size_bytes)
 
 
 class _CUmemLocation(ctypes.Structure):
