@@ -468,6 +468,27 @@ class BaseRenderer(ABC, Generic[_T]):
             )
         return TokensPrompt(prompt_token_ids=list(token_ids), **prompt)
 
+    @staticmethod
+    def _apply_prompt_char_offset(
+        prompt: TokensPrompt, char_offset: int
+    ) -> TokensPrompt:
+        """Map token offsets back to the original prompt after a text pre-trim."""
+        if char_offset == 0:
+            return prompt
+
+        offsets = prompt.get("prompt_token_offsets")
+        if offsets is not None:
+            prompt["prompt_token_offsets"] = [
+                # Fast tokenizers use (0, 0) for special tokens, which are
+                # not character spans in the source prompt.
+                (start, end)
+                if (start, end) == (0, 0)
+                else (start + char_offset, end + char_offset)
+                for start, end in offsets
+            ]
+
+        return prompt
+
     def _tokenize_prompt(
         self,
         prompt: TextPrompt,
@@ -523,8 +544,12 @@ class BaseRenderer(ABC, Generic[_T]):
                     "Expected prompt['prompt'] to be a string before tokenization; "
                     "use 'prompt_token_ids' for token ID inputs"
                 )
+            prompt_char_offset = params._get_text_truncation_offset(
+                self.tokenizer, prompt["prompt"]
+            )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = self._tokenize_prompt(prompt, params)
+            prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
@@ -559,8 +584,12 @@ class BaseRenderer(ABC, Generic[_T]):
                     "Expected prompt['prompt'] to be a string before tokenization; "
                     "use 'prompt_token_ids' for token ID inputs"
                 )
+            prompt_char_offset = params._get_text_truncation_offset(
+                self.tokenizer, prompt["prompt"]
+            )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = await self._tokenize_prompt_async(prompt, params)
+            prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
