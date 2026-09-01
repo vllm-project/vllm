@@ -346,7 +346,7 @@ def convert_to_unquantized_kernel_format(
     moe_config: FusedMoEConfig,
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
-    layer: torch.nn.Module | None = None,
+    layer: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if unquantized_backend == UnquantizedMoeBackend.MOONEP:
         # MoonEP addresses expert weights by global [E+B] row and needs one
@@ -359,7 +359,6 @@ def convert_to_unquantized_kernel_format(
             gather_moonep_weight_layout,
         )
 
-        assert layer is not None
         layout = gather_moonep_weight_layout(
             w13_weight,
             w2_weight,
@@ -511,9 +510,11 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
         moe_config: FusedMoEConfig,
         w13_weight: torch.Tensor,
         w2_weight: torch.Tensor,
+        layer: torch.nn.Module | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert layer is not None
         return convert_to_unquantized_kernel_format(
-            backend, moe_config, w13_weight, w2_weight
+            backend, moe_config, w13_weight, w2_weight, layer=layer
         )
 
     def make_kernel(
