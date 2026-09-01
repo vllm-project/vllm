@@ -28,7 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.hisparse.types import SparseKVOffloadCommand
+from vllm.v1.hisparse.types import SparseKVOffloadCommand, SparseKVRowMirror
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -45,6 +45,8 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
     command: SparseKVOffloadCommand | None
     host_block_copies: tuple[KVCacheBlockCopy, ...]
     source_block_ids: tuple[int, ...]
+    row_mirrors: dict[str, tuple[SparseKVRowMirror, ...]]
+    all_context_pages_resident: bool
 
 
 @dataclass
@@ -97,8 +99,40 @@ class HiSparseConnectorScheduler:
         for new_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids:
             if new_block_ids is not None:
                 source_block_ids.extend(new_block_ids[source_group_id])
+        num_computed_tokens = {
+            request.req_id: request.num_computed_tokens
+            for request in scheduler_output.scheduled_new_reqs
+        }
+        num_computed_tokens.update(
+            zip(
+                scheduler_output.scheduled_cached_reqs.req_ids,
+                scheduler_output.scheduled_cached_reqs.num_computed_tokens,
+            )
+        )
+        scheduled_requests = tuple(
+            (
+                request_id,
+                num_computed_tokens[request_id],
+                scheduled_count,
+            )
+            for request_id, scheduled_count in (
+                scheduler_output.num_scheduled_tokens.items()
+            )
+        )
+        row_mirrors = {}
+        for (
+            request_id,
+            scheduled_count,
+        ) in scheduler_output.num_scheduled_tokens.items():
+            row_mirrors[request_id] = self.coordinator.build_row_mirrors(
+                ((request_id, num_computed_tokens[request_id], scheduled_count),),
+            )
         return HiSparseConnectorMetadata(
-            command, host_block_copies, tuple(source_block_ids)
+            command,
+            host_block_copies,
+            tuple(source_block_ids),
+            row_mirrors,
+            self.coordinator.all_context_pages_resident(scheduled_requests),
         )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
@@ -170,7 +204,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         assert request_state_indices is None or isinstance(
             request_state_indices, torch.Tensor
         )
-        self.connector_worker.start_step(metadata, request_state_indices)
+        request_ids = kwargs.get("request_ids")
+        assert request_ids is None or isinstance(request_ids, list)
+        self.connector_worker.start_step(
+            metadata,
+            request_state_indices,
+            request_ids,
+        )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         return

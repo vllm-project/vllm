@@ -42,7 +42,9 @@ from vllm.v1.attention.ops.pcp import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
-    from vllm.v1.hisparse.runtime import HiSparseIndexGroupBuilder
+    from vllm.v1.attention.backends.mla.index_group import (
+        SparseMLAIndexGroupBuilder,
+    )
 
 
 class DeepseekV32Indexer(nn.Module):
@@ -127,7 +129,7 @@ class DeepseekV32Attention(MLAAttention):
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
         attn_backend: "type | None" = None,
-        hisparse_index_group_builder: "HiSparseIndexGroupBuilder | None" = None,
+        index_group_builder: "SparseMLAIndexGroupBuilder | None" = None,
     ) -> None:
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
@@ -211,7 +213,7 @@ class DeepseekV32Attention(MLAAttention):
             use_sparse=True,
             indexer=indexer,
             topk_indices_buffer=topk_indices_buffer,
-            hisparse_index_group_builder=hisparse_index_group_builder,
+            index_group_builder=index_group_builder,
             attn_backend=attn_backend,
         )
 
@@ -384,11 +386,12 @@ class DeepseekV32Attention(MLAAttention):
 
         if hisparse_cache is not None and mla_slot is not None:
             assert kv_c_out is not None and k_pe_out is not None
-            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+            self.update_kv_cache(
                 kv_c_out,
                 k_pe_out,
                 self.kv_cache,
                 mla_slot,
+                layer_attn_metadata,
                 self.kv_cache_dtype,
                 self._k_scale,
             )
@@ -487,6 +490,7 @@ class DeepseekV32Attention(MLAAttention):
                 ),
                 skip_topk_buffer_clear=True,
             )
+        self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
         attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(
             self.layer_name

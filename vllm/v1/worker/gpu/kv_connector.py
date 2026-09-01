@@ -33,6 +33,7 @@ class KVConnector:
         self,
         scheduler_output: "SchedulerOutput",
         batch_request_indices: torch.Tensor | None = None,
+        batch_request_ids: list[str] | None = None,
     ) -> None:
         pass
 
@@ -68,12 +69,14 @@ class ActiveKVConnector(KVConnector):
 
         self._pending_load_start = False
         self._pending_request_state_indices: torch.Tensor | None = None
+        self._pending_request_ids: list[str] | None = None
         self._disabled = False
 
     def pre_forward(
         self,
         scheduler_output: "SchedulerOutput",
         batch_request_indices: torch.Tensor | None = None,
+        batch_request_ids: list[str] | None = None,
     ) -> None:
         if self._disabled:
             return
@@ -84,27 +87,41 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
         if scheduler_output.has_sync_kv_loads:
             # Sync loads need to run before this step's forward.
-            self._start_load_kv(batch_request_indices)
+            self._start_load_kv(batch_request_indices, batch_request_ids)
         else:
             # Start any async loads in post-forward instead, keeping
             # their host-side submission cost off the critical path.
             self._pending_load_start = True
             self._pending_request_state_indices = batch_request_indices
+            self._pending_request_ids = batch_request_ids
 
-    def _start_load_kv(self, batch_request_indices: torch.Tensor | None = None) -> None:
+    def _start_load_kv(
+        self,
+        batch_request_indices: torch.Tensor | None = None,
+        batch_request_ids: list[str] | None = None,
+    ) -> None:
         self._pending_load_start = False
         if batch_request_indices is None:
             batch_request_indices = self._pending_request_state_indices
+        if batch_request_ids is None:
+            batch_request_ids = self._pending_request_ids
         self._pending_request_state_indices = None
+        self._pending_request_ids = None
         # TODO: sort out KV Connectors' use of forward_context
+        worker_kwargs = {
+            "request_state_indices": batch_request_indices,
+            "request_ids": batch_request_ids,
+        }
         if is_forward_context_available():
             self.kv_connector.start_load_kv(
-                get_forward_context(), request_state_indices=batch_request_indices
+                get_forward_context(),
+                **worker_kwargs,
             )
         else:
             with set_forward_context(None, self.vllm_config):
                 self.kv_connector.start_load_kv(
-                    get_forward_context(), request_state_indices=batch_request_indices
+                    get_forward_context(),
+                    **worker_kwargs,
                 )
 
     def finish_forward(self) -> None:

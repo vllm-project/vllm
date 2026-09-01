@@ -1605,7 +1605,14 @@ def _get_kv_cache_bytes_per_block(
         for group in kv_cache_groups
     )
     assert bytes_per_block > 0
-    return bytes_per_block
+    alignment = math.lcm(
+        *(
+            getattr(_get_per_layer_spec(group, layer_name), "alignment", None) or 1
+            for group in kv_cache_groups
+            for layer_name in group.layer_names
+        )
+    )
+    return round_up(bytes_per_block, alignment)
 
 
 def validate_kv_cache_layout(
