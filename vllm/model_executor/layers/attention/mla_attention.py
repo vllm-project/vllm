@@ -377,12 +377,18 @@ def _get_kv_b_proj_input_dtype(
         return None
     if weight_dtype == current_platform.fp8_dtype():
         from vllm.model_executor.layers.quantization.modelopt import (
-            ModelOptFp8PbWoLinearMethod,
+            ModelOptLinearMethod,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kFp8Static128BlockSym,
         )
 
         quant_method = getattr(kv_b_proj, "quant_method", None)
         # FP8_PB_WO dynamically quantizes BF16/FP16 inputs in the linear method.
-        if isinstance(quant_method, ModelOptFp8PbWoLinearMethod):
+        if (
+            isinstance(quant_method, ModelOptLinearMethod)
+            and quant_method.spec.weight is kFp8Static128BlockSym
+        ):
             return quant_method.input_dtype
         if not use_fp8_prefill:
             return None
