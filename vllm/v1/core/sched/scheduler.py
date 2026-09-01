@@ -348,6 +348,10 @@ class Scheduler(SchedulerInterface):
         if hash_block_size is None:
             hash_block_size = block_size
         self.hash_block_size = hash_block_size
+        verify_hash_content = self.cache_config.prefix_caching_hash_algo in (
+            "xxhash",
+            "xxhash_cbor",
+        )
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
@@ -367,6 +371,7 @@ class Scheduler(SchedulerInterface):
             enable_mamba_shared_prefix_checkpoint=(
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
+            verify_hash_content=verify_hash_content,
         )
         # Mamba managers already account for their speculative state blocks.
         num_spec_decode_tokens = (
