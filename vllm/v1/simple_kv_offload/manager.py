@@ -525,9 +525,8 @@ class SimpleCPUOffloadScheduler:
         """Identify newly computed blocks to offload from scheduler requests.
 
         Only considers blocks whose KV data has been **confirmed computed** by
-        the GPU. This means blocks from the current step are NOT stored until the
-        next step. If a request finishes in the same step as its last full block,
-        that block may be missed. (TODO: flush on finish.)
+        the GPU. Blocks scheduled in the current step can be stored here because
+        the worker orders the DMA read after the compute-done event.
 
         Returns:
             (gpu_block_ids, cpu_block_ids, req_ids) for the store event.
@@ -546,6 +545,40 @@ class SimpleCPUOffloadScheduler:
         num_groups = len(kv_cache_groups)
         # Dedup against blocks already scheduled.
         in_flight = self._in_flight_store_gpu_blocks
+
+        # Mamba align state blocks are not positionally stable. Consume exact
+        # same-step handoffs, but keep the coarse baseline scheduler-aligned.
+        block_state = scheduler_output.kv_connector_block_state
+        boundary_offloads = (
+            block_state.boundary_state_offloads if block_state is not None else {}
+        )
+        for req_id, entries in boundary_offloads.items():
+            scheduled_for_req = False
+            for _, gpu_block_id, boundary_tokens in entries:
+                if boundary_tokens % self.block_size != 0:
+                    continue
+                gpu_block = gpu_block_pool.blocks[gpu_block_id]
+                block_hash = gpu_block.block_hash
+                if (
+                    block_hash is None
+                    or gpu_block_id in in_flight
+                    or cpu_block_pool.cached_block_hash_to_block.get_one_block(
+                        block_hash
+                    )
+                    is not None
+                    or num_free <= 0
+                ):
+                    continue
+                cpu_block = cpu_block_pool.get_new_blocks(1)[0]
+                cpu_block._block_hash = block_hash
+                merged_gpu_block_ids.append(gpu_block_id)
+                merged_cpu_block_ids.append(cpu_block.block_id)
+                in_flight.add(gpu_block_id)
+                gpu_block_pool.touch([gpu_block])
+                num_free -= 1
+                scheduled_for_req = True
+            if scheduled_for_req:
+                req_ids.append(req_id)
 
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             state = self._reqs_to_store.get(req_id)
@@ -574,13 +607,25 @@ class SimpleCPUOffloadScheduler:
             block_hashes_to_store: list[bytes] = []
             advanced_per_group: list[int] = [0] * num_groups
             out_of_space = False
-            # Confirmed tokens: KV data written and visible to all streams.
+            # Confirmed tokens: include tokens already computed in prior steps
+            # and tokens scheduled in the current step. Current-step stores are
+            # ordered after a compute-done event in the worker, so their KV is
+            # visible before DMA reads begin.
             req = state.request
-            confirmed_tokens = req.num_computed_tokens - req.num_output_placeholders
+            confirmed_tokens = (
+                req.num_computed_tokens + num_new_tokens - req.num_output_placeholders
+            )
+            confirmed_tokens = max(0, min(confirmed_tokens, req.num_tokens))
             # Cap to blocks with confirmed KV data.
             aligned_tokens = confirmed_tokens // self.block_size * self.block_size
 
             for g in range(num_groups):
+                # Mamba align block tables relocate state blocks in place, so a
+                # connector's historical block IDs are not safe DMA sources.
+                # These groups are stored only from exact handoffs above.
+                if isinstance(kv_cache_groups[g].kv_cache_spec, MambaSpec):
+                    continue
+
                 # FIXME (yifan): handle CPU cache eviction, where
                 # num_stored_blocks can be stale and omit evicted blocks in
                 # the middle of the request.
