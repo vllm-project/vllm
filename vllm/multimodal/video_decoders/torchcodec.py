@@ -8,6 +8,7 @@ import numpy.typing as npt
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule, check_torchcodec_available
 
 from .base import (
@@ -76,12 +77,13 @@ class TorchCodecVideoBackendMixin:
         device: str = "cpu",
     ) -> "VideoDecoder":
         torch_device = torch.device(device)
-        if torch_device.type == "cuda" and not torch.cuda.is_available():
-            raise ValueError(
-                f"torchcodec video decoding on device {device!r} requires "
-                "CUDA, but CUDA is not available."
-            )
-        if torch_device.type not in ("cpu", "cuda"):
+        if torch_device.type == "cuda":
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    f"torchcodec video decoding on device {device!r} requires "
+                    "a CUDA-capable platform."
+                )
+        elif torch_device.type != "cpu":
             raise ValueError(
                 f"torchcodec video decoding only supports 'cpu' and 'cuda' "
                 f"devices, got {device!r}."
