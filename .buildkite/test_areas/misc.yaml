@@ -2,10 +2,11 @@ group: Miscellaneous
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200 MIG 18GB) V1 Sample + Logits"
+- label: ":nvidia: (H200 MIG 18GB) V1 Sample + Logits Shard %N"
   key: v1-sample-logits
-  timeout_in_minutes: 83
+  timeout_in_minutes: 35
   device: h200_18gb
+  parallelism: 3
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
@@ -26,14 +27,14 @@ steps:
     - tests/v1/test_outputs.py
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s v1/sample
-    - pytest -v -s v1/logits_processors
-    - pytest -v -s v1/test_oracle.py
-    - pytest -v -s v1/test_request.py
-    - pytest -v -s v1/test_outputs.py
+    - pytest -v -s v1/sample --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s v1/logits_processors --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s v1/test_oracle.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s v1/test_request.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s v1/test_outputs.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) V1 Sample + Logits"
+      label: ":amd: (MI300) V1 Sample + Logits Shard %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 70
@@ -334,11 +335,11 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":computer: (CPU) Async Engine, Inputs, Utils, Worker, Config"
+- label: ":computer: (CPU) Async Engine, Inputs, Utils, Worker, Config Shard %N"
   key: async-engine-inputs-utils-worker-config-cpu
   depends_on:
   - image-build-cpu
-  timeout_in_minutes: 65
+  timeout_in_minutes: 35
   source_file_dependencies:
   - vllm/assets/
   - vllm/config/
@@ -380,21 +381,26 @@ steps:
   - tests/transformers_utils
   - tests/config
   device: cpu-small
+  parallelism: 4
   commands:
-  - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s test_envs.py
-  - pytest -v -s test_outputs.py
-  - pytest -v -s test_pooling_params.py
-  - pytest -v -s test_ray_env.py
-  - pytest -v -s test_sampling_params.py
-  - pytest -v -s -m 'cpu_test' multimodal
-  - pytest -v -s renderers
-  - pytest -v -s reasoning
-  - pytest -v -s tool_parsers
-  - pytest -v -s tokenizers_
-  - pytest -v -s parser
-  - pytest -v -s transformers_utils
-  - pytest -v -s config
+  # Four timing-balanced groups from per-command walls in build 83920.
+  # tokenizers_ is split across shards 0-1; all other suites run once.
+  - case "$$BUILDKITE_PARALLEL_JOB" in 0|1|2|3) ;; *) echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" && exit 1;; esac
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || python3 standalone_tests/lazy_imports.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s test_envs.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s test_outputs.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s test_pooling_params.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s test_ray_env.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s test_sampling_params.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -m 'cpu_test' multimodal
+  - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s renderers
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s reasoning
+  - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s tool_parsers
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s tokenizers_ --num-shards=2 --shard-id=0
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s tokenizers_ --num-shards=2 --shard-id=1
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s parser
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s transformers_utils
+  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s config
 
 - label: ":nvidia: (A100) Batch Invariance"
   key: batch-invariance-a100
