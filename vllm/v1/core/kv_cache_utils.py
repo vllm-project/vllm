@@ -1841,7 +1841,7 @@ def _annotate_eagle_groups(
         use_deepseek_v4_fallback: Enable rule 2 for a DeepseekV4 packed group.
     """
     spec_config = vllm_config.speculative_config
-    if spec_config is None or not spec_config.use_eagle():
+    if spec_config is None or not spec_config.use_eagle_block_drop():
         return
 
     for group in kv_cache_groups:
