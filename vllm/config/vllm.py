@@ -1082,6 +1082,14 @@ class VllmConfig:
                 "enable_speculator_dp_sync_pipeline requires "
                 "enable_dp_execution_contract"
             )
+        if (
+            parallel_config.enable_cached_dp_execution_contract
+            and not parallel_config.enable_speculator_dp_sync_pipeline
+        ):
+            raise ValueError(
+                "enable_cached_dp_execution_contract requires "
+                "enable_speculator_dp_sync_pipeline"
+            )
         if not parallel_config.enable_dp_execution_contract:
             return
 
@@ -1132,6 +1140,11 @@ class VllmConfig:
                 unsupported.append("multi-module MTP")
             elif self.num_speculative_tokens <= 1:
                 unsupported.append("num_speculative_tokens <= 1")
+        if parallel_config.enable_cached_dp_execution_contract:
+            if self.scheduler_config.prefill_schedule_interval <= 1:
+                unsupported.append("prefill_schedule_interval <= 1")
+            if parallel_config.dp_execution_contract_stability_steps <= 0:
+                unsupported.append("dp_execution_contract_stability_steps <= 0")
 
         if unsupported:
             raise ValueError(

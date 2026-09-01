@@ -135,3 +135,88 @@ def test_target_and_speculator_collectives_can_overlap_on_gloo():
         (0, 4, 2, (0, 4), 2, 0),
         (1, 4, 2, (0, 4), 2, 0),
     ]
+
+
+def _run_cached_target_contract(rank, init_path, result_queue):
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file://{init_path}",
+        rank=rank,
+        world_size=2,
+    )
+    target_group = dist.new_group(ranks=[0, 1], backend="gloo")
+    try:
+        manager = _GraphManager()
+        target = DPSyncCoordinator(
+            2,
+            rank,
+            group=target_group,
+            lane="target",
+            execution_contract=True,
+            cache_execution_contract=True,
+            cache_stability_steps=1,
+        )
+        refresh = target.start(
+            manager,
+            num_reqs=rank + 1,
+            num_tokens=(rank + 1) * 4,
+            uniform_token_count=4,
+            max_query_len=4,
+            force_refresh=True,
+            contract_epoch=10,
+            contract_capacity_num_reqs=4,
+        )
+        refresh.result(manager)
+        refresh.release()
+
+        hit = target.start(
+            manager,
+            num_reqs=rank,
+            num_tokens=rank * 4,
+            uniform_token_count=4 if rank else None,
+            max_query_len=4 if rank else 0,
+            contract_epoch=10,
+            contract_capacity_num_reqs=4,
+        )
+        batch_desc, sync = hit.result(manager)
+        assert sync is not None
+        result_queue.put(
+            (
+                rank,
+                batch_desc.num_tokens,
+                batch_desc.num_reqs,
+                sync.generation,
+                sync.contract_epoch,
+                sync.live_facts_exact,
+                sync.live_num_tokens_across_dp,
+            )
+        )
+        hit.release()
+    finally:
+        dist.destroy_process_group(target_group)
+        dist.destroy_process_group()
+
+
+def test_cached_target_contract_supports_mixed_live_occupancy_on_gloo():
+    context = mp.get_context("spawn")
+    result_queue = context.Queue()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        init_path = str(Path(temp_dir) / "gloo_cache_init")
+        processes = [
+            context.Process(
+                target=_run_cached_target_contract,
+                args=(rank, init_path, result_queue),
+            )
+            for rank in range(2)
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=30)
+            assert process.exitcode == 0
+
+    results = sorted(result_queue.get(timeout=1) for _ in range(2))
+    assert results == [
+        (0, 16, 4, 1, 10, False, ()),
+        (1, 16, 4, 1, 10, False, ()),
+    ]

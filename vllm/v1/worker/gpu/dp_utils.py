@@ -46,6 +46,35 @@ class DPSyncState:
     # Request capacity selected by a target execution contract. Unlike
     # ``batch_desc.num_reqs``, this is populated for PIECEWISE execution too.
     execution_num_reqs: int | None = None
+    # Cached contracts intentionally omit current cross-rank occupancy. The
+    # execution descriptor remains exact, but the live vectors are unavailable.
+    live_facts_exact: bool = True
+    contract_epoch: int | None = None
+
+
+@dataclass(frozen=True)
+class _CachedDPExecutionContract:
+    batch_desc: BatchExecutionDescriptor
+    execution_num_tokens: int
+    execution_num_reqs: int
+    uniform_token_count: int
+    num_tokens_across_dp: torch.Tensor
+    epoch: int
+
+    @property
+    def signature(self) -> tuple[object, ...]:
+        desc = self.batch_desc
+        return (
+            desc.cg_mode,
+            desc.num_tokens,
+            desc.num_reqs,
+            desc.uniform_token_count,
+            desc.max_query_len,
+            desc.num_active_loras,
+            self.execution_num_tokens,
+            self.execution_num_reqs,
+            self.uniform_token_count,
+        )
 
 
 _SYNC_NUM_TOKENS = 0
@@ -97,6 +126,10 @@ class DPSyncFuture:
         generation: int,
         parent_generation: int | None,
         work: dist.Work | None,
+        contract_epoch: int | None = None,
+        contract_capacity_num_reqs: int | None = None,
+        has_prefill: bool = False,
+        cached_result: tuple[BatchExecutionDescriptor, DPSyncState] | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._local_batch_desc = local_batch_desc
@@ -105,9 +138,14 @@ class DPSyncFuture:
         self._num_active_loras = num_active_loras
         self.generation = generation
         self.parent_generation = parent_generation
+        self.contract_epoch = contract_epoch
+        self.contract_capacity_num_reqs = contract_capacity_num_reqs
+        self.has_prefill = has_prefill
         self._work = work
         self._waited = work is None
-        self._result: tuple[BatchExecutionDescriptor, DPSyncState | None] | None = None
+        self._result: tuple[BatchExecutionDescriptor, DPSyncState | None] | None = (
+            cached_result
+        )
         self._released = False
 
     def result(
@@ -137,6 +175,15 @@ class DPSyncFuture:
                     tensor,
                     self.generation,
                     self.parent_generation,
+                )
+                batch_desc, sync = self._result
+                if sync is not None:
+                    sync = replace(sync, contract_epoch=self.contract_epoch)
+                    self._result = batch_desc, sync
+                self._coordinator._observe_execution_contract(
+                    self,
+                    self._result,
+                    cudagraph_manager,
                 )
             else:
                 live_num_tokens = tuple(
@@ -186,12 +233,26 @@ class DPSyncCoordinator:
         group: dist.ProcessGroup | None = None,
         lane: Literal["target", "speculator"] = "target",
         execution_contract: bool = False,
+        cache_execution_contract: bool = False,
+        cache_stability_steps: int = 2,
     ) -> None:
         self.dp_size = dp_size
         self.dp_rank = dp_rank
         self.group = group
         self.lane = lane
         self.execution_contract = execution_contract
+        if cache_execution_contract and (lane != "target" or not execution_contract):
+            raise ValueError(
+                "Only the target execution-contract coordinator may cache results"
+            )
+        if cache_stability_steps <= 0:
+            raise ValueError("cache_stability_steps must be positive")
+        self.cache_execution_contract = cache_execution_contract
+        self.cache_stability_steps = cache_stability_steps
+        self._cached_contract: _CachedDPExecutionContract | None = None
+        self._cache_candidate: (
+            tuple[tuple[object, ...], _CachedDPExecutionContract, int] | None
+        ) = None
         self._tensor = (
             torch.zeros(_SYNC_NUM_FIELDS, dp_size, dtype=torch.int64, device="cpu")
             if dp_size > 1
@@ -210,6 +271,10 @@ class DPSyncCoordinator:
         need_eager: bool = False,
         num_active_loras: int = 0,
         parent_generation: int | None = None,
+        force_refresh: bool = False,
+        contract_epoch: int | None = None,
+        contract_capacity_num_reqs: int | None = None,
+        has_prefill: bool = False,
     ) -> DPSyncFuture:
         """Dispatch locally and issue the DP collective without waiting."""
         if self._active_future is not None:
@@ -227,8 +292,34 @@ class DPSyncCoordinator:
 
         generation = self._next_generation
         self._next_generation += 1
+        cached_result = None
+        cached = self._cached_contract
+        if (
+            self.cache_execution_contract
+            and contract_epoch is not None
+            and cached is not None
+            and not force_refresh
+        ):
+            self._validate_cached_contract(
+                cached,
+                batch_desc,
+                num_reqs=num_reqs,
+                num_tokens=num_tokens,
+                uniform_token_count=uniform_token_count,
+                max_query_len=max_query_len,
+                need_eager=need_eager,
+                num_active_loras=num_active_loras,
+                has_prefill=has_prefill,
+                contract_epoch=contract_epoch,
+            )
+            cached_result = self._make_cached_result(
+                cached,
+                generation,
+                contract_epoch,
+            )
+
         work = None
-        if self._tensor is not None:
+        if self._tensor is not None and cached_result is None:
             tensor = self._tensor
             tensor.zero_()
             tensor[_SYNC_NUM_TOKENS][self.dp_rank] = num_tokens
@@ -256,9 +347,182 @@ class DPSyncCoordinator:
             generation,
             parent_generation,
             work,
+            contract_epoch=contract_epoch,
+            contract_capacity_num_reqs=contract_capacity_num_reqs,
+            has_prefill=has_prefill,
+            cached_result=cached_result,
         )
         self._active_future = future
         return future
+
+    def _make_cached_result(
+        self,
+        cached: _CachedDPExecutionContract,
+        generation: int,
+        contract_epoch: int,
+    ) -> tuple[BatchExecutionDescriptor, DPSyncState]:
+        return cached.batch_desc, DPSyncState(
+            num_tokens_across_dp=cached.num_tokens_across_dp,
+            uniform_token_count=cached.uniform_token_count,
+            eager=False,
+            generation=generation,
+            live_num_tokens_across_dp=(),
+            live_num_reqs_across_dp=(),
+            execution_num_reqs=cached.execution_num_reqs,
+            live_facts_exact=False,
+            contract_epoch=contract_epoch,
+        )
+
+    def _validate_cached_contract(
+        self,
+        cached: _CachedDPExecutionContract,
+        local_desc: BatchExecutionDescriptor,
+        *,
+        num_reqs: int,
+        num_tokens: int,
+        uniform_token_count: int | None,
+        max_query_len: int | None,
+        need_eager: bool,
+        num_active_loras: int,
+        has_prefill: bool,
+        contract_epoch: int,
+    ) -> None:
+        violations = []
+        if contract_epoch != cached.epoch:
+            violations.append(f"epoch={contract_epoch}, cached={cached.epoch}")
+        if need_eager:
+            violations.append("eager execution")
+        if has_prefill:
+            violations.append("prefill work")
+        if num_active_loras:
+            violations.append(f"num_active_loras={num_active_loras}")
+
+        if num_tokens > 0:
+            if num_reqs <= 0 or num_reqs > num_tokens:
+                violations.append(f"requests/tokens={num_reqs}/{num_tokens}")
+            if num_tokens > cached.execution_num_tokens:
+                violations.append(
+                    f"num_tokens={num_tokens}, capacity={cached.execution_num_tokens}"
+                )
+            if num_reqs > cached.execution_num_reqs:
+                violations.append(
+                    f"num_reqs={num_reqs}, capacity={cached.execution_num_reqs}"
+                )
+            if local_desc.cg_mode != CUDAGraphMode.FULL:
+                violations.append(f"local_cg_mode={local_desc.cg_mode.name}")
+            if local_desc.num_tokens > cached.execution_num_tokens:
+                violations.append(
+                    "local graph token capacity="
+                    f"{local_desc.num_tokens}, cached={cached.execution_num_tokens}"
+                )
+            if (
+                local_desc.num_reqs is not None
+                and local_desc.num_reqs > cached.execution_num_reqs
+            ):
+                violations.append(
+                    "local graph request capacity="
+                    f"{local_desc.num_reqs}, cached={cached.execution_num_reqs}"
+                )
+            if uniform_token_count != cached.uniform_token_count:
+                violations.append(
+                    "uniform_token_count="
+                    f"{uniform_token_count}, cached={cached.uniform_token_count}"
+                )
+            if max_query_len != cached.uniform_token_count:
+                violations.append(
+                    f"max_query_len={max_query_len}, "
+                    f"cached={cached.uniform_token_count}"
+                )
+            if num_tokens != num_reqs * cached.uniform_token_count:
+                violations.append(
+                    f"num_tokens={num_tokens}, expected="
+                    f"{num_reqs * cached.uniform_token_count}"
+                )
+
+        if violations:
+            raise RuntimeError(
+                "Cached target DP execution contract violation; a local fallback "
+                "would change collective ordering: " + "; ".join(violations)
+            )
+
+    def _observe_execution_contract(
+        self,
+        future: DPSyncFuture,
+        result: tuple[BatchExecutionDescriptor, DPSyncState | None],
+        cudagraph_manager: CudaGraphManager | None,
+    ) -> None:
+        if not self.cache_execution_contract or future.contract_epoch is None:
+            return
+
+        batch_desc, sync = result
+        capacity_num_reqs = future.contract_capacity_num_reqs
+        candidate = None
+        if (
+            sync is not None
+            and not sync.eager
+            and not future.has_prefill
+            and sync.uniform_token_count is not None
+            and batch_desc.cg_mode == CUDAGraphMode.FULL
+            and capacity_num_reqs is not None
+            and capacity_num_reqs > 0
+        ):
+            uniform_token_count = sync.uniform_token_count
+            capacity_num_tokens = capacity_num_reqs * uniform_token_count
+            assert cudagraph_manager is not None
+            capacity_desc = cudagraph_manager.dispatch(
+                capacity_num_reqs,
+                capacity_num_tokens,
+                uniform_token_count,
+                num_active_loras=0,
+                max_query_len=uniform_token_count,
+            )
+            if (
+                capacity_desc.cg_mode == CUDAGraphMode.FULL
+                and capacity_desc.num_tokens >= capacity_num_tokens
+                and (capacity_desc.num_reqs or 0) >= capacity_num_reqs
+            ):
+                execution_num_reqs = capacity_desc.num_reqs or capacity_num_reqs
+                candidate = _CachedDPExecutionContract(
+                    batch_desc=capacity_desc,
+                    execution_num_tokens=capacity_desc.num_tokens,
+                    execution_num_reqs=execution_num_reqs,
+                    uniform_token_count=uniform_token_count,
+                    num_tokens_across_dp=torch.full(
+                        (self.dp_size,),
+                        capacity_desc.num_tokens,
+                        dtype=torch.int64,
+                        device="cpu",
+                    ),
+                    epoch=future.contract_epoch,
+                )
+        self._observe_cache_candidate(candidate)
+
+    def _observe_cache_candidate(
+        self, candidate: _CachedDPExecutionContract | None
+    ) -> None:
+        if candidate is None:
+            self._cached_contract = None
+            self._cache_candidate = None
+            return
+
+        active = self._cached_contract
+        if active is not None and active.signature == candidate.signature:
+            self._cached_contract = candidate
+            self._cache_candidate = None
+            return
+
+        previous = self._cache_candidate
+        count = (
+            previous[2] + 1
+            if previous is not None and previous[0] == candidate.signature
+            else 1
+        )
+        if count >= self.cache_stability_steps:
+            self._cached_contract = candidate
+            self._cache_candidate = None
+        else:
+            self._cached_contract = None
+            self._cache_candidate = (candidate.signature, candidate, count)
 
     def _release(self, future: DPSyncFuture) -> None:
         if self._active_future is not future:

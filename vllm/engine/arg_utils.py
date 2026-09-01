@@ -501,6 +501,12 @@ class EngineArgs:
     enable_speculator_dp_sync_pipeline: bool = (
         ParallelConfig.enable_speculator_dp_sync_pipeline
     )
+    enable_cached_dp_execution_contract: bool = (
+        ParallelConfig.enable_cached_dp_execution_contract
+    )
+    dp_execution_contract_stability_steps: int = (
+        ParallelConfig.dp_execution_contract_stability_steps
+    )
     enable_batch_sharded_sampling: bool | None = (
         ParallelConfig.enable_batch_sharded_sampling
     )
@@ -1178,6 +1184,14 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-speculator-dp-sync-pipeline",
             **parallel_kwargs["enable_speculator_dp_sync_pipeline"],
+        )
+        parallel_group.add_argument(
+            "--enable-cached-dp-execution-contract",
+            **parallel_kwargs["enable_cached_dp_execution_contract"],
+        )
+        parallel_group.add_argument(
+            "--dp-execution-contract-stability-steps",
+            **parallel_kwargs["dp_execution_contract_stability_steps"],
         )
         parallel_group.add_argument(
             "--enable-batch-sharded-sampling",
@@ -2317,6 +2331,12 @@ class EngineArgs:
             enable_dp_execution_contract=self.enable_dp_execution_contract,
             enable_speculator_dp_sync_pipeline=(
                 self.enable_speculator_dp_sync_pipeline
+            ),
+            enable_cached_dp_execution_contract=(
+                self.enable_cached_dp_execution_contract
+            ),
+            dp_execution_contract_stability_steps=(
+                self.dp_execution_contract_stability_steps
             ),
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,

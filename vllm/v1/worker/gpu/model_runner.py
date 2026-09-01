@@ -269,12 +269,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.dp_execution_contract_enabled = (
             self.parallel_config.enable_dp_execution_contract
         )
+        self.cached_dp_execution_contract_enabled = (
+            self.parallel_config.enable_cached_dp_execution_contract
+        )
         self._target_dp_sync = (
             DPSyncCoordinator(
                 self.dp_size,
                 self.dp_rank,
                 lane="target",
                 execution_contract=True,
+                cache_execution_contract=(self.cached_dp_execution_contract_enabled),
+                cache_stability_steps=(
+                    self.parallel_config.dp_execution_contract_stability_steps
+                ),
             )
             if self.dp_execution_contract_enabled
             else None
@@ -781,6 +788,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         valid_dummy_state_slots: bool = False,
         dp_idle: bool = False,
+        dp_execution_contract_refresh: bool = False,
+        dp_execution_contract_epoch: int | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
@@ -812,6 +821,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_scheduler_output = SchedulerOutput.make_empty()
         dummy_scheduler_output.total_num_scheduled_tokens = num_tokens
         dummy_scheduler_output.num_scheduled_tokens = num_scheduled_tokens
+        dummy_scheduler_output.dp_execution_contract_refresh = (
+            dp_execution_contract_refresh
+        )
+        dummy_scheduler_output.dp_execution_contract_epoch = dp_execution_contract_epoch
 
         # Disable any use of KVConnector for dummy runs.
         self.kv_connector.set_disabled(True)
@@ -1734,6 +1747,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=max_query_len,
                 need_eager=is_profile or skip_compiled,
                 num_active_loras=num_active_loras,
+                force_refresh=scheduler_output.dp_execution_contract_refresh,
+                contract_epoch=scheduler_output.dp_execution_contract_epoch,
+                contract_capacity_num_reqs=self.max_num_reqs,
+                has_prefill=(
+                    batch_req_state.has_prefill
+                    if batch_req_state is not None
+                    else False
+                ),
             )
             self._pending_target_dp_sync = target_dp_future
             if batch_req_state is not None and not dummy_run:
