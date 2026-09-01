@@ -4,6 +4,7 @@
 import struct
 import threading
 
+import numpy as np
 import pytest
 import torch
 
@@ -37,7 +38,7 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 @pytest.fixture(scope="session")
 def server():
-    server = PagedShmServerProc(size=1024 * 1024, block_size=4096, debug=True)
+    server = PagedShmServerProc(size=1024 * 1024 * 10, block_size=4096, debug=True)
     server.start()
     yield server
     server.shutdown()
@@ -98,11 +99,10 @@ def _compare_items(item1: ShmItem, item2: ShmItem) -> bool:
 
 
 def _make_test_item() -> ShmItem:
-    """Create a representative ShmItem for testing."""
-    e1 = MultiModalFieldElem(
-        torch.randn(10, 10, dtype=torch.float32),
-        MultiModalBatchedField(),
-    )
+    """Create a ShmItem with a large tensor to ensure multi-chunk encoding."""
+    # Large tensor (~256KB) to trigger multi-chunk, but within 1MB server limit
+    large_tensor = torch.randn(256, 256, dtype=torch.float32)  # ~256KB
+    e1 = MultiModalFieldElem(large_tensor, MultiModalBatchedField())
     e2 = MultiModalFieldElem(
         torch.randint(0, 256, (5, 5), dtype=torch.int64),
         MultiModalFlatField(slices=[slice(1, 3), slice(2, 4)], dim=0),
@@ -137,45 +137,69 @@ class TestEncode:
     """Tests for encode_item function."""
 
     def test_encode_item_basic(self):
-        block_size = 4096
-        encoder = MsgpackEncoder(size_threshold=block_size)
+        encoder = MsgpackEncoder(size_threshold=4096)
         item = _make_test_item()
-        meta_block_data, chunks, chunk_lengths = encode_item(item, block_size, encoder)
+        result = encode_item(item.kwargs_item, item.prompt_updates, encoder)
+        assert result is not None, "Expected multi-chunk encoding"
+        chunks, lengths = result
 
-        assert len(meta_block_data) == block_size
-
-        num_chunks = struct.unpack("<I", meta_block_data[:4])[0]
-        assert num_chunks == len(chunks) == len(chunk_lengths)
+        first = chunks[0]
+        assert isinstance(first, bytes)
+        num_chunks = struct.unpack("<I", first[:4])[0]
+        assert num_chunks == len(chunks) == len(lengths)
 
         offset = 4
-        for length in chunk_lengths:
-            stored_len = struct.unpack("<I", meta_block_data[offset : offset + 4])[0]
-            assert stored_len == length
+        stored_lengths = []
+        for _ in range(num_chunks):
+            stored_len = struct.unpack("<I", first[offset : offset + 4])[0]
             offset += 4
+            flag = struct.unpack("<B", first[offset : offset + 1])[0]
+            offset += 1
+            stored_lengths.append(stored_len)
+            assert flag in (0, 1)
 
-        assert sum(chunk_lengths) == sum(len(c) for c in chunks)
+        # Verify metadata length calculation
+        meta_data_len = 4 + num_chunks * 5
+        assert lengths[0] == meta_data_len + stored_lengths[0]
+        for i in range(1, num_chunks):
+            assert lengths[i] == stored_lengths[i]
+
+        for i, ch in enumerate(chunks):
+            actual_size = (
+                ch.nbytes if isinstance(ch, (torch.Tensor, np.ndarray)) else len(ch)
+            )
+            assert actual_size == lengths[i]
 
     def test_encode_item_empty(self):
-        block_size = 4096
-        encoder = MsgpackEncoder(size_threshold=block_size)
-        item = ShmItem(kwargs_item=MultiModalKwargsItem({}), prompt_updates=[])
-        meta_block_data, chunks, chunk_lengths = encode_item(item, block_size, encoder)
+        encoder = MsgpackEncoder(size_threshold=4096)
+        result = encode_item(MultiModalKwargsItem({}), [], encoder)
+        assert result is None or len(result[0]) == 1
 
-        assert len(meta_block_data) == block_size
-        num_chunks = struct.unpack("<I", meta_block_data[:4])[0]
-        assert num_chunks == len(chunks) == len(chunk_lengths)
-        assert sum(chunk_lengths) == sum(len(c) for c in chunks)
+    def test_encode_item_single_chunk(self):
+        small_tensor = torch.randn(10, 10)
+        e = MultiModalFieldElem(small_tensor, MultiModalBatchedField())
+        kwargs = MultiModalKwargsItem({"x": e})
+        encoder = MsgpackEncoder(size_threshold=4096)
+        result = encode_item(kwargs, [], encoder)
+        assert result is None, "Should return None for single chunk"
 
 
 class TestIntegration:
-    """Integration tests using client to allocate blocks,
-    but serial_utils only uses storage."""
+    """Integration tests using client to allocate blocks."""
 
-    def _write_and_get_token(self, client, item, encoder):
+    def _write_and_get_token(self, client, item: ShmItem, encoder, timeout=10.0):
         storage = client._storage
         block_size = storage.block_size
-        meta_block_data, chunks, _ = encode_item(item, block_size, encoder)
-        total_blocks = 1 + sum((len(c) + block_size - 1) // block_size for c in chunks)
+
+        result = encode_item(item.kwargs_item, item.prompt_updates, encoder)
+        if result is None:
+            raise RuntimeError("Test item did not produce multi-chunk encoding")
+        chunks, lengths = result
+
+        total_blocks = 0
+        for length in lengths:
+            total_blocks += (length + block_size - 1) // block_size
+
         mm_hash = _unique_uuid()
         req = ShmWriteRequest(
             uuid=mm_hash,
@@ -183,8 +207,8 @@ class TestIntegration:
             use_cache=True,
             generate_read_token=True,
         )
-        alloc = client.open_write([req], timeout=5.0)[0]
-        write_encoded_to_blocks(storage, meta_block_data, chunks, alloc.blocks)
+        alloc = client.open_write([req], timeout=timeout)[0]
+        write_encoded_to_blocks(storage, chunks, alloc.blocks)
         client.close_write(mm_hash)
         return alloc.read_token
 
@@ -210,7 +234,7 @@ class TestIntegration:
         encoder = MsgpackEncoder(size_threshold=block_size)
         decoder = MsgpackDecoder(ShmItem)
 
-        large_tensor = torch.randn(4096 * 2 + 100, dtype=torch.float32)
+        large_tensor = torch.randn(4096 + 100, dtype=torch.float32)  # ~16KB
         e1 = MultiModalFieldElem(large_tensor, MultiModalBatchedField())
         kwargs_item = MultiModalKwargsItem({"x": e1})
         original_item = ShmItem(kwargs_item=kwargs_item, prompt_updates=[])
@@ -239,13 +263,9 @@ class TestIntegration:
             target=[10, 20, 30],
             content=PromptUpdateDetails.from_seq([100, 200, 300]),
         )
-        kwargs_item = MultiModalKwargsItem(
-            {
-                "a": MultiModalFieldElem(
-                    torch.tensor([1, 2, 3]), MultiModalBatchedField()
-                )
-            }
-        )
+        large_tensor = torch.randn(256, 256, dtype=torch.float32)  # ~256KB
+        e = MultiModalFieldElem(large_tensor, MultiModalBatchedField())
+        kwargs_item = MultiModalKwargsItem({"a": e})
         original_item = ShmItem(kwargs_item=kwargs_item, prompt_updates=[update])
 
         token = self._write_and_get_token(client, original_item, encoder)
@@ -289,7 +309,6 @@ class TestIntegration:
                     kwargs_item=decoded_kwargs, prompt_updates=decoded_updates
                 )
                 results.append(_compare_items(original_item, decoded_item))
-                # Do NOT close token here; will be closed by main thread
             except Exception as e:
                 errors.append(e)
 
@@ -301,8 +320,6 @@ class TestIntegration:
 
         assert all(results), f"Some readers got corrupted data: results={results}"
         assert not errors, f"Reader errors: {errors}"
-
-        # Close token once after all readers finish
         client.close_read(token)
 
     def test_read_token_reusable(self, client):
@@ -313,7 +330,6 @@ class TestIntegration:
 
         token = self._write_and_get_token(client, original_item, encoder)
 
-        # Read twice without closing in between
         for _ in range(2):
             read_alloc = client.open_read(token, timeout=5.0)
             decoded_kwargs, decoded_updates = read_decoded_from_blocks(
@@ -323,19 +339,63 @@ class TestIntegration:
                 kwargs_item=decoded_kwargs, prompt_updates=decoded_updates
             )
             assert _compare_items(original_item, decoded_item)
-            # Do not close here
 
-        # Close once after all reads
         client.close_read(token)
 
     def test_read_nonexistent_blocks_fails(self, client):
         decoder = MsgpackDecoder(ShmItem)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Blocks list cannot be empty"):
             read_decoded_from_blocks(client._storage, [], client._block_size, decoder)
 
     def test_write_empty_blocks_fails(self, client):
-        with pytest.raises(ValueError):
-            write_encoded_to_blocks(client._storage, b"", (), [])
+        storage = client._storage
+        chunks = [b"dummy"]
+        with pytest.raises(ValueError, match="Blocks list cannot be empty"):
+            write_encoded_to_blocks(storage, chunks, [])
+
+    def test_type_flag_restoration(self, client):
+        """Test that type flags correctly restore bytes vs tensor."""
+        block_size = client._block_size
+        encoder = MsgpackEncoder(size_threshold=block_size)
+        decoder = MsgpackDecoder(ShmItem)
+
+        large_tensor = torch.randn(1024, dtype=torch.float32)
+        small_tensor = torch.randn(10, 10, dtype=torch.float32)
+        e1 = MultiModalFieldElem(large_tensor, MultiModalBatchedField())
+        e2 = MultiModalFieldElem(
+            small_tensor, MultiModalFlatField(slices=[slice(1, 3)], dim=0)
+        )
+        kwargs_item = MultiModalKwargsItem({"t1": e1, "t2": e2})
+        original_item = ShmItem(kwargs_item=kwargs_item, prompt_updates=[])
+
+        result = encode_item(
+            original_item.kwargs_item, original_item.prompt_updates, encoder
+        )
+        assert result is not None
+        chunks, lengths = result
+
+        total_blocks = sum(
+            (length + block_size - 1) // block_size for length in lengths
+        )
+        mm_hash = _unique_uuid()
+        req = ShmWriteRequest(
+            uuid=mm_hash,
+            size=total_blocks * block_size,
+            use_cache=True,
+            generate_read_token=True,
+        )
+        alloc = client.open_write([req], timeout=10.0)[0]
+        write_encoded_to_blocks(client._storage, chunks, alloc.blocks)
+        client.close_write(mm_hash)
+
+        read_alloc = client.open_read(alloc.read_token, timeout=5.0)
+        decoded_kwargs, _ = read_decoded_from_blocks(
+            client._storage, read_alloc.blocks, block_size, decoder
+        )
+        client.close_read(alloc.read_token)
+
+        decoded_item = ShmItem(kwargs_item=decoded_kwargs, prompt_updates=[])
+        assert _compare_items(original_item, decoded_item)
 
 
 class TestErrorHandling:
@@ -346,30 +406,24 @@ class TestErrorHandling:
         block_size = storage.block_size
         encoder = MsgpackEncoder(size_threshold=block_size)
         item = _make_test_item()
-        meta_block_data, chunks, _ = encode_item(item, block_size, encoder)
-        with pytest.raises(ValueError, match="Insufficient blocks"):
-            write_encoded_to_blocks(storage, meta_block_data, chunks, [0])
+        result = encode_item(item.kwargs_item, item.prompt_updates, encoder)
+        assert result is not None
+        chunks, _ = result
 
-    def test_decode_corrupted_meta(self, client):
+        with pytest.raises(ValueError, match="Not enough blocks allocated"):
+            write_encoded_to_blocks(storage, chunks, [0])
+
+    def test_decode_insufficient_blocks_raises(self, client):
         storage = client._storage
         block_size = storage.block_size
 
-        # Write meta: num_chunks=1, length=block_size*10 (too large)
-        meta_data = struct.pack("<II", 1, block_size * 10)
-        meta_block = bytearray(block_size)
-        meta_block[: len(meta_data)] = meta_data
-        storage.write(bytes(meta_block), [0])
+        # Create a header claiming length larger than available
+        header = struct.pack("<I", 1) + struct.pack("<I", 10000) + struct.pack("<B", 0)
+        fake_chunk = header + b"X" * 100
+        storage.write(fake_chunk, [0])
 
-        # Write dummy data to block 1 (so we have at least one data block)
-        dummy = b"\x00" * block_size
-        storage.write(dummy, [1])
-
-        decoder = MsgpackDecoder(ShmItem)
-        # read_decoded_from_blocks will see that chunk length needs 10 blocks
-        # but we only have 1 data block,
-        # so it raises ValueError with "Insufficient data blocks"
-        with pytest.raises(ValueError, match="Insufficient data blocks"):
-            read_decoded_from_blocks(storage, [0, 1], block_size, decoder)
+        with pytest.raises(ValueError, match="Insufficient blocks for first chunk"):
+            read_decoded_from_blocks(storage, [0], block_size, MsgpackDecoder(ShmItem))
 
 
 @pytest.mark.slow
@@ -384,13 +438,15 @@ class TestStress:
 
         tokens = []
         for i in range(num_items):
-            tensor = torch.full((10,), i, dtype=torch.float32)
+            tensor = torch.full((256, 256), i, dtype=torch.float32)
             e = MultiModalFieldElem(tensor, MultiModalBatchedField())
             kwargs_item = MultiModalKwargsItem({"v": e})
             item = ShmItem(kwargs_item=kwargs_item, prompt_updates=[])
-            meta, chunks, _ = encode_item(item, block_size, encoder)
-            total_blocks = 1 + sum(
-                (len(c) + block_size - 1) // block_size for c in chunks
+            result = encode_item(item.kwargs_item, item.prompt_updates, encoder)
+            assert result is not None
+            chunks, lengths = result
+            total_blocks = sum(
+                (length + block_size - 1) // block_size for length in lengths
             )
             mm_hash = _unique_uuid()
             req = ShmWriteRequest(
@@ -399,8 +455,8 @@ class TestStress:
                 use_cache=True,
                 generate_read_token=True,
             )
-            alloc = client.open_write([req], timeout=5.0)[0]
-            write_encoded_to_blocks(client._storage, meta, chunks, alloc.blocks)
+            alloc = client.open_write([req], timeout=10.0)[0]
+            write_encoded_to_blocks(client._storage, chunks, alloc.blocks)
             client.close_write(mm_hash)
             tokens.append((alloc.read_token, i))
 
@@ -411,7 +467,6 @@ class TestStress:
             )
             data_dict = decoded_kwargs.data
             tensor = data_dict["v"].data
-            assert torch.equal(
-                tensor, torch.full((10,), expected_idx, dtype=torch.float32)
-            )
+            expected = torch.full((256, 256), expected_idx, dtype=torch.float32)
+            assert torch.equal(tensor, expected)
             client.close_read(token)

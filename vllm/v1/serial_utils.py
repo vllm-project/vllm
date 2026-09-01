@@ -150,6 +150,7 @@ class MsgpackEncoder:
         self,
         size_threshold: int | None = None,
         oob_tensor_consumer: OOBTensorConsumer | None = None,
+        save_raw_tensor: bool = False,
     ):
         if size_threshold is None:
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
@@ -160,6 +161,7 @@ class MsgpackEncoder:
         self.aux_buffers: list[bytestr] | None = None
         self.size_threshold = size_threshold
         self.oob_tensor_consumer = oob_tensor_consumer
+        self.save_raw_tensor = save_raw_tensor
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
@@ -268,7 +270,7 @@ class MsgpackEncoder:
             # Otherwise encode index of backing buffer to avoid copy.
             assert self.aux_buffers is not None
             data = len(self.aux_buffers)
-            self.aux_buffers.append(tensor_data(obj))
+            self.aux_buffers.append(obj if self.save_raw_tensor else tensor_data(obj))
         dtype = str(obj.dtype).removeprefix("torch.")
         return dtype, obj.shape, data
 
@@ -406,21 +408,24 @@ class MsgpackDecoder:
 
         is_aux = isinstance(data, int)
         buffer = self.aux_buffers[data] if is_aux else data
-        buffer = buffer if isinstance(buffer, memoryview) else memoryview(buffer)
         torch_dtype = getattr(torch, dtype)
         assert isinstance(torch_dtype, torch.dtype)
-        if not buffer.nbytes:  # torch.frombuffer doesn't like empty buffers
-            assert 0 in shape
-            return torch.empty(shape, dtype=torch_dtype)
-        # Create uint8 array
-        arr = torch.frombuffer(buffer, dtype=torch.uint8)
-        # Clone ensures tensor is backed by pytorch-owned memory for safe
-        # future async CPU->GPU transfer.
-        # Pin larger tensors for more efficient CPU->GPU transfer.
-        if not is_aux:
-            arr = arr.clone()
-        elif not self.share_mem:
-            arr = arr.pin_memory() if self.pin_tensors else arr.clone()
+        if not isinstance(buffer, torch.Tensor):
+            buffer = buffer if isinstance(buffer, memoryview) else memoryview(buffer)
+            if not buffer.nbytes:  # torch.frombuffer doesn't like empty buffers
+                assert 0 in shape
+                return torch.empty(shape, dtype=torch_dtype)
+            # Create uint8 array
+            arr = torch.frombuffer(buffer, dtype=torch.uint8)
+            # Clone ensures tensor is backed by pytorch-owned memory for safe
+            # future async CPU->GPU transfer.
+            # Pin larger tensors for more efficient CPU->GPU transfer.
+            if not is_aux:
+                arr = arr.clone()
+            elif not self.share_mem:
+                arr = arr.pin_memory() if self.pin_tensors else arr.clone()
+        else:
+            arr = buffer
         # Convert back to proper shape & type
         return arr.view(torch_dtype).view(shape)
 
