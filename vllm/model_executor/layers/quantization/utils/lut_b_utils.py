@@ -70,6 +70,15 @@ def _assign_lut_indices(values: torch.Tensor, centers: torch.Tensor) -> torch.Te
     return torch.searchsorted(boundaries, values.contiguous()).to(torch.int64)
 
 
+def _pin_zero_centers(
+    centers: torch.Tensor,
+    preserve_zero: torch.Tensor,
+) -> torch.Tensor:
+    zero_indices = centers.abs().argmin(dim=1)
+    centers[preserve_zero, zero_indices[preserve_zero]] = 0
+    return centers
+
+
 def _initialize_farthest_centers(values: torch.Tensor) -> torch.Tensor:
     centers = torch.empty(
         values.shape[0],
@@ -117,8 +126,10 @@ def _fit_from_centers(
     values: torch.Tensor,
     centers: torch.Tensor,
     num_iterations: int,
+    preserve_zero: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    centers = _snap_to_e4m3(centers).to(torch.float32).sort(dim=1).values
+    centers = _snap_to_e4m3(centers).to(torch.float32)
+    centers = _pin_zero_centers(centers, preserve_zero).sort(dim=1).values
     for _ in range(num_iterations):
         indices = _assign_lut_indices(values, centers)
         sums = torch.zeros_like(centers)
@@ -127,7 +138,8 @@ def _fit_from_centers(
         counts.scatter_add_(1, indices, torch.ones_like(values))
         updated = sums / counts.clamp_min(1)
         centers = torch.where(counts > 0, updated, centers)
-        centers = _snap_to_e4m3(centers).to(torch.float32).sort(dim=1).values
+        centers = _snap_to_e4m3(centers).to(torch.float32)
+        centers = _pin_zero_centers(centers, preserve_zero).sort(dim=1).values
 
     indices = _assign_lut_indices(values, centers)
     return indices.to(torch.uint8), centers.to(torch.float8_e4m3fn)
@@ -138,6 +150,7 @@ def _fit_lut_b_tiles(
     num_iterations: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     values = values.to(torch.float32)
+    preserve_zero = (values == 0).any(dim=1)
     initializers = (
         _initialize_farthest_centers,
         _initialize_quantile_centers,
@@ -162,6 +175,7 @@ def _fit_lut_b_tiles(
             values,
             initializer(values),
             num_iterations,
+            preserve_zero,
         )
         reconstructed = torch.gather(
             centers.to(torch.float32),

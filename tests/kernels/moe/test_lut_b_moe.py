@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantDesc,
 )
 from vllm.model_executor.layers.fused_moe.experts.lut_b_moe import (
+    LutBTritonExperts,
     dequantize_lut_b_triton,
     make_lut_b_moe_kernel,
     should_dequantize_lut_b,
@@ -28,6 +29,30 @@ from vllm.platforms import current_platform
 def test_lut_b_dequant_heuristic_boundary() -> None:
     assert not should_dequantize_lut_b(num_tokens=7, num_experts=4)
     assert should_dequantize_lut_b(num_tokens=8, num_experts=4)
+
+
+def test_lut_b_kernel_rejects_unsupported_config(monkeypatch) -> None:
+    monkeypatch.setattr(
+        LutBTritonExperts,
+        "_supports_current_device",
+        staticmethod(lambda: True),
+    )
+    moe_config = make_dummy_moe_config(
+        num_experts=4,
+        experts_per_token=2,
+        hidden_dim=64,
+        intermediate_size=64,
+    )
+    moe_config.has_bias = True
+    quant_config = FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(),
+        _a2=FusedMoEQuantDesc(),
+        _w1=FusedMoEQuantDesc("lut_b"),
+        _w2=FusedMoEQuantDesc("lut_b"),
+    )
+
+    with pytest.raises(ValueError, match="kernel does not support bias"):
+        make_lut_b_moe_kernel(moe_config, quant_config, None)
 
 
 @pytest.mark.skipif(

@@ -90,6 +90,16 @@ def test_lut_b_stacked_moe_weight_format_and_fit() -> None:
     assert (weight - reconstructed).square().mean() < weight.square().mean()
 
 
+def test_lut_b_preserves_zero_padding() -> None:
+    weight = torch.linspace(-1, 1, 512, dtype=torch.float32).reshape(1, 8, 64)
+    weight[:, :, -1] = 0
+
+    packed, codebooks = quantize_lut_b(weight)
+    reconstructed = dequantize_lut_b(packed, codebooks, out_dtype=torch.float32)
+
+    assert torch.all(reconstructed[weight == 0] == 0)
+
+
 def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
     monkeypatch,
 ) -> None:

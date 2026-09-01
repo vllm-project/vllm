@@ -9,6 +9,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
@@ -337,6 +338,32 @@ def invoke_lut_b_grouped_gemm(
 class LutBTritonExperts(TritonExperts):
     """Routed experts backed by two fused LUT-B decode-and-GEMM launches."""
 
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        supported, reason = TritonExperts.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
+        if not supported:
+            return supported, reason
+        if moe_config.has_bias:
+            return False, "kernel does not support bias"
+        if (
+            moe_config.hidden_dim % LUT_B_BLOCK_K != 0
+            or moe_config.intermediate_size_per_partition % LUT_B_BLOCK_K != 0
+        ):
+            return False, (f"kernel requires dimensions divisible by {LUT_B_BLOCK_K}")
+        return True, None
+
     def __init__(self, moe_config, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config, quant_config)
         self.dense_experts = TritonExperts(
@@ -489,7 +516,7 @@ class LutBTritonExperts(TritonExperts):
 
 
 def make_lut_b_moe_kernel(
-    moe_config,
+    moe_config: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
 ) -> mk.FusedMoEKernel:
@@ -497,6 +524,16 @@ def make_lut_b_moe_kernel(
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
         maybe_make_prepare_finalize,
     )
+
+    supported, reason = LutBTritonExperts.is_supported_config(
+        LutBTritonExperts,
+        moe_config,
+        kLutBStatic,
+        None,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+    if not supported:
+        raise ValueError(f"LUT-B MoE kernel is unsupported: {reason}")
 
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
