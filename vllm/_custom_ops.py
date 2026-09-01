@@ -159,6 +159,44 @@ def paged_attention_rocm(
     )
 
 
+def paged_attention_rocm_splitkv(
+    output: torch.Tensor,
+    partial_out: torch.Tensor,
+    partial_max: torch.Tensor,
+    partial_sum: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    num_kv_heads: int,
+    softmax_scale: float,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    query_start_loc: torch.Tensor | None,
+    physical_page_size: int,
+    kv_cache_dtype: str,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+) -> None:
+    torch.ops._rocm_C.paged_attention_splitkv(
+        output,
+        partial_out,
+        partial_max,
+        partial_sum,
+        query,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        softmax_scale,
+        block_tables,
+        seq_lens,
+        query_start_loc,
+        physical_page_size,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
+
+
 def mla_decode_kvcache_cpu(
     out: torch.Tensor,
     query: torch.Tensor,

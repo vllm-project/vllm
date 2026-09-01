@@ -12,6 +12,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     kernel_paged_attention_2d,
     paged_attention_2d_splitkv_decode,
+    paged_attention_rocm_splitkv_decode,
 )
 
 DEVICE_TYPE = current_platform.device_type
@@ -22,7 +23,7 @@ def _to_vllm_kv_cache(
     value_cache: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
-    x = 8
+    x = 16 // key_cache.element_size()
     key_cache = (
         key_cache.view(num_blocks, block_size, num_kv_heads, head_size // x, x)
         .permute(0, 2, 3, 1, 4)
@@ -43,6 +44,8 @@ def _ref_paged_decode(
     scale: float,
     query_start_loc: torch.Tensor | None = None,
     filter_by_query_len: bool = False,
+    k_scale: torch.Tensor | float = 1.0,
+    v_scale: torch.Tensor | float = 1.0,
 ) -> torch.Tensor:
     """Reference decode using the non-split kernel_paged_attention_2d."""
     output = torch.empty_like(query)
@@ -68,8 +71,8 @@ def _ref_paged_decode(
         seq_lens_ptr=seq_lens,
         alibi_slopes_ptr=None,
         scale=scale,
-        k_scale=1.0,
-        v_scale=1.0,
+        k_scale=k_scale,
+        v_scale=v_scale,
         out_scale_inv=1.0,
         num_query_heads=num_query_heads,
         num_queries_per_kv=num_queries_per_kv,
@@ -110,7 +113,7 @@ def _ref_paged_decode(
     not torch.accelerator.is_available(), reason="split-KV decode test requires a GPU"
 )
 @pytest.mark.parametrize("num_query_heads,num_kv_heads", [(4, 4), (16, 4)])
-@pytest.mark.parametrize("block_size", [16, 32, 528])
+@pytest.mark.parametrize("block_size", [16, 32, 528, 1584])
 @pytest.mark.parametrize("batch_size", [1, 3, 5])
 @pytest.mark.parametrize(
     "seq_lens",
@@ -176,12 +179,232 @@ def test_paged_attention_2d_splitkv_decode(
 
 
 @pytest.mark.skipif(
+    not on_gfx1x(), reason="native ROCm split-KV decode is only built for gfx1x"
+)
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="native split-KV test requires a GPU"
+)
+@pytest.mark.parametrize("block_size", [32, 528, 1584])
+@pytest.mark.parametrize("batch_size", [1, 3, 5])
+@pytest.mark.parametrize("num_query_heads", [16, 24])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [1001, 1023, 997, 1019, 991],
+        [4001, 4095, 3983, 4077, 3967],
+        [16001, 16383, 15983, 16277, 15871],
+    ],
+)
+@torch.inference_mode()
+def test_paged_attention_rocm_splitkv_decode(
+    block_size: int,
+    batch_size: int,
+    num_query_heads: int,
+    dtype: torch.dtype,
+    seq_lens: list[int],
+) -> None:
+    set_random_seed(0)
+    torch.set_default_device(DEVICE_TYPE)
+
+    head_size = 256
+    num_kv_heads = 4
+    seq_lens_tensor = torch.tensor(seq_lens[:batch_size], dtype=torch.int32)
+    max_seq_len = int(seq_lens_tensor.max().item())
+    num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
+    num_blocks = batch_size * num_blocks_per_seq
+    scale = head_size**-0.5
+
+    query = torch.randn(batch_size, num_query_heads, head_size, dtype=dtype)
+    dense_key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    dense_value_cache = torch.randn_like(dense_key_cache)
+    block_tables = torch.arange(num_blocks, dtype=torch.int32).view(
+        batch_size, num_blocks_per_seq
+    )
+    key_cache, value_cache = _to_vllm_kv_cache(dense_key_cache, dense_value_cache)
+
+    triton_output = paged_attention_2d_splitkv_decode(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        block_tables=block_tables,
+        seq_lens=seq_lens_tensor,
+        scale=scale,
+        actual_max_splits=4,
+        max_seq_len=max_seq_len,
+    )
+    native_output = paged_attention_rocm_splitkv_decode(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        block_tables=block_tables,
+        seq_lens=seq_lens_tensor,
+        scale=scale,
+        actual_max_splits=4,
+        max_seq_len=max_seq_len,
+    )
+
+    torch.testing.assert_close(
+        native_output,
+        triton_output,
+        atol=get_default_atol(native_output),
+        rtol=get_default_rtol(native_output),
+    )
+
+
+@pytest.mark.skipif(
+    not on_gfx1x(), reason="native ROCm split-KV decode is only built for gfx1x"
+)
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="native split-KV test requires a GPU"
+)
+@pytest.mark.parametrize("block_size", [32, 528, 1584])
+@pytest.mark.parametrize("batch_size", [1, 3, 5])
+@pytest.mark.parametrize("num_query_heads", [16, 24])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [1001, 1023, 997, 1019, 991],
+        [4001, 4095, 3983, 4077, 3967],
+        [16001, 16383, 15983, 16277, 15871],
+    ],
+)
+@torch.inference_mode()
+def test_paged_attention_rocm_splitkv_decode_fp8_e4m3(
+    block_size: int,
+    batch_size: int,
+    num_query_heads: int,
+    seq_lens: list[int],
+) -> None:
+    set_random_seed(0)
+    torch.set_default_device(DEVICE_TYPE)
+
+    head_size = 256
+    num_kv_heads = 4
+    dtype = torch.bfloat16
+    fp8_dtype = current_platform.fp8_dtype()
+    seq_lens_tensor = torch.tensor(seq_lens[:batch_size], dtype=torch.int32)
+    max_seq_len = int(seq_lens_tensor.max().item())
+    num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
+    num_blocks = batch_size * num_blocks_per_seq
+    scale = head_size**-0.5
+    k_scale = torch.tensor(0.02, dtype=torch.float32)
+    v_scale = torch.tensor(0.025, dtype=torch.float32)
+
+    query = torch.randn(batch_size, num_query_heads, head_size, dtype=dtype)
+    dense_key_cache = (
+        torch.randn(num_blocks, block_size, num_kv_heads, head_size, dtype=dtype)
+        / k_scale
+    ).to(fp8_dtype)
+    dense_value_cache = (
+        torch.randn(num_blocks, block_size, num_kv_heads, head_size, dtype=dtype)
+        / v_scale
+    ).to(fp8_dtype)
+    block_tables = torch.arange(num_blocks, dtype=torch.int32).view(
+        batch_size, num_blocks_per_seq
+    )
+    key_cache, value_cache = _to_vllm_kv_cache(dense_key_cache, dense_value_cache)
+
+    ref_output = _ref_paged_decode(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        block_tables=block_tables,
+        seq_lens=seq_lens_tensor,
+        scale=scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
+    native_output = paged_attention_rocm_splitkv_decode(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        block_tables=block_tables,
+        seq_lens=seq_lens_tensor,
+        scale=scale,
+        actual_max_splits=4,
+        max_seq_len=max_seq_len,
+        kv_cache_dtype="fp8_e4m3",
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
+
+    torch.testing.assert_close(native_output, ref_output, atol=0.02, rtol=0.02)
+
+
+@pytest.mark.skipif(
+    not on_gfx1x(), reason="native ROCm split-KV decode is only built for gfx1x"
+)
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="native split-KV test requires a GPU"
+)
+@torch.inference_mode()
+def test_paged_attention_rocm_splitkv_reduction_state() -> None:
+    """Check the reduction result directly from stage-1 max/sum/output."""
+    set_random_seed(0)
+    torch.set_default_device(DEVICE_TYPE)
+
+    page_size = 1584
+    seq_len = 4001
+    num_query_heads = 24
+    num_kv_heads = 4
+    head_size = 256
+    num_splits = 4
+    num_pages = (seq_len + page_size - 1) // page_size
+    query = torch.randn(1, num_query_heads, head_size, dtype=torch.bfloat16)
+    dense_key_cache = torch.randn(
+        num_pages, page_size, num_kv_heads, head_size, dtype=query.dtype
+    )
+    dense_value_cache = torch.randn_like(dense_key_cache)
+    key_cache, value_cache = _to_vllm_kv_cache(
+        dense_key_cache, dense_value_cache
+    )
+    block_tables = torch.arange(num_pages, dtype=torch.int32).view(1, -1)
+    seq_lens = torch.tensor([seq_len], dtype=torch.int32)
+    partial_out = torch.empty(
+        1, num_query_heads, num_splits, head_size, dtype=torch.float32
+    )
+    partial_max = torch.empty(
+        1, num_query_heads, num_splits, dtype=torch.float32
+    )
+    partial_sum = torch.empty_like(partial_max)
+
+    output = paged_attention_rocm_splitkv_decode(
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        seq_lens,
+        head_size**-0.5,
+        actual_max_splits=num_splits,
+        max_seq_len=seq_len,
+        partial_out=partial_out,
+        partial_max=partial_max,
+        partial_sum=partial_sum,
+    )
+    global_max = partial_max.max(dim=2, keepdim=True).values
+    split_weight = torch.exp(partial_max - global_max)
+    expected = (
+        partial_out * split_weight.unsqueeze(-1)
+    ).sum(dim=2) / (partial_sum * split_weight).sum(dim=2, keepdim=True)
+
+    torch.testing.assert_close(
+        output,
+        expected.to(output.dtype),
+        atol=get_default_atol(output),
+        rtol=get_default_rtol(output),
+    )
+
+
+@pytest.mark.skipif(
     not on_gfx1x(), reason="split-KV decode kernel is only activated on gfx1x"
 )
 @pytest.mark.skipif(
     not torch.accelerator.is_available(), reason="split-KV decode test requires a GPU"
 )
-@pytest.mark.parametrize("block_size", [16, 32, 528])
+@pytest.mark.parametrize("block_size", [16, 32, 528, 1584])
 @pytest.mark.parametrize(
     "query_lens,seq_lens",
     [

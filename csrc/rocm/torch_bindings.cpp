@@ -93,6 +93,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                Tensor? fp8_out_scale,"
       "                str mfma_type) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
+
+  rocm_ops.def(
+      "paged_attention_splitkv(Tensor! output, Tensor! partial_out, "
+      "Tensor! partial_max, Tensor! partial_sum, Tensor query, "
+      "Tensor key_cache, Tensor value_cache, int num_kv_heads, "
+      "float softmax_scale, Tensor block_tables, Tensor seq_lens, "
+      "Tensor? query_start_loc, int physical_page_size, "
+      "str kv_cache_dtype, Tensor k_scale, Tensor v_scale) -> ()");
+  rocm_ops.impl("paged_attention_splitkv", torch::kCUDA,
+                &paged_attention_splitkv);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

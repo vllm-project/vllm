@@ -52,3 +52,13 @@ void paged_attention(
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale,
     const std::string& mfma_type);
+
+void paged_attention_splitkv(
+    torch::Tensor& output, torch::Tensor& partial_out,
+    torch::Tensor& partial_max, torch::Tensor& partial_sum,
+    torch::Tensor& query, torch::Tensor& key_cache,
+    torch::Tensor& value_cache, int64_t num_kv_heads, double softmax_scale,
+    torch::Tensor& block_tables, torch::Tensor& seq_lens,
+    const std::optional<torch::Tensor>& query_start_loc,
+    int64_t physical_page_size, const std::string& kv_cache_dtype,
+    torch::Tensor& k_scale, torch::Tensor& v_scale);

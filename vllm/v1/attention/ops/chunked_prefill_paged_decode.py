@@ -563,6 +563,8 @@ def kernel_paged_attention_2d_splitkv(
     block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
     seq_lens_ptr,  # [num_seqs]
     scale,
+    k_scale,
+    v_scale,
     num_query_heads: tl.constexpr,
     num_queries_per_kv: tl.constexpr,
     num_queries_per_kv_padded: tl.constexpr,
@@ -658,7 +660,7 @@ def kernel_paged_attention_2d_splitkv(
             + internal_offsets[None, :] * stride_k_cache_3
             + (offs_d[:, None] % x) * stride_k_cache_4
         )
-        K = tl.load(
+        K_load = tl.load(
             key_cache_ptr + k_offset,
             mask=dim_mask[:, None] & token_mask[None, :],
             other=0.0,
@@ -671,12 +673,19 @@ def kernel_paged_attention_2d_splitkv(
             + offs_d[None, :] * stride_v_cache_2
             + internal_offsets[:, None] * stride_v_cache_3
         )
-        V = tl.load(
+        V_load = tl.load(
             value_cache_ptr + v_offset,
             mask=token_mask[:, None] & dim_mask[None, :],
             other=0.0,
             eviction_policy="evict_last",
         )
+
+        if K_load.dtype.is_fp8():
+            K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
+            V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
+        else:
+            K = K_load
+            V = V_load
 
         S = scale * tl.dot(Q, K)
         S = tl.where(head_mask[:, None] & token_mask[None, :], S, float("-inf"))
@@ -925,6 +934,8 @@ def paged_attention_2d_splitkv_decode(
     max_num_splits: int = _MAX_SPLITS,
     query_start_loc: torch.Tensor | None = None,
     filter_by_query_len: bool = False,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Decode-only paged attention launcher with split-KV.
 
@@ -939,6 +950,10 @@ def paged_attention_2d_splitkv_decode(
     head_size = query.shape[2]
     num_kv_heads = key_cache.shape[1]
     physical_block_size = key_cache.shape[3]
+    if k_scale is None:
+        k_scale = torch.ones(1, device=query.device, dtype=torch.float32)
+    if v_scale is None:
+        v_scale = torch.ones(1, device=query.device, dtype=torch.float32)
     block_size = _choose_compute_block_size(physical_block_size)
     if block_size != 32:
         logger.warning_once(
@@ -980,8 +995,8 @@ def paged_attention_2d_splitkv_decode(
             seq_lens_ptr=seq_lens,
             alibi_slopes_ptr=None,
             scale=scale,
-            k_scale=1.0,
-            v_scale=1.0,
+            k_scale=k_scale,
+            v_scale=v_scale,
             out_scale_inv=1.0,
             num_query_heads=num_query_heads,
             num_queries_per_kv=num_queries_per_kv,
@@ -1039,6 +1054,8 @@ def paged_attention_2d_splitkv_decode(
         block_tables,
         seq_lens,
         scale,
+        k_scale,
+        v_scale,
         num_query_heads=num_query_heads,
         num_queries_per_kv=num_queries_per_kv,
         num_queries_per_kv_padded=num_queries_per_kv_padded,
@@ -1093,5 +1110,96 @@ def paged_attention_2d_splitkv_decode(
         num_warps=4,
         num_stages=1,
         waves_per_eu=1,
+    )
+    return output
+
+
+def paged_attention_rocm_splitkv_decode(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    scale: float,
+    output: torch.Tensor | None = None,
+    actual_max_splits: int | None = None,
+    max_seq_len: int | None = None,
+    partial_out: torch.Tensor | None = None,
+    partial_max: torch.Tensor | None = None,
+    partial_sum: torch.Tensor | None = None,
+    max_num_splits: int = _MAX_SPLITS,
+    query_start_loc: torch.Tensor | None = None,
+    filter_by_query_len: bool = False,
+    kv_cache_dtype: str = "auto",
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Launch the native ROCm split-KV decode operator directly.
+
+    This is deliberately separate from backend dispatch while the native
+    kernel is being validated. Scheduling uses 32-token logical compute tiles
+    regardless of the physical KV page size.
+    """
+    if output is None:
+        output = torch.empty_like(query)
+
+    batch_size = seq_lens.shape[0] if filter_by_query_len else query.shape[0]
+    num_query_heads = query.shape[1]
+    head_size = query.shape[2]
+    num_kv_heads = key_cache.shape[1]
+    physical_page_size = key_cache.shape[3]
+
+    if max_seq_len is None:
+        max_seq_len = block_tables.shape[1] * physical_page_size
+    if actual_max_splits is None:
+        actual_max_splits = _get_num_splits(
+            batch_size,
+            num_kv_heads,
+            head_size,
+            _DEFAULT_COMPUTE_BLOCK_SIZE,
+            max_seq_len,
+            max_num_splits,
+        )
+    if not 1 <= actual_max_splits <= max_num_splits:
+        raise ValueError(
+            f"actual_max_splits ({actual_max_splits}) must be in "
+            f"[1, {max_num_splits}]."
+        )
+
+    partial_shape = (batch_size, num_query_heads, actual_max_splits)
+    if partial_out is None:
+        partial_out = torch.empty(
+            (*partial_shape, head_size), device=query.device, dtype=torch.float32
+        )
+    if partial_max is None:
+        partial_max = torch.empty(
+            partial_shape, device=query.device, dtype=torch.float32
+        )
+    if partial_sum is None:
+        partial_sum = torch.empty(
+            partial_shape, device=query.device, dtype=torch.float32
+        )
+    if k_scale is None:
+        k_scale = torch.ones(1, device=query.device, dtype=torch.float32)
+    if v_scale is None:
+        v_scale = torch.ones(1, device=query.device, dtype=torch.float32)
+
+    ops.paged_attention_rocm_splitkv(
+        output,
+        partial_out,
+        partial_max,
+        partial_sum,
+        query,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        scale,
+        block_tables,
+        seq_lens,
+        query_start_loc if filter_by_query_len else None,
+        physical_page_size,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
     )
     return output
