@@ -74,6 +74,11 @@ class Histogram(Metric):
 def get_metrics_snapshot() -> list[Metric]:
     """An API for accessing in-memory Prometheus metrics.
 
+    Returns only the collector types this reader can represent - gauge,
+    counter and histogram. Other prometheus_client collector types
+    (summary, info, stateset, untyped) are skipped, so a metric registered
+    under the vllm: prefix with one of those types will not appear here.
+
     Example:
         >>> for metric in llm.get_metrics():
         ...     if isinstance(metric, Counter):
