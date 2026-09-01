@@ -2827,7 +2827,8 @@ class VllmConfig:
             KVConnectorFactory,
         )
 
-        return KVConnectorFactory.requires_dcp_block_aligned_interleave(config)
+        connector_cls = KVConnectorFactory.get_connector_class(config)
+        return connector_cls.requires_dcp_block_aligned_interleave(config)
 
     @model_validator(mode="after")
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":

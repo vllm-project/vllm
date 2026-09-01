@@ -176,6 +176,10 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
             kv_role="kv_both",
         ),
         KVTransferConfig(
+            kv_connector="DecodeBenchConnector",
+            kv_role="kv_both",
+        ),
+        KVTransferConfig(
             kv_connector="MultiConnector",
             kv_role="kv_both",
             kv_connector_extra_config={
@@ -191,8 +195,36 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
                 ]
             },
         ),
+        KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "MultiConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "connectors": [
+                                {
+                                    "kv_connector": "SimpleCPUOffloadConnector",
+                                    "kv_role": "kv_both",
+                                },
+                                {
+                                    "kv_connector": "DecodeBenchConnector",
+                                    "kv_role": "kv_both",
+                                },
+                            ]
+                        },
+                    },
+                    {
+                        "kv_connector": "OffloadingConnector",
+                        "kv_role": "kv_both",
+                    },
+                ]
+            },
+        ),
     ],
-    ids=["simple", "offloading", "multi-local"],
+    ids=["simple", "offloading", "decode-bench", "multi-local", "nested-multi-local"],
 )
 def test_local_offload_keeps_dcp_interleave_size(
     kv_transfer_config: KVTransferConfig,

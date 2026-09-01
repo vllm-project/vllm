@@ -54,6 +54,7 @@ from vllm.v1.core.kv_cache_utils import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -86,6 +87,12 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
     emulate a prefill-decode disaggregated setting, enabling performance
     testing of the decoder with larger input sequence lengths.
     """
+
+    @classmethod
+    def requires_dcp_block_aligned_interleave(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        return False
 
     def __init__(
         self,

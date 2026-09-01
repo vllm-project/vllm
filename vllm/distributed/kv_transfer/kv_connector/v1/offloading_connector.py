@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -45,9 +45,16 @@ from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
+if TYPE_CHECKING:
+    from vllm.config.kv_transfer import KVTransferConfig
+
 
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
-    requires_dcp_block_aligned_interleave = False
+    @classmethod
+    def requires_dcp_block_aligned_interleave(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        return False
 
     @property
     def requires_kv_delivery(self) -> bool:
