@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -130,8 +131,6 @@ def init_attn_backend(
 
     # Phase 3: create metadata builders and determine cudagraph support.
     attn_backend_workspace: torch.Tensor | None = None
-    min_cg_support = AttentionCGSupport.ALWAYS
-    min_cg_attn_backend = None
     for kv_cache_group_id, groups in enumerate(attn_groups):
         kernel_block_size = None
         if kv_cache_group_id < len(kernel_block_sizes):
@@ -150,7 +149,25 @@ def init_attn_backend(
             else:
                 if hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
-            # Check cudagraph support for the attention backend
+    attn_cg_support_info = get_attn_cg_support(attn_groups, vllm_config)
+    return attn_groups, attn_cg_support_info, kernel_block_sizes
+
+
+def get_attn_cg_support(
+    attn_groups: list[list[AttentionGroup]],
+    vllm_config: VllmConfig,
+    checked_layer_names: set[str] | None = None,
+) -> AttentionCGSupportInfo:
+    """Return the weakest CUDA graph support among the checked layers."""
+    min_cg_support = AttentionCGSupport.ALWAYS
+    min_cg_attn_backend = None
+    for groups in attn_groups:
+        for group in groups:
+            if checked_layer_names is not None and checked_layer_names.isdisjoint(
+                group.layer_names
+            ):
+                continue
+            builder = group.get_metadata_builder(0)
             cg_support = builder.get_cudagraph_support(
                 vllm_config,
                 group.kv_cache_spec,
@@ -158,15 +175,15 @@ def init_attn_backend(
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support
                 min_cg_attn_backend = group.backend.__name__
-
-    attn_cg_support_info = AttentionCGSupportInfo(
-        min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend
+    return AttentionCGSupportInfo(
+        min_cg_support=min_cg_support,
+        min_cg_attn_backend=min_cg_attn_backend,
     )
-    return attn_groups, attn_cg_support_info, kernel_block_sizes
 
 
 def get_query_lens_mismatch_unsupported_backend(
     attn_groups: list[list[AttentionGroup]],
+    checked_layer_names: set[str] | None = None,
 ) -> str | None:
     """Name the first backend needing the CPU query lengths to be exact, if any.
 
@@ -176,6 +193,10 @@ def get_query_lens_mismatch_unsupported_backend(
     """
     for groups in attn_groups:
         for group in groups:
+            if checked_layer_names is not None and checked_layer_names.isdisjoint(
+                group.layer_names
+            ):
+                continue
             if not group.backend.supports_device_cpu_query_lens_mismatch():
                 return group.backend.__name__
     return None
@@ -188,13 +209,16 @@ def init_kv_cache(
     device: torch.device,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
+    kv_cache_allocation_context: AbstractContextManager | None = None,
 ) -> dict[str, Any]:
-    kv_caches = allocate_kv_cache(
-        kv_cache_config,
-        device,
-        vllm_config.cache_config.get_resolved_kv_cache_layout(),
-        kernel_block_sizes,
-    )
+    allocation_context = kv_cache_allocation_context or nullcontext()
+    with allocation_context:
+        kv_caches = allocate_kv_cache(
+            kv_cache_config,
+            device,
+            vllm_config.cache_config.get_resolved_kv_cache_layout(),
+            kernel_block_sizes,
+        )
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
@@ -205,7 +229,13 @@ def init_kv_cache(
         in ("longcat_flash", "longcat_flash_ngram")
         else 1
     )
-    bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
+    bind_kv_cache(
+        kv_caches,
+        forward_context,
+        runner_kv_caches,
+        num_attn_module,
+        kv_cache_groups=kv_cache_config.kv_cache_groups,
+    )
     return kv_caches
 
 
