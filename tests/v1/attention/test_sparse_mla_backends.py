@@ -1846,6 +1846,47 @@ def test_hisparse_uses_graph_stable_request_state_mapping():
 
 
 @requires_hisparse_ops
+def test_hisparse_maps_speculative_rows_through_request_state():
+    """Multiple verification rows for one request share its persistent state."""
+    device = torch.device(DEVICE_TYPE)
+    block_size, row_width = 64, 8
+    runtime = _make_hisparse_runtime(
+        top_k=1,
+        device_buffer_size=2,
+        max_num_reqs=1,
+        row_width=row_width,
+        block_size=block_size,
+        max_swap_rows=4,
+    )
+    runtime.bind_source_cache(
+        torch.zeros(1, block_size, row_width, dtype=torch.float32).pin_memory()
+    )
+
+    cache_handle = HiSparseCacheHandle(runtime)
+    resident_table = torch.tensor([[1]], dtype=torch.int32, device=device)
+    cache_handle.bind_cache(
+        runtime.hot.cache.view(torch.int8),
+        byte_offset=0,
+        block_stride=block_size * row_width * torch.float32.itemsize,
+        num_blocks=2,
+        block_size=block_size,
+        block_table=resident_table,
+        slot_mapping=torch.arange(4, dtype=torch.int64, device=device),
+    )
+    cache_handle.all_context_pages_resident = True
+    runtime.begin_forward()
+    physical = cache_handle.swap_in(
+        req_id_per_token=torch.zeros(4, dtype=torch.int32, device=device),
+        block_table=torch.zeros((1, 1), dtype=torch.int32, device=device),
+        logical_topk_indices=torch.zeros((4, 1), dtype=torch.int32, device=device),
+        block_size=block_size,
+    )
+    torch.accelerator.synchronize()
+
+    assert physical.tolist() == [[block_size]] * 4
+
+
+@requires_hisparse_ops
 def test_hisparse_resident_rows_bypass_hot_lru():
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 64, 8
