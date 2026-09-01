@@ -16,9 +16,11 @@ from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
+from vllm.lora.model_manager import LoRALoadedState
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
+from vllm.v1.notifications import LoRALoadEvent, publish_worker_notification
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
 
@@ -31,6 +33,7 @@ logger = init_logger(__name__)
 class LoRAModelRunnerMixin:
     lora_config: LoRAConfig | None
     get_model: Callable[[], nn.Module]
+    _last_lora_loaded_state: LoRALoadedState | None = None
 
     def reset_lora_state(self) -> None:
         """Invalidate LoRA state after base weights are replaced."""
@@ -43,6 +46,25 @@ class LoRAModelRunnerMixin:
         for module in self.get_model().modules():
             if isinstance(module, LogitsProcessorWithLoRA):
                 module.reset_sharded_to_full_mapping()
+        self._publish_lora_load_event()
+
+    def _publish_lora_load_event(self) -> None:
+        """Publish a LoRALoadEvent if the loaded set changed since the last
+        publish. Unchanged costs three small set copies and a compare."""
+        state = self.lora_manager.get_loaded_state()
+        if state == self._last_lora_loaded_state:
+            return
+        self._last_lora_loaded_state = state
+        gpu_adapters, cpu_adapters, pinned_adapters = (
+            self.lora_manager.get_loaded_names(state)
+        )
+        publish_worker_notification(
+            LoRALoadEvent(
+                gpu_adapters=gpu_adapters,
+                cpu_adapters=cpu_adapters,
+                pinned_adapters=pinned_adapters,
+            )
+        )
 
     def load_lora_model(
         self,
@@ -81,6 +103,7 @@ class LoRAModelRunnerMixin:
             type=mapping_type,
         )
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+        self._publish_lora_load_event()
 
     def _ensure_lora_enabled(self) -> None:
         if not hasattr(self, "lora_manager"):
@@ -286,18 +309,25 @@ class LoRAModelRunnerMixin:
         if lora_config is None:
             return
         self.lora_manager.remove_all_adapters()
+        self._publish_lora_load_event()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         self._ensure_lora_enabled()
-        return self.lora_manager.add_adapter(lora_request)
+        added = self.lora_manager.add_adapter(lora_request)
+        self._publish_lora_load_event()
+        return added
 
     def remove_lora(self, lora_id: int) -> bool:
         self._ensure_lora_enabled()
-        return self.lora_manager.remove_adapter(lora_id)
+        removed = self.lora_manager.remove_adapter(lora_id)
+        self._publish_lora_load_event()
+        return removed
 
     def pin_lora(self, lora_id: int) -> bool:
         self._ensure_lora_enabled()
-        return self.lora_manager.pin_adapter(lora_id)
+        pinned = self.lora_manager.pin_adapter(lora_id)
+        self._publish_lora_load_event()
+        return pinned
 
     def list_loras(self) -> set[int]:
         self._ensure_lora_enabled()
