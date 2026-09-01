@@ -100,33 +100,64 @@ class SimpleCPUOffloadWorker:
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
         assert self.kv_cache_config.kv_cache_tensors
-        logical_storage_bytes = self.kv_cache_config.kv_cache_tensors[0].size
 
-        # The DMA backend copies whole blocks as base + block_id * stride(0),
-        # so view each unique allocation as [num_blocks, block_bytes].
+        # The DMA backend copies whole blocks as base + block_id * stride(0), so
+        # every region is a [num_blocks, block_bytes] view. Which bytes form one
+        # region depends on the layout, so take it from each tensor's placement
+        # metadata instead of reinterpreting the whole allocation with a single
+        # layer's block size. Layers of one allocation can have different page
+        # sizes -- a DSA model's MLA latent and indexer key caches share a cache
+        # group -- so a shared block size does not exist.
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         seen: set[tuple[torch.device, int]] = set()
-        for name, tensor in kv_caches.items():
-            storage = tensor.untyped_storage()
-            key = (tensor.device, storage.data_ptr())
-            if key in seen:
+        for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
+            name = next((n for n in kv_cache_tensor.layers if n in kv_caches), None)
+            if name is None:
                 continue
-            seen.add(key)
+            num_layers = len(kv_cache_tensor.layers)
+            block_bytes = kv_cache_tensor.block_stride
+            blocks_span = num_blocks * block_bytes
+            if kv_cache_tensor.layer_stride >= blocks_span:
+                # Layer-outermost: each layer owns a contiguous region, or one per
+                # KV head group when the head dim is hoisted out of the block dim
+                # (LHBNC).
+                start = kv_cache_tensor.offset
+                span = num_layers * kv_cache_tensor.layer_stride
+                layer_names = kv_cache_tensor.layers
+            else:
+                # Block-outermost: every layer's page sits inside each block, so
+                # one region with a block stride spanning them all covers it.
+                start = 0
+                span = blocks_span
+                layer_names = kv_cache_tensor.layers[:1]
 
-            physical_per_block, remainder = divmod(tensor.shape[0], num_blocks)
+            cache = kv_caches[name]
+            raw = torch.empty(0, dtype=torch.int8, device=cache.device).set_(
+                cache.untyped_storage()
+            )
+            assert raw.numel() >= start + span, (
+                f"KV cache {name!r} storage has {raw.numel()} bytes, smaller than "
+                f"the {span} bytes it places at offset {start}"
+            )
+            regions = raw[start : start + span].view(-1, num_blocks, block_bytes)
+            groups_per_layer, remainder = divmod(len(regions), len(layer_names))
             assert remainder == 0, (
-                f"KV cache {name!r} has {tensor.shape[0]} physical blocks, which "
-                f"is not divisible by {num_blocks} scheduler blocks"
+                f"KV cache {name!r} places {len(layer_names)} layers in "
+                f"{len(regions)} block-strided regions"
             )
-            block_bytes = tensor.stride(0) * tensor.element_size() * physical_per_block
-            raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(storage)
-            assert raw.numel() >= logical_storage_bytes, (
-                f"KV cache {name!r} storage has {raw.numel()} bytes, smaller "
-                f"than the configured {logical_storage_bytes}-byte allocation"
-            )
-            regions = raw[:logical_storage_bytes].view(-1, num_blocks, block_bytes)
             for idx, region in enumerate(regions):
-                key_name = name if len(regions) == 1 else f"{name}.{idx}"
+                key = (region.device, region.data_ptr())
+                if key in seen:
+                    # Cache groups overlay each other; whichever registered these
+                    # bytes first already covers them.
+                    continue
+                seen.add(key)
+                layer_name = layer_names[idx // groups_per_layer]
+                key_name = (
+                    layer_name
+                    if groups_per_layer == 1
+                    else f"{layer_name}.{idx % groups_per_layer}"
+                )
                 unique_gpu_caches[key_name] = region
 
         # Compute per-tensor bytes_per_block. Tensors may have different
