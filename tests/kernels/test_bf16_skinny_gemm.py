@@ -254,9 +254,9 @@ def test_residual_cute_configs_match_measured_table() -> None:
 
 
 def test_kda_overlap_configs_match_measured_table() -> None:
-    assert k3_gemm.KDA_PROJECTION_OVERLAP_MAX_TOKENS == 16
-    assert k3_gemm.KDA_SKINNY_N_MAX_TOKENS == 15
-    assert k3_gemm.KDA_SKINNY_K_MAX_TOKENS == 15
+    assert k3_gemm.KDA_PROJECTION_OVERLAP_MAX_TOKENS == 14
+    assert k3_gemm.KDA_SKINNY_N_MAX_TOKENS == 14
+    assert k3_gemm.KDA_SKINNY_K_MAX_TOKENS == 14
     assert _config_tuple(k3_gemm.KDA_M1_QKVG_CONFIG) == (64, 4, 2, 8)
     assert _config_tuple(k3_gemm.KDA_M1_FAB_CONFIG) == (224, 1, 2, 8)
     assert {
@@ -306,7 +306,7 @@ def test_kda_qkvg_autotune_enables_full_overlap(
 
     k3_gemm.autotune_kda_qkvg(kda)
 
-    assert calls == [(torch.Size([16, 8]), torch.Size([8, 6144]), True, "cute-dsl")]
+    assert calls == [(torch.Size([14, 8]), torch.Size([8, 6144]), True, "cute-dsl")]
     assert (
         kda._projection_overlap_max_tokens == k3_gemm.KDA_PROJECTION_OVERLAP_MAX_TOKENS
     )
@@ -871,7 +871,7 @@ def test_cute_selected_shapes(
     assert cosine > 0.999
 
 
-@pytest.mark.parametrize("num_tokens", [1, 2, 3, 4, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+@pytest.mark.parametrize("num_tokens", [1, 2, 3, 4, 8, 9, 10, 11, 12, 13, 14])
 def test_kda_projection_overlap_cuda_graph(num_tokens: int) -> None:
     """The TP8 split must preserve projection results across both streams."""
     _require_sm103_and_cute()
