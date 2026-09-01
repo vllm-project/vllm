@@ -8,11 +8,11 @@ For each token and channel, the output kernel computes
   hist[m] = state[sid, slot_off + m, c]  if m < state_len
             x[qsl[r] + m - state_len, c] otherwise
 
-State may use either [slot, window, channel] or [slot, channel, window]
-layout. Decode, speculative decode, and prefill differ in their state-window
-offset and write-back rule. The write-back runs separately because it
-overwrites state read by the output kernel. An optional token map lets mixed
-batches retain their original row order. Slot zero is never updated.
+State is a logical [slot, channel, window] view and may have arbitrary strides.
+Decode, speculative decode, and prefill differ in their state-window offset and
+write-back rule. The write-back runs separately because it overwrites state
+read by the output kernel. An optional token map lets mixed batches retain
+their original row order. Slot zero is never updated.
 """
 
 from typing import Literal
@@ -233,43 +233,6 @@ def _ple_conv_writeback_kernel(
         )
 
 
-def _conv_dimensions(
-    inputs: torch.Tensor,
-    conv_weights: torch.Tensor,
-    dilation: int,
-    spec_query_len: int,
-) -> tuple[int, int, int, int, int]:
-    num_tokens, channels = inputs.shape
-    kernel_size = conv_weights.shape[1]
-    state_len = (kernel_size - 1) * dilation
-    state_width = state_len + spec_query_len - 1
-    return num_tokens, channels, kernel_size, state_len, state_width
-
-
-def _get_conv_state_strides(
-    conv_state: torch.Tensor,
-    channels: int,
-    state_width: int,
-) -> tuple[int, int, int]:
-    is_sd_layout = (
-        conv_state.shape[1] >= state_width and conv_state.shape[2] == channels
-    )
-    is_ds_layout = (
-        conv_state.shape[1] == channels and conv_state.shape[2] >= state_width
-    )
-    if is_sd_layout == is_ds_layout:
-        raise ValueError(
-            "conv_state must have shape [slots, window, channels] or "
-            "[slots, channels, window]"
-        )
-    state_dim, channel_dim = (1, 2) if is_sd_layout else (2, 1)
-    return (
-        conv_state.stride(0),
-        conv_state.stride(state_dim),
-        conv_state.stride(channel_dim),
-    )
-
-
 def ple_conv(
     inputs: torch.Tensor,
     residual: torch.Tensor,
@@ -287,12 +250,18 @@ def ple_conv(
 ) -> None:
     """Add short-convolution output to ``residual`` and update its state."""
     kernel_spec_query_len = spec_query_len if mode == "spec" else 1
-    T, C, K, state_len, state_width = _conv_dimensions(
-        inputs, conv_weights, dilation, kernel_spec_query_len
-    )
+    T, C = inputs.shape
+    K = conv_weights.shape[1]
+    state_len = (K - 1) * dilation
+    state_width = state_len + kernel_spec_query_len - 1
     if token_indices is not None:
         T = token_indices.numel()
-    state_bs, state_ws, state_cs = _get_conv_state_strides(conv_state, C, state_width)
+    if conv_state.shape[1] != C or conv_state.shape[2] < state_width:
+        raise ValueError(
+            "conv_state must have shape [slots, channels, window], with "
+            f"channels={C} and window >= {state_width}"
+        )
+    state_bs, state_cs, state_ws = conv_state.stride()
 
     if mode == "decode":
         num_reqs = T

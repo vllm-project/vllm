@@ -1275,21 +1275,20 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             )
 
         conv_state = self.kv_cache[0]
+        if not is_conv_state_dim_first():
+            conv_state = conv_state.transpose(-1, -2)
         conv_weights = self.conv1d.weight.squeeze(1)
 
         state_capacity = self.conv_state_len + self.num_spec_tokens
-        state_dim = -1 if is_conv_state_dim_first() else 1
         if state_capacity > 0:
-            state_size = conv_state.size(state_dim)
+            state_size = conv_state.size(-1)
             if state_size < state_capacity:
                 raise RuntimeError(
                     "PLE short-conv cache is smaller than expected for "
                     f"dilated convolution: got {state_size}, "
                     f"expect at least {state_capacity}."
                 )
-            conv_state = conv_state.narrow(
-                state_dim, state_size - state_capacity, state_capacity
-            )
+            conv_state = conv_state[..., -state_capacity:]
         self._short_conv_dilated_dispatch(
             inputs=inputs,
             residual=residual,

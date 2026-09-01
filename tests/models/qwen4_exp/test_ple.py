@@ -528,13 +528,7 @@ def _make_conv_case(
     dilation: int,
     state_layout: str,
     spec_query_len: int = 1,
-) -> tuple[
-    torch.Generator,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-]:
+) -> tuple[torch.Generator, torch.Tensor, torch.Tensor, torch.Tensor]:
     rng = torch.Generator(device=device).manual_seed(seed)
     state_len = (kernel_size - 1) * dilation
     state_width = state_len + spec_query_len - 1
@@ -546,14 +540,14 @@ def _make_conv_case(
     state_kernel = torch.randn(
         state_shape, device=device, dtype=torch.bfloat16, generator=rng
     )
-    state_kernel_ds = (
+    conv_state = (
         state_kernel.transpose(-1, -2) if state_layout == "SD" else state_kernel
     )
-    state_reference_ds = state_kernel_ds.clone()
+    state_reference = conv_state.clone()
     weights = torch.randn(
         channels, kernel_size, device=device, dtype=torch.bfloat16, generator=rng
     )
-    return rng, state_reference_ds, state_kernel, state_kernel_ds, weights
+    return rng, state_reference, conv_state, weights
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="fused conv needs CUDA")
@@ -573,7 +567,7 @@ def test_fused_conv_decode_correctness(
 
     device = torch.device("cuda")
     conv_state_len = (kernel_size - 1) * dilation
-    rng, state_reference, state_kernel, state_kernel_ds, weights = _make_conv_case(
+    rng, state_reference, conv_state, weights = _make_conv_case(
         device, num_tokens, channels, kernel_size, dilation, state_layout
     )
     inputs = torch.randn(
@@ -587,7 +581,7 @@ def test_fused_conv_decode_correctness(
         state_indices[-1] = 0
     has_initial_states = torch.arange(num_tokens, device=device) % 2 == 0
 
-    null_state = state_kernel_ds[0].clone()
+    null_state = conv_state[0].clone()
     conv_reference = _short_conv_dilated_decode_pytorch(
         inputs,
         state_reference,
@@ -602,7 +596,7 @@ def test_fused_conv_decode_correctness(
     ple_conv(
         inputs,
         residual_kernel,
-        state_kernel,
+        conv_state,
         weights,
         state_indices,
         mode="decode",
@@ -612,8 +606,8 @@ def test_fused_conv_decode_correctness(
     torch.testing.assert_close(
         residual_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
     )
-    assert torch.equal(state_kernel_ds, state_reference)
-    assert torch.equal(state_kernel_ds[0], null_state)
+    assert torch.equal(conv_state, state_reference)
+    assert torch.equal(conv_state[0], null_state)
     assert torch.equal(
         residual_kernel[state_indices == 0], residual[state_indices == 0]
     )
@@ -650,7 +644,7 @@ def test_fused_conv_spec_correctness(
     device = torch.device("cuda")
     conv_state_len = (kernel_size - 1) * dilation
     num_reqs = len(query_lens)
-    rng, state_reference, state_kernel, state_kernel_ds, weights = _make_conv_case(
+    rng, state_reference, conv_state, weights = _make_conv_case(
         device,
         num_reqs + 100,
         channels,
@@ -675,7 +669,7 @@ def test_fused_conv_spec_correctness(
         state_indices[1] = 0
     num_accepted_tensor = torch.tensor(num_accepted, dtype=torch.int32, device=device)
 
-    null_state = state_kernel_ds[0].clone()
+    null_state = conv_state[0].clone()
     conv_reference = _short_conv_dilated_spec_pytorch(
         inputs,
         state_reference,
@@ -692,7 +686,7 @@ def test_fused_conv_spec_correctness(
     ple_conv(
         inputs,
         residual_kernel,
-        state_kernel,
+        conv_state,
         weights,
         state_indices,
         mode="spec",
@@ -704,8 +698,8 @@ def test_fused_conv_spec_correctness(
     torch.testing.assert_close(
         residual_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
     )
-    assert torch.equal(state_kernel_ds, state_reference)
-    assert torch.equal(state_kernel_ds[0], null_state)
+    assert torch.equal(conv_state, state_reference)
+    assert torch.equal(conv_state[0], null_state)
     assert torch.equal(residual_kernel[num_real_tokens:], residual[num_real_tokens:])
 
 
@@ -726,7 +720,7 @@ def test_fused_conv_prefill_correctness(
 
     device = torch.device("cuda")
     conv_state_len = (kernel_size - 1) * dilation
-    rng, state_reference, state_kernel, state_kernel_ds, weights = _make_conv_case(
+    rng, state_reference, conv_state, weights = _make_conv_case(
         device,
         sum(query_lens),
         channels,
@@ -755,7 +749,7 @@ def test_fused_conv_prefill_correctness(
         max_prefill_query_len=max(query_lens),
     )
 
-    null_state = state_kernel_ds[0].clone()
+    null_state = conv_state[0].clone()
     conv_reference = _short_conv_dilated_prefill_pytorch(
         inputs,
         metadata,
@@ -773,7 +767,7 @@ def test_fused_conv_prefill_correctness(
     ple_conv(
         inputs,
         residual_kernel,
-        state_kernel,
+        conv_state,
         weights,
         state_indices,
         mode="prefill",
@@ -784,8 +778,8 @@ def test_fused_conv_prefill_correctness(
     torch.testing.assert_close(
         residual_kernel.float(), output_reference.float(), atol=3e-2, rtol=3e-2
     )
-    assert torch.equal(state_kernel_ds, state_reference)
-    assert torch.equal(state_kernel_ds[0], null_state)
+    assert torch.equal(conv_state, state_reference)
+    assert torch.equal(conv_state[0], null_state)
     query_start = 0
     for state_index, query_len in zip(state_indices.tolist(), query_lens):
         if state_index == 0:
@@ -876,7 +870,7 @@ def test_fused_conv_mixed_batch_correctness(state_layout: str) -> None:
     module.conv_state_len = 9
     module.short_conv_dilation = 3
 
-    rng, state_eager, state_kernel, state_kernel_ds, weights = _make_conv_case(
+    rng, state_eager, conv_state, weights = _make_conv_case(
         device,
         17,
         channels,
@@ -925,7 +919,7 @@ def test_fused_conv_mixed_batch_correctness(state_layout: str) -> None:
         inputs=inputs,
         residual=residual_kernel,
         metadata=metadata,
-        conv_state=state_kernel,
+        conv_state=conv_state,
         conv_weights=weights,
     )
     _short_conv_dilated_dispatch_pytorch(
@@ -940,4 +934,4 @@ def test_fused_conv_mixed_batch_correctness(state_layout: str) -> None:
     torch.testing.assert_close(
         residual_kernel.float(), residual_eager.float(), atol=3e-2, rtol=3e-2
     )
-    assert torch.equal(state_kernel_ds, state_eager)
+    assert torch.equal(conv_state, state_eager)
