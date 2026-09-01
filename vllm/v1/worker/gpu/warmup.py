@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
+from vllm.v1.worker.extensible_kv_cache import ensure_kv_cache_blocks
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
@@ -130,6 +131,7 @@ def run_mixed_prefill_decode_warmup(
             required_blocks,
         )
         return False
+    ensure_kv_cache_blocks(model_runner, 1 + required_blocks)
 
     next_block_id = 1
 
@@ -301,6 +303,7 @@ def _warmup_kernels(
             num_reqs,
             max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
         )
+        ensure_kv_cache_blocks(model_runner, 1 + num_reqs * max_blocks_per_req)
 
     req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
 

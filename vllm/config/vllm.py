@@ -1837,6 +1837,7 @@ class VllmConfig:
             self._validate_v2_model_runner()
         else:
             self._validate_v1_model_runner()
+        self._validate_extensible_kv_cache()
 
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
@@ -2862,8 +2863,27 @@ class VllmConfig:
 
         return unsupported
 
+    def _validate_extensible_kv_cache(self) -> None:
+        if not self.cache_config.enable_extensible_kv_cache:
+            return
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            raise ValueError("enable_extensible_kv_cache is only supported on CUDA.")
+        if self.cache_config.kv_cache_memory_bytes is not None:
+            raise ValueError(
+                "enable_extensible_kv_cache sizes the KV cache from measured "
+                "memory and cannot be combined with kv_cache_memory_bytes."
+            )
+        if self.kv_transfer_config is not None:
+            raise ValueError(
+                "enable_extensible_kv_cache does not yet support KV connectors."
+            )
+
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
         unsupported: list[str] = []
+        if self.cache_config.enable_extensible_kv_cache:
+            unsupported.append("extensible KV cache")
 
         # PCP runtime support is implemented only by the V2 model runner.
         if self.parallel_config.prefill_context_parallel_size > 1:

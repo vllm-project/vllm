@@ -975,6 +975,7 @@ def test_v1_model_runner_rejects_v2_only_features():
         ),
         speculative_config=None,
         model_config=None,
+        cache_config=SimpleNamespace(enable_extensible_kv_cache=False),
     )
     config._dflash_needs_multi_kv_group = lambda: False
     config._is_dflash2_draft = lambda: False

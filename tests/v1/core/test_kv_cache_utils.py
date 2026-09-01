@@ -4136,3 +4136,32 @@ def test_deepseek_v4_annotation_requires_model_type():
     )
 
     assert not any(g.is_eagle_group for g in groups)
+
+
+def test_shrink_kv_cache_configs_keeps_tensors_and_checks_fit():
+    """Shrinking to the measured block count lowers only `num_blocks`; the
+    tensors keep describing the reserved capacity. A count too small for
+    `max_model_len` is rejected."""
+    spec = new_kv_cache_spec()
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=spec.block_size * 4)
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 16
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+    assert config.num_blocks == 16
+    tensors_before = copy.deepcopy(config.kv_cache_tensors)
+
+    kv_cache_utils.shrink_kv_cache_configs(vllm_config, [config, scheduler_config], 10)
+    assert config.num_blocks == 10
+    assert scheduler_config.num_blocks == 10
+    assert config.kv_cache_tensors == tensors_before
+
+    # 4 blocks are needed for max_model_len plus the null block.
+    with pytest.raises(ValueError, match="max seq len"):
+        kv_cache_utils.shrink_kv_cache_configs(vllm_config, [config], 4)
+    kv_cache_utils.shrink_kv_cache_configs(vllm_config, [config], 5)
+    assert config.num_blocks == 5
