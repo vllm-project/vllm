@@ -615,13 +615,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
                 _FA4_MLA_PREFILL_KERNEL.register_warmup()
 
-            if vllm_config.parallel_config.decode_context_parallel_size > 1:
-                from vllm.v1.attention.ops.dcp import (
-                    _CORRECT_ATTN_CP_OUT_KERNEL,
-                )
-
-                _CORRECT_ATTN_CP_OUT_KERNEL.register_warmup()
-
             backend_name = self.attn_backend.get_name()
             if backend_name in (
                 "FLASHMLA_SPARSE",

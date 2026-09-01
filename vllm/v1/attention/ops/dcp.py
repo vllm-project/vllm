@@ -240,33 +240,44 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
             is_base_e=is_base_e,
         )
 
-    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        from vllm.model_executor.layers.attention.mla_attention import (
-            get_mla_dims,
-        )
-
+    def get_warmup_keys(
+        self,
+        vllm_config: Any,
+        *,
+        output_dtype: torch.dtype | None = None,
+        num_heads: int | None = None,
+        head_dim: int | None = None,
+        is_base_e: bool | tuple[bool, ...] = (False, True),
+    ) -> list[CompileKey]:
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         max_tokens = min(
             16,
             vllm_config.scheduler_config.max_num_batched_tokens,
         )
-        hf_config = vllm_config.model_config.hf_config
-        num_heads = (
-            hf_config.num_attention_heads
-            // vllm_config.parallel_config.tensor_parallel_size
-        )
-        head_dim = get_mla_dims(vllm_config.model_config).v_head_dim
+        if num_heads is None:
+            num_heads = (
+                vllm_config.model_config.hf_config.num_attention_heads
+                // vllm_config.parallel_config.tensor_parallel_size
+            )
+        if head_dim is None:
+            from vllm.model_executor.layers.attention.mla_attention import (
+                get_mla_dims,
+            )
+
+            head_dim = get_mla_dims(vllm_config.model_config).v_head_dim
+        if output_dtype is None:
+            output_dtype = vllm_config.model_config.dtype
         if dcp_world_size <= 1 or max_tokens <= 0 or num_heads <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
-            output_dtype=vllm_config.model_config.dtype,
+            output_dtype=output_dtype,
             lse_dtype=torch.float32,
             num_tokens=WarmupIntRange(1, max_tokens + 1),
             num_heads=num_heads,
             head_dim=head_dim,
             n_rounded=dcp_world_size,
             lse_idx=WarmupIntRange(0, dcp_world_size),
-            is_base_e=(False, True),
+            is_base_e=is_base_e,
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
@@ -1416,6 +1427,14 @@ class MLADCPManager:
             is_lse_base_on_e,
             use_pcp,
         )
+        if vllm_config.kernel_config.enable_jit_warmup and not self.use_a2a:
+            _CORRECT_ATTN_CP_OUT_KERNEL.register_warmup(
+                vllm_config,
+                output_dtype=output_dtype,
+                num_heads=num_heads,
+                head_dim=output_head_dim,
+                is_base_e=is_lse_base_on_e,
+            )
         self.query_gather = (
             None
             if use_pcp

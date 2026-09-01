@@ -23,6 +23,8 @@ class PackSeqTritonKernel(VllmTritonJitKernel["PackSeqTritonKernel.CompileKey"])
         block_t: int
         block_d: int
 
+    # N is unused; D and Lmax only affect runtime addressing and masks. The
+    # compile-time tile shape remains controlled by BLOCK_T and BLOCK_D.
     @staticmethod
     @triton.jit(do_not_specialize=["N", "D", "Lmax"])
     def kernel(
@@ -93,18 +95,17 @@ class PackSeqTritonKernel(VllmTritonJitKernel["PackSeqTritonKernel.CompileKey"])
             pad_is_uint8=is_uint8,
         )
 
-    def get_warmup_keys(self) -> list[CompileKey]:
-        # SparseAttnIndexer uses this for packed decode Q. FP8 uses the current
-        # platform FP8 dtype; FP4 uses uint8 values/scales with zero padding.
+    def get_warmup_keys(
+        self,
+        *,
+        dtype: torch.dtype,
+        pad_value: float | int,
+    ) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(
-            dtype=(torch.float8_e4m3fn, torch.uint8),
-            pad_value=(-float("inf"), 0),
+            dtype=dtype,
+            pad_value=pad_value,
             block_t=64,
             block_d=64,
-            _when=lambda *, dtype, pad_value: (
-                (dtype == torch.uint8 and pad_value == 0)
-                or (dtype != torch.uint8 and pad_value != 0)
-            ),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
@@ -224,6 +225,8 @@ class UnpackSeqTritonKernel(VllmTritonJitKernel["UnpackSeqTritonKernel.CompileKe
         block_t: int
         block_d: int
 
+    # B, Lmax, and D only affect runtime addressing and masks. The compile-time
+    # tile shape remains controlled by BLOCK_T and BLOCK_D.
     @staticmethod
     @triton.jit(do_not_specialize=["B", "Lmax", "D"])
     def kernel(

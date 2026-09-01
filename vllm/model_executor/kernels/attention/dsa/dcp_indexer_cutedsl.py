@@ -12,10 +12,11 @@ from cutlass import Float32, Int32, Uint32, Uint64
 from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import recast_val
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
+from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
+    CuTeDSLLaunchSpec,
+    VllmCuTeDSLJitKernel,
+    cutedsl_kernel_launcher,
 )
-from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
@@ -85,6 +86,8 @@ class PackDCPTopkCandidatesKernel(
         topk: int
         block_size: int
 
+    # These scalars only describe runtime layouts and bounds; the constexpr
+    # fields below own the launch geometry and algorithmic specialization.
     @staticmethod
     @triton.jit(
         do_not_specialize=[
@@ -251,7 +254,7 @@ class PackDCPTopkCandidatesKernel(
 
 
 class StableTopKFromGatheredCandidatesKernel(
-    VllmJitKernel["StableTopKFromGatheredCandidatesKernel.CompileKey"]
+    VllmCuTeDSLJitKernel["StableTopKFromGatheredCandidatesKernel.CompileKey"]
 ):
     tb_size = 512
     hist_bins = 2048
@@ -551,10 +554,7 @@ class StableTopKFromGatheredCandidatesKernel(
             num_candidates=topk * dcp_world_size,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
-            return
-
+    def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         num_rows = cute.sym_int()
         gathered = cute.runtime.make_fake_tensor(
             Float32,
@@ -567,23 +567,26 @@ class StableTopKFromGatheredCandidatesKernel(
             (num_rows, compile_key.topk),
             divisibility=1,
         )
-        self._compiled_cache[compile_key] = compile_cutedsl(
-            self.kernel(compile_key),
-            gathered,
-            out,
-        )
+        return gathered, out
 
-    def __call__(self, gathered: torch.Tensor, out: torch.Tensor, *, topk: int) -> Any:
+    @cutedsl_kernel_launcher
+    def __call__(
+        self,
+        gathered: torch.Tensor,
+        out: torch.Tensor,
+        *,
+        topk: int,
+    ) -> CuTeDSLLaunchSpec[CompileKey]:
         compile_key = self.dispatch(topk=topk, num_candidates=gathered.shape[1])
-        compiled = self._get_or_compile(
+        return (
             compile_key,
-            runtime_context={
+            (gathered, out),
+            {
                 "gathered_shape": tuple(gathered.shape),
                 "out_shape": tuple(out.shape),
                 "topk": topk,
             },
         )
-        return compiled(gathered, out)
 
 
 _PACK_DCP_TOPK_CANDIDATES_KERNEL = PackDCPTopkCandidatesKernel()

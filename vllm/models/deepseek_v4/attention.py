@@ -393,12 +393,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     block_size=self.swa_cache_layer.block_size,
                 )
 
-            if vllm_config.parallel_config.decode_context_parallel_size > 1:
-                from vllm.v1.attention.ops.dcp import (
-                    _CORRECT_ATTN_CP_OUT_KERNEL,
-                )
-
-                _CORRECT_ATTN_CP_OUT_KERNEL.register_warmup()
             from vllm.platforms import current_platform
             from vllm.utils.import_utils import has_cutedsl
 
@@ -984,27 +978,8 @@ class DeepseekV4Indexer(nn.Module):
         ]
 
         if vllm_config.kernel_config.enable_jit_warmup:
-            from vllm.utils.import_utils import has_cutedsl
-            from vllm.v1.attention.ops.common import (
-                _PACK_SEQ_TRITON_KERNEL,
-                _UNPACK_SEQ_TRITON_KERNEL,
-            )
-
-            _PACK_SEQ_TRITON_KERNEL.register_warmup()
-            _UNPACK_SEQ_TRITON_KERNEL.register_warmup()
-
-            if (
-                vllm_config.parallel_config.decode_context_parallel_size > 1
-                and has_cutedsl()
-            ):
-                from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (  # noqa: E501
-                    _PACK_DCP_TOPK_CANDIDATES_KERNEL,
-                    _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL,
-                )
-
-                _PACK_DCP_TOPK_CANDIDATES_KERNEL.register_warmup()
-                _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL.register_warmup()
             from vllm.platforms import current_platform
+            from vllm.utils.import_utils import has_cutedsl
 
             if has_cutedsl():
                 from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (  # noqa: E501
