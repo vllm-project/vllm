@@ -43,7 +43,10 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    get_quark_ocp_mx_group_size,
+)
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -90,6 +93,38 @@ def _should_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     )
 
 
+def _should_replicate_misaligned_shared_expert(
+    intermediate_size: int,
+    tp_size: int,
+    group_size: int | None,
+    enable_expert_parallel: bool,
+    is_sequence_parallel: bool,
+) -> bool:
+    if intermediate_size <= 0 or group_size is None:
+        return False
+
+    partition_size, remainder = divmod(intermediate_size, tp_size)
+    if remainder == 0 and partition_size % group_size == 0:
+        return False
+
+    if enable_expert_parallel or is_sequence_parallel:
+        return True
+
+    if remainder != 0:
+        raise ValueError(
+            f"Shared-expert intermediate size {intermediate_size} must be "
+            f"divisible by tensor-parallel size {tp_size}."
+        )
+
+    raise ValueError(
+        "The Quark OCP MX shared expert cannot be tensor-parallelized: "
+        f"intermediate size {intermediate_size} with TP size {tp_size} "
+        f"produces a partition of {partition_size}, which is not divisible by "
+        f"the OCP MX group size {group_size}. Choose a compatible "
+        "tensor-parallel size or enable expert parallelism."
+    )
+
+
 class Qwen3NextSparseMoeBlock(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -106,6 +141,17 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
+        shared_expert_group_size = get_quark_ocp_mx_group_size(
+            quant_config,
+            f"{prefix}.shared_expert.down_proj",
+        )
+        self.replicate_shared_expert = _should_replicate_misaligned_shared_expert(
+            config.shared_expert_intermediate_size,
+            self.tp_size,
+            shared_expert_group_size,
+            parallel_config.enable_expert_parallel,
+            self.is_sequence_parallel,
+        )
         if self.tp_size > config.num_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -138,7 +184,10 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         )
 
         self.is_fused_shared_expert_enabled = False
-        if config.shared_expert_intermediate_size > 0:
+        if (
+            config.shared_expert_intermediate_size > 0
+            and not self.replicate_shared_expert
+        ):
             self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
                 quant_config,
                 prefix,
@@ -159,11 +208,14 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 reduce_results=False,
                 expert_gate=self.shared_expert_gate,
                 is_sequence_parallel=self.is_sequence_parallel,
+                disable_tp=self.replicate_shared_expert,
                 prefix=f"{prefix}.shared_expert",
             )
 
         self.experts = FusedMoEFactory(
-            shared_experts=self.shared_expert,
+            shared_experts=(
+                None if self.replicate_shared_expert else self.shared_expert
+            ),
             gate=self.gate,
             num_experts=self.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -195,9 +247,16 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
+        replicated_shared_output = (
+            self.shared_expert(hidden_states)
+            if self.replicate_shared_expert and self.shared_expert is not None
+            else None
+        )
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=hidden_states
         )
+        if replicated_shared_output is not None:
+            final_hidden_states += replicated_shared_output
 
         if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -300,14 +359,26 @@ class Qwen3NextAttention(nn.Module):
         self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         # Fuse the gated split + QK-RMSNorm + (partial) NeoX RoPE + gate copy.
-        # TODO: support MRoPE
         mm_config = model_config.multimodal_config if model_config else None
         text_only = mm_config is None or mm_config.language_model_only
+        mrope_section = getattr(self.rotary_emb, "mrope_section", None)
+        supports_mrope = bool(
+            type(self.rotary_emb) is MRotaryEmbedding
+            and mrope_section
+            and len(mrope_section) == 3
+            and sum(mrope_section) == self.rotary_emb.rotary_dim // 2
+            and getattr(self.rotary_emb, "mrope_interleaved", False)
+        )
+        supports_dtype = getattr(self.rotary_emb, "dtype", None) in (
+            torch.float16,
+            torch.bfloat16,
+        )
         self.use_fused_qk_norm_rope_gate = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
             and current_platform.is_cuda()
-            and text_only
+            and supports_dtype
+            and (text_only or supports_mrope)
         )
 
     def _project_qkv_gate(
@@ -325,22 +396,28 @@ class Qwen3NextAttention(nn.Module):
             q_gate, k, v = qkv.split(
                 [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
             )
-            # mRoPE passes positions as (3, n_tokens) for T/H/W. Fusion is only
-            # enabled text-only, where the three rows are identical, so taking
-            # the T row is exact. (1D positions pass through.)
-            pos = positions[0] if positions.ndim == 2 else positions
+            if positions.ndim == 2 and not getattr(
+                self.rotary_emb, "mrope_section", None
+            ):
+                positions = positions[0]
             q, k, gate = fused_qk_rmsnorm_rope_gate(
                 q_gate,
                 k,
-                self.q_norm.weight.float() + 1.0,
-                self.k_norm.weight.float() + 1.0,
+                self.q_norm.weight,
+                self.k_norm.weight,
                 self.rotary_emb.cos_sin_cache,
-                pos,
+                positions,
                 self.q_norm.variance_epsilon,
                 self.num_heads,
                 self.num_kv_heads,
                 self.head_dim,
                 self.rotary_emb.rotary_dim,
+                norm_beta=1.0,
+                mrope_section=(
+                    getattr(self.rotary_emb, "mrope_section", None)
+                    if positions.ndim == 2
+                    else None
+                ),
             )
             return q, k, v, gate
 
@@ -470,7 +547,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
-        positions: torch.Tensor = None,
+        positions: torch.Tensor,
         **kwargs: object,
     ):
         full_num_tokens = positions.shape[-1]
