@@ -26,6 +26,7 @@ from vllm.v1.ple_offload.protocol import (
     PleOffloadRegistration,
     PleOffloadRequest,
 )
+from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
@@ -283,14 +284,10 @@ class PleOffloadConnector:
         event_pool = self._d2h_event_pool
         event = pending.d2h_done_event
         assert event_pool is not None, "PLE D2H event pool is not initialized"
-        with (
-            torch.accelerator.device_index(self.device.index),
-            torch.cuda.nvtx.range("ple_offload.wait_d2h"),
-        ):
+        with torch.accelerator.device_index(self.device.index):
             event.synchronize()
 
-        with torch.cuda.nvtx.range("ple_offload.send_request"):
-            socket.send(msgspec.msgpack.encode(request))
+        socket.send(msgspec.msgpack.encode(request))
         event_pool.put_nowait(event)
 
     def _validate_input_sources(self) -> None:
@@ -331,25 +328,25 @@ class PleOffloadConnector:
         d2h_done_event: torch.cuda.Event,
     ) -> None:
         """Stage inputs on the model stream and record D2H completion."""
-        with torch.accelerator.device_index(self.device.index):
+        with (
+            record_function_or_nullcontext("ple_offload: enqueue_cuda_inputs"),
+            torch.accelerator.device_index(self.device.index),
+        ):
             stream = torch.cuda.current_stream(self.device)
-            with torch.cuda.nvtx.range("ple_offload.copy_input_ids"):
-                self._input_ids_buf[: request.num_tokens].copy_(
-                    self._input_ids_source[: request.num_tokens],
-                    non_blocking=True,
-                )
-            with torch.cuda.nvtx.range("ple_offload.copy_query_start_loc"):
-                self._query_start_loc_buf[: request.num_reqs + 1].copy_(
-                    self._query_start_loc_source[: request.num_reqs + 1],
-                    non_blocking=True,
-                )
+            self._input_ids_buf[: request.num_tokens].copy_(
+                self._input_ids_source[: request.num_tokens],
+                non_blocking=True,
+            )
+            self._query_start_loc_buf[: request.num_reqs + 1].copy_(
+                self._query_start_loc_source[: request.num_reqs + 1],
+                non_blocking=True,
+            )
             if self._ngram_context_buf is not None:
                 assert self._ngram_context_source is not None
-                with torch.cuda.nvtx.range("ple_offload.copy_ngram_context"):
-                    self._ngram_context_buf[: request.num_reqs].copy_(
-                        self._ngram_context_source[: request.num_reqs],
-                        non_blocking=True,
-                    )
+                self._ngram_context_buf[: request.num_reqs].copy_(
+                    self._ngram_context_source[: request.num_reqs],
+                    non_blocking=True,
+                )
             d2h_done_event.record(stream)
 
     def _launch(
