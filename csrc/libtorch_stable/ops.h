@@ -411,13 +411,14 @@ void fused_gdn_decode_post_conv_mtp(
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
 void kimi_k3_attn_res(torch::stable::Tensor& prefix,
-                      torch::stable::Tensor const& delta,
-                      torch::stable::Tensor const& blocks,
+                      std::optional<torch::stable::Tensor> delta,
+                      torch::stable::Tensor& blocks,
                       torch::stable::Tensor const& norm_weight,
                       torch::stable::Tensor const& qk_weight,
-                      torch::stable::Tensor const& output_norm_weight,
+                      std::optional<torch::stable::Tensor> output_norm_weight,
                       torch::stable::Tensor& output, int64_t num_blocks,
-                      double eps, double output_norm_eps);
+                      int64_t block_write_idx, double eps,
+                      double output_norm_eps);
 #endif
 
 // Sampler kernels (shared CUDA/ROCm)
@@ -670,6 +671,15 @@ void cp_gather_and_upconvert_fp8_kv_cache(
     torch::stable::Tensor const& workspace_starts,  // [BATCH]
     int64_t batch_size,
     std::optional<torch::stable::Tensor> seq_starts = std::nullopt);
+
+// Gather and upconvert an nvfp4_ds_mla KV cache to a BF16 workspace
+void cp_gather_and_upconvert_nvfp4_kv_cache(
+    torch::stable::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE,
+                                                    // 352]
+    torch::stable::Tensor const& dst,               // [TOT_TOKENS, 576]
+    torch::stable::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
+    torch::stable::Tensor const& workspace_starts,  // [BATCH]
+    int64_t batch_size);
 
 // Indexer K quantization and cache function
 void indexer_k_quant_and_cache(
