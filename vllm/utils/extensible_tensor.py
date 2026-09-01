@@ -333,7 +333,7 @@ class ExtensibleTensor:
     def release_physical(self) -> None:
         """Drop all physical pages but keep the reservation and its views."""
         self._buffer.release_physical()
-        self._bytes_per_segment = 0
+        self._committed = [0] * self.num_segments
 
     @property
     def num_bytes(self) -> int:

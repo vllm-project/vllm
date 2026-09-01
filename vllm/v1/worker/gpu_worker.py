@@ -323,6 +323,11 @@ class Worker(WorkerBase):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().unregister_kv_caches()
+        # An extensible KV cache lives outside the allocator pool; keep its
+        # reservation so views and graphs stay valid.
+        extensible_kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
+        if extensible_kv_cache is not None:
+            extensible_kv_cache.release_physical()
         self.sleep_mode_backend.suspend(level)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
@@ -346,7 +351,12 @@ class Worker(WorkerBase):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.sleep_mode_backend.resume(tags)
-        if has_kv_transfer_group() and (tags is None or "kv_cache" in tags):
+        wake_kv_cache = tags is None or "kv_cache" in tags
+        # Back the extensible KV cache before the connector re-registers it.
+        extensible_kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
+        if extensible_kv_cache is not None and wake_kv_cache:
+            extensible_kv_cache.recommit()
+        if has_kv_transfer_group() and wake_kv_cache:
             get_kv_transfer_group().restore_kv_caches()
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             resume_device_comms()
