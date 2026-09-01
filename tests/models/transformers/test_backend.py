@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoModel
+from transformers import AutoConfig, AutoModel, PretrainedConfig
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.models.interfaces import SupportsMultiModal
@@ -316,6 +316,8 @@ def test_pooling(
 
 
 VOCAB_SIZE = 64
+PER_LAYER_VOCAB_SIZE = 32
+NUM_POSITIONS = 16
 HIDDEN_SIZE = 8
 EMBED_SCALE = 3.0
 
@@ -397,10 +399,10 @@ def replace(embedding):
     return new_embedding
 
 
-def assert_scaled(vpe, module, embedding=None):
-    """`module`'s output is `embedding`'s unscaled output times `EMBED_SCALE`."""
+def assert_scaled(vpe, module):
+    """`module`'s output is its own unscaled output times `EMBED_SCALE`."""
     input_ids = torch.arange(VOCAB_SIZE)
-    unscaled = vpe.forward(embedding if embedding is not None else module, input_ids)
+    unscaled = vpe.forward(module, input_ids)
     torch.testing.assert_close(module(input_ids), unscaled * EMBED_SCALE)
 
 
@@ -434,56 +436,106 @@ def test_replace_inherited_embedding(vpe):
     assert_scaled(vpe, new_embedding)
 
 
-def test_replace_composed_embedding(vpe):
-    """Wrappers are left alone; only the `nn.Embedding` they hold is replaced."""
-    embedding = ComposedWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE)
-    new_embedding = replace(embedding)
+def test_replace_is_idempotent(tp_init):
+    """A tied table is reached twice by the recursion, and must not be rebased twice."""
+    from vllm.model_executor.models.transformers.utils import replace_embedding_class
 
-    assert new_embedding is embedding
-    assert type(embedding.embed) is vpe
-    assert_scaled(vpe, new_embedding, embedding.embed)
+    new_embedding = replace(ScaledWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=2))
+    again = replace_embedding_class(new_embedding)
+
+    assert again is new_embedding
+    assert type(again) is type(new_embedding)
 
 
-def test_replace_nested_embedding(vpe):
-    """The composed `nn.Embedding` is found and set however deeply it is nested."""
-    wrapper = nn.Module()
-    wrapper.add_module("inner", nn.Module())
-    wrapper.inner.add_module(
-        "embed", ScaledWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE)
+class FakeVocabModel(nn.Module):
+    """The embedding tables a model can hold, only one of which is a vocab table.
+
+    `embed_tokens_per_layer` mirrors Gemma 3n, whose per-layer table is sized by
+    `vocab_size_per_layer_input` rather than `vocab_size`.
+    """
+
+    def __init__(self, per_layer: bool = False, composed: bool = False):
+        super().__init__()
+        embed_cls = ComposedWordEmbedding if composed else ScaledWordEmbedding
+        self.embed_tokens = embed_cls(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE)
+        if per_layer:
+            self.embed_tokens_per_layer = ScaledWordEmbedding(
+                PER_LAYER_VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE
+            )
+        # Not a vocab table: indexed by position, and read as a whole by models
+        # which interpolate it (e.g. `SiglipVisionEmbeddings`)
+        self.position_embedding = nn.Embedding(NUM_POSITIONS, HIDDEN_SIZE)
+
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+
+def replace_vocab_embeddings(model, **config_kwargs):
+    """Replace `model`'s vocab tables as `recursive_replace` would, and return them."""
+    from vllm.model_executor.models.transformers.utils import attrsetter
+
+    stub = nn.Module()
+    stub.model = model
+    stub.config = PretrainedConfig(
+        vocab_size=VOCAB_SIZE, num_positions=NUM_POSITIONS, **config_kwargs
     )
-    replace(wrapper)
+    ids = Base._vocab_embedding_ids(stub)
 
-    assert isinstance(wrapper.inner.embed, vpe)
-    assert_scaled(vpe, wrapper.inner.embed)
-
-
-@pytest.mark.parametrize("num_embeddings", [0, 2])
-def test_replace_ambiguous_embedding(tp_init, num_embeddings):
-    """Composing anything but one `nn.Embedding` is an error, not a silent guess."""
-    wrapper = nn.Module()
-    for i in range(num_embeddings):
-        wrapper.add_module(f"embed_{i}", nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE))
-
-    with pytest.raises(ValueError, match=f"found {num_embeddings}"):
-        replace(wrapper)
+    replaced = []
+    for name, module in list(model.named_modules()):
+        if id(module) in ids:
+            replaced.append(replace(module))
+            attrsetter(name)(model, replaced[-1])
+    return replaced
 
 
-def test_replaced_embedding_exposes_one_vpe(vpe):
-    """`CausalMixin` ties `lm_head` to the one `VocabParallelEmbedding` it can find.
+def test_only_vocab_tables_are_replaced(vpe):
+    """Position embeddings share the `nn.Embedding` type, but not the treatment."""
+    model = FakeVocabModel()
 
-    `tie_weights` reads `.weight`, which a composing module does not have, so it must
-    be handed the composed embedding instead.
+    assert replace_vocab_embeddings(model) == [model.embed_tokens]
+    assert isinstance(model.embed_tokens, vpe)
+    assert type(model.position_embedding) is nn.Embedding
+
+
+def test_per_layer_vocab_table_is_replaced(vpe):
+    """A second vocab table is found by its size, without a bespoke accessor."""
+    model = FakeVocabModel(per_layer=True)
+    replaced = replace_vocab_embeddings(
+        model, vocab_size_per_layer_input=PER_LAYER_VOCAB_SIZE
+    )
+
+    assert replaced == [model.embed_tokens, model.embed_tokens_per_layer]
+    assert all(isinstance(module, vpe) for module in replaced)
+
+
+def test_composed_input_embeddings_are_replaced(vpe):
+    """A wrapper is left alone; only the `nn.Embedding` it composes is replaced.
+
+    `CausalMixin` ties `lm_head` to whichever `VocabParallelEmbedding` it finds under
+    `get_input_embeddings()`, reading a `.weight` the wrapper does not have.
     """
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
-    inherited = replace(ScaledWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE))
-    composed = replace(ComposedWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE, EMBED_SCALE))
+    model = FakeVocabModel(composed=True)
+    wrapper = model.embed_tokens
+    replaced = replace_vocab_embeddings(model)
 
-    assert [m for m in inherited.modules() if isinstance(m, vpe)] == [inherited]
-    assert [m for m in composed.modules() if isinstance(m, vpe)] == [composed.embed]
+    assert model.embed_tokens is wrapper
+    assert replaced == [m for m in wrapper.modules() if isinstance(m, vpe)]
 
     lm_head = ParallelLMHead(VOCAB_SIZE, HIDDEN_SIZE)
-    assert lm_head.tie_weights(composed.embed).weight is composed.embed.weight
+    assert lm_head.tie_weights(replaced[0]).weight is replaced[0].weight
+
+
+def test_missing_input_embeddings_are_skipped(tp_init):
+    """Pipeline ranks without the embeddings have a `PPMissingLayer` in their place."""
+    from vllm.model_executor.models.utils import PPMissingLayer
+
+    model = FakeVocabModel()
+    model.embed_tokens = PPMissingLayer()
+
+    assert replace_vocab_embeddings(model) == []
 
 
 MULTIMODAL_MODEL = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
