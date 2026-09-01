@@ -143,3 +143,36 @@ def test_extensible_kv_cache_rejects_manual_kv_cache_size():
     )
     with pytest.raises(ValueError, match="kv_cache_memory_bytes"):
         engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+
+def test_extensible_kv_cache_falls_back_when_driver_unsupported():
+    from types import SimpleNamespace
+
+    from vllm.v1.executor.abstract import Executor
+
+    calls: list[str] = []
+
+    def collective_rpc(method: str):
+        calls.append(method)
+        if method == "extensible_kv_cache_unsupported_reason":
+            return [None, "no VMM support"]
+        return [None, None]
+
+    engine_args = EngineArgs(model="facebook/opt-125m", enable_extensible_kv_cache=True)
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert vllm_config.cache_config.enable_extensible_kv_cache
+    specs = [{"layer": object()}]
+    fake = SimpleNamespace(vllm_config=vllm_config, collective_rpc=collective_rpc)
+    Executor.resolve_extensible_kv_cache(fake, specs)
+    assert not vllm_config.cache_config.enable_extensible_kv_cache
+    assert calls == [
+        "extensible_kv_cache_unsupported_reason",
+        "disable_extensible_kv_cache",
+    ]
+
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+    fake = SimpleNamespace(
+        vllm_config=vllm_config, collective_rpc=lambda method: [None, None]
+    )
+    Executor.resolve_extensible_kv_cache(fake, specs)
+    assert vllm_config.cache_config.enable_extensible_kv_cache

@@ -123,7 +123,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         enable_extensible_kv_cache: Reserve the KV cache address range with
             device virtual memory and commit physical pages after warmup, so
             the cache is sized from the memory actually free after CUDA graph
-            capture. Supported on CUDA with the V2 model runner.
+            capture. Supported on CUDA and ROCm with the V2 model runner.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data

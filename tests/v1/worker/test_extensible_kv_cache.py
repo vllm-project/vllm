@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig, VllmConfig
+from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -13,6 +14,18 @@ from vllm.v1.worker.extensible_kv_cache import (
     measure_kv_cache_blocks,
 )
 from vllm.v1.worker.utils import allocate_kv_cache
+
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="requires CUDA"
+)
+
+
+@pytest.fixture
+def vmm():
+    # Probed lazily so collection does not initialize CUDA in the pytest parent.
+    if (reason := vmm_unavailable_reason()) is not None:
+        pytest.skip(f"VMM unavailable: {reason}")
+
 
 NUM_BLOCKS = 8
 NUM_LAYERS = 3
@@ -34,12 +47,12 @@ def _make_config(layout: KVCacheLayout):
     return config, spec
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_cuda
 @pytest.mark.parametrize(
     ("layout", "expected_segments"),
     [(KVCacheLayout.LBNHC, NUM_LAYERS), (KVCacheLayout.BLNHC, 1)],
 )
-def test_segments_follow_layout(layout, expected_segments):
+def test_segments_follow_layout(vmm, layout, expected_segments):
     """Layer-outermost layouts commit one prefix per layer; block-outermost
     layouts commit a single prefix of the whole allocation."""
     config, spec = _make_config(layout)
@@ -52,9 +65,9 @@ def test_segments_follow_layout(layout, expected_segments):
         kv_cache.free()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_cuda
 @pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLNHC])
-def test_views_stay_valid_across_commits(layout):
+def test_views_stay_valid_across_commits(vmm, layout):
     """Layer views built over the reservation address committed blocks at
     fixed offsets: data written before a commit survives it and newly
     committed blocks read as zero."""
