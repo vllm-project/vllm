@@ -95,7 +95,9 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker: DecodeBenchConnectorWorker | None = None
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = DecodeBenchConnectorScheduler(vllm_config)
+            self.connector_scheduler = DecodeBenchConnectorScheduler(
+                vllm_config, kv_cache_config
+            )
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = DecodeBenchConnectorWorker(
                 vllm_config, kv_cache_config
@@ -184,9 +186,11 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
 class DecodeBenchConnectorScheduler:
     """Scheduler-side implementation for DecodeBenchConnector."""
 
-    def __init__(self, vllm_config: "VllmConfig"):
+    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
         self.vllm_config = vllm_config
-        self.block_size = vllm_config.cache_config.block_size
+        self.group_block_sizes = tuple(
+            group.kv_cache_spec.block_size for group in kv_cache_config.kv_cache_groups
+        )
 
         # Track which requests have already been filled
         self._filled_requests: set[str] = set()
@@ -249,13 +253,12 @@ class DecodeBenchConnectorScheduler:
         # block_groups is a tuple of lists, one per KV cache group
         block_groups = blocks.get_block_ids()
 
-        # Calculate how many blocks we need to fill
-        # num_external_tokens are the tokens we said we'd provide
-        num_blocks_to_fill = cdiv(num_external_tokens, self.block_size)
-
-        # Extract up to num_blocks_to_fill independently from each group
+        # Extract the blocks covering num_external_tokens from each group
         block_ids_per_group = tuple(
-            group_blocks[:num_blocks_to_fill] for group_blocks in block_groups
+            group_blocks[: cdiv(num_external_tokens, group_block_size)]
+            for group_blocks, group_block_size in zip(
+                block_groups, self.group_block_sizes, strict=True
+            )
         )
 
         # Store the blocks to fill for all group. _pending_fills doesn't need cleanup
@@ -267,9 +270,9 @@ class DecodeBenchConnectorScheduler:
         self._filled_requests.add(req_id)
 
         logger.debug(
-            "DecodeBenchConnector: Allocated %d blocks across %d KV cache groups "
+            "DecodeBenchConnector: Allocated %s blocks across %d KV cache groups "
             "for request %s",
-            num_blocks_to_fill,
+            tuple(len(block_ids) for block_ids in block_ids_per_group),
             len(block_groups),
             req_id,
         )

@@ -7,6 +7,8 @@ Tests the functionality of the DecodeBenchConnector which fills KV cache
 with dummy values for decode performance benchmarking.
 """
 
+from unittest.mock import MagicMock
+
 import pytest
 import torch
 
@@ -231,6 +233,47 @@ def test_decode_bench_connector_fills_each_hma_group():
     assert torch.count_nonzero(group_0_cache[5]) == 0
     assert torch.count_nonzero(group_1_cache[1]) == 0
     assert torch.allclose(group_1_cache[5], torch.tensor(0.015))
+
+
+def test_decode_bench_connector_uses_per_group_block_sizes():
+    """Scheduler selects only the blocks covering each group's token span."""
+    vllm_config = create_vllm_config(
+        block_size=16,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            [f"group_{group_idx}_layer"],
+            FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        )
+        for group_idx, block_size in enumerate((16, 32))
+    ]
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[],
+            kv_cache_groups=kv_cache_groups,
+        ),
+    )
+    request = MagicMock(request_id="request")
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = ([0, 1], [2, 3])
+
+    connector.update_state_after_alloc(request, blocks, num_external_tokens=17)
+    metadata = connector.build_connector_meta(MagicMock())
+
+    assert isinstance(metadata, DecodeBenchConnectorMetadata)
+    block_ids_per_group, num_tokens = metadata.reqs_to_fill["request"]
+    assert block_ids_per_group == ([0, 1], [2])
+    assert num_tokens == 17
 
 
 def test_decode_bench_connector_no_refill():
