@@ -12,7 +12,7 @@ To get started with Open WebUI using vLLM, follow these steps:
 2. Start the vLLM server with a supported chat completion model:
 
     ```console
-    vllm serve Qwen/Qwen3-0.6B-Chat
+    vllm serve Qwen/Qwen3-0.6B
     ```
 
     !!! note
@@ -37,6 +37,6 @@ To get started with Open WebUI using vLLM, follow these steps:
 
 4. Open it in the browser: <http://open-webui-host:3000/>
 
-    At the top of the page, you should see the model `Qwen/Qwen3-0.6B-Chat`.
+    At the top of the page, you should see the model `Qwen/Qwen3-0.6B`.
 
-    ![Web portal of model Qwen/Qwen3-0.6B-Chat](../../assets/deployment/open_webui.png)
+    ![Web portal of model Qwen/Qwen3-0.6B](../../assets/deployment/open_webui.png)
