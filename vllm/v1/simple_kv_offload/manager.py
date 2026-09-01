@@ -137,7 +137,7 @@ class SimpleCPUOffloadScheduler:
             pcp_world_size=1,
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
-            allow_partial_hash_hits=False,
+            allow_partial_hash_hits=not lazy_offload,
         )
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
         # GPU block pool reference - bound after scheduler builds kv_cache_manager
@@ -255,6 +255,15 @@ class SimpleCPUOffloadScheduler:
         if stale := self._pending_cpu_hits.pop(request.request_id, None):
             self._free_pending_cpu_hit(stale)
 
+        if num_computed_tokens % self.block_size != 0:
+            logger.warning_once(
+                "SimpleCPU external lookup requires scheduler-block-aligned "
+                "local tokens, got %d tokens with scheduler block size %d.",
+                num_computed_tokens,
+                self.block_size,
+            )
+            return 0, False
+
         num_skipped_hashes = num_computed_tokens // self.hash_block_size
         remaining_hashes = request.block_hashes[num_skipped_hashes:]
 
@@ -332,17 +341,13 @@ class SimpleCPUOffloadScheduler:
 
         cpu_hit_blocks_full, _ = pending
 
-        # ``num_external_tokens`` is LCM-aligned (checked per-group below),
-        # so this counts whole scheduler-aligned chunks of incoming tokens.
-        num_blocks_to_load = num_external_tokens // self.block_size
-        assert num_blocks_to_load > 0
         num_cached_fa_blocks = sum(
             blk.block_hash is not None for blk in blocks.blocks[self.fa_gidx]
         )
         num_computed_tokens = num_cached_fa_blocks * self.fa_block_size
-
-        # Build transfer pairs across all groups.
-        total_computed_tokens = num_computed_tokens + num_external_tokens
+        assert num_computed_tokens % self.block_size == 0, (
+            "SimpleCPU external loads must start at a scheduler-block boundary"
+        )
 
         # The scheduler may have accepted fewer blocks than
         # get_num_new_matched_tokens() reported.
@@ -352,11 +357,7 @@ class SimpleCPUOffloadScheduler:
         cpu_hit_blocks: list[list[KVCacheBlock]] = []
         for g in range(num_groups):
             g_block_size = self.cpu_coordinator.single_type_managers[g].block_size
-            assert num_external_tokens % g_block_size == 0, (
-                f"num_external_tokens={num_external_tokens} not aligned to "
-                f"group {g} block_size={g_block_size}"
-            )
-            n_take_g = num_external_tokens // g_block_size
+            n_take_g = cdiv(num_external_tokens, g_block_size)
             cpu_hit_blocks.append(cpu_hit_blocks_full[g][:n_take_g])
 
         gpu_block_ids: list[int] = []
@@ -369,12 +370,10 @@ class SimpleCPUOffloadScheduler:
             if n_ext_g == 0:
                 continue
 
-            # Number of blocks in the computed range for this group.
             g_block_size = self.cpu_coordinator.single_type_managers[g].block_size
-            n_computed_g = cdiv(total_computed_tokens, g_block_size)
-
-            # Back-trace: ext blocks sit at the tail of the computed range.
-            gpu_ext_start = n_computed_g - n_ext_g
+            # The local prefix starts on the scheduler LCM, which is also a
+            # physical block boundary for every group.
+            gpu_ext_start = num_computed_tokens // g_block_size
             group_gpu_ids = block_ids_by_group[g]
 
             for i, cpu_blk in enumerate(cpu_blocks_g):
@@ -546,17 +545,17 @@ class SimpleCPUOffloadScheduler:
         # Dedup against blocks already scheduled.
         in_flight = self._in_flight_store_gpu_blocks
 
-        # Mamba align state blocks are not positionally stable. Consume exact
-        # same-step handoffs, but keep the coarse baseline scheduler-aligned.
+        # Exact recurrent/partial-tail states are published after their hashes
+        # become valid. Store them before request teardown. Mamba align groups
+        # use this as their only safe source because their block tables are not
+        # positionally stable.
         block_state = scheduler_output.kv_connector_block_state
         boundary_offloads = (
             block_state.boundary_state_offloads if block_state is not None else {}
         )
         for req_id, entries in boundary_offloads.items():
             scheduled_for_req = False
-            for _, gpu_block_id, boundary_tokens in entries:
-                if boundary_tokens % self.block_size != 0:
-                    continue
+            for _, gpu_block_id, _ in entries:
                 gpu_block = gpu_block_pool.blocks[gpu_block_id]
                 block_hash = gpu_block.block_hash
                 if (

@@ -854,12 +854,16 @@ class KVCacheManager:
         """Drain this step's boundary-state hand-offs for a KV connector.
 
         Returns ``{request_id: [(group_id, block_id, boundary_tokens), ...]}``
-        for mamba "align" boundary states: the
-        request's committed boundary-state snapshots and, on a sub-block partial
-        hit, the CoW copy of its last-prompt-boundary state. Only mamba "align"
-        groups contribute; empty otherwise. A connector reads the referenced
-        blocks — never resolving them positionally — and offloads them so a
-        later request can hit that prefix.
+        for the durable boundary blocks of producers' last-prompt-boundary
+        partial tails. Mamba "align" groups contribute exact boundary-state
+        snapshots (including CoW targets for sub-block partial hits); DCP
+        full-attention groups contribute the request's own boundary block,
+        which is a durable source because KV below that boundary is
+        append-only. Empty otherwise.
+
+        A connector reads the referenced block IDs (without positional
+        resolution) and offloads them so a later request can hit that
+        sub-block prefix.
         """
         offloads: dict[str, list[tuple[int, int, int]]] = {}
         for mgr in self.coordinator.single_type_managers:

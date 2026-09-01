@@ -656,7 +656,8 @@ def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
     assert moved[0].block_id == cow_copy.dst_block_id
 
 
-def test_boundary_state_offloads_returns_cow_target():
+@pytest.mark.parametrize("dcp_world_size", [1, 2])
+def test_boundary_state_offloads_returns_cow_target(dcp_world_size: int):
     """Boundary hand-offs expose aligned snapshots and the partial-tail CoW
     target, never the overwritten CoW source."""
     hash_block_size = 2
@@ -690,6 +691,8 @@ def test_boundary_state_offloads_returns_cow_target():
         kv_cache_config=kv_cache_config,
         max_model_len=8192,
         enable_caching=True,
+        dcp_world_size=dcp_world_size,
+        scheduler_block_size=block_size,
         hash_block_size=hash_block_size,
     )
 
@@ -697,10 +700,11 @@ def test_boundary_state_offloads_returns_cow_target():
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
 
-    # Step A offers the materialized aligned checkpoint immediately.
-    ((group_id, block_id, boundary_tokens),) = drain_boundary_state_offloads(manager)[
-        "0"
-    ]
+    # Step A offers the materialized aligned Mamba checkpoint immediately. With
+    # DCP, full attention also offers its append-only prompt boundary block.
+    step_a_offloads = drain_boundary_state_offloads(manager)["0"]
+    mamba_offloads = [entry for entry in step_a_offloads if entry[0] == 1]
+    ((group_id, block_id, boundary_tokens),) = mamba_offloads
     assert group_id == 1
     assert boundary_tokens == 4
     aligned_hash = req0.block_hashes[4 // hash_block_size - 1]
@@ -709,6 +713,18 @@ def test_boundary_state_offloads_returns_cow_target():
     )
     assert aligned_block is not None
     assert block_id == aligned_block[0].block_id
+    full_offloads = [entry for entry in step_a_offloads if entry[0] == 0]
+    if dcp_world_size > 1:
+        ((_, full_block_id, full_boundary_tokens),) = full_offloads
+        assert full_boundary_tokens == 6
+        partial_full_hash = req0.block_hashes[6 // hash_block_size - 1]
+        partial_full_block = manager.block_pool.get_cached_block(
+            partial_full_hash, kv_cache_group_ids=[0]
+        )
+        assert partial_full_block is not None
+        assert full_block_id == partial_full_block[0].block_id
+    else:
+        assert full_offloads == []
 
     partial_mamba_hash = req0.block_hashes[6 // hash_block_size - 1]
     source_block = manager.block_pool.get_cached_block(
