@@ -84,7 +84,27 @@ Bytes, structured as:
 -   **Last 8 bytes:** Scale factors, containing 7 `ue8m0` values + 1B pad.
     The first `ue8m0` is the scale for the first 64 `float8_e4m3` values,
     the second for the next 64, and so on.
+
+In the "nvfp4_ds_mla" format (SM100 only, DeepSeek V3.2 geometry), each
+token's KV cache is 352 Bytes, structured as:
+-   **First 256 bytes:** 512 `e2m1` NoPE values packed 2/byte (low nibble =
+    even element).
+-   **Next 64 bytes:** 64 `float8_e4m3` RoPE values. These carry no scale
+    factor: `e4m3`'s 4 exponent bits span the RoPE magnitude range unaided.
+-   **Last 32 bytes:** 32 `float8_e4m3` NoPE scale factors, one per 16
+    elements, stored permuted (an 8x4 -> 4x8 transpose: the scale for element
+    block `s` lives at byte `8 * (s & 3) + (s >> 2)`) so that the 8 scales one
+    FlashMLA dequant thread needs are contiguous. See the layout comment in
+    `csrc/libtorch_stable/cache_kernels.cu`.
+
 """
+
+# Quantized DS-MLA cache formats served by the FP8/NVFP4 sparse decode kernel
+# path (as opposed to the plain bf16 cache). FlashMLA infers which of these the
+# cache holds from its bytes-per-token, so nothing else needs to be passed down.
+QUANTIZED_DS_MLA_CACHE_FORMATS: frozenset[str] = frozenset(
+    {"fp8_ds_mla", "nvfp4_ds_mla"}
+)
 
 
 class FlashMLASparseBackend(AttentionBackend):
@@ -94,6 +114,7 @@ class FlashMLASparseBackend(AttentionBackend):
         "bfloat16",
         "fp8_ds_mla",
         "fp8",  # alias for fp8_ds_mla
+        "nvfp4_ds_mla",  # NVFP4 NoPE + FP8 RoPE (SM100 only)
     ]
 
     @staticmethod
@@ -128,6 +149,26 @@ class FlashMLASparseBackend(AttentionBackend):
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major in [9, 10]
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: "CacheDType | None",
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        if kv_cache_dtype == "nvfp4_ds_mla" and device_capability.major != 10:
+            return (
+                f"FLASHMLA_SPARSE only supports the {kv_cache_dtype} kv-cache "
+                "dtype on SM100 (Blackwell)"
+            )
+        return None
 
 
 @dataclass
@@ -258,7 +299,9 @@ class FlashMLASparseMetadataBuilder(
             FlashMLASparseImpl._compute_fp8_decode_padded_heads(self.num_heads)
         )
 
-        self.use_fp8_kv_cache = cache_config.cache_dtype == "fp8_ds_mla"
+        self.use_fp8_kv_cache = (
+            cache_config.cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
+        )
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         # Shape: [max_num_seqs], all elements = topk_tokens (constant for full-CG)
         self.topk_tokens_tensor = torch.full(
@@ -596,9 +639,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             )
         q_concat_shape = (max_tokens, q_concat_heads, head_size)
         if is_quantized_kv_cache(kv_cache_dtype):
-            assert kv_cache_dtype == "fp8_ds_mla", (
-                "FlashMLA Sparse Attention backend fp8 only supports "
-                "fp8_ds_mla kv-cache dtype"
+            assert kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS, (
+                "FlashMLA Sparse Attention backend only supports the "
+                f"{sorted(QUANTIZED_DS_MLA_CACHE_FORMATS)} quantized kv-cache "
+                f"dtypes, got {kv_cache_dtype}"
             )
 
         if self.need_to_return_lse_for_decode and not is_quantized_kv_cache(
@@ -609,7 +653,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 "the bf16 sparse path is not supported under DCP."
             )
 
-        if kv_cache_dtype == "fp8_ds_mla":
+        if kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS:
             # Reserve workspace during initialization
             assert vllm_config is not None and vllm_config.model_config is not None
             prefill_workspace_size = get_prefill_workspace_size(
@@ -749,13 +793,22 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             assert fp8_metadata.prefill is not None
             for chunk in fp8_metadata.prefill.chunks:
                 chunk_workspace = self.prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
-                ops.cp_gather_and_upconvert_fp8_kv_cache(
-                    kv_c_and_k_pe_cache,
-                    chunk_workspace,
-                    chunk.block_table,
-                    chunk.workspace_starts,
-                    len(chunk.block_table),
-                )
+                if self.kv_cache_dtype == "fp8_ds_mla":
+                    ops.cp_gather_and_upconvert_fp8_kv_cache(
+                        kv_c_and_k_pe_cache,
+                        chunk_workspace,
+                        chunk.block_table,
+                        chunk.workspace_starts,
+                        len(chunk.block_table),
+                    )
+                else:
+                    ops.cp_gather_and_upconvert_nvfp4_kv_cache(
+                        kv_c_and_k_pe_cache.view(torch.uint8),
+                        chunk_workspace,
+                        chunk.block_table,
+                        chunk.workspace_starts,
+                        len(chunk.block_table),
+                    )
 
                 chunk_q = q[chunk.tokens_slice]
                 chunk_topk_indices_workspace = topk_indices[chunk.tokens_slice]
@@ -953,7 +1006,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
+        use_fp8_cache = self.kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
 
         lse: torch.Tensor | None = None
 

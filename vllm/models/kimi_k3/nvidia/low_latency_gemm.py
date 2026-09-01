@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi-K3 decode GEMM selection for unquantized BF16 on SM103 and SM100.
+"""Kimi-K3 decode GEMM selection for unquantized BF16 on SM90/SM100/SM103.
 
 Dispatch is purely by local ``(N, K)`` shape and token count ``M`` — the module
 name plays no role. Each measured shape maps to a :class:`ProjectionSpec`
@@ -8,12 +8,11 @@ holding the winning backend per token count. The static part of the decision is
 resolved once per module at install time into a small ``{M: call}`` plan, so the
 per-forward path is a single dict lookup.
 
-The two supported capabilities carry separate measured tables:
+The supported capabilities carry separate measured tables:
 :data:`KIMI_K3_PROJECTIONS` was tuned on B300 (SM103),
-:data:`KIMI_K3_PROJECTIONS_SM100` on B200 (SM100). The per-(shape, M) winners
-genuinely differ between the two parts (e.g. 3584x7168 favors dsv3 at M2..8 on
-B300 but only wins with CuTe at M1..3 on B200), so the tables must not be
-merged.
+:data:`KIMI_K3_PROJECTIONS_SM100` on B200 (SM100), and
+:data:`KIMI_K3_PROJECTIONS_SM90` on H200 (SM90). The per-(shape, M) winners
+genuinely differ between the parts, so the tables must not be merged.
 """
 
 from __future__ import annotations
@@ -493,6 +492,96 @@ KIMI_K3_PROJECTIONS_SM100: dict[tuple[int, int], ProjectionSpec] = {
     ),
 }
 
+_SM90CuteConfig = tuple[int, int, int, int]
+
+
+def _sm90_spec(
+    n: int,
+    k: int,
+    dsv3_tokens: frozenset[int] = frozenset(),
+    configs: tuple[_SM90CuteConfig, ...] = (),
+) -> ProjectionSpec:
+    cute_configs = tuple(
+        (m, _cute(m, *config)) for m, config in enumerate(configs, start=1)
+    )
+    return ProjectionSpec(n, k, dsv3_tokens, cute_configs)
+
+
+KIMI_K3_PROJECTIONS_SM90: dict[tuple[int, int], ProjectionSpec] = {
+    (1536, 128): _sm90_spec(1536, 128, frozenset(range(1, 9))),
+    (3072, 128): _sm90_spec(3072, 128, frozenset({1, 2, 5, 6, 7, 8, 9})),
+    (1536, 7168): _sm90_spec(
+        1536,
+        7168,
+        frozenset(range(7, 17)),
+        (
+            (224, 2, 4, 8),
+            (128, 3, 2, 8),
+            (128, 2, 1, 8),
+            (128, 2, 1, 8),
+            (128, 3, 1, 8),
+            (128, 3, 1, 8),
+        ),
+    ),
+    (3072, 7168): _sm90_spec(
+        3072,
+        7168,
+        configs=((224, 2, 4, 8), (128, 2, 2, 8), (64, 4, 1, 8), (128, 6, 1, 8)),
+    ),
+    (2112, 7168): _sm90_spec(
+        2112,
+        7168,
+        frozenset(range(5, 17)),
+        ((224, 2, 4, 8), (128, 4, 2, 8), (128, 2, 1, 8), (128, 2, 1, 8)),
+    ),
+    (2304, 1536): _sm90_spec(
+        2304,
+        1536,
+        frozenset(range(3, 9)),
+        ((96, 4, 2, 8), (96, 4, 1, 8)),
+    ),
+    (4608, 1536): _sm90_spec(
+        4608,
+        1536,
+        configs=((96, 4, 2, 4), (96, 4, 1, 8), (64, 4, 1, 8)),
+    ),
+    (3584, 7168): _sm90_spec(
+        3584,
+        7168,
+        configs=((224, 2, 4, 8), (128, 4, 2, 8), (128, 2, 1, 8)),
+    ),
+    (6288, 7168): _sm90_spec(
+        6288,
+        7168,
+        configs=((224, 2, 4, 8), (128, 4, 2, 8), (64, 4, 1, 8)),
+    ),
+    (12448, 7168): _sm90_spec(
+        12448,
+        7168,
+        configs=((224, 2, 4, 8), (224, 4, 2, 8), (128, 2, 1, 8)),
+    ),
+    (7168, 768): _sm90_spec(7168, 768, configs=((96, 4, 2, 4), (96, 4, 1, 8))),
+    (7168, 1536): _sm90_spec(7168, 1536, configs=((96, 4, 2, 8), (96, 4, 1, 8))),
+    (7168, 3072): _sm90_spec(
+        7168,
+        3072,
+        configs=((96, 2, 4, 8), (64, 4, 2, 8), (64, 2, 2, 8)),
+    ),
+    (7168, 3584): _sm90_spec(
+        7168,
+        3584,
+        configs=((224, 4, 2, 8), (64, 4, 2, 8), (64, 4, 2, 8)),
+    ),
+    (7168, 4224): _sm90_spec(7168, 4224, configs=((96, 4, 2, 4), (32, 4, 2, 4))),
+    (7168, 8448): _sm90_spec(7168, 8448, configs=((96, 2, 4, 8), (32, 4, 2, 8))),
+    (7168, 14336): _sm90_spec(7168, 14336, configs=((224, 2, 4, 8), (128, 2, 2, 8))),
+    (20480, 7168): _sm90_spec(
+        20480,
+        7168,
+        configs=((224, 4, 2, 8), (224, 4, 2, 8), (128, 2, 1, 8)),
+    ),
+}
+
 
 def _backend_for(
     spec: ProjectionSpec, num_tokens: int, has_residual: bool
@@ -543,6 +632,8 @@ def _low_latency_table() -> dict[tuple[int, int], ProjectionSpec] | None:
         return KIMI_K3_PROJECTIONS
     if current_platform.is_device_capability((10, 0)):
         return KIMI_K3_PROJECTIONS_SM100
+    if current_platform.is_device_capability((9, 0)):
+        return KIMI_K3_PROJECTIONS_SM90
     return None
 
 
@@ -634,6 +725,7 @@ class _KimiK3LowLatencyApply:
     """Mixin: try the precomputed plan, else defer to the base method."""
 
     def __init__(self, plan: dict[int, ResolvedCall]) -> None:
+        super().__init__()
         self._plan = plan
 
     def apply(
@@ -694,7 +786,7 @@ def enable_kimi_k3_low_latency_gemm(
     Modules are matched purely by type, an exactly-unquantized method, and a
     local ``(N, K)`` present in the current device's measured table
     (:data:`KIMI_K3_PROJECTIONS` on SM103, :data:`KIMI_K3_PROJECTIONS_SM100`
-    on SM100).
+    on SM100, :data:`KIMI_K3_PROJECTIONS_SM90` on SM90).
     """
     if dtype != torch.bfloat16:
         return

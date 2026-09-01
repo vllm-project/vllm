@@ -14,16 +14,93 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    CircularBufferManager,
+    FullAttentionManager,
+    MambaManager,
     RSWAManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
+    FullAttentionSpec,
+    MambaSpec,
     RSWASpec,
     SlidingWindowSpec,
 )
 
 pytestmark = pytest.mark.cpu_test
+
+
+def test_external_computed_blocks_do_not_corrupt_free_pool():
+    block_size = 4
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    manager = FullAttentionManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    request_id = "request"
+    manager.allocate_new_blocks(
+        request_id,
+        num_tokens=3 * block_size,
+        num_tokens_main_model=3 * block_size,
+    )
+    num_free_blocks = block_pool.get_num_free_blocks()
+
+    # Speculative allocations can exceed the blocks implied by the eventual
+    # external computed-token count. This must not request a negative number
+    # of blocks, which inflates the free-queue counter.
+    manager.allocate_external_computed_blocks(
+        request_id,
+        num_local_computed_tokens=0,
+        num_external_computed_tokens=block_size,
+    )
+
+    assert block_pool.get_num_free_blocks() == num_free_blocks
+    assert len(manager.req_to_blocks[request_id]) == 3
+
+
+def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
+    spec = MambaSpec(
+        block_size=4,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=1,
+    )
+    block_pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=4)
+    manager = MambaManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+    )
+    block = block_pool.get_new_blocks(1)[0]
+    blocks = [block]
+
+    manager._relocate_speculative_block(blocks, 0)
+
+    assert blocks == [block_pool.null_block, block]
+    assert block.ref_cnt == 1
+
+    pinned_block = block_pool.get_new_blocks(1)[0]
+    block_pool.touch((pinned_block,))
+    with pytest.raises(AssertionError, match="exclusively owned and unhashed"):
+        manager._relocate_speculative_block([pinned_block], 0)
 
 
 def get_sliding_window_manager(
@@ -59,6 +136,67 @@ def get_chunked_local_attention_manager(
         needs_kv_cache_zeroing=needs_kv_cache_zeroing,
         max_admission_blocks_per_request=10**9,
     )
+
+
+def test_circular_buffer_allocates_one_block_for_the_request_lifetime():
+    block_size = 4
+    spec = CircularBufferSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
+    )
+    manager = CircularBufferManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+        needs_kv_cache_zeroing=True,
+        max_admission_blocks_per_request=1,
+    )
+    request_id = "request"
+
+    assert (
+        manager.get_num_blocks_to_allocate(
+            request_id,
+            num_tokens=128,
+            new_computed_blocks=[block_pool.blocks[1]],
+            total_computed_tokens=0,
+            num_local_computed_tokens=0,
+            num_tokens_main_model=128,
+        )
+        == 1
+    )
+    blocks = manager.allocate_new_blocks(
+        request_id, num_tokens=128, num_tokens_main_model=128
+    )
+    assert len(blocks) == 1
+    assert not manager.records_new_block_ids
+    assert manager.take_new_block_ids() == []
+
+    for num_tokens in (256, 1024):
+        assert (
+            manager.get_num_blocks_to_allocate(
+                request_id,
+                num_tokens,
+                [],
+                total_computed_tokens=num_tokens - 1,
+                num_local_computed_tokens=0,
+                num_tokens_main_model=num_tokens,
+            )
+            == 0
+        )
+        assert manager.allocate_new_blocks(request_id, num_tokens, num_tokens) == []
+
+    manager.cache_blocks(request_id, 1024)
+    manager.remove_skipped_blocks(request_id, 1024)
+    assert manager.get_num_common_prefix_blocks(request_id) == 0
+    assert manager.get_num_skipped_tokens(1024) == 0
+    assert manager.req_to_blocks[request_id] == blocks
 
 
 def test_sliding_window_records_new_blocks_for_zeroing():
@@ -259,6 +397,47 @@ def test_sliding_window_possible_cached_prefix():
         [True, True, False, True, False, False, True, True, False, False, False, True],
         8,
     )
+
+
+def test_sliding_window_cache_hit_with_finer_hash_alignment():
+    """Sliding-window lookup uses full blocks with finer hybrid-cache hashes."""
+    hash_block_size = 2
+    block_size = 4
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=8,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+    block_hashes = [BlockHash(str(i).encode()) for i in range(4)]
+
+    # Each physical block uses the last chained hash in its block-size view.
+    for block_hash, block in zip(
+        (block_hashes[1], block_hashes[3]), block_pool.blocks[10:12]
+    ):
+        block_pool.cached_block_hash_to_block.insert(
+            make_block_hash_with_group_id(block_hash, 0), block
+        )
+
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=8,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=sliding_window_spec,
+        drop_eagle_block=False,
+        alignment_tokens=hash_block_size,
+    )
+
+    assert hit_length == 8
+    assert computed_blocks[0] == block_pool.blocks[10:12]
 
 
 def test_chunked_local_attention_remove_skipped_blocks():
