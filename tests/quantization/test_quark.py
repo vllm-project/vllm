@@ -18,6 +18,16 @@ import torch
 from packaging import version
 
 from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor import parameter
+from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+    AiterPerTokenFp8ScaledMMLinearKernel,
+    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+    FP8ScaledMMLinearLayerConfig,
+)
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkConfig,
     QuarkLinearMethod,
@@ -34,6 +44,8 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
+    kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
@@ -59,6 +71,12 @@ QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
 ) >= version.parse(QUARK_MXFP4_MIN_VERSION)
 
 AITER_AVAILABLE = is_aiter_found_and_supported()
+
+AITER_PTPC_KERNELS = (
+    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+    AiterPerTokenFp8ScaledMMLinearKernel,
+)
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -175,6 +193,54 @@ def test_quark_w8a8_fp8_per_block_requires_block_size():
 
     with pytest.raises(ValueError, match="requires `block_size`"):
         QuarkW8A8Fp8PerBlock(weight_config, input_config)
+
+
+def test_quark_fp8_ptpc_exposes_kernel_input_quant_key(monkeypatch):
+    """QuarkW8A8Fp8 must advertise the key its kernel consumes pre-quantized.
+
+    Only kernel selection runs, no GEMM. The shape matters: AITER PTPC
+    kernels decline untuned shapes, leaving a torch kernel that has no key.
+    """
+    # Llama-3.1-70B qkv_proj at TP1 (aiter-tuned N, K on gfx950).
+    N, K = 10240, 8192
+    dtype = torch.bfloat16
+    kernel_config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8StaticChannelSym,
+        activation_quant_key=kFp8DynamicTokenSym,
+        weight_shape=(N, K),
+        input_dtype=dtype,
+        out_dtype=dtype,
+    )
+    if not any(
+        cls.is_supported()[0] and cls.can_implement(kernel_config)[0]
+        for cls in AITER_PTPC_KERNELS
+    ):
+        pytest.skip("no AITER PTPC kernel is usable for this shape and environment")
+
+    monkeypatch.setattr(parameter, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(parameter, "get_tensor_model_parallel_world_size", lambda: 1)
+
+    scheme = QuarkW8A8Fp8.__new__(QuarkW8A8Fp8)
+    scheme.weight_qscheme = "per_channel"
+    scheme.is_static_input_scheme = False
+    scheme.input_qscheme = "per_channel"
+    scheme.activation_quant_key = kFp8DynamicTokenSym
+    scheme.weight_quant_key = kFp8StaticChannelSym
+    scheme.out_dtype = dtype
+    scheme.input_dtype = dtype
+
+    layer = torch.nn.Module()
+    with set_current_vllm_config(VllmConfig()):
+        scheme.create_weights(
+            layer,
+            output_partition_sizes=[N],
+            input_size_per_partition=K,
+            params_dtype=dtype,
+            weight_loader=lambda *args, **kwargs: None,
+        )
+
+    assert isinstance(scheme.fp8_linear, AITER_PTPC_KERNELS)
+    assert layer.input_quant_key == kFp8DynamicTokenSym
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
