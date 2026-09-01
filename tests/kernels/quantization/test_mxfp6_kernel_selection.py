@@ -82,8 +82,8 @@ def test_emulation_kernel_rejects_non_mxfp4_or_mxfp6_activation(weight_quant_key
 
 def test_quark_ocp_mx_recognizes_dense_w6a8():
     scheme = QuarkOCP_MX(
-        weight_quant_spec={"dtype": "fp6_e3m2"},
-        input_quant_spec={"dtype": "fp8_e4m3", "is_dynamic": True},
+        weight_quant_key=kMxfp6E3M2Static,
+        activation_quant_key=kMxfp8Dynamic,
     )
 
     assert scheme.weight_quant_key == kMxfp6E3M2Static
