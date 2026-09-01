@@ -6,9 +6,10 @@ import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx1x
+from vllm.platforms.rocm import on_gfx1x, on_gfx1151
 from vllm.triton_utils import triton
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.ops import chunked_prefill_paged_decode as decode_ops
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     kernel_paged_attention_2d,
     paged_attention_2d_splitkv_decode,
@@ -16,6 +17,91 @@ from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
 )
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.skipif(not on_gfx1151(), reason="gfx1151 native split-KV dispatch test")
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="native split-KV test requires a GPU"
+)
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
+@torch.inference_mode()
+def test_gfx1151_native_splitkv_dispatch(
+    kv_cache_dtype: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Large LBHNC pages must reach the new native operator, including FP8."""
+    set_random_seed(0)
+    torch.set_default_device(DEVICE_TYPE)
+
+    batch_size = 3
+    num_query_heads = 24
+    num_kv_heads = 4
+    head_size = 256
+    page_size = 1584
+    seq_lens = torch.tensor([1001, 1023, 997], dtype=torch.int32)
+    query = torch.randn(batch_size, num_query_heads, head_size, dtype=torch.bfloat16)
+    current_key = torch.empty(batch_size, num_kv_heads, head_size, dtype=query.dtype)
+    k_scale = torch.tensor(0.02, dtype=torch.float32)
+    v_scale = torch.tensor(0.025, dtype=torch.float32)
+    dense_key = torch.randn(
+        batch_size,
+        page_size,
+        num_kv_heads,
+        head_size,
+        dtype=query.dtype,
+    )
+    dense_value = torch.randn_like(dense_key)
+    if kv_cache_dtype == "fp8_e4m3":
+        dense_key = (dense_key / k_scale).to(current_platform.fp8_dtype())
+        dense_value = (dense_value / v_scale).to(current_platform.fp8_dtype())
+    key_cache, value_cache = _to_vllm_kv_cache(dense_key, dense_value)
+    block_tables = torch.arange(batch_size, dtype=torch.int32).view(batch_size, 1)
+    query_start_loc = torch.arange(batch_size + 1, dtype=torch.int32)
+    output = torch.empty_like(query)
+
+    called = 0
+    native_decode = decode_ops.paged_attention_rocm_splitkv_decode
+
+    def record_native_decode(*args, **kwargs):
+        nonlocal called
+        called += 1
+        return native_decode(*args, **kwargs)
+
+    monkeypatch.setattr(
+        decode_ops, "paged_attention_rocm_splitkv_decode", record_native_decode
+    )
+    decode_ops.chunked_prefill_paged_decode(
+        query=query,
+        key=current_key,
+        value=current_key,
+        output=output,
+        kv_cache_dtype=kv_cache_dtype,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        block_table=block_tables,
+        query_start_loc=query_start_loc,
+        seq_lens=seq_lens,
+        max_seq_len=int(seq_lens.max().item()),
+        max_query_len=1,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
+    assert called == 1
+
+    num_splits = 16 if kv_cache_dtype == "fp8_e4m3" else 4
+    expected = native_decode(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        scale=head_size**-0.5,
+        actual_max_splits=num_splits,
+        max_seq_len=int(seq_lens.max().item()),
+        kv_cache_dtype=kv_cache_dtype,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
+    torch.testing.assert_close(output, expected, atol=0.02, rtol=0.02)
 
 
 def _to_vllm_kv_cache(
@@ -358,17 +444,13 @@ def test_paged_attention_rocm_splitkv_reduction_state() -> None:
         num_pages, page_size, num_kv_heads, head_size, dtype=query.dtype
     )
     dense_value_cache = torch.randn_like(dense_key_cache)
-    key_cache, value_cache = _to_vllm_kv_cache(
-        dense_key_cache, dense_value_cache
-    )
+    key_cache, value_cache = _to_vllm_kv_cache(dense_key_cache, dense_value_cache)
     block_tables = torch.arange(num_pages, dtype=torch.int32).view(1, -1)
     seq_lens = torch.tensor([seq_len], dtype=torch.int32)
     partial_out = torch.empty(
         1, num_query_heads, num_splits, head_size, dtype=torch.float32
     )
-    partial_max = torch.empty(
-        1, num_query_heads, num_splits, dtype=torch.float32
-    )
+    partial_max = torch.empty(1, num_query_heads, num_splits, dtype=torch.float32)
     partial_sum = torch.empty_like(partial_max)
 
     output = paged_attention_rocm_splitkv_decode(
@@ -386,9 +468,9 @@ def test_paged_attention_rocm_splitkv_reduction_state() -> None:
     )
     global_max = partial_max.max(dim=2, keepdim=True).values
     split_weight = torch.exp(partial_max - global_max)
-    expected = (
-        partial_out * split_weight.unsqueeze(-1)
-    ).sum(dim=2) / (partial_sum * split_weight).sum(dim=2, keepdim=True)
+    expected = (partial_out * split_weight.unsqueeze(-1)).sum(dim=2) / (
+        partial_sum * split_weight
+    ).sum(dim=2, keepdim=True)
 
     torch.testing.assert_close(
         output,
