@@ -378,7 +378,7 @@ class KVCacheManager:
             per_group_hits[group_id] for group_id in fixed_group_ids
         )
         if completion_boundary <= local_hit:
-            return *self.get_computed_blocks(request), False, None
+            return *self.get_computed_blocks(request), False, 0
 
         blocks = self.truncate_group_completion_blocks(
             self.create_kv_cache_blocks(computed),
@@ -904,9 +904,9 @@ class KVCacheManager:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        if not all(pool.reset_prefix_cache() for pool in self.block_pools):
-            return False
         if not self.hisparse_coordinator.reset_prefix_cache():
+            return False
+        if not all(pool.reset_prefix_cache() for pool in self.block_pools):
             return False
         if self.log_stats:
             assert self.prefix_cache_stats is not None

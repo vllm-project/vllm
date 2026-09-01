@@ -1487,22 +1487,6 @@ class VllmConfig:
                 raise ValueError("HiSparse currently requires NVIDIA CUDA.")
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError("HiSparse does not support pipeline parallelism.")
-            # PD-decode instances (KV arrives via a consumer connector) are
-            # the intended fast path. Local prefill also works — rows are
-            # written to the host pool and prefill attention stages the
-            # context host->GPU — but it is slower than a normal GPU prefill,
-            # so warn when the deployment will prefill routinely.
-            if (
-                self.kv_transfer_config is None
-                or not self.kv_transfer_config.is_kv_consumer
-            ):
-                logger.warning(
-                    "HiSparse host-resident KV is enabled without a "
-                    "kv_consumer connector (unified / non-PD instance). "
-                    "Every prefill gathers KV from host memory, which is "
-                    "slower than a normal GPU prefill; PD decode-only "
-                    "instances avoid this cost."
-                )
             if self.parallel_config.decode_context_parallel_size > 1:
                 raise ValueError(
                     "HiSparse does not support decode context parallelism."

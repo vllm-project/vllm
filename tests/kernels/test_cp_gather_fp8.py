@@ -316,6 +316,48 @@ def test_cp_gather_fp8_shuffled_blocks():
     assert torch.equal(dst[:, NOPE_DIM:], expected[:, NOPE_DIM:])
 
 
+def test_cp_gather_fp8_mixes_resident_and_pinned_host_rows():
+    seq_lens = [7, 5]
+    block_size = 4
+    (
+        cache,
+        block_table,
+        workspace_starts,
+        num_reqs,
+        total_tokens,
+        expected,
+    ) = _build_test_case(seq_lens, block_size)
+
+    device_cache = cache.clone()
+    host_cache = cache.cpu().pin_memory().view(-1, ENTRY_BYTES)
+    device_rows = torch.arange(host_cache.shape[0], dtype=torch.int32, device="cuda")
+    use_device = device_rows % 2 == 0
+    host_rows = device_rows.clone()
+    device_rows.masked_fill_(~use_device, -1)
+
+    host_cache[use_device.cpu()] = 0
+    device_cache.view(-1, ENTRY_BYTES)[~use_device] = 0
+    dst = torch.empty(
+        total_tokens, NOPE_DIM + ROPE_DIM, dtype=torch.bfloat16, device="cuda"
+    )
+
+    ops.cp_gather_and_upconvert_fp8_kv_cache(
+        device_cache,
+        dst,
+        block_table,
+        workspace_starts,
+        num_reqs,
+        host_cache=host_cache,
+        host_row_ids=host_rows,
+        device_row_ids=device_rows,
+    )
+
+    torch.testing.assert_close(
+        dst[:, :NOPE_DIM], expected[:, :NOPE_DIM], atol=1e-3, rtol=1e-2
+    )
+    assert torch.equal(dst[:, NOPE_DIM:], expected[:, NOPE_DIM:])
+
+
 @pytest.mark.parametrize(
     "gather_seq_lens,seq_starts",
     [

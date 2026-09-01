@@ -15,6 +15,15 @@ class SparseKVPageTransfer:
     after_forward: bool
 
 
+@dataclass(frozen=True)
+class SparseKVRowMirror:
+    """Mirror one contiguous resident-row span into the host cache."""
+
+    source_starts: tuple[int, ...]
+    destination_start: int
+    num_rows: int
+
+
 @dataclass
 class SparseKVOffloadCommand:
     """Opaque scheduler-to-worker command for one model step."""

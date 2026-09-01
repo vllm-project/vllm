@@ -17,6 +17,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.hisparse.types import (
     SparseKVOffloadCommand,
     SparseKVPageTransfer,
+    SparseKVRowMirror,
 )
 from vllm.v1.kv_cache_interface import (
     HiSparseResidentSpec,
@@ -638,6 +639,76 @@ class HiSparseCoordinator:
         self.spills_to_send.append(plan)
         return True
 
+    def build_row_mirrors(
+        self,
+        requests: Iterable[tuple[str, int, int]],
+    ) -> tuple[SparseKVRowMirror, ...]:
+        """Map scheduled rows to scheduler-owned resident and host blocks."""
+        if not self.resident_managers or self.host_manager is None:
+            return ()
+        block_size = self.resident_managers[0].block_size
+        mirrors: list[SparseKVRowMirror] = []
+        for request_id, num_computed_tokens, num_scheduled_tokens in requests:
+            host_blocks = self.host_manager.req_to_blocks.get(request_id)
+            resident_blocks = [
+                manager.req_to_blocks.get(request_id)
+                for manager in self.resident_managers
+            ]
+            if host_blocks is None or any(blocks is None for blocks in resident_blocks):
+                return ()
+            token_position = num_computed_tokens
+            end_position = token_position + num_scheduled_tokens
+            while token_position < end_position:
+                page_idx, row_offset = divmod(token_position, block_size)
+                num_rows = min(block_size - row_offset, end_position - token_position)
+                source_starts = []
+                for blocks in resident_blocks:
+                    assert blocks is not None
+                    if page_idx >= len(blocks) or blocks[page_idx].is_null:
+                        return ()
+                    source_starts.append(
+                        blocks[page_idx].block_id * block_size + row_offset
+                    )
+                host_block_idx, destination_page_offset = divmod(
+                    page_idx, self.pages_per_host_block
+                )
+                if host_block_idx >= len(host_blocks):
+                    return ()
+                host_block = host_blocks[host_block_idx]
+                if host_block.is_null:
+                    return ()
+                destination_page = (
+                    host_block.block_id * self.pages_per_host_block
+                    + destination_page_offset
+                )
+                mirrors.append(
+                    SparseKVRowMirror(
+                        source_starts=tuple(source_starts),
+                        destination_start=destination_page * block_size + row_offset,
+                        num_rows=num_rows,
+                    )
+                )
+                token_position += num_rows
+        return tuple(mirrors)
+
+    def all_context_pages_resident(
+        self,
+        requests: Iterable[tuple[str, int, int]],
+    ) -> bool:
+        """Return whether every scheduled request can read only resident KV."""
+        if not self.resident_managers:
+            return False
+        block_size = self.resident_managers[0].block_size
+        for request_id, num_computed_tokens, num_scheduled_tokens in requests:
+            num_pages = cdiv(num_computed_tokens + num_scheduled_tokens, block_size)
+            for page_idx in range(num_pages):
+                if any(
+                    manager.get_resident_page(request_id, page_idx) is None
+                    for manager in self.resident_managers
+                ):
+                    return False
+        return True
+
     def take_block_table_updates(self) -> dict[str, tuple[list[int], ...]]:
         updates = {
             request_id: tuple(
@@ -691,9 +762,13 @@ class HiSparseCoordinator:
             int, tuple[str, _HiSparseRequestState, list[_PendingSpill]]
         ] = {}
         for pending in self.pending_spills.values():
-            if pending.expected_worker_completions and (
-                not pending.enqueue_applied
-                or (pending.release_after and not pending.resident_released)
+            if (
+                pending.expected_worker_completions
+                and pending.worker_completions >= pending.expected_worker_completions
+                and (
+                    not pending.enqueue_applied
+                    or (pending.release_after and not pending.resident_released)
+                )
             ):
                 request_id = pending.page[0]
                 entry = ready_by_state.setdefault(

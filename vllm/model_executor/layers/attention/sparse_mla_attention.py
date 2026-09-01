@@ -3,7 +3,6 @@
 """Shared MHA implementation and metadata builder for sparse MLA backends."""
 
 import math
-from collections.abc import Callable
 from dataclasses import dataclass
 from shutil import which
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
@@ -34,24 +33,20 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.torch_utils import (
     is_quantized_kv_cache,
-    kv_cache_dtype_str_to_dtype,
     np_to_pinned_tensor,
 )
 from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
-from vllm.v1.attention.backends.mla.sparse_utils import (
-    triton_convert_req_index_to_global_index,
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroup,
+    SparseMLAIndexGroupBuilder,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.hisparse.runtime import (
-    FP8_DS_MLA_ROW_BYTES,
-    HiSparseCacheHandle,
-    HiSparseIndexGroupBuilder,
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
-    create_hisparse_cache_handle,
 )
 
 if TYPE_CHECKING:
@@ -131,7 +126,7 @@ def _is_masked_mha_available(
 
 @dataclass
 class SparseMLAPrefillMetadata(MLACommonPrefillMetadata):
-    hisparse_staging_plan: HiSparsePrefillStagingPlan | None = None
+    host_staging_plan: HiSparsePrefillStagingPlan | None = None
 
 
 @dataclass(kw_only=True)
@@ -151,10 +146,6 @@ class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
 
 
 T = TypeVar("T", bound=SparseMLACommonMetadata)
-HiSparseMQAStep = Callable[
-    [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-    tuple[torch.Tensor, torch.Tensor | None],
-]
 
 
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
@@ -245,12 +236,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         supports_spec_as_decode: bool = False,
         supports_dcp_with_varlen: bool = False,
     ) -> None:
-        if (
-            self.vllm_config.attention_config.hisparse_config is not None
-            and not self.hisparse_supports_multi_token_decode
-        ):
+        if self.vllm_config.attention_config.hisparse_config is not None:
             reorder_batch_threshold = 1
-            supports_spec_as_decode = False
+            if not self.hisparse_supports_multi_token_decode:
+                supports_spec_as_decode = False
         super()._init_reorder_batch_threshold(
             reorder_batch_threshold,
             supports_spec_as_decode,
@@ -405,7 +394,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                     and not self.vllm_config.attention_config.sparse_mla_force_mqa
                 ),
                 topk_mask_workspace=self.topk_mask_workspace,
-                hisparse_staging_plan=staging_plan,
+                host_staging_plan=staging_plan,
             )
             self._prefill_backend.prepare_metadata(prefill)
 
@@ -617,7 +606,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         kv_b_proj: "ColumnParallelLinear",
         indexer: object | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
-        hisparse_index_group_builder: HiSparseIndexGroupBuilder | None = None,
+        index_group_builder: SparseMLAIndexGroupBuilder | None = None,
         q_pad_num_heads: int | None = None,
     ) -> None:
         super().__init__(
@@ -642,33 +631,20 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             if indexer is not None
             else topk_indices_buffer
         )
-
-        self.hisparse_cache: HiSparseCacheHandle | None = None
-        vllm_config = get_current_vllm_config()
-        if vllm_config.attention_config.hisparse_config is not None:
-            if kv_cache_dtype == "fp8_ds_mla":
-                row_width = FP8_DS_MLA_ROW_BYTES
-                kv_dtype = torch.uint8
-            else:
-                row_width = head_size
-                kv_dtype = kv_cache_dtype_str_to_dtype(
-                    kv_cache_dtype, vllm_config.model_config
+        self.index_group: SparseMLAIndexGroup | None = None
+        self.index_group_index = 0
+        if index_group_builder is None and self.topk_indices_buffer is not None:
+            index_group_builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
+        if index_group_builder is not None:
+            vllm_config = get_current_vllm_config()
+            self.index_group, self.index_group_index = (
+                index_group_builder.register_layer(
+                    indexer is not None,
+                    vllm_config,
+                    head_size=head_size,
+                    kv_cache_dtype=kv_cache_dtype,
                 )
-            model_top_k = (
-                indexer.topk_tokens  # type: ignore[attr-defined]
-                if indexer is not None
-                else vllm_config.model_config.hf_config.index_topk
             )
-            self.hisparse_cache = create_hisparse_cache_handle(
-                vllm_config,
-                model_top_k,
-                is_index_group_leader=indexer is not None,
-                row_width=row_width,
-                kv_dtype=kv_dtype,
-                index_group_builder=hisparse_index_group_builder,
-            )
-            assert self.hisparse_cache is not None
-        self._hisparse_dummy_batch = False
 
         self._use_flashinfer_concat_mla_k = (
             has_flashinfer()
@@ -686,303 +662,31 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             kv_cache_dtype=kv_cache_dtype,
         )
 
-    @property
-    def _hisparse_decode_batch(self) -> bool:
-        return self.hisparse_cache is not None and self.hisparse_cache.decode_batch
+    def record_logical_topk_ready(self) -> None:
+        if self.index_group is not None:
+            self.index_group.set_logical_topk_ready(self.index_group_index)
 
-    def prepare_for_batch(self, attn_metadata: Any | None) -> None:
-        self._hisparse_dummy_batch = attn_metadata is None
-        if self.hisparse_cache is not None:
-            self.hisparse_cache.num_actual_tokens = (
-                attn_metadata.num_actual_tokens if attn_metadata is not None else 0
-            )
-            self.hisparse_cache.num_decode_tokens = (
-                attn_metadata.num_decode_tokens if attn_metadata is not None else 0
-            )
-            self.hisparse_cache.req_id_per_token = (
-                attn_metadata.req_id_per_token if attn_metadata is not None else None
-            )
-            self.hisparse_cache.decode_batch = (
-                attn_metadata is not None
-                and attn_metadata.num_decode_tokens == attn_metadata.num_actual_tokens
-                and attn_metadata.max_query_len == 1
-                and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
-            )
+    def prepare_for_batch(self, attn_metadata: T | None) -> None:
+        if self.index_group is not None:
+            self.index_group.prepare_for_batch(self.index_group_index, attn_metadata)
 
-    def _hisparse_swap_in(
+    def _convert_logical_to_physical_topk(
         self,
-        topk_indices: torch.Tensor,
-        attn_metadata: Any,
-        num_decode_tokens: int | None = None,
-        return_valid_counts: bool = False,
-        req_id_per_token: torch.Tensor | None = None,
-        plan_row_offset: int = 0,
-        prefetch_followers: bool = True,
-    ):
-        assert self.hisparse_cache is not None
-        n = topk_indices.shape[0] if num_decode_tokens is None else num_decode_tokens
-        if req_id_per_token is None:
-            assert num_decode_tokens is None or n == attn_metadata.num_decodes, (
-                "Multi-token HiSparse decode must resolve one step at a time."
-            )
-            req_id_per_token = attn_metadata.req_id_per_token[:n]
-        return self.hisparse_cache.resolve_topk(
-            req_id_per_token,
-            block_table=attn_metadata.block_table,
-            topk_indices=topk_indices[:n],
-            block_size=attn_metadata.block_size,
-            return_valid_counts=return_valid_counts,
-            plan_row_offset=plan_row_offset,
-            prefetch_followers=prefetch_followers,
-        )
-
-    def _run_hisparse_decode(
-        self,
-        q: torch.Tensor,
-        topk_indices: torch.Tensor,
-        attn_metadata: Any,
-        run_step: HiSparseMQAStep,
-        *,
-        uniform: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        num_decodes = attn_metadata.num_decodes
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        assert num_decodes > 0 and num_decode_tokens > 0
-
-        if uniform:
-            assert num_decode_tokens % num_decodes == 0
-            max_query_len = num_decode_tokens // num_decodes
-            q_by_request = q.view(num_decodes, max_query_len, *q.shape[1:])
-            topk_by_request = topk_indices[:num_decode_tokens].view(
-                num_decodes, max_query_len, -1
-            )
-            req_ids_by_request = attn_metadata.req_id_per_token[
-                :num_decode_tokens
-            ].view(num_decodes, max_query_len)
-        else:
-            max_query_len = attn_metadata.decode_max_query_len
-            query_start_loc = attn_metadata.query_start_loc[: num_decodes + 1]
-            request_ids = torch.arange(
-                num_decodes,
-                dtype=torch.int32,
-                device=q.device,
-            )
-
-        outputs = []
-        lses = []
-        output_indices = []
-        for step in range(max_query_len):
-            if uniform:
-                step_q = q_by_request[:, step]
-                step_topk = topk_by_request[:, step].contiguous()
-                step_req_ids = req_ids_by_request[:, step].contiguous()
-                active = None
-            else:
-                token_indices = query_start_loc[:-1] + step
-                active = (token_indices < query_start_loc[1:]) & (
-                    token_indices < num_decode_tokens
-                )
-                output_indices.append(
-                    torch.where(
-                        active,
-                        token_indices,
-                        torch.full_like(token_indices, num_decode_tokens),
-                    ).long()
-                )
-                token_indices = token_indices.clamp(
-                    min=0, max=num_decode_tokens - 1
-                ).long()
-                step_q = q.index_select(0, token_indices)
-                step_topk = topk_indices.index_select(0, token_indices).masked_fill(
-                    ~active.unsqueeze(1), -1
-                )
-                step_req_ids = request_ids
-
-            hot_cache, physical_indices, seq_lens = self._hisparse_swap_in(
-                step_topk,
-                attn_metadata,
-                return_valid_counts=True,
-                req_id_per_token=step_req_ids,
-                plan_row_offset=step * num_decodes,
-                prefetch_followers=max_query_len == 1,
-            )
-            step_out, step_lse = run_step(
-                step_q,
-                hot_cache,
-                physical_indices,
-                seq_lens,
-            )
-            if active is not None:
-                step_out.masked_fill_(~active.view(-1, 1, 1), 0)
-                if step_lse is not None:
-                    step_lse.masked_fill_(~active.view(-1, 1), float("-inf"))
-            outputs.append(step_out)
-            if step_lse is not None:
-                lses.append(step_lse)
-
-        stacked_outputs = torch.stack(outputs, dim=1).flatten(0, 1)
-        stacked_lses = torch.stack(lses, dim=1).flatten(0, 1) if lses else None
-        if uniform:
-            return stacked_outputs, stacked_lses
-
-        packed_indices = torch.stack(output_indices, dim=1).flatten()
-        output = stacked_outputs.new_empty(
-            (num_decode_tokens + 1, *stacked_outputs.shape[1:])
-        )
-        output.index_copy_(0, packed_indices, stacked_outputs)
-        if stacked_lses is None:
-            return output[:num_decode_tokens], None
-        lse = stacked_lses.new_empty((num_decode_tokens + 1, *stacked_lses.shape[1:]))
-        lse.index_copy_(0, packed_indices, stacked_lses)
-        return output[:num_decode_tokens], lse[:num_decode_tokens]
-
-    def _forward_hisparse_mqa(
-        self,
-        q: torch.Tensor,
-        kv_cache: torch.Tensor,
-        topk_indices: torch.Tensor,
-        attn_metadata: Any,
-        run_step: HiSparseMQAStep,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        assert self.hisparse_cache is not None
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        if 0 < num_decode_tokens < q.shape[0]:
-            decode_out, decode_lse = self._run_hisparse_decode(
-                q[:num_decode_tokens],
-                topk_indices[:num_decode_tokens],
-                attn_metadata,
-                run_step,
-            )
-            prefill_cache, prefill_block_table, prefill_req_ids = (
-                self._hisparse_stage_prefill_rows(kv_cache, attn_metadata)
-            )
-            prefill_indices, prefill_lens = triton_convert_req_index_to_global_index(
-                prefill_req_ids,
-                prefill_block_table,
-                topk_indices[num_decode_tokens:],
-                BLOCK_SIZE=attn_metadata.block_size,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
-                return_valid_counts=True,
-            )
-            prefill_out, prefill_lse = run_step(
-                q[num_decode_tokens:],
-                prefill_cache,
-                prefill_indices,
-                prefill_lens,
-            )
-            out = torch.cat((decode_out, prefill_out))
-            if decode_lse is None:
-                return out, None
-            assert prefill_lse is not None
-            return out, torch.cat((decode_lse, prefill_lse))
-
-        if attn_metadata.decode_max_query_len > 1:
-            return self._run_hisparse_decode(
-                q,
-                topk_indices,
-                attn_metadata,
-                run_step,
-            )
-
-        kv_cache, physical_indices, seq_lens = self._hisparse_decode_cache(
-            kv_cache,
-            topk_indices,
-            attn_metadata,
-            return_valid_counts=True,
-        )
-        return run_step(q, kv_cache, physical_indices, seq_lens)
-
-    def _hisparse_decode_cache(
-        self,
-        kv_cache: torch.Tensor,
-        topk_indices: torch.Tensor,
+        logical_topk_indices: torch.Tensor,
         attn_metadata: Any,
         *,
-        return_valid_counts: bool = False,
-    ):
-        if self.hisparse_cache is None:
-            return None
-        if attn_metadata.num_decode_tokens == 0:
-            kv_cache, block_table, req_ids = self._hisparse_stage_prefill_rows(
-                kv_cache, attn_metadata
-            )
-            converted = triton_convert_req_index_to_global_index(
-                req_ids,
-                block_table,
-                topk_indices,
-                BLOCK_SIZE=attn_metadata.block_size,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
-                return_valid_counts=return_valid_counts,
-            )
-            if return_valid_counts:
-                indices, valid_counts = converted
-                return kv_cache, indices, valid_counts
-            return kv_cache, converted
-        if not self._hisparse_decode_batch and (
-            topk_indices.shape[0] != attn_metadata.num_decode_tokens
-        ):
-            raise NotImplementedError(
-                "HiSparse MQA prefill is not implemented by this sparse MLA backend: "
-                f"topk_rows={topk_indices.shape[0]}, "
-                f"num_decode_tokens={attn_metadata.num_decode_tokens}, "
-                f"num_actual_tokens={attn_metadata.num_actual_tokens}."
-            )
-        resolved = self._hisparse_swap_in(
-            topk_indices,
+        block_stride_rows: int | None,
+        return_valid_counts: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        group = self.index_group
+        assert group is not None
+        assert self.dcp_world_size == 1
+        return group.convert_logical_to_physical_topk(
+            self.index_group_index,
+            logical_topk_indices,
             attn_metadata,
-            num_decode_tokens=(
-                None if self._hisparse_decode_batch else len(topk_indices)
-            ),
+            block_stride_rows=block_stride_rows,
             return_valid_counts=return_valid_counts,
-        )
-        return (resolved[0].view(kv_cache.dtype), *resolved[1:])
-
-    def _hisparse_stage_prefill_rows(
-        self, kv_cache: torch.Tensor, attn_metadata: Any
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        assert self.hisparse_cache is not None
-        num_decodes = attn_metadata.num_decodes
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        prefill = attn_metadata.prefill
-        staging_plan = prefill.hisparse_staging_plan if prefill is not None else None
-        assert staging_plan is not None
-        staged_cache = self.hisparse_cache.runtime.gather_prefill_cache(
-            kv_cache, staging_plan
-        )
-        staged_bt = staging_plan.block_table
-        prefill_req_ids = attn_metadata.req_id_per_token[num_decode_tokens:]
-        if num_decodes > 0:
-            prefill_req_ids = prefill_req_ids - num_decodes
-        return staged_cache, staged_bt, prefill_req_ids
-
-    def do_kv_cache_update(
-        self,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        kv_cache_dtype: str,
-        k_scale: torch.Tensor,
-    ) -> None:
-        hisparse_cache = self.hisparse_cache
-        if hisparse_cache is None:
-            return super().do_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                kv_cache,
-                slot_mapping,
-                kv_cache_dtype,
-                k_scale,
-            )
-        if self._hisparse_dummy_batch:
-            return
-        hisparse_cache.write_rows(
-            kv_c_normed,
-            k_pe,
-            slot_mapping,
-            kv_cache_dtype,
-            k_scale,
-            mirror_to_host=not hisparse_cache.decode_batch,
         )
 
     @staticmethod
@@ -1247,26 +951,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
     ) -> None:
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata is not None
-        staging_plan = prefill_metadata.hisparse_staging_plan
-        if (
-            staging_plan is not None
-            and prefill_metadata.chunked_context is not None
-            and kv_c_and_k_pe_cache.device.type == "cpu"
-        ):
-            assert self.hisparse_cache is not None
-            handle = self.hisparse_cache
-            resident_cache = None
-            if handle.view is not None and handle.block_table is not None:
-                staging_plan.ensure_gpu_sources(
-                    handle.block_table[attn_metadata.num_decodes :],
-                    handle.view.block_size,
-                )
-                resident_cache = handle.view.cache
-            kv_c_and_k_pe_cache = handle.runtime.gather_prefill_cache(
-                kv_c_and_k_pe_cache,
-                staging_plan,
-                resident_cache=resident_cache,
-            )
         prefill_max_seq_len = attn_metadata.prefill_max_seq_len
         topk_tokens = attn_metadata.topk_tokens
         force_dense = getattr(self, "_sparse_mla_force_dense_mha", False)

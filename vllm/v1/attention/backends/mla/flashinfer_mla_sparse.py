@@ -26,6 +26,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
     MultipleOf,
 )
+from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
@@ -375,13 +376,14 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         self._prepare_mqa_kernel(layer, q.device)
 
-        if self.hisparse_cache is not None:
-            return self._forward_hisparse_mqa(
+        index_group = self.index_group
+        if isinstance(index_group, HiSparseMLAIndexGroup):
+            return self._forward_host_backed_mqa(
+                index_group,
                 q,
                 kv_c_and_k_pe_cache,
                 topk_indices,
                 attn_metadata,
-                self._run_mqa_kernel,
             )
 
         _, block_stride_rows = flat_kv_row_view(
@@ -402,13 +404,10 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 return_valid_counts=True,
             )
         else:
-            topk_indices_physical, seq_lens = triton_convert_req_index_to_global_index(
-                attn_metadata.req_id_per_token[:num_actual_toks],
-                attn_metadata.block_table,
+            topk_indices_physical, seq_lens = self._convert_logical_to_physical_topk(
                 topk_indices,
-                BLOCK_SIZE=attn_metadata.block_size,
-                BLOCK_STRIDE_ROWS=block_stride_rows,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                attn_metadata,
+                block_stride_rows=block_stride_rows,
                 return_valid_counts=True,
             )
 
@@ -418,6 +417,142 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             topk_indices_physical,
             seq_lens,
         )
+
+    def _forward_host_backed_mqa(
+        self,
+        index_group: HiSparseMLAIndexGroup,
+        q: torch.Tensor,
+        source_cache: torch.Tensor,
+        logical_topk_indices: torch.Tensor,
+        attn_metadata: FlashInferMLASparseMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        if 0 < num_decode_tokens < q.shape[0]:
+            decode_out, decode_lse = self._run_host_backed_decode(
+                index_group,
+                q[:num_decode_tokens],
+                logical_topk_indices[:num_decode_tokens],
+                attn_metadata,
+            )
+            prefill_cache, block_table, req_ids = index_group.stage_prefill_rows(
+                self.index_group_index, source_cache, attn_metadata
+            )
+            prefill_indices, prefill_lens = triton_convert_req_index_to_global_index(
+                req_ids,
+                block_table,
+                logical_topk_indices[num_decode_tokens:],
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=logical_topk_indices.shape[1],
+                return_valid_counts=True,
+            )
+            prefill_out, prefill_lse = self._run_mqa_kernel(
+                q[num_decode_tokens:],
+                prefill_cache,
+                prefill_indices,
+                prefill_lens,
+            )
+            output = torch.cat((decode_out, prefill_out))
+            if decode_lse is None:
+                return output, None
+            assert prefill_lse is not None
+            return output, torch.cat((decode_lse, prefill_lse))
+
+        if attn_metadata.decode_max_query_len > 1:
+            return self._run_host_backed_decode(
+                index_group, q, logical_topk_indices, attn_metadata
+            )
+
+        cache = index_group.cache(self.index_group_index)
+        if num_decode_tokens == 0 and not cache.all_context_pages_resident:
+            attention_cache, block_table, req_ids = index_group.stage_prefill_rows(
+                self.index_group_index, source_cache, attn_metadata
+            )
+            physical_topk, valid_counts = triton_convert_req_index_to_global_index(
+                req_ids,
+                block_table,
+                logical_topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=logical_topk_indices.shape[1],
+                return_valid_counts=True,
+            )
+        else:
+            physical_topk, valid_counts = index_group.convert_logical_to_physical_topk(
+                self.index_group_index,
+                logical_topk_indices,
+                attn_metadata,
+                block_stride_rows=None,
+                return_valid_counts=True,
+            )
+            attention_cache = index_group.physical_kv_cache(
+                self.index_group_index
+            ).view(source_cache.dtype)
+        return self._run_mqa_kernel(q, attention_cache, physical_topk, valid_counts)
+
+    def _run_host_backed_decode(
+        self,
+        index_group: HiSparseMLAIndexGroup,
+        q: torch.Tensor,
+        logical_topk_indices: torch.Tensor,
+        attn_metadata: FlashInferMLASparseMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        num_decodes = attn_metadata.num_decodes
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        max_query_len = attn_metadata.decode_max_query_len
+        query_start_loc = attn_metadata.query_start_loc[: num_decodes + 1]
+        request_ids = torch.arange(num_decodes, dtype=torch.int32, device=q.device)
+        attention_cache = index_group.physical_kv_cache(self.index_group_index)
+        outputs = []
+        lses = []
+        output_indices = []
+        for step in range(max_query_len):
+            token_indices = query_start_loc[:-1] + step
+            active = (token_indices < query_start_loc[1:]) & (
+                token_indices < num_decode_tokens
+            )
+            output_indices.append(
+                torch.where(
+                    active,
+                    token_indices,
+                    torch.full_like(token_indices, num_decode_tokens),
+                ).long()
+            )
+            token_indices = token_indices.clamp(min=0, max=num_decode_tokens - 1).long()
+            step_q = q.index_select(0, token_indices)
+            step_topk = logical_topk_indices.index_select(0, token_indices).masked_fill(
+                ~active.unsqueeze(1), -1
+            )
+            physical_topk, valid_counts = index_group.convert_logical_to_physical_topk(
+                self.index_group_index,
+                step_topk,
+                attn_metadata,
+                block_stride_rows=None,
+                return_valid_counts=True,
+                req_id_per_token=request_ids,
+            )
+            step_out, step_lse = self._run_mqa_kernel(
+                step_q,
+                attention_cache,
+                physical_topk,
+                valid_counts,
+            )
+            step_out.masked_fill_(~active.view(-1, 1, 1), 0)
+            if step_lse is not None:
+                step_lse.masked_fill_(~active.view(-1, 1), float("-inf"))
+                lses.append(step_lse)
+            outputs.append(step_out)
+
+        stacked_outputs = torch.stack(outputs, dim=1).flatten(0, 1)
+        packed_indices = torch.stack(output_indices, dim=1).flatten()
+        output = stacked_outputs.new_empty(
+            (num_decode_tokens + 1, *stacked_outputs.shape[1:])
+        )
+        output.index_copy_(0, packed_indices, stacked_outputs)
+        if not lses:
+            return output[:num_decode_tokens], None
+        stacked_lses = torch.stack(lses, dim=1).flatten(0, 1)
+        lse = stacked_lses.new_empty((num_decode_tokens + 1, *stacked_lses.shape[1:]))
+        lse.index_copy_(0, packed_indices, stacked_lses)
+        return output[:num_decode_tokens], lse[:num_decode_tokens]
 
     def _prepare_mqa_kernel(
         self,
@@ -438,10 +573,11 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
     def autotune_hisparse_decode(self, layer: AttentionLayer) -> None:
         """Autotune the largest legal HiSparse decode batch."""
-        assert self.hisparse_cache is not None
+        assert isinstance(self.index_group, HiSparseMLAIndexGroup)
+        cache = self.index_group.cache(self.index_group_index)
         assert self.topk_indices_buffer is not None
 
-        runtime = self.hisparse_cache.runtime
+        runtime = cache.runtime
         kv_cache = runtime.hot.attention_cache
         num_tokens = runtime.max_num_reqs
         topk_tokens = self.topk_indices_buffer.shape[1]

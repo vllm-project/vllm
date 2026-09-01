@@ -966,7 +966,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
 
 #ifndef USE_ROCM
   ops.def(
-      "hisparse_swap_in(Tensor host_cache,"
+      "hisparse_resolve_residency(Tensor host_cache,"
       "                 Tensor! hot_cache,"
       "                 Tensor hot_block_table,"
       "                 Tensor global_indices,"
@@ -983,9 +983,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 int source_block_size=0,"
       "                 Tensor(c!)? resolved_global_indices=None,"
       "                 Tensor(d!)? valid_counts=None,"
-      "                 Tensor(e!)? compact_miss_globals=None,"
-      "                 Tensor(f!)? compact_miss_hots=None,"
-      "                 Tensor(g!)? compact_miss_counts=None,"
+      "                 Tensor(e!)? swap_host_physical_rows=None,"
+      "                 Tensor(f!)? swap_device_physical_rows=None,"
+      "                 Tensor(g!)? swap_counts=None,"
       "                 Tensor? resident_block_table=None,"
       "                 int resident_block_size=0,"
       "                 int resident_null_block=0) -> ()");
@@ -1012,24 +1012,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                        Tensor miss_global_indices,"
       "                        Tensor miss_hot_indices,"
       "                        Tensor miss_counts) -> ()");
-
-  ops.def(
-      "hisparse_backup(Tensor src_cache,"
-      "                Tensor src_indices,"
-      "                Tensor! host_cache,"
-      "                Tensor dst_slots) -> ()");
-
-  ops.def(
-      "hisparse_backup_layers(Tensor hot_backing,"
-      "                        Tensor layer_offsets,"
-      "                        Tensor src_indices_ptrs,"
-      "                        Tensor! host_anchor,"
-      "                        Tensor host_cache_ptrs,"
-      "                        Tensor dst_slots,"
-      "                        int num_items,"
-      "                        int src_block_stride,"
-      "                        int src_block_size,"
-      "                        int src_rows) -> ()");
 
 #endif  // !USE_ROCM
 
@@ -1069,7 +1051,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
   ops.def(
       "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
       "Tensor block_table, Tensor workspace_starts, int batch_size, Tensor? "
-      "seq_starts) -> ()");
+      "seq_starts, Tensor? host_cache=None, Tensor? host_row_ids=None, Tensor? "
+      "device_row_ids=None) -> ()");
 
   ops.def(
       "cp_gather_and_upconvert_nvfp4_kv_cache(Tensor src_cache, Tensor! dst, "
@@ -1139,13 +1122,12 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
            TORCH_BOX(&concat_and_cache_mla_grouped));
 
 #ifndef USE_ROCM
-  ops.impl("hisparse_swap_in", TORCH_BOX(&hisparse_swap_in));
+  ops.impl("hisparse_resolve_residency",
+           TORCH_BOX(&hisparse_resolve_residency));
   ops.impl("hisparse_invalidate_written_slots",
            TORCH_BOX(&hisparse_invalidate_written_slots));
   ops.impl("hisparse_gather_plan", TORCH_BOX(&hisparse_gather_plan));
   ops.impl("hisparse_gather_compact", TORCH_BOX(&hisparse_gather_compact));
-  ops.impl("hisparse_backup", TORCH_BOX(&hisparse_backup));
-  ops.impl("hisparse_backup_layers", TORCH_BOX(&hisparse_backup_layers));
 #endif  // !USE_ROCM
   ops.impl("concat_and_cache_mla_rope_fused",
            TORCH_BOX(&concat_and_cache_mla_rope_fused));

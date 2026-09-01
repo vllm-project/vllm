@@ -214,7 +214,9 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     assert spec.cache_dtype_str == cache_dtype
     assert spec.kv_quant_mode == expected_quant_mode
     if cache_dtype == "fp8_ds_mla":
+        assert spec.real_page_size_bytes == 64 * 656
         assert spec.page_size_bytes == 64 * 656
+        assert spec.alignment == 656
 
 
 @pytest.mark.cpu_test

@@ -13,8 +13,8 @@ from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from vllm.v1.hisparse.runtime import (
-        HiSparseIndexGroupBuilder,
+    from vllm.v1.attention.backends.mla.index_group import (
+        SparseMLAIndexGroupBuilder,
     )
 
 
@@ -36,7 +36,7 @@ class MLAModules:
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
     g_proj: torch.nn.Module | None = None
-    hisparse_index_group_builder: "HiSparseIndexGroupBuilder | None" = None
+    index_group_builder: "SparseMLAIndexGroupBuilder | None" = None
 
 
 # --8<-- [start:multi_head_latent_attention]
@@ -135,7 +135,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             use_sparse=self.is_sparse,
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
-            hisparse_index_group_builder=mla_modules.hisparse_index_group_builder,
+            index_group_builder=mla_modules.index_group_builder,
             non_causal_multi_token_decode=non_causal_multi_token_decode,
         )
         indexer_op = getattr(self.indexer, "indexer_op", None)
@@ -231,6 +231,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+        if self.is_sparse:
+            self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
         if llama_4_scaling is not None:
             q *= llama_4_scaling

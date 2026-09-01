@@ -634,7 +634,7 @@ void concat_and_cache_mla_grouped(torch::stable::Tensor& kv_c,
 
 #ifndef USE_ROCM
 // HiSparse kernels use raw PTX in the row copy; CUDA-only.
-void hisparse_swap_in(
+void hisparse_resolve_residency(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
     torch::stable::Tensor const& hot_block_table,
     torch::stable::Tensor const& global_indices,
@@ -651,9 +651,9 @@ void hisparse_swap_in(
     int64_t source_block_size,
     std::optional<torch::stable::Tensor> const& resolved_global_indices,
     std::optional<torch::stable::Tensor> const& valid_counts,
-    std::optional<torch::stable::Tensor> const& compact_miss_globals,
-    std::optional<torch::stable::Tensor> const& compact_miss_hots,
-    std::optional<torch::stable::Tensor> const& compact_miss_counts,
+    std::optional<torch::stable::Tensor> const& swap_host_physical_rows,
+    std::optional<torch::stable::Tensor> const& swap_device_physical_rows,
+    std::optional<torch::stable::Tensor> const& swap_counts,
     std::optional<torch::stable::Tensor> const& resident_block_table,
     int64_t resident_block_size, int64_t resident_null_block);
 
@@ -677,20 +677,6 @@ void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
                              torch::stable::Tensor const& miss_global_indices,
                              torch::stable::Tensor const& miss_hot_indices,
                              torch::stable::Tensor const& miss_counts);
-
-void hisparse_backup(torch::stable::Tensor const& src_cache,
-                     torch::stable::Tensor const& src_indices,
-                     torch::stable::Tensor& host_cache,
-                     torch::stable::Tensor const& dst_slots);
-
-void hisparse_backup_layers(torch::stable::Tensor const& hot_backing,
-                            torch::stable::Tensor const& layer_offsets,
-                            torch::stable::Tensor const& src_indices_ptrs,
-                            torch::stable::Tensor& host_anchor,
-                            torch::stable::Tensor const& host_cache_ptrs,
-                            torch::stable::Tensor const& dst_slots,
-                            int64_t num_items, int64_t src_block_stride,
-                            int64_t src_block_size, int64_t src_rows);
 
 #endif  // !USE_ROCM
 
@@ -737,7 +723,10 @@ void cp_gather_and_upconvert_fp8_kv_cache(
     torch::stable::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
     torch::stable::Tensor const& workspace_starts,  // [BATCH]
     int64_t batch_size,
-    std::optional<torch::stable::Tensor> seq_starts = std::nullopt);
+    std::optional<torch::stable::Tensor> seq_starts = std::nullopt,
+    std::optional<torch::stable::Tensor> host_cache = std::nullopt,
+    std::optional<torch::stable::Tensor> host_row_ids = std::nullopt,
+    std::optional<torch::stable::Tensor> device_row_ids = std::nullopt);
 
 // Gather and upconvert an nvfp4_ds_mla KV cache to a BF16 workspace
 void cp_gather_and_upconvert_nvfp4_kv_cache(

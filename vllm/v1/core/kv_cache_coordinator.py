@@ -337,8 +337,7 @@ class KVCacheCoordinator(ABC):
             request_id,
             new_computed_blocks,
         )
-        if hisparse_host_import:
-            assert num_external_computed_tokens > 0
+        if hisparse_host_import and num_external_computed_tokens > 0:
             for manager in self.single_type_managers:
                 if isinstance(manager, HiSparseHotManager):
                     manager.require_hot(request_id)
