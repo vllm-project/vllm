@@ -54,7 +54,9 @@ class Medusa(nn.Module):
        needs to have truncated_vocab_size (=k) as an attribute."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        config = speculative_config.draft_model_config.hf_config
         super().__init__()
         self.config = config
         self.blocks = nn.ModuleList(

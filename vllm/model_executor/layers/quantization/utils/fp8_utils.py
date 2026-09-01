@@ -38,6 +38,11 @@ from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = init_logger(__name__)
 
+# Pre-fill value for scale parameters whose shards load independently. The
+# shards are combined with .max(), so an unloaded shard must never win; the
+# smallest representable float32 guarantees that.
+FP8_SCALE_SENTINEL = torch.finfo(torch.float32).min
+
 
 def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
     if isinstance(x, torch.Tensor):
@@ -881,9 +886,13 @@ def w8a8_triton_block_scaled_mm(
         torch.Tensor: The result of matmul.
     """
 
-    from vllm.platforms.rocm import on_gfx1250
+    _on_gfx1250 = False
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1250
 
-    if on_gfx1250():
+        _on_gfx1250 = on_gfx1250()
+
+    if _on_gfx1250:
         # Torch upcast reference: dequantize A,B to fp32 and matmul in fp32.
         # Avoids the gfx1250 native-fp8 block GEMM NaN bug. Correct but slow.
         _bn, _bk = block_size[0], block_size[1]
