@@ -9,17 +9,45 @@ and tolerated (token-embedding fallback) when it is not, while a miss within
 the processed range still fails loudly.
 """
 
+from unittest.mock import MagicMock
+
 import numpy as np
 import pytest
 import torch
 
-from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalSharedField,
+    PlaceholderRange,
+)
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 pytestmark = pytest.mark.cpu_test
 
 HIDDEN = 4
+
+
+def _model_state(cache: EncoderCache) -> MagicMock:
+    """A mock ModelState backed by a real EncoderCache."""
+    state = MagicMock()
+    state.encoder_cache = cache
+    state.device = torch.device("cpu")
+    return state
+
+
+def _embeds_item(embeds: torch.Tensor) -> MultiModalKwargsItem:
+    """A `prompt_embeds` kwargs item, as the HF renderer builds it."""
+    return MultiModalKwargsItem(
+        {
+            "embedding": MultiModalFieldElem(
+                data=embeds, field=MultiModalSharedField(batch_size=1)
+            )
+        }
+    )
 
 
 def _feature(identifier: str, offset: int, length: int) -> MultiModalFeatureSpec:
@@ -181,3 +209,119 @@ def test_gather_preserves_mixed_modalities():
     assert len(mm_embeds) == 2
     assert [e.modality for e in mm_embeds] == ["video", "audio"]
     assert int(is_mm_embed.sum()) == 8
+
+
+def test_execute_mm_encoder_caches_outputs_without_gathering():
+    """An encoder instance encodes and publishes, and must stop there.
+
+    `ModelState.execute_mm_encoder` is the half of `get_mm_embeddings` that an
+    EPD encoder instance needs: it runs no language model, so gathering would
+    build an `inputs_embeds` nobody reads -- and the gather raises
+    `Encoder cache miss` for any scheduled item absent from the local cache,
+    which on a producer takes the whole engine down (the scheduler hands it
+    items the connector already holds, and a producer has no load path).
+    """
+    cache = EncoderCache()
+    state = _model_state(cache)
+    embedding = torch.ones(2, HIDDEN)
+    # (mm_hashes, [(modality, kwargs item), ...]), as prepare_mm_inputs returns.
+    state.encoder_runner.prepare_mm_inputs.return_value = (
+        ["hash0"],
+        [("image", MagicMock())],
+    )
+    state.encoder_runner.execute_mm_encoder.return_value = [embedding]
+
+    ModelState.execute_mm_encoder(state, {"req0": [0]})
+
+    assert cache.encoder_outputs == {"hash0": embedding}
+    state.encoder_runner.gather_mm_embeddings.assert_not_called()
+
+
+def test_execute_mm_encoder_is_a_noop_without_scheduled_items():
+    """A step that schedules no encoder input must not touch the encoder."""
+    cache = EncoderCache()
+    state = _model_state(cache)
+    state.encoder_runner.prepare_mm_inputs.return_value = ([], [])
+
+    ModelState.execute_mm_encoder(state, {})
+
+    assert not cache.encoder_outputs
+    state.encoder_runner.execute_mm_encoder.assert_not_called()
+
+
+def _pe_feature(identifier: str, embeds: torch.Tensor, offset: int = 0):
+    return MultiModalFeatureSpec(
+        data=_embeds_item(embeds),
+        modality="prompt_embeds",
+        identifier=identifier,
+        mm_position=PlaceholderRange(offset=offset, length=embeds.shape[0]),
+    )
+
+
+def test_prepare_mm_inputs_passes_prompt_embeds_through():
+    """`prompt_embeds` is already in embedding space, so no encoder may run.
+
+    The renderer delivers prompt_embeds mixed with real media as an ordinary MM
+    modality. prepare_mm_inputs must cache the tensor directly and keep it out
+    of the encoder batch -- the vision encoder cannot consume it, and a missing
+    cache entry makes the subsequent gather raise "Encoder cache miss".
+    """
+    prompt_embeds = torch.arange(2 * HIDDEN, dtype=torch.float32).view(2, HIDDEN)
+    image_feature = MultiModalFeatureSpec(
+        data=MagicMock(),
+        modality="image",
+        identifier="hash_img",
+        mm_position=PlaceholderRange(offset=2, length=2),
+    )
+    runner = _make_runner(
+        [_pe_feature("hash_pe", prompt_embeds), image_feature], cached=[]
+    )
+
+    mm_hashes, mm_kwargs = runner.prepare_mm_inputs({"req0": [0, 1]})
+
+    # Only the image remains for the encoder; the embeds are already cached.
+    assert mm_hashes == ["hash_img"]
+    assert [modality for modality, _ in mm_kwargs] == ["image"]
+    assert torch.equal(runner.encoder_cache.encoder_outputs["hash_pe"], prompt_embeds)
+
+
+def test_prepare_mm_inputs_skips_cached_prompt_embeds():
+    """A prompt_embeds item already in the cache must not be re-uploaded."""
+    prompt_embeds = torch.ones(3, HIDDEN)
+    feature = _pe_feature("hash_pe", prompt_embeds)
+    runner = _make_runner([feature], cached=[feature])
+    sentinel = runner.encoder_cache.encoder_outputs["hash_pe"]
+
+    mm_hashes, mm_kwargs = runner.prepare_mm_inputs({"req0": [0]})
+
+    assert mm_hashes == [] and mm_kwargs == []
+    assert runner.encoder_cache.encoder_outputs["hash_pe"] is sentinel
+
+
+def test_execute_mm_encoder_skips_encoder_for_prompt_embeds_only():
+    """A batch of nothing but prompt_embeds must not invoke the encoder."""
+    prompt_embeds = torch.ones(3, HIDDEN)
+    runner = _make_runner([_pe_feature("hash_pe", prompt_embeds)], cached=[])
+    state = _model_state(runner.encoder_cache)
+    state.encoder_runner.prepare_mm_inputs.side_effect = runner.prepare_mm_inputs
+
+    ModelState.execute_mm_encoder(state, {"req0": [0]})
+
+    state.encoder_runner.execute_mm_encoder.assert_not_called()
+    assert torch.equal(runner.encoder_cache.encoder_outputs["hash_pe"], prompt_embeds)
+
+
+def test_encoder_timing_stats_registry():
+    runner = _make_runner([], [])
+    runner.enable_timing = True
+
+    with runner.timed_encoder_operation({"r1"}):
+        pass
+    with runner.timed_encoder_operation({"r1"}):
+        pass
+
+    stats = runner.get_encoder_timing_stats()
+    assert set(stats) == {"r1"}
+    assert stats["r1"]["num_encoder_calls"] == 2
+    assert stats["r1"]["encoder_forward_secs"] >= 0
+    assert runner.get_encoder_timing_stats() == {}

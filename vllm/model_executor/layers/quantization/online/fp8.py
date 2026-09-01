@@ -516,7 +516,6 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def get_fused_moe_quant_config(
@@ -639,36 +638,6 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             round_up(hidden_size, block_size),
             round_up(intermediate_size_per_partition, block_size),
         )
-
-    def _zero_padding(self, layer: Module) -> None:
-        hidden_size = layer.moe_config.hidden_dim_unpadded
-        intermediate_size = layer.moe_config.intermediate_size_per_partition_unpadded
-
-        w13_shard = layer.w13_weight.shape[1] // self.moe.w13_num_shards
-        if w13_shard > intermediate_size:
-            for shard in range(self.moe.w13_num_shards):
-                start = shard * w13_shard + intermediate_size
-                layer.w13_weight[:, start : (shard + 1) * w13_shard, :] = 0
-        if layer.w13_weight.shape[2] > hidden_size:
-            layer.w13_weight[:, :, hidden_size:] = 0
-
-        if layer.w2_weight.shape[1] > hidden_size:
-            layer.w2_weight[:, hidden_size:, :] = 0
-        if layer.w2_weight.shape[2] > intermediate_size:
-            layer.w2_weight[:, :, intermediate_size:] = 0
-
-        if getattr(layer, "w13_bias", None) is not None:
-            w13_bias_shard = layer.w13_bias.shape[1] // self.moe.w13_num_shards
-            if w13_bias_shard > intermediate_size:
-                for shard in range(self.moe.w13_num_shards):
-                    start = shard * w13_bias_shard + intermediate_size
-                    layer.w13_bias[:, start : (shard + 1) * w13_bias_shard] = 0
-
-        if (
-            getattr(layer, "w2_bias", None) is not None
-            and layer.w2_bias.shape[1] > hidden_size
-        ):
-            layer.w2_bias[:, hidden_size:] = 0
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):

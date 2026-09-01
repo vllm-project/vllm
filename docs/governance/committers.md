@@ -9,6 +9,7 @@ You can also refer to the [CODEOWNERS](https://github.com/vllm-project/vllm/blob
 We try to summarize each committer's role in vLLM in a few words. In general, vLLM committers cover a wide range of areas and help each other in the maintenance process.
 Please refer to the later section about Area Owners for exact component ownership details.
 Sorted alphabetically by GitHub handle:
+
 - [@aarnphm](https://github.com/aarnphm): Structured output
 - [@AndreasKaratzas](https://github.com/AndreasKaratzas): ROCm / AMD GPU integration, CI
 - [@ApostaC](https://github.com/ApostaC): Connectors, offloading
@@ -68,6 +69,7 @@ Sorted alphabetically by GitHub handle:
 ### Emeritus Committers
 
 Committers who have contributed to vLLM significantly in the past (thank you!) but no longer active:
+
 - [@22quinn](https://github.com/22quinn): RL API
 - [@alexm-redhat](https://github.com/alexm-redhat): Performance
 - [@andoorve](https://github.com/andoorve): Pipeline parallelism
@@ -191,5 +193,5 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 ### Ecosystem Projects
 
 - Ascend NPU: [@wangxiyuan](https://github.com/wangxiyuan) and [see more details](https://vllm-ascend.readthedocs.io/en/latest/community/contributors.html#maintainers)
-- Intel Gaudi HPU [@xuechendi](https://github.com/xuechendi) and [@kzawora-intel](https://github.com/kzawora-intel)
+- Intel Gaudi HPU [@xuechendi](https://github.com/xuechendi) and [@iboiko-habana](https://github.com/iboiko-habana)
 - Semantic Router: [@xunzhuo](https://github.com/xunzhuo), [@rootfs](https://github.com/rootfs) and [see more details](https://vllm-semantic-router.com/community/team)

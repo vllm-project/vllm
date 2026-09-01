@@ -11,9 +11,13 @@ from safetensors.torch import load as safetensors_load
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.pooler import PoolingParamsUpdate
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..layers.pooler import DispatchPooler
@@ -26,13 +30,21 @@ from .interfaces import SupportsLateInteraction
 from .interfaces_base import VllmModelForPooling
 from .llama import LlamaForCausalLM
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    StageMissingLayer,
+    WeightsMapper,
+    maybe_prefix,
+    no_init_weights,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class JinaForRanking(nn.Module, SupportsLateInteraction):
     is_pooling_model = True
+
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"lm_head.": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -78,8 +90,8 @@ class JinaForRanking(nn.Module, SupportsLateInteraction):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=(["lm_head."]))
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class JinaForRankingPool(StepPool):
@@ -93,26 +105,35 @@ class JinaForRankingPool(StepPool):
     def get_supported_tasks(self) -> set[PoolingTask]:
         return {"token_embed"}
 
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate(requires_token_ids=True)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> list[TokenPoolingMethodOutputItem]:
         pooled_data_lst = super().forward(hidden_states, pooling_metadata)
-        prompt_token_ids = pooling_metadata.get_prompt_token_ids()
+        prompt_token_ids_cpu = pooling_metadata.get_prompt_token_ids_cpu()
 
         embeds_list = list[torch.Tensor | None]()
-        for data, token_ids in zip(pooled_data_lst, prompt_token_ids):
+        for data, token_ids_cpu in zip(pooled_data_lst, prompt_token_ids_cpu):
             # for unfinished chunked prefill
             if data is None:
                 embeds_list.append(None)
             else:
-                docs_indexes = torch.where(torch.eq(token_ids, self.doc_token_id))[0]
-                query_indexes = torch.where(torch.eq(token_ids, self.query_token_id))[0]
+                doc_match = torch.eq(token_ids_cpu, self.doc_token_id)
+                docs_indexes_cpu = torch.where(doc_match)[0]
+                query_indexes_cpu = torch.where(
+                    torch.eq(token_ids_cpu, self.query_token_id)
+                )[0]
 
                 # The JinaForRanking model concatenates docs first, then query.
                 # Let's stay consistent with this novel design.
-                indexes = torch.cat([docs_indexes, query_indexes])
+                indexes_cpu = torch.cat([docs_indexes_cpu, query_indexes_cpu])
+                indexes = async_tensor_h2d(
+                    indexes_cpu, device=data.device, dtype=torch.long
+                )
                 embeds = self.projector(data[indexes])
                 embeds_list.append(embeds)
 
@@ -162,7 +183,9 @@ def _load_adapter(
     return adapter_config, adapter_weights
 
 
-def _build_lora_pairs(adapter_weights: dict) -> dict:
+def _build_lora_pairs(
+    adapter_weights: dict[str, torch.Tensor],
+) -> dict[str, dict[str, torch.Tensor]]:
     """Group raw adapter tensors into {base_key: {"A": tensor, "B": tensor}} pairs.
 
     Transforms adapter keys like:
@@ -170,7 +193,7 @@ def _build_lora_pairs(adapter_weights: dict) -> dict:
     Into base keys like:
         layers.0.self_attn.q_proj.weight
     """
-    lora_pairs = defaultdict(dict)
+    lora_pairs: defaultdict[str, dict[str, torch.Tensor]] = defaultdict(dict)
     for key, tensor in adapter_weights.items():
         clean_key = key
         if clean_key.startswith("base_model.model."):
@@ -211,7 +234,7 @@ def _load_jina_v5_weights(
     model: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
 ) -> set[str]:
     """Shared loader: merge the selected task LoRA adapter into the base weights."""
-    lora_pairs: dict = {}
+    lora_pairs: dict[str, dict[str, torch.Tensor]] = {}
     scaling = 1.0
 
     result = _load_adapter(model._model_name, model._task, model._revision)
@@ -267,7 +290,12 @@ class JinaEmbeddingsV5DecoderModel(Qwen3ForCausalLM, VllmModelForPooling):
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        with no_init_weights(
+            self,
+            lambda mod: StageMissingLayer("output", mod),
+            targets=(LogitsProcessor, ParallelLMHead),
+        ):
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
         _setup_jina_v5_task_and_pooler(self, vllm_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -289,7 +317,12 @@ class JinaEmbeddingsV5EncoderModel(LlamaForCausalLM, VllmModelForPooling):
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        with no_init_weights(
+            self,
+            lambda mod: StageMissingLayer("output", mod),
+            targets=(LogitsProcessor, ParallelLMHead),
+        ):
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
         _setup_jina_v5_task_and_pooler(self, vllm_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

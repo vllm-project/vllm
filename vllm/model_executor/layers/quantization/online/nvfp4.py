@@ -164,17 +164,18 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.experts_cls is not None
-        self.moe_kernel = make_nvfp4_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            experts_cls=self.experts_cls,
-            backend=self.nvfp4_backend,
-            routing_tables=layer._expert_routing_tables(),
-            layer=layer,
-            per_token_activation=True,
-        )
+        if self.moe_kernel is None:
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.experts_cls is not None
+            self.moe_kernel = make_nvfp4_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                experts_cls=self.experts_cls,
+                backend=self.nvfp4_backend,
+                routing_tables=layer._expert_routing_tables(),
+                per_token_activation=True,
+            )
+
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:

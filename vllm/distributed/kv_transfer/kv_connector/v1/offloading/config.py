@@ -8,7 +8,10 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
+    KVCacheSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -20,12 +23,7 @@ from vllm.v1.kv_offload.config import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
-
-
-def is_kv_cache_tensor_packed(kv_cache_tensor: "KVCacheTensor") -> bool:
-    """Return whether a KV cache tensor uses a packed block stride."""
-    return bool(kv_cache_tensor.block_stride)
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
 def build_offloading_config(
@@ -96,18 +94,10 @@ def build_offloading_config(
         blocks_per_chunk = tokens_per_chunk_int // tokens_per_block
 
     worker_kv_bytes_per_block = 0
-    if kv_cache_config.num_blocks > 0:
-        packed_tensors = tuple(
-            is_kv_cache_tensor_packed(tensor)
-            for tensor in kv_cache_config.kv_cache_tensors
-        )
-        is_packed = any(packed_tensors)
-        assert not is_packed or all(packed_tensors)
-        total_gpu_kv_bytes = (
-            kv_cache_config.kv_cache_tensors[0].size
-            if is_packed
-            else sum(tensor.size for tensor in kv_cache_config.kv_cache_tensors)
-        )
+    if kv_cache_config.num_blocks > 0 and kv_cache_config.kv_cache_tensors:
+        # Every KVCacheTensor describes placement within the same backing allocation,
+        # so its size is the total, not a per-tensor share.
+        total_gpu_kv_bytes = kv_cache_config.kv_cache_tensors[0].size
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
 
     single_group_spec = (
@@ -135,15 +125,59 @@ def build_offloading_config(
         and parallel_config.nnodes_within_dp == 1
     )
 
-    # Only a single non-MLA full-attention group is parallelism-invariant:
-    # MLA latent KV is replicated per rank (never head-sharded), and the V2
-    # model runner's KV layout is not known to be parallelism-invariant.
+    canonical_layout = bool(extra_config.get("canonical_layout", False))
+
+    # Only a single non-MLA full-attention group with genuinely head-sharded
+    # pages is parallelism-invariant: replicated latent or GQA heads,
+    # per-token-head scales, CP token sharding, and the V2 model runner's
+    # layout are all excluded.
     is_parallelism_agnostic = (
         not vllm_config.use_v2_model_runner
         and single_group_spec is not None
         and isinstance(single_group_spec, FullAttentionSpec)
         and not isinstance(single_group_spec, MLAAttentionSpec)
+        and single_group_spec.num_kv_heads * parallel_config.tensor_parallel_size
+        == vllm_config.model_config.get_total_num_kv_heads()
+        and not single_group_spec.kv_quant_mode.is_per_token_head
+        and parallel_config.decode_context_parallel_size == 1
+        and parallel_config.prefill_context_parallel_size == 1
     )
+    # Canonical pages are topology-free, so the gate widens to every config
+    # whose mappings derive portable, group by group; certification happens
+    # per layer at registration and create_worker fails closed on this flag.
+    if canonical_layout and not is_parallelism_agnostic:
+        tp_size = parallel_config.tensor_parallel_size
+        total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+
+        def spec_certifiable(spec: KVCacheSpec) -> bool:
+            """Conservative static mirror of _layer_mapping's per-layer checks."""
+            if not isinstance(spec, AttentionSpec):
+                return False
+            if spec.kv_quant_mode.is_per_token_head:
+                return False
+            if type(spec) is MLAAttentionSpec:
+                return (
+                    spec.tokens_per_state == 1
+                    and spec.real_page_size_bytes % spec.block_size == 0
+                )
+            if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
+                return False
+            if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+                return False
+            return (
+                total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
+            ) and spec.num_kv_heads == max(1, total_kv_heads // tp_size)
+
+        is_parallelism_agnostic = (
+            len(kv_cache_config.kv_cache_groups) > 0
+            and all(
+                spec_certifiable(group.kv_cache_spec)
+                for group in kv_cache_config.kv_cache_groups
+            )
+            and parallel_config.decode_context_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.world_size == tp_size
+        )
 
     kv_events_config = vllm_config.kv_events_config
     cache_dtype = (
@@ -176,7 +210,11 @@ def build_offloading_config(
             pcp_size=parallel_config.prefill_context_parallel_size,
             dcp_size=parallel_config.decode_context_parallel_size,
             data_parallel_index=parallel_config.data_parallel_index,
+            data_parallel_size=parallel_config.data_parallel_size,
+            data_parallel_rank_local=parallel_config.data_parallel_rank_local,
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
+        canonical_layout=canonical_layout,
+        kv_cache_layout=vllm_config.cache_config.kv_cache_layout,
     )
