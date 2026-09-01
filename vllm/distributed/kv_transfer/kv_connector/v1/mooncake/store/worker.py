@@ -963,10 +963,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             kv_event_block_hashes: list[BlockHash] = []
             group_indices: list[int] = []
             for g_idx, db in enumerate(self.token_databases):
-                if (
-                    not self.group_participates[g_idx]
-                    or db.block_size < self.block_size
-                ):
+                if not self.group_participates[g_idx]:
                     continue
                 # Rotate the stride phase per group to balance load across ranks.
                 put_step = self.group_put_steps[g_idx]
@@ -2026,10 +2023,7 @@ class MooncakeStoreWorker:
         fine_grained = self.coord.enable_partial_hash_hits
         lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
         for g_idx, db in enumerate(self.token_dbs):
-            if (
-                not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable
-                or db.block_size < self.block_size
-            ):
+            if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
                 continue
             spec_block_size = db.block_size
             key_prefixes = self._lookup_key_prefixes[g_idx]
