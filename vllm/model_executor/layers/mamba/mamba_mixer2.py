@@ -1309,7 +1309,7 @@ def share_replayssm_ring_trackers(
         first_layer_name = group_layer_names[0]
         last_layer_name = group_layer_names[-1]
 
-        first_mixer = replayssm_mixers[first_layer_name]
+        first_mixer = replayssm_mixers[group_layer_names[0]]
         first_state = first_mixer.kv_cache[1]
         num_blocks, device = first_state.shape[0], first_state.device
         for layer_name in group_layer_names:

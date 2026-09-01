@@ -463,7 +463,6 @@ _mamba_ssu_backend: MambaSSUBackend | None = None
 _flashinfer_replayssm_kernel: Callable[..., torch.Tensor] | None = None
 
 
-
 @cache
 def flashinfer_replayssm_autotune_supported() -> bool:
     """Return True when FlashInfer exposes ReplaySSM autotuning."""
@@ -495,9 +494,6 @@ def selective_state_update_replayssm_flashinfer(
     state_batch_indices: torch.Tensor | None = None,
     null_block_id: int = NULL_BLOCK_ID,
     scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    algorithm: str = "auto",
-    d_split: int | None = None,
-    precompute_heads_per_cta: int = 0,
     update_trackers: bool = True,
     enable_stochastic_rounding: bool = False,
     stochastic_rounding_philox_rounds: int = 0,
@@ -559,9 +555,6 @@ def selective_state_update_replayssm_flashinfer(
         cb_scaled=cb_scaled,
         cumAdt_vec=cumAdt_vec,
         cb_old=cb_old,
-        d_split=d_split,
-        precompute_heads_per_cta=precompute_heads_per_cta,
-        algorithm=algorithm,
     )
     if update_trackers and indices is not None:
         update_replayssm_ring_trackers(
@@ -623,10 +616,7 @@ def initialize_mamba_ssu_backend(
     _flashinfer_replayssm_kernel = None
     if use_replayssm and backend == MambaBackendEnum.FLASHINFER:
         try:
-            from flashinfer.mamba.checkpointing_ssu import (
-                CheckpointingSSURunner,
-                checkpointing_ssu,
-            )
+            from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
         except ImportError as e:
             raise ImportError(
                 "FlashInfer ReplaySSM requires a compatible flashinfer-python package"

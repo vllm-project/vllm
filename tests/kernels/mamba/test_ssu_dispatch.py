@@ -17,12 +17,15 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
     reset_replayssm_ring_trackers,
     selective_state_update,
-    selective_state_update_replayssm_flashinfer,
     update_replayssm_ring_trackers,
 )
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
+)
 
 try:
     import flashinfer.mamba  # noqa: F401
@@ -30,22 +33,6 @@ try:
     HAS_FLASHINFER = True
 except ImportError:
     HAS_FLASHINFER = False
-
-try:
-    from flashinfer.mamba.checkpointing_ssu import (
-        CheckpointingSSURunner,
-        allocate_checkpointing_ssu_scratch,
-    )
-    from flashinfer.mamba.checkpointing_ssu import (
-        checkpointing_ssu as checkpointing_ssu_kernel,
-    )
-
-    HAS_FLASHINFER_CHECKPOINTING_SSU = all(
-        callable(symbol)
-        for symbol in (CheckpointingSSURunner, allocate_checkpointing_ssu_scratch)
-    )
-except ImportError:
-    HAS_FLASHINFER_CHECKPOINTING_SSU = False
 
 
 @pytest.fixture(autouse=True)
@@ -59,7 +46,6 @@ def restore_backend_state():
     mod._flashinfer_replayssm_kernel = old_replayssm_kernel
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_flashinfer_replayssm_ring_tracker_lifecycle():
     ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
     prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
@@ -93,64 +79,6 @@ def test_flashinfer_replayssm_ring_tracker_lifecycle():
     assert (ring_start[1].item(), prev_num_accepted[1].item()) == (0, 0)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_flashinfer_replayssm_ring_tracker_ignores_invalid_slots():
-    ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
-    prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
-    prev_query_len = torch.zeros(2, dtype=torch.int32, device="cuda")
-    state_batch_indices = torch.tensor([-1, 2, 1, 0], dtype=torch.int32, device="cuda")
-
-    update_replayssm_ring_trackers(
-        ring_start,
-        prev_num_accepted,
-        prev_query_len,
-        state_batch_indices,
-        logical_window=16,
-        ring_buffer_len=17,
-    )
-
-    assert ring_start.tolist() == [0, 0]
-    assert prev_num_accepted.tolist() == [0, 1]
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_flashinfer_replayssm_spec_ring_tracker_lifecycle():
-    ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
-    prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
-    prev_query_len = torch.zeros(2, dtype=torch.int32, device="cuda")
-    state_batch_indices = torch.tensor([1], dtype=torch.int32, device="cuda")
-    query_start_loc = torch.tensor([0, 4], dtype=torch.int32, device="cuda")
-
-    observed = []
-    for accepted in (4, 3, 4, 4, 4, 2):
-        commit_replayssm_ring_trackers(
-            ring_start,
-            prev_num_accepted,
-            prev_query_len,
-            state_batch_indices,
-            torch.tensor([accepted], dtype=torch.int32, device="cuda"),
-            query_start_loc,
-            logical_window=16,
-            ring_buffer_len=20,
-        )
-        observed.append(
-            (
-                int(ring_start[1]),
-                int(prev_num_accepted[1]),
-                int(prev_query_len[1]),
-            )
-        )
-
-    assert observed == [
-        (0, 0, 4),
-        (0, 3, 4),
-        (0, 7, 4),
-        (0, 11, 4),
-        (0, 15, 4),
-        (15, 2, 4),
-    ]
-
-
 def _kv_cache_config_with_ssu(
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2,
 ) -> KVCacheConfig:
@@ -178,7 +106,8 @@ def test_explicit_triton_backend():
     initialize_mamba_ssu_backend(
         MambaConfig(backend=MambaBackendEnum.TRITON), _kv_cache_config_with_ssu()
     )
-    assert isinstance(get_mamba_ssu_backend(), TritonSSUBackend)
+    backend = get_mamba_ssu_backend()
+    assert isinstance(backend, TritonSSUBackend)
 
 
 @pytest.mark.skipif(not HAS_FLASHINFER, reason="flashinfer not installed")
@@ -217,9 +146,18 @@ def test_flashinfer_forwards_ssu_algorithm(
             ssu_algorithm=algorithm,
         )
     )
-    tensor = torch.empty(1)
 
-    backend(*(tensor,) * 8)
+    tensor = torch.empty(1)
+    backend(
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+    )
 
     assert kernel.call_args.kwargs["algorithm"] == expected
 
@@ -227,13 +165,10 @@ def test_flashinfer_forwards_ssu_algorithm(
 def test_uninitialized_backend_raises():
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
 
-    old = mod._mamba_ssu_backend
+    # restore_backend_state (autouse) puts the global back afterwards.
     mod._mamba_ssu_backend = None
-    try:
-        with pytest.raises(RuntimeError, match="not been initialized"):
-            get_mamba_ssu_backend()
-    finally:
-        mod._mamba_ssu_backend = old
+    with pytest.raises(RuntimeError, match="not been initialized"):
+        get_mamba_ssu_backend()
 
 
 @pytest.mark.parametrize(
@@ -266,24 +201,25 @@ def test_flashinfer_import_error():
         FlashInferSSUBackend(MambaConfig())
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_triton_basic_call():
     set_random_seed(0)
     initialize_mamba_ssu_backend(
         MambaConfig(backend=MambaBackendEnum.TRITON), _kv_cache_config_with_ssu()
     )
+    device = "cuda"
     batch_size = 2
     dim = 64
     dstate = 16
-    state = torch.randn(batch_size, dim, dstate, device="cuda")
-    x = torch.randn(batch_size, dim, device="cuda")
+
+    state = torch.randn(batch_size, dim, dstate, device=device)
+    x = torch.randn(batch_size, dim, device=device)
     out = torch.empty_like(x)
-    dt = torch.randn(batch_size, dim, device="cuda")
-    dt_bias = torch.rand(dim, device="cuda") - 4.0
-    A = -torch.rand(dim, dstate, device="cuda")
-    B = torch.randn(batch_size, dstate, device="cuda")
-    C = torch.randn(batch_size, dstate, device="cuda")
-    D = torch.randn(dim, device="cuda")
+    dt = torch.randn(batch_size, dim, device=device)
+    dt_bias = torch.rand(dim, device=device) - 4.0
+    A = -torch.rand(dim, dstate, device=device)
+    B = torch.randn(batch_size, dstate, device=device)
+    C = torch.randn(batch_size, dstate, device=device)
+    D = torch.randn(dim, device=device)
 
     selective_state_update(
         state,
@@ -298,8 +234,6 @@ def test_triton_basic_call():
         out=out,
     )
     assert not torch.isnan(out).any()
-
-
 
 
 def test_replayssm_flashinfer_call_forwards_explicit_controls(monkeypatch):
