@@ -4,6 +4,7 @@ from enum import Enum
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.config.kernel import MoEBackend
@@ -288,6 +289,12 @@ def select_nvfp4_moe_backend(
             )
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
+        )
+
+    if envs.VLLM_TEST_FORCE_FP8_MARLIN:
+        backend = NvFp4MoeBackend.MARLIN
+        return _return_or_raise(
+            backend, config, weight_key, activation_key, activation_format
         )
 
     # Select kernels in order of backend.
