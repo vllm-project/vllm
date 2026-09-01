@@ -431,6 +431,29 @@ def test_zen_cpu_rejects_zero_points_but_takes_bias(
     assert (reason is None) == expected_ok
 
 
+def test_zen_cpu_rejects_moe_wna16_layout():
+    from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
+
+    quant_config = MoeWNA16Config(
+        linear_quant_method="gptq",
+        weight_bits=4,
+        group_size=128,
+        has_zp=False,
+        lm_head_quantized=False,
+        modules_to_not_convert=None,
+        full_config={},
+    )
+    reason = int_wna16._backend_incompatibility_reason(
+        WNA16MoEBackend.ZEN_CPU,
+        moe_config=None,
+        quant_config=quant_config,
+        may_have_zp=False,
+        may_have_bias=False,
+        allow_tile_padding=True,
+    )
+    assert reason is not None
+
+
 def test_zen_cpu_disabled_by_env(monkeypatch):
     monkeypatch.setattr(int_wna16.envs, "VLLM_CPU_INT4_W4A8", False)
     quant_config = type("Args", (), {"group_size": 128})()
@@ -477,6 +500,12 @@ def test_zen_experts_support_predicates():
         assert ZentorchExpertsInt4._supports_activation(act) == expected
     assert ZentorchExpertsInt4.requires_interleaved_w13
     assert not ZentorchExpertsInt4._supports_no_act_and_mul()
+    assert ZentorchExpertsInt4._supports_parallel_config(
+        type("Par", (), {"use_ep": False})()
+    )
+    assert not ZentorchExpertsInt4._supports_parallel_config(
+        type("Par", (), {"use_ep": True})()
+    )
 
 
 def test_zen_experts_take_custom_routing():
