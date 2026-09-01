@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from functools import cached_property
 from itertools import chain
 from operator import attrgetter
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import regex as re
 import torch
@@ -57,7 +57,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.model_executor.models.transformers.fuser import BaseFuser, Fusers
-from vllm.model_executor.models.transformers.fusers import MLAFuser
+from vllm.model_executor.models.transformers.fusers import MLAFuser, SinkFuser
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
     can_enable_torch_compile,
@@ -85,6 +85,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+_F = TypeVar("_F", bound=BaseFuser)
 
 
 class PreTrainedModelClasses(NamedTuple):
@@ -129,8 +131,8 @@ class Base(
         self.packed_modules_mapping: dict[str, list[str]] = {}
         """Fused module -> constituent projections, populated by `recursive_replace`
         for the quantization machinery and loaders (e.g. bitsandbytes)."""
-        self.fusers: dict[str, BaseFuser] = {}
-        """Module qualname -> the fuser applied to it, populated
+        self.fusers: dict[str, list[BaseFuser]] = {}
+        """Module qualname -> the fusers applied to it, populated
         by `recursive_replace` for `create_attention_instances`."""
 
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
@@ -168,6 +170,10 @@ class Base(
         self.recursive_replace()
         # Create attention instances for KV cache allocation
         self.attention_instances = self.create_attention_instances()
+        # The instances are passed to the model's forward through a plain dict, so
+        # register them as submodules too, otherwise `named_modules` never yields
+        # them and their `process_weights_after_loading` does not run
+        self._attention_layers = nn.ModuleList(self.attention_instances.values())
 
         # Input embeddings
         input_embeddings = self.model.get_input_embeddings()
@@ -456,7 +462,7 @@ class Base(
 
         def register_fusion(fuser: BaseFuser, prefix: str):
             """Register a fused layer's mappings just before it is built."""
-            self.fusers[prefix] = fuser
+            self.fusers.setdefault(prefix, []).append(fuser)
 
             orig_to_new_stacked = fuser.orig_to_new_stacked(prefix)
             self.hf_to_vllm_mapper.orig_to_new_stacked.update(orig_to_new_stacked)
@@ -503,10 +509,11 @@ class Base(
                     )
                 elif isinstance(child_module, (nn.Conv2d, nn.Conv3d)):
                     new_module = replace_conv_class(child_module)
-                elif (fuser := fusers[child_module]) is not None:
-                    register_fusion(fuser, qual_name)
-                    new_module = fuser.fuse(child_module, qual_name, self.vllm_config)
-                    logger.info_once(fuser.info(child_name))
+                elif child_fusers := fusers[child_module]:
+                    for fuser in child_fusers:
+                        register_fusion(fuser, qual_name)
+                        new_module = fuser.fuse(new_module, qual_name, self.vllm_config)
+                        logger.info_once(fuser.info(child_name))
                     _recursive_replace(new_module, prefix=qual_name)
                 elif not isinstance(child_module, MoERunner):
                     # MoERunner can contain aliases of shared experts and gates,
@@ -519,6 +526,18 @@ class Base(
 
         _recursive_replace(self.model, prefix="model")
 
+    def find_fusers(self, fuser_cls: type[_F]) -> dict[int, tuple[str, _F]]:
+        """Layer index -> qualname and fuser, for every `fuser_cls` that was applied.
+
+        Only meaningful for fusers that match modules living inside a layer.
+        """
+        return {
+            extract_layer_index(prefix): (prefix, fuser)
+            for prefix, fusers in self.fusers.items()
+            for fuser in fusers
+            if isinstance(fuser, fuser_cls)
+        }
+
     def create_attention_instances(self) -> dict[int, Attention]:
         """
         Create `Attention` instances to inform KV cache allocation.
@@ -530,11 +549,7 @@ class Base(
 
         # kv_lora_rank indicates that this is an MLA model
         if getattr(text_config, "kv_lora_rank", None) is not None:
-            mla_fusers = {
-                extract_layer_index(prefix): (prefix, fuser)
-                for prefix, fuser in self.fusers.items()
-                if isinstance(fuser, MLAFuser)
-            }
+            mla_fusers = self.find_fusers(MLAFuser)
             if attn_cls is MLAAttention:
                 text_config._attn_implementation = "vllm_mla"
             else:
@@ -545,6 +560,11 @@ class Base(
                     self.model_config.model_arch_config.head_size = qk_head_dim
 
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
+        # Learnable per-head sinks, which only the attention impl can apply
+        sinks = {
+            i: fuser.sink(self.get_submodule(prefix))
+            for i, (prefix, fuser) in self.find_fusers(SinkFuser).items()
+        }
 
         pp_rank = self.pp_group.rank_in_group
         pp_size = self.pp_group.world_size
@@ -599,12 +619,10 @@ class Base(
                 ):
                     kwargs["per_layer_sliding_window"] = text_config.sliding_window
 
-            attn_instance = attn_cls(**kwargs)
-            if attn_cls is MLAAttention:
-                # Attach MLA attn_instance to mla_module so it appears in
-                # model.named_modules() and runs its process_weights_after_loading
-                mla_module._vllm_mla_attn = attn_instance
-            attention_instances[i] = attn_instance
+                if (sink := sinks.get(i)) is not None:
+                    kwargs["sinks"] = sink
+
+            attention_instances[i] = attn_cls(**kwargs)
         return attention_instances
 
     def _get_attn_cls(self) -> type[AttentionLayerBase]:
@@ -620,7 +638,7 @@ class Base(
             return EncoderOnlyAttention
         if self.model_config.use_mla:
             self.check_version("5.15.0.dev0", "optimized MLA support")
-            if any(isinstance(fuser, MLAFuser) for fuser in self.fusers.values()):
+            if self.find_fusers(MLAFuser):
                 return MLAAttention
             logger.warning_once(
                 "This model uses MLA but `MLAFuser` failed to match and/or fuse any "
