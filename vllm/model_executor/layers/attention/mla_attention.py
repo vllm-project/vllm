@@ -352,6 +352,10 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
 ) -> CacheDType:
     backend_name = attn_backend.get_name()
     if backend_name == "FLASHMLA_SPARSE" and is_quantized_kv_cache(kv_cache_dtype):
+        # The NVFP4 DS-MLA format is used as-is; any other quantized dtype
+        # (fp8, fp8_e4m3, ...) is served via the fp8_ds_mla format.
+        if kv_cache_dtype == "nvfp4_ds_mla":
+            return kv_cache_dtype
         return "fp8_ds_mla"
     if backend_name == "FLASHINFER_MLA_SPARSE_SM120" and kv_cache_dtype in (
         "auto",
@@ -373,12 +377,18 @@ def _get_kv_b_proj_input_dtype(
         return None
     if weight_dtype == current_platform.fp8_dtype():
         from vllm.model_executor.layers.quantization.modelopt import (
-            ModelOptFp8PbWoLinearMethod,
+            ModelOptLinearMethod,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kFp8Static128BlockSym,
         )
 
         quant_method = getattr(kv_b_proj, "quant_method", None)
         # FP8_PB_WO dynamically quantizes BF16/FP16 inputs in the linear method.
-        if isinstance(quant_method, ModelOptFp8PbWoLinearMethod):
+        if (
+            isinstance(quant_method, ModelOptLinearMethod)
+            and quant_method.spec.weight is kFp8Static128BlockSym
+        ):
             return quant_method.input_dtype
         if not use_fp8_prefill:
             return None
@@ -604,6 +614,33 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.use_sparse = use_sparse
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            backend_name = self.attn_backend.get_name()
+            if backend_name in (
+                "FLASHMLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE_SM120",
+                "DEEPSEEK_V32_INDEXER",
+            ):
+                from vllm.v1.attention.backends.mla.compressor_utils import (
+                    _COMPRESSED_SLOT_MAPPING_KERNEL,
+                )
+                from vllm.v1.attention.backends.mla.indexer import (
+                    _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+                    _PREPARE_UNIFORM_DECODE_KERNEL,
+                )
+
+                _COMPRESSED_SLOT_MAPPING_KERNEL.register_warmup()
+                _PREPARE_UNIFORM_DECODE_KERNEL.register_warmup()
+                _BUILD_PREFILL_CHUNK_METADATA_KERNEL.register_warmup()
+
+                if backend_name != "DEEPSEEK_V32_INDEXER":
+                    from vllm.v1.attention.backends.mla.sparse_swa import (
+                        _COMPUTE_PREFILL_METADATA_KERNEL,
+                    )
+
+                    _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
+
         self.dcp_manager: MLADCPManager | None = None
         if self.impl.dcp_world_size > 1:
             query_dtype = (
@@ -652,6 +689,26 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
+        if (
+            self._vllm_config.kernel_config.enable_jit_warmup
+            and self.attn_backend.get_name()
+            in (
+                "FLASHMLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE_SM120",
+                "DEEPSEEK_V32_INDEXER",
+            )
+        ):
+            from vllm.v1.attention.backends.mla.sparse_utils import (
+                _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL,
+            )
+
+            row_width = self.kv_cache.shape[-1]
+            assert self.kv_cache.stride(0) % row_width == 0
+            _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL.register_warmup(
+                self._vllm_config,
+                block_stride_rows=self.kv_cache.stride(0) // row_width,
+            )
 
     @property
     def chunked_prefill_workspace_size(self) -> int:
@@ -814,7 +871,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
+        if fp8_attention and self.kv_cache_dtype not in (
+            # Opaque per-token byte formats stay as raw uint8
+            "fp8_ds_mla",
+            "nvfp4_ds_mla",
+        ):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         assert (
@@ -1215,9 +1276,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
-            # fp8_ds_mla: 656-byte custom layout (kv_lora_rank=512 +
-            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
-            state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
+            # ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token
+            # blob, so the size is not derivable from head_size.
+            # See flashmla_sparse.py.
+            state_content_bytes={"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(
+                self.kv_cache_dtype
+            ),
         )
         if self.sliding_window is not None:
             return SlidingWindowMLASpec(
@@ -3157,9 +3221,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         parallel_config = get_current_vllm_config().parallel_config
         # Avoid requiring an initialized DCP group in tests.
         self.dcp_world_size: int = parallel_config.decode_context_parallel_size
-        self.cp_kv_cache_interleave_size: int = (
-            parallel_config.cp_kv_cache_interleave_size
-        )
 
     @abstractmethod
     def forward_mqa(

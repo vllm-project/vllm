@@ -129,7 +129,7 @@ class LLMEngine:
             model = self._get_driver_model_for_cleanup()
             if model is not None:
                 self._finalizer = weakref.finalize(
-                    self, LLMEngine._cleanup_instance_caches, model
+                    self, LLMEngine._cleanup_instance_caches, weakref.ref(model)
                 )
 
         if self.external_launcher_dp:
@@ -444,10 +444,13 @@ class LLMEngine:
         return getattr(model_runner, "model", None)
 
     @staticmethod
-    def _cleanup_instance_caches(model) -> None:
+    def _cleanup_instance_caches(model_ref: "weakref.ref[nn.Module]") -> None:
         """Remove the bytecode hooks that pin the compiled model."""
         from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 
+        model = model_ref()
+        if model is None:
+            return
         for module in model.modules():
             if isinstance(module, TorchCompileWithNoGuardsWrapper):
                 module.cleanup()
