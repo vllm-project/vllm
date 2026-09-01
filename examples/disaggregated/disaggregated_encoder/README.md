@@ -53,7 +53,7 @@ To support local image inputs (from your ```MEDIA_PATH``` directory), add the fo
 --allowed-local-media-path $MEDIA_PATH
 ```
 
-The vllm instances and `disagg_encoder_proxy` supports local URIs with ```{"url": "file://'"$MEDIA_PATH_FILENAME"'}``` as multimodal inputs. Each URI is passed unchanged from the `disagg_encoder_proxy` to the encoder instance so that the encoder can load the media locally.
+The vllm instances and `disagg_epd_proxy.py` supports local URIs with ```{"url": "file://'"$MEDIA_PATH_FILENAME"'}``` as multimodal inputs. Each URI is passed unchanged from the `disagg_epd_proxy.py` to the encoder instance so that the encoder can load the media locally.
 
 ## EC connector and KV transfer
 
@@ -110,7 +110,7 @@ Example usage:
 For E + PD setup:
 
 ```bash
-$ python disagg_encoder_proxy.py \
+$ python disagg_epd_proxy.py \
       --encode-servers-urls "http://e1:8001,http://e2:8002" \
       --prefill-servers-urls "disable" \
       --decode-servers-urls "http://pd1:8003,http://pd2:8004"
@@ -119,7 +119,7 @@ $ python disagg_encoder_proxy.py \
 For E + P + D setup:
 
 ```bash
-$ python disagg_encoder_proxy.py \
+$ python disagg_epd_proxy.py \
       --encode-servers-urls "http://e1:8001,http://e2:8001" \
       --prefill-servers-urls "http://p1:8003,http://p2:8004" \ 
       --decode-servers-urls "http://d1:8005,http://d2:8006"
