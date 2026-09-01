@@ -1867,7 +1867,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> bool:
         state_indices = attn_metadata.spec_state_indices_tensor
         return (
-            attn_metadata.spec_sequence_masks is not None
+            # ReplaySSM owns the complete post-conv recurrent-attention path.
+            # The baseline fused CUDA MTP kernel updates the checkpoint state
+            # directly and assumes the baseline state-index layout, while the
+            # ReplaySSM path keeps that checkpoint behind a circular d/k/g
+            # history.  Routing ReplaySSM metadata through the fused shortcut
+            # both bypasses the ReplaySSM kernel and can access invalid state
+            # indices at serving batch sizes.
+            not self.use_replayssm_spec
+            and attn_metadata.spec_sequence_masks is not None
             and attn_metadata.num_decodes == 0
             and attn_metadata.num_spec_decodes > 0
             and self.kv_cache[1].dtype in FUSED_GDN_STATE_DTYPES
