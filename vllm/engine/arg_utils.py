@@ -1543,6 +1543,10 @@ class EngineArgs:
             description=SchedulerConfig.__doc__,
         )
         scheduler_group.add_argument(
+            "--blocked-waiting-timeout-s",
+            **scheduler_kwargs["blocked_waiting_timeout_s"],
+        )
+        scheduler_group.add_argument(
             "--max-num-batched-tokens",
             **{
                 **scheduler_kwargs["max_num_batched_tokens"],
