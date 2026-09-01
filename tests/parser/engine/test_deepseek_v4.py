@@ -211,9 +211,9 @@ class TestImplicitParameterClose:
         chunks = [
             DSML_TOOL_START,
             f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n",
-            f"<{_PARAM_OPEN.format(name='location', is_str='true')}Paris ",
-            "<｜DSML｜param",
-            'eter name="date" string="true">tomorrow',
+            f"<{_PARAM_OPEN.format(name='location', is_str='true')}"
+            "Paris a<b><｜DSML｜parameter",
+            ' name="date" string="true">tomorrow',
             _PARAM_CLOSE,
             DSML_INVOKE_END,
             DSML_TOOL_END,
@@ -226,7 +226,7 @@ class TestImplicitParameterClose:
         arguments = collect_tool_arguments(results)
         assert "<｜DSML｜param" not in arguments
         assert json.loads(arguments) == {
-            "location": "Paris ",
+            "location": "Paris a<b>",
             "date": "tomorrow",
         }
 
