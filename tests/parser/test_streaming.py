@@ -6,12 +6,20 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
+
+
+@pytest.fixture(autouse=True)
+def enable_hermes_required_named_parsing(monkeypatch):
+    # With VLLM_ENFORCE_STRICT_TOOL_CALLING (default on), Hermes sets
+    # supports_required_and_named=False and uses structural-tag guided tool
+    # calling. Force it True to test the non-guided JSON required/named parse path.
+    monkeypatch.setattr(Hermes2ProToolParser, "supports_required_and_named", True)
 
 
 class ThinkReasoningParser(BaseThinkingReasoningParser):

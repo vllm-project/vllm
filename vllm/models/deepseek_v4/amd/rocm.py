@@ -1,20 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 from dataclasses import dataclass
 from typing import cast
 
 import torch
 
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4.sparse_mla import (
-    DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
-    DeepseekV4FlashMLAMetadataBuilder,
+    DeepseekV4SparseMLABackend,
+    DeepseekV4SparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
@@ -31,12 +38,57 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 )
 from vllm.v1.worker.workspace import current_workspace_manager
 
+logger = init_logger(__name__)
+
+
+def _trust_dsv4_extra_cache_nan_free(
+    kv_cache_dtype: str,
+    has_kv_transfer: bool,
+    has_extra_cache: bool,
+) -> bool:
+    return (
+        _ON_GFX950
+        and kv_cache_dtype == "fp8_ds_mla"
+        and not has_kv_transfer
+        and has_extra_cache
+    )
+
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
     lengths = lengths.to(dtype=torch.int32).contiguous()
     indptr = torch.zeros(lengths.shape[0] + 1, dtype=torch.int32, device=lengths.device)
     torch.cumsum(lengths, dim=0, out=indptr[1:])
     return indptr
+
+
+def apply_pre_quantized_block_scaled_mm(
+    linear: torch.nn.Module,
+    x_fp8: torch.Tensor,
+    x_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Block-scaled fp8 GEMM on pre-quantized activations.
+
+    The fused q/kv norm kernel writes fp8 qr + per-1x128 scales; this
+    drives the linear's block-scaled GEMM directly with them, bypassing
+    apply_weights which would re-quantize the fp8 input. Only valid for
+    the wq_b-style column/replicated linears: their output is the local
+    TP shard, so no all-reduce is needed.
+    """
+    from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel import (
+        FP8BlockParams,
+    )
+
+    params = FP8BlockParams.from_layer(linear)
+    weight_scale = (
+        params.weight_scale
+        if params.weight_scale_inv is None
+        else params.weight_scale_inv
+    )
+    kernel = linear.quant_method.fp8_linear
+    out = kernel.apply_block_scaled_mm(
+        A=x_fp8, B=params.weight, As=x_scale, Bs=weight_scale
+    )
+    return out.to(dtype=kernel.config.out_dtype)
 
 
 # ROCm sparse prefill keeps this dense combine local so AMD-specific SWA changes
@@ -290,9 +342,13 @@ def _copy_ragged_to_graph_buffers(
 
     max_entries = max(num_rows * max_entries_per_row, 1)
     ragged_out = ragged_indices_buffer[:max_entries]
-    nnz = ragged_indices.numel()
-    if nnz > 0:
-        ragged_out[:nnz].copy_(ragged_indices, non_blocking=True)
+    source_entries = ragged_indices.numel()
+    if source_entries > 0:
+        ragged_out[:source_entries].copy_(ragged_indices, non_blocking=True)
+    if _ON_GFX950:
+        # Preserve the graph-stable base pointer while exposing source capacity
+        # to the sync-free split selector; indptr still carries the true NNZ.
+        ragged_out = ragged_out[: max(source_entries, 1)]
     return ragged_out, indptr_out
 
 
@@ -302,6 +358,7 @@ class DeepseekV4ROCMAiterMLASparseMetadata(DeepseekV4FlashMLAMetadata):
 
     c128a_decode_topk_ragged_indices: torch.Tensor | None = None
     c128a_decode_topk_ragged_indptr: torch.Tensor | None = None
+    for_cudagraph_capture: bool = False
 
 
 @dataclass
@@ -310,7 +367,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
     decode_swa_ragged_indptr: torch.Tensor | None = None
 
 
-class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4FlashMLAMetadataBuilder):
+class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.c128a_decode_topk_ragged_indices_buffer: torch.Tensor | None = None
@@ -366,8 +423,22 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4FlashMLAMetadataBuil
             c128a_decode_topk_ragged_indptr=ragged_indptr,
         )
 
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> DeepseekV4ROCMAiterMLASparseMetadata:
+        metadata = cast(
+            DeepseekV4ROCMAiterMLASparseMetadata,
+            super().build_for_cudagraph_capture(common_attn_metadata),
+        )
+        metadata.for_cudagraph_capture = _ON_GFX950
+        return metadata
+
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    # Keep fused multi-step decode disabled until update_draft_decode_metadata()
+    # also refreshes the ROCm-specific ragged SWA indices and indptrs.
+    supports_draft_decode_metadata_update = False
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
@@ -406,7 +477,9 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             and base.decode_swa_lens is not None
         ):
             ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
-                base.decode_swa_indices.reshape(base.num_decode_tokens, -1),
+                base.decode_swa_indices.reshape(
+                    base.num_decode_tokens, base.decode_swa_width
+                ),
                 base.decode_swa_lens,
             )
             ragged_indices, ragged_indptr = _copy_ragged_to_graph_buffers(
@@ -415,9 +488,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
                 self.decode_swa_ragged_indices_buffer,
                 self.decode_swa_ragged_indptr_buffer,
                 base.num_decode_tokens,
-                # Actual dense width for this build: window_size (causal) or
-                # noncausal_index_width (DSpark non-causal draft).
-                base.decode_swa_indices.shape[-1],
+                base.decode_swa_width,
             )
 
         return DeepseekV4ROCMAiterSparseSWAMetadata(
@@ -427,7 +498,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
         )
 
 
-class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4FlashMLABackend):
+class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV4"
@@ -442,9 +513,209 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
 
+    def __init__(self, *args, **kwargs):
+        vllm_config = args[0] if args else kwargs["vllm_config"]
+        super().__init__(*args, **kwargs)
+        self._has_kv_transfer = vllm_config.kv_transfer_config is not None
+        # Block scale for the preshuffled weight; None = not preshuffled.
+        self._wqa_wkv_scale: torch.Tensor | None = None
+        self._wo_b_scale: torch.Tensor | None = None
+        self._fused_compressor_weight: torch.Tensor | None
+        self.register_buffer("_fused_compressor_weight", None, persistent=False)
+        self._fused_compressor_split_sizes: tuple[int, int] | None = None
+
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
+
+    def prepare_attn_preshuffle(self) -> None:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if not rocm_aiter_ops.is_enabled():
+            return
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            _upcast_e8m0_to_fp32,
+        )
+        from vllm.model_executor.utils import replace_parameter
+
+        def _prep(linear) -> torch.Tensor | None:
+            w = getattr(linear, "weight", None)
+            if w is None or w.dim() != 2:
+                return None
+            # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
+            if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
+                return None
+            ws = getattr(linear, "weight_scale_inv", None)  # per-block scale
+            if ws is None:
+                return None
+            if ws.dtype == torch.float8_e8m0fnu:
+                ws = _upcast_e8m0_to_fp32(ws).contiguous()
+            # Shuffle the weight in place (single weight, no unshuffled copy).
+            replace_parameter(
+                linear,
+                "weight",
+                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+            )
+            return ws
+
+        self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
+        self._wo_b_scale = _prep(self.wo_b)
+
+    def prepare_compressor_gemm_fusion(self) -> bool:
+        if self._fused_compressor_weight is not None:
+            return False
+
+        from vllm.model_executor.offloader import NoopOffloader, get_offloader
+
+        if not isinstance(get_offloader(), NoopOffloader):
+            logger.warning_once(
+                "DeepSeek V4 compressor GEMM fusion is incompatible with "
+                "weight offloading and will remain disabled."
+            )
+            return False
+
+        compressor = self.compressor
+        indexer = self.indexer
+        if compressor is None or indexer is None:
+            return False
+
+        main_weight = compressor.fused_wkv_wgate.weight
+        indexer_weight = indexer.compressor.fused_wkv_wgate.weight
+        if main_weight.ndim != 2 or indexer_weight.ndim != 2:
+            raise ValueError("DeepSeek V4 compressor weights must be matrices")
+        if main_weight.shape[1] != indexer_weight.shape[1]:
+            raise ValueError("DeepSeek V4 compressor weights must share K")
+        if main_weight.dtype != indexer_weight.dtype:
+            raise ValueError("DeepSeek V4 compressor weights must share dtype")
+        if main_weight.device != indexer_weight.device:
+            raise ValueError("DeepSeek V4 compressor weights must share device")
+
+        main_size = main_weight.shape[0]
+        indexer_size = indexer_weight.shape[0]
+        fused_weight = torch.cat((main_weight, indexer_weight), dim=0)
+        with torch.no_grad():
+            main_weight.set_(fused_weight[:main_size])
+            indexer_weight.set_(fused_weight[main_size:])
+
+        self._fused_compressor_weight = fused_weight
+        self._fused_compressor_split_sizes = (main_size, indexer_size)
+        return True
+
+    def _bpre_attn_gemm(
+        self,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        x: torch.Tensor,
+        reduce_tp: bool,
+    ) -> torch.Tensor:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
+        out = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+            x_fp8, weight, x_scale, scale, output_dtype=x.dtype
+        )
+        if reduce_tp and get_tensor_model_parallel_world_size() > 1:
+            out = tensor_model_parallel_all_reduce(out)
+        return out
+
+    def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self._wqa_wkv_scale is not None and hidden_states.dim() == 2:
+            return self._bpre_attn_gemm(
+                self.fused_wqa_wkv.weight, self._wqa_wkv_scale, hidden_states, False
+            )
+        return super()._fused_wqa_wkv_gemm(hidden_states)
+
+    def _run_parallel_input_projections(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        fused_weight = self._fused_compressor_weight
+        split_sizes = self._fused_compressor_split_sizes
+        if fused_weight is None or split_sizes is None:
+            return super()._run_parallel_input_projections(hidden_states)
+
+        indexer = self.indexer
+        if indexer is None:
+            raise RuntimeError("Fused compressor weight requires a C4 indexer")
+
+        qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+        fused_scores = torch.mm(
+            hidden_states,
+            fused_weight.T,
+            out_dtype=torch.float32,
+        )
+        kv_score, indexer_kv_score = fused_scores.split(split_sizes, dim=-1)
+        indexer_weights, _ = indexer.weights_proj(hidden_states)
+        return qr_kv, kv_score, indexer_kv_score, indexer_weights
+
+    @functools.cached_property
+    def _wq_b_uses_aiter_block_scaled(self) -> bool:
+        """True when both wq_b GEMMs run the aiter block-scaled fp8 kernel.
+
+        Cached: the linear kernels and the aiter env gates are fixed once
+        the model is built, so this is evaluated at the first forward
+        only.
+
+        The fused norm+quant path is only valid if the quant and GEMM it
+        replaces are exactly the aiter ones; otherwise fall back to the
+        shared path.
+        """
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.model_executor.kernels.linear.scaled_mm import (
+            Fp8BlockScaledMMLinearKernel,
+        )
+
+        if not rocm_aiter_ops.is_linear_fp8_enabled():
+            return False
+
+        linears = [self.wq_b]
+        if self.indexer is not None:
+            linears.append(self.indexer.wq_b)
+        for linear in linears:
+            kernel = getattr(getattr(linear, "quant_method", None), "fp8_linear", None)
+            if not isinstance(kernel, Fp8BlockScaledMMLinearKernel):
+                return False
+        return True
+
+    def _split_qkv_and_norm(
+        self, qr_kv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """Fuse q/kv RMSNorm + per-1x128 fp8 q quant into one aiter kernel.
+
+        The shared path norms q and kv in one triton kernel and the wq_b
+        linears then re-read the bf16 qr to quantize it. The aiter kernel
+        computes both RMSNorms (fp32 accumulate) and the fp8 group quant
+        in a single pass, writing fp8 qr + group scales directly; both
+        wq_b GEMMs (attention and indexer) then consume that pair and
+        skip their own input quant. kv stays bf16: the fused insert
+        kernel RoPE/quantizes it itself. Falls back to the shared path
+        when the aiter linear path is not active.
+        """
+        qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+        if not (
+            qr.dim() == 2
+            and qr.shape[0] > 0
+            and self.q_lora_rank % 128 == 0
+            and self._wq_b_uses_aiter_block_scaled
+        ):
+            return super()._split_qkv_and_norm(qr_kv)
+
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        return rocm_aiter_ops.fused_qk_rmsnorm_group_quant(
+            q=qr,
+            q_weight=self.q_norm.weight.data,
+            q_epsilon=self.eps,
+            kv=kv,
+            kv_weight=self.kv_norm.weight.data,
+            kv_epsilon=self.eps,
+            group_size=128,
+            transpose_scale=False,
+        )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
@@ -457,7 +728,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             self.o_lora_rank,
             self.wo_a,
         )
-        return self.wo_b(z.flatten(1))
+        zf = z.flatten(1)
+        if self._wo_b_scale is not None and zf.dim() == 2:
+            return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
+        return self.wo_b(zf)
 
     def forward_mqa(
         self,
@@ -531,6 +805,13 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 attn_metadata=rocm_metadata,
                 swa_only=swa_only,
                 output=output[:num_decode_tokens],
+                adaptive_splits=(
+                    _ON_GFX950
+                    and not swa_only
+                    and self.compress_ratio == 128
+                    and rocm_metadata is not None
+                    and rocm_metadata.for_cudagraph_capture
+                ),
             )
 
     def _forward_decode(
@@ -541,6 +822,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         attn_metadata: DeepseekV4ROCMAiterMLASparseMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
+        adaptive_splits: bool,
     ) -> None:
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
@@ -592,6 +874,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             nope_head_dim=self.nope_head_dim,
             rope_head_dim=self.rope_head_dim,
             output=output,
+            adaptive_splits=adaptive_splits,
+            extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
+                self.kv_cache_dtype,
+                self._has_kv_transfer,
+                not swa_only and kv_cache is not None,
+            ),
         )
 
     def _forward_prefill(

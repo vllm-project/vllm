@@ -6,121 +6,13 @@ from unittest.mock import patch
 
 import pytest
 
-import vllm.v1.worker.gpu_worker as gpu_worker_module
-from vllm.multimodal.video import (
-    PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
-    PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
-    PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
-    PYNVVIDEOCODEC_VIDEO_BACKEND,
-)
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.worker import startup_plan
-from vllm.v1.worker.gpu_worker import Worker
+from vllm.v1.worker import gpu_worker, startup_plan
+from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-
-
-def _worker_with_mm_config(
-    mm_config: SimpleNamespace,
-    *,
-    api_process_count: int = 1,
-) -> Worker:
-    worker = object.__new__(Worker)
-    worker.model_config = SimpleNamespace(multimodal_config=mm_config)
-    worker.parallel_config = SimpleNamespace(_api_process_count=api_process_count)
-    return worker
-
-
-def _mm_config(
-    *,
-    mm_ipc_gpu_memory_gb: float = 0,
-    video_backend: str | None = None,
-) -> SimpleNamespace:
-    video_kwargs = {} if video_backend is None else {"video_backend": video_backend}
-    return SimpleNamespace(
-        mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
-        media_io_kwargs={"video": video_kwargs} if video_kwargs else {},
-    )
-
-
-def _pynvvideocodec_decoder_budget(api_process_count: int = 1) -> int:
-    return api_process_count * (
-        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES * PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
-        + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
-    )
-
-
-@pytest.mark.parametrize("video_backend", [None, "opencv"])
-def test_reserve_mm_ipc_gpu_memory_raw_frame_budget_only(
-    monkeypatch: pytest.MonkeyPatch,
-    video_backend: str | None,
-):
-    monkeypatch.setattr(
-        gpu_worker_module.envs,
-        "VLLM_VIDEO_LOADER_BACKEND",
-        "opencv",
-    )
-    worker = _worker_with_mm_config(
-        _mm_config(mm_ipc_gpu_memory_gb=0.25, video_backend=video_backend)
-    )
-
-    assert worker._reserve_mm_ipc_gpu_memory(GiB_bytes) == int(0.75 * GiB_bytes)
-
-
-def test_reserve_mm_ipc_gpu_memory_includes_pynvvideocodec_decoder_budget(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setattr(
-        gpu_worker_module.envs,
-        "VLLM_VIDEO_LOADER_BACKEND",
-        "opencv",
-    )
-    worker = _worker_with_mm_config(
-        _mm_config(
-            mm_ipc_gpu_memory_gb=0.25,
-            video_backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
-        )
-    )
-    available_bytes = 4 * GiB_bytes
-
-    assert worker._reserve_mm_ipc_gpu_memory(available_bytes) == (
-        available_bytes - int(0.25 * GiB_bytes) - _pynvvideocodec_decoder_budget()
-    )
-
-
-def test_reserve_mm_ipc_gpu_memory_uses_env_video_backend(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setattr(
-        gpu_worker_module.envs,
-        "VLLM_VIDEO_LOADER_BACKEND",
-        PYNVVIDEOCODEC_VIDEO_BACKEND,
-    )
-    worker = _worker_with_mm_config(_mm_config())
-    available_bytes = 4 * GiB_bytes
-
-    assert worker._reserve_mm_ipc_gpu_memory(available_bytes) == (
-        available_bytes - _pynvvideocodec_decoder_budget()
-    )
-
-
-def test_reserve_mm_ipc_gpu_memory_scales_pynvvideocodec_budget_by_api_servers(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setattr(
-        gpu_worker_module.envs,
-        "VLLM_VIDEO_LOADER_BACKEND",
-        PYNVVIDEOCODEC_VIDEO_BACKEND,
-    )
-    worker = _worker_with_mm_config(_mm_config(), api_process_count=3)
-    available_bytes = 8 * GiB_bytes
-
-    assert worker._reserve_mm_ipc_gpu_memory(available_bytes) == (
-        available_bytes - _pynvvideocodec_decoder_budget(api_process_count=3)
-    )
-
 
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
@@ -186,3 +78,77 @@ def test_startup_plan_apply_gate(plan_env):
     explicit = _plan_worker(kv_bytes=7 * GiB_bytes)
     maybe_apply_startup_plan(explicit)
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
+
+
+# Memory accounting of the profiling run (Worker.determine_available_memory).
+
+# The fallback reads only the sign of the measured drop and this process's torch
+# reservation; free memory is only logged, so no amount here is a device size.
+ANY_FREE_MEMORY = 8 * GiB_bytes
+MEASURED_DROP = 4 * GiB_bytes
+TORCH_RESERVED = 3 * GiB_bytes
+RELEASED_BY_OTHERS = 2 * GiB_bytes
+
+
+def _snapshot(free_memory, torch_memory=0):
+    return SimpleNamespace(free_memory=free_memory, torch_memory=torch_memory)
+
+
+def _profile_result(consumed, reserved_before=0, reserved_after=0):
+    """A result whose free-memory readings agree with `consumed`, which
+    `memory_profiling` derives as the drop in free memory, negative when it grew."""
+    return SimpleNamespace(
+        total_consumed=consumed,
+        transient_peak_headroom=0,
+        before_create=_snapshot(ANY_FREE_MEMORY, reserved_before),
+        after_profile=_snapshot(ANY_FREE_MEMORY - consumed, reserved_after),
+    )
+
+
+@pytest.fixture
+def rocm(request):
+    with patch.object(
+        gpu_worker, "current_platform", SimpleNamespace(is_rocm=lambda: request.param)
+    ):
+        yield request.param
+
+
+@pytest.mark.parametrize("rocm", [True, False], indirect=True)
+def test_profiling_fallback_declines_when_free_memory_dropped(rocm):
+    """The profiling measurement is kept as-is whenever free memory dropped."""
+    result = _profile_result(consumed=MEASURED_DROP)
+
+    assert maybe_rocm_profiling_fallback(result) is None
+
+
+@pytest.mark.parametrize("rocm", [True], indirect=True)
+def test_profiling_fallback_replaces_a_released_measurement(rocm):
+    """A negative measurement describes the rest of the device, so it is replaced
+    by this process's reservation, which the rest of the device cannot move."""
+    result = _profile_result(
+        consumed=-RELEASED_BY_OTHERS,
+        reserved_after=TORCH_RESERVED,
+    )
+
+    assert maybe_rocm_profiling_fallback(result) == TORCH_RESERVED
+
+
+@pytest.mark.parametrize("rocm", [True], indirect=True)
+def test_profiling_fallback_never_returns_a_negative_amount(rocm):
+    """A reservation that shrank across the run cannot become negative usage."""
+    result = _profile_result(
+        consumed=-RELEASED_BY_OTHERS,
+        reserved_before=TORCH_RESERVED,
+        reserved_after=0,
+    )
+
+    assert maybe_rocm_profiling_fallback(result) == 0
+
+
+@pytest.mark.parametrize("rocm", [False], indirect=True)
+def test_profiling_fallback_declines_off_rocm(rocm):
+    """Platforms that account frees eagerly keep reporting the error, so the
+    caller's assertion stays reachable there."""
+    result = _profile_result(consumed=-RELEASED_BY_OTHERS)
+
+    assert maybe_rocm_profiling_fallback(result) is None

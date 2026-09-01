@@ -25,7 +25,7 @@ from .factories import init_pooling_io_processors
 from .scoring.io_processor import ScoringIOProcessor
 from .scoring.typing import ScoreInput
 from .typing import (
-    ALLOfflineInputsContext,
+    AnyOfflineInputsContext,
     OfflineEncodeInputsContext,
     OfflineOutputsContext,
     OfflinePluginInputsContext,
@@ -104,7 +104,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         io_processor = self.pooling_io_processors[pooling_task]
 
-        ctx: ALLOfflineInputsContext
+        ctx: AnyOfflineInputsContext
         if isinstance(prompts, dict) and "data" in prompts:
             ctx = OfflinePluginInputsContext(
                 pooling_task=pooling_task,
@@ -173,7 +173,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 "Try converting the model using `--convert classify`."
             )
 
-        # plugin task uses io_processor.parse_request to verify inputs
+        # plugin task uses io_processor.parse_data to verify inputs
         if pooling_task != "plugin" and pooling_task != self.pooling_task:
             if pooling_task not in self.supported_tasks:
                 raise ValueError(
@@ -399,6 +399,9 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         num_requests: int,
         use_tqdm: bool | Callable[..., tqdm] = True,
     ):
+        if num_requests == 0:
+            raise ValueError("You must pass at least one prompt")
+
         # Keeping max_num_seqs * 2 requests in the core can already saturate the core.
         # Therefore, keep most requests waiting outside the core.
         max_requests_in_core = (

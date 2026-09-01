@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import vllm._custom_ops as ops
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
@@ -37,7 +38,12 @@ def _torch_topk_softplus_sqrt(
         assert input_ids is not None
         topk_ids = hash_indices_table[input_ids.long()]
     else:
-        topk_ids = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=True)[1]
+        # Match the fused kernel's deterministic tie-break: lower expert ids
+        # win when scores are equal. torch.topk does not guarantee which tied
+        # index it selects at the k-th boundary.
+        topk_ids = torch.argsort(
+            scores_for_choice, dim=-1, descending=True, stable=True
+        )[:, :topk]
 
     topk_weights = original_scores.gather(1, topk_ids.long())
     if renormalize:
@@ -45,6 +51,19 @@ def _torch_topk_softplus_sqrt(
     if routed_scaling_factor != 1.0:
         topk_weights = topk_weights * routed_scaling_factor
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
+
+def test_torch_topk_softplus_sqrt_breaks_ties_by_expert_id():
+    gating_output = torch.tensor([[2.0, 1.0, 1.0, 0.0]])
+
+    _, topk_ids = _torch_topk_softplus_sqrt(
+        gating_output,
+        topk=2,
+        renormalize=False,
+        routed_scaling_factor=1.0,
+    )
+
+    assert topk_ids.tolist() == [[0, 1]]
 
 
 def test_sqrtsoftplus_bias_uses_deepseek_v4_routing_method():
@@ -231,3 +250,119 @@ def test_dsv4_fast_topk(
         atol=2e-5,
         rtol=2e-5,
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize("use_hash", [False, True])
+@pytest.mark.parametrize("use_bias", [False, True])
+@pytest.mark.parametrize("use_padding_mask", [False, True])
+@pytest.mark.parametrize("pad_with_nan", [False, True])
+@pytest.mark.parametrize("num_experts", [128, 256, 384])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half, torch.float32])
+def test_fused_topk_softplus_sqrt_padding(
+    use_hash: bool,
+    use_bias: bool,
+    use_padding_mask: bool,
+    pad_with_nan: bool,
+    num_experts: int,
+    dtype: torch.dtype,
+):
+    """Verify explicit padding and NaN-padded rows do not affect real rows."""
+    torch.manual_seed(0)
+    num_tokens = 8
+    topk = 6
+    indices_dtype = torch.int32
+
+    gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
+
+    padding_rows = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
+    padding_rows[1::2] = True
+    if pad_with_nan:
+        gating_output[padding_rows] = float("nan")
+    is_padding = padding_rows if use_padding_mask else None
+
+    # A negative correction bias makes explicit pad rows look selectable unless
+    # the kernel uses the is_padding guard.
+    e_score_correction_bias = None
+    if use_bias:
+        e_score_correction_bias = (
+            -torch.rand((num_experts,), dtype=torch.float32, device="cuda") - 1.0
+        )
+
+    input_ids = None
+    hash_indices_table = None
+    if use_hash:
+        vocab_size = 64
+        hash_indices_table = torch.stack(
+            [torch.randperm(num_experts)[:topk] for _ in range(vocab_size)]
+        ).to(device="cuda", dtype=indices_dtype)
+        input_ids = torch.randint(
+            0, vocab_size, (num_tokens,), dtype=indices_dtype, device="cuda"
+        )
+
+    topk_weights = torch.empty(num_tokens, topk, dtype=torch.float32, device="cuda")
+    topk_ids = torch.empty(num_tokens, topk, dtype=indices_dtype, device="cuda")
+    token_expert_indices = torch.empty(
+        num_tokens, topk, dtype=torch.int32, device="cuda"
+    )
+
+    ops.topk_hash_softplus_sqrt(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        renormalize=True,
+        routed_scaling_factor=1.0,
+        e_score_correction_bias=e_score_correction_bias,
+        input_tokens=input_ids,
+        hash_indices_table=hash_indices_table,
+        is_padding=is_padding,
+    )
+
+    if use_padding_mask:
+        pad_ids = topk_ids[padding_rows]
+        pad_weights = topk_weights[padding_rows]
+        assert torch.equal(pad_ids, torch.full_like(pad_ids, -1)), (
+            f"Explicit pad rows should contain only -1 ids, got {pad_ids.tolist()}"
+        )
+        assert (pad_weights == 0).all(), (
+            "Explicit pad rows should have all-zero weights, "
+            f"got {pad_weights.tolist()}"
+        )
+
+    if pad_with_nan:
+        nan_pad_weights = topk_weights[padding_rows]
+        assert torch.isfinite(nan_pad_weights).all(), (
+            f"NaN-padded rows have non-finite weights, got {nan_pad_weights.tolist()}"
+        )
+        assert (nan_pad_weights == 0).all(), (
+            "NaN-padded rows should have all-zero weights, "
+            f"got {nan_pad_weights.tolist()}"
+        )
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=True,
+        routed_scaling_factor=1.0,
+        e_score_correction_bias=e_score_correction_bias,
+        input_ids=input_ids,
+        hash_indices_table=hash_indices_table,
+    )
+
+    rows_to_compare = torch.ones(num_tokens, dtype=torch.bool, device="cuda")
+    if use_padding_mask or pad_with_nan:
+        rows_to_compare = ~padding_rows
+
+    sorted_ref_ids, idx_ref = topk_ids_ref[rows_to_compare].sort(dim=-1)
+    sorted_ids, idx_ops = topk_ids[rows_to_compare].sort(dim=-1)
+    torch.testing.assert_close(
+        sorted_ref_ids, sorted_ids.to(sorted_ref_ids.dtype), atol=0, rtol=0
+    )
+
+    sorted_w_ref = topk_weights_ref[rows_to_compare].gather(1, idx_ref)
+    sorted_w = topk_weights[rows_to_compare].gather(1, idx_ops)
+    torch.testing.assert_close(sorted_w_ref, sorted_w, atol=2e-2, rtol=1e-2)
