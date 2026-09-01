@@ -92,6 +92,8 @@ steps:
 # correctness test on L4 until its H200 output matches the Transformers reference.
 - label: ":nvidia: (L4) Granite Language Model Compatibility"
   key: language-models-tests-granite-l4-compatibility
+  device: l4
+  num_devices: 1
   timeout_in_minutes: 65
   source_file_dependencies:
   - vllm/
