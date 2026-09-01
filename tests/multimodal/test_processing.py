@@ -1266,6 +1266,7 @@ def test_mm_processor_kwargs_merge_then_overlay_preserves_scoping():
     assert "size" not in overlay_modality_mm_kwargs(merged, "image")
     assert "size" not in overlay_modality_mm_kwargs(merged, None)
 
+
 def test_processor_inputs_hashes_partial_uuids():
     rng = np.random.RandomState(0)
     images = [random_image(rng, min_wh=8, max_wh=9) for _ in range(2)]

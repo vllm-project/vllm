@@ -21,9 +21,7 @@ class ProcessorInputs:
     mm_data_items: MultiModalDataItems
     mm_uuid_items: MultiModalUUIDItems | None = None
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
-    media_io_kwargs: Mapping[str, Mapping[str, object]] = field(
-        default_factory=dict
-    )
+    media_io_kwargs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
     def get_mm_hashes(
         self,
