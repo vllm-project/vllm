@@ -187,7 +187,7 @@ def response_input_to_harmony(
             raise ValueError(f"No call message found for {call_id}")
         msg = Message.from_author_and_content(
             Author.new(Role.TOOL, f"functions.{call_response.name}"),
-            response_msg["output"],
+            flatten_input_text_content(response_msg["output"]) or "",
         )
         msg = msg.with_channel("commentary")
         msg = msg.with_recipient("assistant")
