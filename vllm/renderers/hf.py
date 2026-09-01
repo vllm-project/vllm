@@ -509,6 +509,21 @@ def _consolidate_system_messages(
     return [merged, *non_system]
 
 
+_CONTENT_FORMATS_MAXSIZE = 32
+_CONTENT_FORMATS = dict[
+    tuple[str | None, bool, str, str | None, str | None, bool],
+    "ChatTemplateContentFormat",
+]()
+"""
+Used in `_resolve_chat_template_content_format` to avoid resolving and parsing
+the chat template on every request.
+
+`lru_cache` cannot be used because `tools` and `model_config` are unhashable, so
+the key holds the fields that select the template. Only the presence of `tools`
+matters: it picks the template, and its contents never reach the AST.
+"""
+
+
 def _resolve_chat_template_content_format(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
@@ -516,6 +531,17 @@ def _resolve_chat_template_content_format(
     *,
     model_config: ModelConfig,
 ) -> ChatTemplateContentFormat:
+    cache_key = (
+        chat_template,
+        tools is None,
+        tokenizer.name_or_path,
+        model_config.revision,
+        model_config.code_revision,
+        model_config.trust_remote_code,
+    )
+    if (cached_format := _CONTENT_FORMATS.get(cache_key)) is not None:
+        return cached_format
+
     resolved_chat_template = resolve_chat_template(
         tokenizer,
         chat_template=chat_template,
@@ -534,6 +560,11 @@ def _resolve_chat_template_content_format(
         if jinja_text is None
         else _detect_content_format(jinja_text, default="string")
     )
+
+    # Requests may carry their own chat template, so bound the cache.
+    if len(_CONTENT_FORMATS) >= _CONTENT_FORMATS_MAXSIZE:
+        _CONTENT_FORMATS.clear()
+    _CONTENT_FORMATS[cache_key] = detected_format
 
     return detected_format
 
