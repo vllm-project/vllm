@@ -45,7 +45,7 @@ def test_cached_prompt_tokens_are_exposed_by_physical_source():
             "device": 3,
             "cpu": 4,
             "disk": 0,
-            "mixed": 0,
+            "p2p": 0,
             "external": 0,
         }
     finally:
