@@ -4,8 +4,10 @@
 import contextlib
 import inspect
 import os
+import queue
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -2881,18 +2883,16 @@ def test_failed_request_skips_kv_postprocessing(
 def test_handles_failing_in_separate_polls_do_not_kill_the_engine(
     default_vllm_config, dist_init
 ):
-    """A request whose handles fail in different polls must not crash the engine.
+    """A request's failure report waits for its sibling handles to finish.
 
     One transfer handle is created per remote rank, and when a peer goes away
     they do not all fail in the same poll: one errors while another is still
-    PROC. The first failure reports the request via _failed_recv_reqs and
-    get_finished() pops its metadata; when the remaining handles fail in a
-    later poll, the request must be cleaned up without being reported again.
+    PROC. Reporting on the first failure lets the scheduler invalidate the
+    blocks and reassign them while the remaining handles may still be posting
+    RDMA writes into them, corrupting whichever request owns them next.
 
-    Reporting twice kills the EngineCore: the scheduler's assert in
-    _update_from_kv_xfer_finished only expects a finished recv for a request
-    still waiting for KVs, having moved this one out of
-    WAITING_FOR_REMOTE_KVS to recompute locally after the first report.
+    The report (and the block invalidation) is therefore deferred until every
+    handle of the request is terminal, and issued exactly once.
     """
     vllm_config = create_vllm_config()
     connector = NixlConnector(
@@ -2931,6 +2931,8 @@ def test_handles_failing_in_separate_polls_do_not_kill_the_engine(
     worker._recving_transfers[request_id] = [first, second]
 
     # Poll 1: the first handle has failed, the second is still running.
+    # The report must be deferred: the blocks are not invalidated while the
+    # sibling handle may still be writing into them.
     def first_failed(handle):
         return "ERR" if handle is first else "PROC"
 
@@ -2939,20 +2941,75 @@ def test_handles_failing_in_separate_polls_do_not_kill_the_engine(
     ):
         _, done_recving = connector.get_finished(finished_req_ids=set())
 
-    assert request_id in done_recving
-    assert request_id not in worker._recving_metadata
+    assert request_id not in done_recving
+    assert request_id in worker._recving_metadata
     assert worker._recving_transfers[request_id] == [second]
+    assert connector.get_block_ids_with_load_errors() == set()
 
-    # Poll 2: the second handle fails too. The request was already reported,
-    # so it must not be reported a second time: the scheduler has since moved
-    # it out of WAITING_FOR_REMOTE_KVS to recompute locally, and asserts on a
-    # finished recv for a request in that state. Its remaining handles are
-    # still released and the transfer entry removed.
+    # Poll 2: the second handle fails too. All handles are now terminal, so
+    # the request is reported exactly once, its blocks invalidated, and its
+    # remaining state cleaned up.
     with patch.object(worker.nixl_wrapper, "check_xfer_state", return_value="ERR"):
         _, done_recving = connector.get_finished(finished_req_ids=set())
 
-    assert request_id not in done_recving
+    assert request_id in done_recving
+    assert request_id not in worker._recving_metadata
     assert request_id not in worker._recving_transfers
+    assert connector.get_block_ids_with_load_errors() == {1, 2, 3}
+
+
+def _bare_worker_for_pop_done() -> NixlConnectorWorker:
+    """Minimal worker state for polling transfer handles directly."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker._failed_recv_pending = set()
+    worker._failed_recv_reported = set()
+    worker._failed_recv_lock = threading.Lock()
+    worker._failed_recv_reqs = queue.Queue()
+    worker._invalid_block_ids = queue.Queue()
+    worker._recving_metadata = {}
+    worker._is_hma_required = False
+    worker.xfer_stats = MagicMock()
+    worker._log_failure = MagicMock()
+    worker.nixl_wrapper = MagicMock()
+    return worker
+
+
+def test_send_side_transfer_failures_do_not_report_recv_failure():
+    """A failed WRITE is logged and cleaned up, never a receive failure.
+
+    The push worker polls its send handles through the same helper as the
+    receive path; reporting a send failure through the recv channel would
+    make the scheduler treat a purely outbound write error as a KV load
+    failure.
+    """
+    worker = _bare_worker_for_pop_done()
+    worker.nixl_wrapper.check_xfer_state.return_value = "ERR"
+
+    done = worker._pop_done_transfers({"send-req": [1]}, is_recv=False)
+    assert done == {"send-req"}
+    assert worker._failed_recv_reqs.empty()
+    assert worker._invalid_block_ids.empty()
+    assert worker._failed_recv_pending == set()
+
+    # The same failure on the receive side is reported exactly once.
+    assert worker._pop_done_transfers({"recv-req": [1]}, is_recv=True) == set()
+    assert worker._failed_recv_reqs.get_nowait() == "recv-req"
+
+
+def test_report_failed_recv_invalidates_all_block_groups():
+    """A failed recv invalidates every transfer group's blocks.
+
+    Heterogeneous caches give one request blocks in multiple groups;
+    invalidating only the first group would leave the rest reusable while
+    the failed transfer never wrote them.
+    """
+    worker = _bare_worker_for_pop_done()
+    worker._recving_metadata["req"] = SimpleNamespace(local_block_ids=([1, 2], [7], []))
+
+    worker._report_failed_recv("req")
+
+    assert worker._invalid_block_ids.get_nowait() == {1, 2, 7}
+    assert worker._failed_recv_reqs.get_nowait() == "req"
 
 
 def _set_test_speculative_config(

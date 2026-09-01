@@ -776,9 +776,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         done_sending, done_recving = super().get_finished()
 
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
-        # writer thread also appends to it, so guard the pop.
+        # writer thread also appends to it, so guard the pop. Send-side
+        # failures are outbound only: they must not be reported through
+        # the recv-failure channel.
         with self._sending_transfers_lock:
-            done_pushing = self._pop_done_transfers(self._sending_transfers)
+            done_pushing = self._pop_done_transfers(
+                self._sending_transfers, is_recv=False
+            )
         for req_id in done_pushing:
             self._reqs_to_send.pop(req_id, None)
             self._reqs_to_process.discard(req_id)
