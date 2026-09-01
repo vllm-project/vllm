@@ -243,6 +243,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         activation_quant_key: QuantKey | None,
     ):
         super().__init__(moe, weight_quant_key, activation_quant_key)
+        self.weight_dtype = "fp8"
         self.weight_qscheme = (
             "per_channel" if weight_quant_key == kFp8StaticChannelSym else "per_tensor"
         )
