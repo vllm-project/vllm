@@ -69,8 +69,8 @@ class DecodeBenchConnectorMetadata(KVConnectorMetadata):
 
     # request_id -> (block_ids_per_group, num_tokens_to_fill)
     # block_ids_per_group is a tuple of lists, one per KV cache group
-    # For standard attention: single group, e.g., ([1, 2, 3],)
-    # For MLA: multiple groups, e.g., ([1, 2], [1, 2])
+    # One group: ([1, 2, 3],)
+    # Multiple groups: ([1, 2], [5, 6])
     reqs_to_fill: dict[str, tuple[tuple[list[int], ...], int]]
 
 
@@ -238,8 +238,7 @@ class DecodeBenchConnectorScheduler:
         Called after blocks are allocated. Store the block IDs so we can
         fill them with dummy values.
 
-        Supports both standard attention (single KV cache group) and MLA
-        (multiple KV cache groups).
+        Supports both single- and multi-group KV cache configurations.
         """
         req_id = request.request_id
 
@@ -248,16 +247,13 @@ class DecodeBenchConnectorScheduler:
 
         # Get the block IDs that were allocated
         # block_groups is a tuple of lists, one per KV cache group
-        # For standard attention: 1 group
-        # For MLA: multiple groups (one per attention type)
         block_groups = blocks.get_block_ids()
 
         # Calculate how many blocks we need to fill
         # num_external_tokens are the tokens we said we'd provide
         num_blocks_to_fill = cdiv(num_external_tokens, self.block_size)
 
-        # Extract the first num_blocks_to_fill blocks from each group
-        # All groups should have the same block IDs for the same request
+        # Extract up to num_blocks_to_fill independently from each group
         block_ids_per_group = tuple(
             group_blocks[:num_blocks_to_fill] for group_blocks in block_groups
         )
@@ -337,7 +333,7 @@ class DecodeBenchConnectorWorker:
         This simulates having a populated KV cache from a prefill phase,
         allowing decode performance testing with larger context sizes.
 
-        Supports both standard attention (single group) and MLA (multiple groups).
+        Supports both single- and multi-group KV cache configurations.
         """
         if not metadata.reqs_to_fill:
             return
