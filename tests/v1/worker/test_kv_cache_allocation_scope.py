@@ -125,11 +125,14 @@ def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     worker = cast(
         Worker,
         SimpleNamespace(
-            _get_sleep_mode_backend=lambda: SimpleNamespace(resume=lambda tags: None),
+            sleep_mode_backend=SimpleNamespace(resume=lambda tags: None),
             _sleep_saved_buffers={},
             _sleep_saved_draft_buffers={},
             model_runner=runner,
             synchronize_device=lambda: None,
+            vllm_config=SimpleNamespace(
+                model_config=SimpleNamespace(enable_nccl_comm_suspend=False)
+            ),
         ),
     )
     layout_tensors = runner.layout_tensors

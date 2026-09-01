@@ -18,8 +18,6 @@ class _TestReplaySSMMixer(MambaMixer2):
         torch.nn.Module.__init__(self)
         self.use_replayssm = True
         self.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
-        self.cache_config = SimpleNamespace(mamba_cache_mode="none")
-        self.replayssm_buffer_len = 16
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_query_len = torch.empty(0, dtype=torch.int32)
@@ -27,10 +25,10 @@ class _TestReplaySSMMixer(MambaMixer2):
         self._updates_replayssm_trackers = True
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
-        return self._state_shapes
+        return ((2,), (3,), (4,), (5,), (6,))
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
-        return self._state_dtypes
+        return (torch.float32,) * 5
 
     def get_replayssm_state_shape(self) -> tuple[tuple[int, ...], ...]:
         return ((4,), (5,), (6,))
@@ -75,7 +73,7 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
         },
     )
 
-    assert all(len(mixer.kv_cache) == 5 for mixer in mixers)
+    assert all(len(mixer.kv_cache) == 2 for mixer in mixers)
 
     assert (
         mixers[0]._replayssm_ring_start.data_ptr()

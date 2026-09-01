@@ -38,6 +38,13 @@ PROMPTS = [
     "Once upon a time, in a small village,",
 ]
 
+try:
+    from flashinfer.mamba.checkpointing_ssu import CheckpointingSSURunner
+
+    HAS_FLASHINFER_CHECKPOINTING_SSU = callable(CheckpointingSSURunner)
+except ImportError:
+    HAS_FLASHINFER_CHECKPOINTING_SSU = False
+
 
 def _check_replayssm_parity(
     vllm_runner,
@@ -97,12 +104,9 @@ def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
     _check_replayssm_parity(vllm_runner, model_name, tensor_parallel_size=2)
 
 
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
 @pytest.mark.parametrize("model_name", MODELS)
 def test_replayssm_flashinfer_decode_matches_baseline(vllm_runner, model_name):
+    pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
     _check_replayssm_parity(
         vllm_runner,
         model_name,
