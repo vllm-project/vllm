@@ -15,17 +15,11 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     from vllm.compilation.backends import set_model_tag
     from vllm.model_executor.models.qwen3_dflash import (
         dflash_has_any_non_causal,
-        dflash_target_rope_is_neox_style,
     )
 
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
-    # The drafter must rotate Q/K the way its target does. Take that from the
-    # built target before super() constructs the draft.
-    is_neox_style = dflash_target_rope_is_neox_style(target_model)
-    if is_neox_style is not None:
-        draft_model_config.hf_config.is_neox_style = is_neox_style
     # Select an attention backend that supports the drafter's attention: mixing
     # a non-causal layer onto a causal-only backend would fail.
     draft_vllm_config = replace(

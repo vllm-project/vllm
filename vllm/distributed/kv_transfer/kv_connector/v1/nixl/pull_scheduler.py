@@ -155,12 +155,23 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     local_block_ids = self.get_exchange_clipped_blocks(
                         unhashed_local_block_ids
                     )
+                    # Blocks covered by the local prefix cache, per KV cache group.
+                    # Each count fixes where that group's DCP slice starts, which the
+                    # worker needs to line up with the remote's slice.
+                    local_num_computed_blocks = tuple(
+                        sum(
+                            block.block_hash is not None and not block.is_null
+                            for block in group
+                        )
+                        for group in blocks.blocks
+                    )
 
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
                     # cache hit is indicated with an empty list.
                     self._reqs_need_recv[request.request_id] = (
                         request,
                         local_block_ids,
+                        local_num_computed_blocks,
                     )
 
                 else:
@@ -213,7 +224,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
-            self._reqs_need_recv[request.request_id] = (request, [])
+            self._reqs_need_recv[request.request_id] = (request, [], ())
             params["do_remote_prefill"] = False
             return False, None
 
@@ -272,6 +283,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
+            pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
             remote_blocks_expiry_time=blocks_expiry_time,
             transfer_mode=self._TRANSFER_MODE,
