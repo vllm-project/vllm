@@ -225,6 +225,7 @@ def test_kv_connector_builds_worker_metadata_after_polling_completions():
 
     active_connector = ActiveKVConnector.__new__(ActiveKVConnector)
     active_connector._disabled = False
+    active_connector._pending_load_start = False
     active_connector.kv_connector = connector
 
     active_connector.post_forward(set())
