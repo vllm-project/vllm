@@ -2,7 +2,7 @@ group: JIT Monitor XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: No Runtime JITs e2e tests
+- label: ':nvidia: (H200 MIG 35GB) No Runtime JITs E2E'
   device: intel_gpu
   timeout_in_minutes: 45
   working_dir: .
