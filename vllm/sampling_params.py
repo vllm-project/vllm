@@ -531,6 +531,14 @@ class SamplingParams(
             self.bad_words = []
         else:
             self.bad_words = list(dict.fromkeys(self.bad_words))
+        max_num_bad_words = envs.VLLM_MAX_NUM_BAD_WORDS
+        if len(self.bad_words) > max_num_bad_words:
+            raise VLLMValidationError(
+                f"Too many bad_words: {len(self.bad_words)}. "
+                f"The max number is {max_num_bad_words}.",
+                parameter="bad_words",
+                value=self.bad_words,
+            )
 
         if self.logprobs is True:
             self.logprobs = 1
@@ -754,6 +762,16 @@ class SamplingParams(
                             parameter="bad_words",
                             value=self.bad_words,
                         )
+
+        total_tokens = sum(len(ids) for ids in self._bad_words_token_ids)
+        max_total_tokens = envs.VLLM_MAX_BAD_WORDS_TOTAL_TOKENS
+        if total_tokens > max_total_tokens:
+            raise VLLMValidationError(
+                f"Too many total bad word tokens: {total_tokens}. "
+                f"The max is {max_total_tokens}.",
+                parameter="bad_words",
+                value=self.bad_words,
+            )
 
         invalid_token_ids = [
             token_id

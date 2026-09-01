@@ -12,6 +12,7 @@ import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
+    BadWordsParam,
     PerRequestMetrics,
     StopParam,
     StopTokenIdsParam,
@@ -106,7 +107,7 @@ class CompletionRequest(OpenAIBaseModel):
             "set."
         ),
     )
-    bad_words: list[str] = Field(default_factory=list)
+    bad_words: BadWordsParam = Field(default_factory=list)
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
