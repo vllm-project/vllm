@@ -18,11 +18,23 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
+    _flatten_row_mirrors,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
+
+
+def test_hisparse_row_mirrors_follow_runner_request_order():
+    first = SparseKVRowMirror((1,), 10, 1)
+    second = SparseKVRowMirror((2,), 20, 1)
+    row_mirrors = {"first": (first,), "second": (second,)}
+
+    assert _flatten_row_mirrors(row_mirrors, ["second", "first"]) == (
+        second,
+        first,
+    )
 
 
 def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
@@ -182,73 +194,6 @@ def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
     worker.host_write_event.record.assert_called_once_with(worker.dma_stream)
     event.record.assert_called_once_with(worker.dma_stream)
     assert worker._dma_submitted
-
-
-def test_hisparse_slot_mapping_wait_is_deferred_until_first_dma(monkeypatch):
-    worker = object.__new__(HiSparseConnectorWorker)
-    worker.is_host_writer = True
-    worker.kernel_block_size = 64
-    worker.dma_stream = MagicMock()
-    worker._slot_mapping_host = torch.empty(4, dtype=torch.int64)
-    worker._slot_mapping_ready_event = MagicMock()
-    worker.cache_handles = [
-        SimpleNamespace(mirror_slot_mapping=torch.tensor([64, 65, 130, 131]))
-    ]
-    worker._set_row_mirrors(
-        (
-            SparseKVRowMirror((10, 20), 64, 2),
-            SparseKVRowMirror((12, 22), 130, 2),
-        )
-    )
-    current_stream = MagicMock()
-    monkeypatch.setattr(
-        hisparse_worker_module, "current_stream", lambda: current_stream
-    )
-    monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
-
-    worker._enqueue_slot_mapping_copy()
-
-    worker.dma_stream.wait_stream.assert_called_once_with(current_stream)
-    worker._slot_mapping_ready_event.record.assert_called_once_with(worker.dma_stream)
-    worker._slot_mapping_ready_event.synchronize.assert_not_called()
-
-    worker._materialize_row_mirror_destinations()
-
-    worker._slot_mapping_ready_event.synchronize.assert_called_once_with()
-    assert worker._row_mirrors == (
-        SparseKVRowMirror((10, 20), 64, 2),
-        SparseKVRowMirror((12, 22), 130, 2),
-    )
-    assert not worker._slot_mapping_pending
-
-
-def test_hisparse_slot_mapping_uses_runner_request_order(monkeypatch):
-    worker = object.__new__(HiSparseConnectorWorker)
-    worker.is_host_writer = True
-    worker.kernel_block_size = 64
-    worker.dma_stream = MagicMock()
-    worker._slot_mapping_host = torch.empty(3, dtype=torch.int64)
-    worker._slot_mapping_ready_event = MagicMock()
-    worker.cache_handles = [
-        SimpleNamespace(mirror_slot_mapping=torch.tensor([64, 130, 131]))
-    ]
-    row_mirrors = {
-        "prefill": (SparseKVRowMirror((20,), 130, 2),),
-        "decode": (SparseKVRowMirror((10,), 64, 1),),
-    }
-    worker._set_row_mirrors(
-        hisparse_worker_module._flatten_row_mirrors(row_mirrors, ("decode", "prefill"))
-    )
-    monkeypatch.setattr(hisparse_worker_module, "current_stream", MagicMock())
-    monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
-
-    worker._enqueue_slot_mapping_copy()
-    worker._materialize_row_mirror_destinations()
-
-    assert worker._row_mirrors == (
-        SparseKVRowMirror((10,), 64, 1),
-        SparseKVRowMirror((20,), 130, 2),
-    )
 
 
 def test_hisparse_row_mirror_count_must_match_forward():

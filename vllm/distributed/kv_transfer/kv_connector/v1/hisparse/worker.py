@@ -82,46 +82,6 @@ def _flatten_row_mirrors(
     )
 
 
-def _replace_row_mirror_destinations(
-    mirrors: tuple[SparseKVRowMirror, ...], destination_slots: np.ndarray
-) -> tuple[SparseKVRowMirror, ...]:
-    expected_rows = sum(mirror.num_rows for mirror in mirrors)
-    if destination_slots.ndim != 1 or destination_slots.size != expected_rows:
-        raise RuntimeError(
-            "HiSparse DMA destinations do not match the forward: "
-            f"{destination_slots.size} destinations for {expected_rows} rows."
-        )
-    if np.any(destination_slots < 0):
-        raise RuntimeError("HiSparse DMA destination contains an invalid slot.")
-
-    result: list[SparseKVRowMirror] = []
-    cursor = 0
-    for mirror in mirrors:
-        destinations = destination_slots[cursor : cursor + mirror.num_rows]
-        run_starts = np.concatenate(
-            (
-                np.array([0], dtype=np.int64),
-                np.flatnonzero(np.diff(destinations) != 1) + 1,
-            )
-        )
-        run_ends = np.concatenate(
-            (run_starts[1:], np.array([mirror.num_rows], dtype=np.int64))
-        )
-        for run_start, run_end in zip(run_starts, run_ends, strict=True):
-            offset = int(run_start)
-            result.append(
-                SparseKVRowMirror(
-                    source_starts=tuple(
-                        source_start + offset for source_start in mirror.source_starts
-                    ),
-                    destination_start=int(destinations[offset]),
-                    num_rows=int(run_end - run_start),
-                )
-            )
-        cursor += mirror.num_rows
-    return tuple(result)
-
-
 def _is_hisparse_host_writer(
     shared_host_region: SharedOffloadRegion | None,
 ) -> bool:
@@ -252,15 +212,6 @@ class HiSparseConnectorWorker:
         self._submitted_mirror_layers: set[int] = set()
         self._layer_ready_events = tuple(torch.Event() for _ in cache_handles)
         self._forward_ready_event = torch.Event()
-        self._slot_mapping_host = torch.empty(
-            self.vllm_config.scheduler_config.max_num_batched_tokens,
-            dtype=torch.int64,
-            pin_memory=True,
-        )
-        self._slot_mapping_ready_event = torch.Event()
-        self._slot_mapping_pending = False
-        self._slot_mapping_source_ptr: int | None = None
-        self._slot_mapping_materialized = True
         self._set_row_mirrors(())
         self.host_write_events = _create_hisparse_host_events(
             shared_host_region, is_host_writer, device
@@ -286,8 +237,6 @@ class HiSparseConnectorWorker:
                 "HiSparse request-state mapping does not match max_num_seqs."
             )
         self.hot_backing = hot_backing
-        self._block_staging: torch.Tensor | None = None
-        self._block_staging_event: torch.Event | None = None
         self._pending_invalid_block_ids: list[int] = []
         self._post_forward_transfers: list[SparseKVPageTransfer] = []
         self._enqueued_transfer_ids: list[int] = []
@@ -363,9 +312,6 @@ class HiSparseConnectorWorker:
         self._release_completed_dma_descriptors()
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
         self._set_row_mirrors(mirrors)
-        self._slot_mapping_materialized = not mirrors
-        if mirrors:
-            self._enqueue_slot_mapping_copy()
         self._dma_submitted = False
         self._per_layer_mirrored.clear()
         self._submitted_mirror_layers.clear()
@@ -431,19 +377,8 @@ class HiSparseConnectorWorker:
         if not block_ids:
             return
         device = self.cache_handles[0].runtime.device
-        num_blocks = len(block_ids)
-        if self._block_staging is None or self._block_staging.shape[0] < num_blocks:
-            size = 1 << max(10, (num_blocks - 1).bit_length())
-            self._block_staging = torch.empty(size, dtype=torch.long, pin_memory=True)
-            self._block_staging_event = None
-        if self._block_staging_event is not None:
-            self._block_staging_event.synchronize()
-        staging = self._block_staging[:num_blocks]
-        staging.copy_(torch.from_numpy(np.asarray(block_ids, dtype=np.int64)))
+        staging = torch.tensor(block_ids, dtype=torch.int32, pin_memory=True)
         blocks = staging.to(device, dtype=torch.int32, non_blocking=True)
-        if self._block_staging_event is None:
-            self._block_staging_event = torch.Event()
-        self._block_staging_event.record(current_stream())
         offsets = torch.arange(self.kernel_block_size, dtype=torch.int32, device=device)
         slots = (blocks[:, None] * self.kernel_block_size + offsets[None, :]).flatten()
         sorted_slots = torch.sort(slots).values
@@ -525,45 +460,6 @@ class HiSparseConnectorWorker:
             self._row_mirror_source_starts = np.empty((0, 0), dtype=np.int64)
         self._row_mirror_num_rows = int(self._row_mirror_counts.sum())
 
-    def _enqueue_slot_mapping_copy(
-        self, cache: HiSparseCacheHandle | None = None
-    ) -> None:
-        self._slot_mapping_pending = False
-        if not self.is_host_writer or not self._row_mirror_num_rows:
-            return
-        if cache is None:
-            cache = self.cache_handles[0]
-        slot_mapping = cache.mirror_slot_mapping
-        if slot_mapping is None:
-            raise RuntimeError("HiSparse host mirror has no destination slot mapping.")
-        num_rows = self._row_mirror_num_rows
-        if num_rows > self._slot_mapping_host.numel():
-            raise RuntimeError(
-                "HiSparse host mirror exceeds slot-mapping staging capacity: "
-                f"{num_rows} > {self._slot_mapping_host.numel()}."
-            )
-        stream = self.dma_stream
-        assert stream is not None
-        stream.wait_stream(current_stream())
-        with torch.cuda.stream(stream):
-            self._slot_mapping_host[:num_rows].copy_(
-                slot_mapping[:num_rows], non_blocking=True
-            )
-        self._slot_mapping_ready_event.record(stream)
-        self._slot_mapping_pending = True
-        self._slot_mapping_source_ptr = slot_mapping.data_ptr()
-
-    def _materialize_row_mirror_destinations(self) -> None:
-        if not getattr(self, "_slot_mapping_pending", False):
-            return
-        self._slot_mapping_ready_event.synchronize()
-        destination_slots = self._slot_mapping_host[: self._row_mirror_num_rows].numpy()
-        self._set_row_mirrors(
-            _replace_row_mirror_destinations(self._row_mirrors, destination_slots)
-        )
-        self._slot_mapping_pending = False
-        self._slot_mapping_materialized = True
-
     def _require_row_mirrors(self, num_rows: int) -> tuple[SparseKVRowMirror, ...]:
         if self._row_mirror_num_rows != num_rows:
             raise RuntimeError(
@@ -581,17 +477,6 @@ class HiSparseConnectorWorker:
             or not self.is_host_writer
         ):
             return
-        if not getattr(self, "_slot_mapping_materialized", True):
-            cache = self.cache_handles[layer_indices[0]]
-            slot_mapping = cache.mirror_slot_mapping
-            if slot_mapping is None:
-                raise RuntimeError("HiSparse host mirror has no destination mapping.")
-            if (
-                not self._slot_mapping_pending
-                or self._slot_mapping_source_ptr != slot_mapping.data_ptr()
-            ):
-                self._enqueue_slot_mapping_copy(cache)
-            self._materialize_row_mirror_destinations()
         mirrors = self._row_mirrors
         num_layers = len(layer_indices)
         descriptor_count = len(mirrors) * num_layers
