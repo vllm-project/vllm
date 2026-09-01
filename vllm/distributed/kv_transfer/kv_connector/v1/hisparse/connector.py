@@ -74,8 +74,11 @@ class HiSparseConnectorWorkerMetadata(KVConnectorWorkerMetadata):
 
 
 class HiSparseConnectorScheduler:
-    def __init__(self, coordinator: HiSparseCoordinator) -> None:
+    def __init__(
+        self, coordinator: HiSparseCoordinator, *, row_mirror_enabled: bool
+    ) -> None:
         self.coordinator = coordinator
+        self.row_mirror_enabled = row_mirror_enabled
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -120,13 +123,14 @@ class HiSparseConnectorScheduler:
             )
         )
         row_mirrors = {}
-        for (
-            request_id,
-            scheduled_count,
-        ) in scheduler_output.num_scheduled_tokens.items():
-            row_mirrors[request_id] = self.coordinator.build_row_mirrors(
-                ((request_id, num_computed_tokens[request_id], scheduled_count),),
-            )
+        if self.row_mirror_enabled:
+            for (
+                request_id,
+                scheduled_count,
+            ) in scheduler_output.num_scheduled_tokens.items():
+                row_mirrors[request_id] = self.coordinator.build_row_mirrors(
+                    ((request_id, num_computed_tokens[request_id], scheduled_count),),
+                )
         return HiSparseConnectorMetadata(
             command,
             host_block_copies,
@@ -170,7 +174,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         if role == KVConnectorRole.SCHEDULER:
             if coordinator is None:
                 raise ValueError("HiSparse scheduler requires a coordinator.")
-            self.connector_scheduler = HiSparseConnectorScheduler(coordinator)
+            self.connector_scheduler = HiSparseConnectorScheduler(
+                coordinator,
+                row_mirror_enabled=not (
+                    vllm_config.scheduler_config.async_scheduling
+                    and vllm_config.speculative_config is not None
+                ),
+            )
         elif role == KVConnectorRole.WORKER:
             if coordinator is not None:
                 raise ValueError("HiSparse worker cannot receive a coordinator.")

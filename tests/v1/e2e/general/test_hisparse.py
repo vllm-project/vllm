@@ -22,6 +22,14 @@ HF_OVERRIDES = {
 }
 
 
+def _shrink_config(config):
+    overrides = HF_OVERRIDES.copy()
+    if any("MTP" in architecture for architecture in config.architectures):
+        overrides.pop("num_hidden_layers")
+    config.update(overrides)
+    return config
+
+
 def _num_hisparse_spills(runner: VllmRunner) -> int:
     client = runner.llm.llm_engine.engine_core
     coordinator = client.engine_core.scheduler.kv_cache_manager.hisparse_coordinator
@@ -63,22 +71,23 @@ def test_hisparse_spill_and_prefix_restore(
     with vllm_runner(
         MODEL,
         load_format="dummy",
-        hf_overrides=HF_OVERRIDES,
+        hf_overrides=_shrink_config,
         attention_config=AttentionConfig(
             hisparse_config=HiSparseConfig(
                 host_pool_gib=1,
-                device_buffer_size=128,
+                device_buffer_size=512,
             )
         ),
         block_size=64,
         max_model_len=320,
         max_num_batched_tokens=1024,
         max_num_seqs=4,
-        num_gpu_blocks_override=56,
+        num_gpu_blocks_override=128,
         kv_offloading_size=kv_offloading_size,
         disable_log_stats=False,
         enable_chunked_prefill=True,
         enable_prefix_caching=True,
+        speculative_config={"method": "mtp", "num_speculative_tokens": 3},
         compilation_config={"cudagraph_capture_sizes": [1, 4]},
     ) as runner:
         expected = runner.generate_greedy([target], max_tokens=8)

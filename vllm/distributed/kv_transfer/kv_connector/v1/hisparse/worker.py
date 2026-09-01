@@ -122,6 +122,10 @@ class HiSparseConnectorWorker:
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> None:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
+        self.row_mirror_enabled = not (
+            vllm_config.scheduler_config.async_scheduling
+            and vllm_config.speculative_config is not None
+        )
         self._initialized = False
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
@@ -248,6 +252,8 @@ class HiSparseConnectorWorker:
             partial(self._enqueue_layer_mirror, layer_index)
             for layer_index in range(len(cache_handles))
         )
+        for handle in cache_handles:
+            handle.row_mirror_enabled = self.row_mirror_enabled
         self._initialized = True
 
     def set_request_state_indices(self, indices: torch.Tensor) -> None:
@@ -584,7 +590,7 @@ class HiSparseConnectorWorker:
     def _enqueue_pre_forward_transfers(
         self, transfers: list[SparseKVPageTransfer]
     ) -> None:
-        if self.cache_handles[0].runtime.eager_host_mirror:
+        if self.row_mirror_enabled and self.cache_handles[0].runtime.eager_host_mirror:
             self._record_transfer_completion(transfers)
         else:
             self._enqueue_transfers(transfers)
@@ -748,7 +754,7 @@ class HiSparseConnectorWorker:
         transfers = self._post_forward_transfers
         self._post_forward_transfers = []
         self._enqueue_host_mirror(self._forward_ready_event)
-        if self.cache_handles[0].runtime.eager_host_mirror:
+        if self.row_mirror_enabled and self.cache_handles[0].runtime.eager_host_mirror:
             self._record_transfer_completion(transfers)
         else:
             self._enqueue_transfers(transfers)
