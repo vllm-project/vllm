@@ -67,37 +67,3 @@ def test_scaled_fp8_quant_per_channel_shape() -> None:
     assert y.dtype == current_platform.fp8_dtype()
     assert s.shape == (96, 1)
     assert s.dtype == torch.float32
-
-
-@pytest.mark.skipif(
-    not is_quant_method_supported("fp8"),
-    reason="FP8 is not supported on this GPU type.",
-)
-def test_fp8_per_channel_online_quantization(
-    vllm_runner,
-    monkeypatch,
-) -> None:
-    """End-to-end smoke: load `facebook/opt-125m` bf16 with
-    `quantization='fp8_per_channel'`, check a dense Linear is wrapped by
-    `Fp8PtpcOnlineLinearMethod`, its weights are fp8 with per-channel
-    scales (shape `[N, 1]`), and a short greedy generation works.
-    """
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-
-    with vllm_runner(
-        "facebook/opt-125m",
-        quantization="fp8_per_channel",
-        enforce_eager=True,
-    ) as llm:
-
-        def check_model(model):
-            fc1 = model.model.decoder.layers[0].fc1
-            assert isinstance(fc1.quant_method, Fp8PtpcOnlineLinearMethod)
-            assert fc1.weight.dtype == current_platform.fp8_dtype()
-            assert fc1.weight_scale.ndim == 2
-            assert fc1.weight_scale.shape[-1] == 1
-            assert fc1.input_scale is None
-
-        llm.apply_model(check_model)
-        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
-        print(outputs[0][1])

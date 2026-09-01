@@ -759,6 +759,7 @@ class BaseRenderer(ABC, Generic[_T]):
         mm_data: MultiModalDataDict,
         mm_uuids: MultiModalUUIDDict | None,
         mm_processor_kwargs: Mapping[str, object] | None,
+        media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
         *,
         skip_mm_cache: bool = False,
     ) -> "MultiModalInput":
@@ -781,6 +782,7 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_data_items,
             mm_uuid_items,
             hf_processor_mm_kwargs=mm_processor_kwargs or {},
+            media_io_kwargs=media_io_kwargs or {},
         )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 
@@ -809,6 +811,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 multi_modal_data,
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
                 mm_uuids=prompt.get("multi_modal_uuids"),
+                media_io_kwargs=prompt.get("media_io_kwargs"),
                 skip_mm_cache=skip_mm_cache,
             )
         else:
@@ -871,6 +874,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 multi_modal_data,
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
                 mm_uuids=prompt.get("multi_modal_uuids"),
+                media_io_kwargs=prompt.get("media_io_kwargs"),
                 skip_mm_cache=skip_mm_cache,
             )
         else:
@@ -910,6 +914,15 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return await self._process_tokens_async(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
 
+    def _get_skip_decoder_start_token(self) -> bool:
+        """Whether the multimodal processor supplies a complete decoder prefix."""
+        if self.mm_processor is not None:
+            from vllm.multimodal.processing import EncDecMultiModalProcessor
+
+            if isinstance(self.mm_processor, EncDecMultiModalProcessor):
+                return self.mm_processor.skip_decoder_start_token
+        return False
+
     def _process_enc_dec(
         self,
         prompt: EncoderDecoderTokPrompt,
@@ -918,13 +931,6 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> EncoderDecoderInput:
         enc_prompt = prompt["encoder_prompt"]
         dec_prompt = prompt["decoder_prompt"]
-
-        skip_decoder_start_token = False
-        if self.mm_processor is not None:
-            from vllm.multimodal.processing import EncDecMultiModalProcessor
-
-            if isinstance(self.mm_processor, EncDecMultiModalProcessor):
-                skip_decoder_start_token = self.mm_processor.skip_decoder_start_token
 
         return build_enc_dec_input(
             encoder_input=self._process_singleton(
@@ -936,7 +942,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 else self._process_singleton(dec_prompt, skip_mm_cache=skip_mm_cache)
             ),
             decoder_start_token_id=self.get_dec_start_token_id(),
-            skip_decoder_start_token=skip_decoder_start_token,
+            skip_decoder_start_token=self._get_skip_decoder_start_token(),
         )
 
     async def _process_enc_dec_async(
@@ -963,6 +969,7 @@ class BaseRenderer(ABC, Generic[_T]):
             encoder_input=encoder_input,
             decoder_input=decoder_input,
             decoder_start_token_id=self.get_dec_start_token_id(),
+            skip_decoder_start_token=self._get_skip_decoder_start_token(),
         )
 
     def process_for_engine(
@@ -1082,6 +1089,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
 
+        prompt_extras = dict(prompt_extras or {})
+        prompt_extras["media_io_kwargs"] = chat_params.media_io_kwargs or {}
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
         eng_prompts = [
@@ -1118,6 +1127,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
 
+        prompt_extras = dict(prompt_extras or {})
+        prompt_extras["media_io_kwargs"] = chat_params.media_io_kwargs or {}
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
         eng_prompts = await asyncio.gather(
