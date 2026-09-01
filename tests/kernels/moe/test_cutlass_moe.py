@@ -131,6 +131,52 @@ def test_nvfp4_clamp_allows_shared_activation_backends(
     assert selected == expected
 
 
+@pytest.mark.skipif(
+    (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
+        current_platform.get_device_capability()
+    ),
+    reason="Grouped gemm is not supported on this GPU type.",
+)
+def test_cutlass_moe_permutation_maps_padding_to_zero():
+    """Invalid top-k routes must not leave unsafe permutation-map entries."""
+    num_experts = 2
+    topk_ids = torch.tensor(
+        [[0, -1], [1, num_experts]], device="cuda", dtype=torch.int32
+    )
+    num_routes = topk_ids.numel()
+
+    expert_offsets = torch.empty(num_experts + 1, device="cuda", dtype=torch.int32)
+    blockscale_offsets = torch.empty_like(expert_offsets)
+    problem_sizes1 = torch.empty(num_experts, 3, device="cuda", dtype=torch.int32)
+    problem_sizes2 = torch.empty_like(problem_sizes1)
+    input_permutation = torch.empty(num_routes, device="cuda", dtype=torch.int32)
+    output_permutation = torch.empty_like(input_permutation)
+
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_experts,
+        128,
+        128,
+        blockscale_offsets,
+    )
+
+    input_tensor = torch.randn(2, 128, device="cuda", dtype=torch.bfloat16)
+    permuted = ops.shuffle_rows(input_tensor, input_permutation)
+    restored = ops.shuffle_rows(permuted, output_permutation)
+
+    torch.testing.assert_close(permuted[:2], input_tensor)
+    torch.testing.assert_close(permuted[2:], torch.zeros_like(permuted[2:]))
+    torch.testing.assert_close(restored[0], input_tensor[0])
+    torch.testing.assert_close(restored[1], torch.zeros_like(restored[1]))
+    torch.testing.assert_close(restored[2], input_tensor[1])
+    torch.testing.assert_close(restored[3], torch.zeros_like(restored[3]))
+
+
 @dataclasses.dataclass
 class MOETensors:
     a: torch.Tensor
