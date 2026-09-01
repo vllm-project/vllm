@@ -195,19 +195,22 @@ class AsyncLLM(EngineClient):
                 profiler_dir,
             )
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
+            # Held rather than passed as on_trace_ready so that stop() only
+            # ends the trace and the export can run off the event loop.
+            self.frontend_trace_handler = torch.profiler.tensorboard_trace_handler(
+                profiler_dir,
+                worker_name=worker_name,
+                use_gzip=vllm_config.profiler_config.torch_profiler_use_gzip,
+            )
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
                 ],
                 with_stack=vllm_config.profiler_config.torch_profiler_with_stack,
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    profiler_dir,
-                    worker_name=worker_name,
-                    use_gzip=vllm_config.profiler_config.torch_profiler_use_gzip,
-                ),
             )
         else:
             self.profiler = None
+            self.frontend_trace_handler = None
 
     @classmethod
     def from_vllm_config(
@@ -1017,16 +1020,40 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
+    async def _start_frontend_profiler(self) -> None:
+        """Start the frontend profiler on the event loop thread.
+
+        Kineto binds its client to the thread that starts the profiler, and
+        records only that thread's work. Started from a worker thread it
+        captures nothing, and a stop() landing on a different pool thread
+        crashes the process. See
+        https://github.com/vllm-project/vllm/issues/39603
+
+        A coroutine so it can join the gather below, keeping the EngineCore
+        request concurrent with it.
+        """
+        self.profiler.start()
+
+    async def _stop_frontend_profiler(self) -> None:
+        """Stop the frontend profiler and export its trace off the loop.
+
+        stop() has to stay on the thread that started the profiler, but the
+        export does not, and the export is the expensive half: it serializes
+        and compresses every recorded event.
+        """
+        self.profiler.stop()
+        await asyncio.to_thread(self.frontend_trace_handler, self.profiler)
+
     async def start_profile(self, profile_prefix: str | None = None) -> None:
         coros = [self.engine_core.profile_async(True, profile_prefix)]
         if self.profiler is not None:
-            coros.append(asyncio.to_thread(self.profiler.start))
+            coros.append(self._start_frontend_profiler())
         await asyncio.gather(*coros)
 
     async def stop_profile(self) -> None:
         coros = [self.engine_core.profile_async(False)]
         if self.profiler is not None:
-            coros.append(asyncio.to_thread(self.profiler.stop))
+            coros.append(self._stop_frontend_profiler())
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
