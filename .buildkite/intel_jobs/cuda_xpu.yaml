@@ -2,7 +2,7 @@ group: CUDA XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: Platform Tests
+- label: ':nvidia: (H200 MIG 18GB) CUDA Platform'
   device: intel_gpu
   timeout_in_minutes: 20
   working_dir: .
@@ -32,7 +32,7 @@ steps:
     pytest -v -s cuda/test_cuda_context.py || true &&
     pytest -v -s cuda/test_platform_no_cuda_init.py || true &&
     pytest -v -s cuda/test_cuda_compatibility_path.py || true'
-- label: Cudagraph
+- label: ':nvidia: (H200 MIG 35GB) CUDAGraph'
   device: intel_gpu
   timeout_in_minutes: 30
   working_dir: .
