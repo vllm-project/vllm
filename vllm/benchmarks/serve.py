@@ -1374,24 +1374,17 @@ async def benchmark(
             mean = getattr(metrics, f"mean_{metric_attribute_name}_ms")
             median = getattr(metrics, f"median_{metric_attribute_name}_ms")
             std = getattr(metrics, f"std_{metric_attribute_name}_ms")
-            percentiles = getattr(
-                metrics, f"percentiles_{metric_attribute_name}_ms"
-            )
+            percentiles = getattr(metrics, f"percentiles_{metric_attribute_name}_ms")
         else:
             mean = np.mean(values or 0) * 1000
             median = np.median(values or 0) * 1000
             std = np.std(values or 0) * 1000
             percentiles = [
-                (p, np.percentile(values or 0, p) * 1000)
-                for p in selected_percentiles
+                (p, np.percentile(values or 0, p) * 1000) for p in selected_percentiles
             ]
         print("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
-        print(
-            "{:<40} {:<10.2f}".format(f"Mean {metric_name} (ms):", mean)
-        )
-        print(
-            "{:<40} {:<10.2f}".format(f"Median {metric_name} (ms):", median)
-        )
+        print("{:<40} {:<10.2f}".format(f"Mean {metric_name} (ms):", mean))
+        print("{:<40} {:<10.2f}".format(f"Median {metric_name} (ms):", median))
         result[f"mean_{metric_attribute_name}_ms"] = mean
         result[f"median_{metric_attribute_name}_ms"] = median
         result[f"std_{metric_attribute_name}_ms"] = std
