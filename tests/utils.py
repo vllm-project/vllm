@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterable, MutableMapping, Sequence
 from contextlib import ExitStack, contextmanager
 from multiprocessing import Process, get_context
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import patch
 
 import anthropic
@@ -46,10 +46,6 @@ from vllm.distributed import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import (
-    _KernelT,
-    init_fp8_linear_kernel,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
@@ -64,6 +60,9 @@ from vllm.utils.torch_utils import (
     set_random_seed,  # noqa: F401 - re-exported for use in test files
 )
 from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
+
+if TYPE_CHECKING:
+    from vllm.model_executor.kernels.linear import _KernelT
 
 logger = init_logger(__name__)
 
@@ -2349,9 +2348,11 @@ class TestFP8Layer(torch.nn.Module):
         out_dtype: torch.dtype | None = None,
         transpose_weights: bool = False,
         device: torch.device | None = None,
-        force_kernel: type[_KernelT] | None = None,
+        force_kernel: "type[_KernelT] | None" = None,
     ):
         super().__init__()
+        from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
+
         self.input_size_per_partition = weight_shape[1]
         self.output_size_per_partition = weight_shape[0]
         self.logical_widths = [self.output_size_per_partition]

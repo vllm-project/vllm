@@ -1662,7 +1662,7 @@ class MooncakeStoreWorker:
                 # to keep the divisibility invariant trivially true.
                 hash_block_size=(
                     self.hash_block_size
-                    if g.kv_cache_spec.participates_in_prefix_caching
+                    if g.kv_cache_spec.prefix_cacheable
                     else g.kv_cache_spec.block_size
                 ),
             )
@@ -2141,9 +2141,7 @@ class MooncakeStoreWorker:
         boundaries = []
         hit_boundary_hash_idx = hit_length // self.hash_block_size - 1
         for group_id, db in enumerate(self.token_dbs):
-            if not self._kv_cache_groups[
-                group_id
-            ].kv_cache_spec.participates_in_prefix_caching:
+            if not self._kv_cache_groups[group_id].kv_cache_spec.prefix_cacheable:
                 # Scratch groups are never stored, so they have no tail key.
                 continue
             chunk_id = cdiv(hit_length, db.block_size) - 1

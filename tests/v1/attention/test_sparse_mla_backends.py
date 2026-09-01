@@ -126,7 +126,7 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
     )
     impl.forward_mqa(
         torch.zeros(1, 1, kv_lora_rank),
-        torch.zeros(1, kv_lora_rank),
+        torch.zeros(1, 1, kv_lora_rank),
         metadata,
         SimpleNamespace(),
     )
