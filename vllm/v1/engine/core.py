@@ -287,6 +287,8 @@ class EngineCore:
         # capture full cudagraphs initialize a minimal KV cache during it.
         # Attention-free models resolve the default so layout reads never precede
         # resolution.
+        if vllm_config.cache_config.enable_extensible_kv_cache:
+            self.model_executor.resolve_extensible_kv_cache(kv_cache_specs)
         layout = resolve_kv_cache_layout(
             vllm_config,
             self.model_executor.get_supported_kv_cache_layouts(),

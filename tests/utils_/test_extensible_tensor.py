@@ -4,12 +4,23 @@
 import pytest
 import torch
 
+from tests.utils import create_new_process_for_each_test
 from vllm.utils.extensible_tensor import ExtensibleTensor
+from vllm.utils.vmm_driver import vmm_unavailable_reason
 
+# Each test runs in its own process: touching the driver here would initialize
+# CUDA in the pytest parent and break later fork-based tests in the shard.
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
+def _skip_unless_vmm() -> None:
+    if (reason := vmm_unavailable_reason()) is not None:
+        pytest.skip(f"VMM unavailable: {reason}")
+
+
+@create_new_process_for_each_test("spawn")
 def test_extensible_tensor_grows_without_moving() -> None:
+    _skip_unless_vmm()
     buffer = ExtensibleTensor(4096, device="cuda")
     try:
         base_ptr = buffer.base_ptr
@@ -32,7 +43,9 @@ def test_extensible_tensor_grows_without_moving() -> None:
         buffer.free()
 
 
+@create_new_process_for_each_test("spawn")
 def test_extensible_tensor_rejects_shrink_and_overflow() -> None:
+    _skip_unless_vmm()
     buffer = ExtensibleTensor(1024, device="cuda")
     try:
         buffer.resize_per_segment_(512)
@@ -44,7 +57,9 @@ def test_extensible_tensor_rejects_shrink_and_overflow() -> None:
         buffer.free()
 
 
+@create_new_process_for_each_test("spawn")
 def test_segments_grow_in_lockstep_and_zero_new() -> None:
+    _skip_unless_vmm()
     """Each segment's committed prefix grows in lockstep.
 
     Data written to a segment's committed prefix survives a grow; the newly
@@ -85,7 +100,9 @@ def test_segments_grow_in_lockstep_and_zero_new() -> None:
         et.free()
 
 
+@create_new_process_for_each_test("spawn")
 def test_segments_at_granularity_scale() -> None:
+    _skip_unless_vmm()
     """Segments spanning multiple mapping granules commit correctly.
 
     Uses a segment capacity that is not a multiple of the allocation
@@ -120,7 +137,9 @@ def test_segments_at_granularity_scale() -> None:
         et.free()
 
 
+@create_new_process_for_each_test("spawn")
 def test_invalid_usage_raises() -> None:
+    _skip_unless_vmm()
     with pytest.raises(ValueError):
         ExtensibleTensor(max_num_bytes=100, device="cuda", num_segments=3)
 
@@ -135,3 +154,38 @@ def test_invalid_usage_raises() -> None:
             et.resize_per_segment_(et.segment_capacity_bytes + 1)
     finally:
         et.free()
+
+
+@create_new_process_for_each_test("spawn")
+def test_release_physical_keeps_addresses() -> None:
+    _skip_unless_vmm()
+    """Releasing physical pages keeps the reservation; recommitting maps fresh
+    zeroed pages under the same addresses (the sleep/wake contract)."""
+    et = ExtensibleTensor(max_num_bytes=8192, device="cuda", num_segments=2)
+    try:
+        et.resize_per_segment_(1024, zero_new=True)
+        fv = et.full_view()
+        fv[:1024].fill_(9)
+        base = et.base_ptr
+
+        et.release_physical()
+        assert et.num_bytes == 0
+        assert et.physical_bytes == 0
+        assert et.base_ptr == base
+
+        et.resize_per_segment_(1024, zero_new=True)
+        assert et.full_view().data_ptr() == base
+        assert torch.count_nonzero(et.full_view()[:1024]) == 0
+    finally:
+        et.free()
+
+
+@create_new_process_for_each_test("spawn")
+def test_vmm_probe_reports_usable_driver() -> None:
+    reason = vmm_unavailable_reason()
+    print(f"vmm_unavailable_reason reported as: {reason}")
+    if torch.version.hip is None:
+        assert reason is None
+    else:
+        # ROCm runtimes older than the hipMemSetAccess fix are rejected.
+        assert reason is None or "HIP runtime" in reason
