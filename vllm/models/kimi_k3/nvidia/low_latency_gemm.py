@@ -27,8 +27,8 @@ from torch import nn
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
+    _SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL,
     SkinnyGemmConfig,
-    shape_dynamic_skinny_gemm,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -582,9 +582,9 @@ def _run_plan(
         return None
     backend, config = entry
     if backend == "cute":
-        if not shape_dynamic_skinny_gemm.is_available():
+        if not _SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL.is_available():
             return None
-        return shape_dynamic_skinny_gemm(x, weight, config, None)
+        return _SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL(x, weight, config, None)
     if not hasattr(torch.ops._C, "dsv3_fused_a_gemm"):
         return None
     output = torch.empty((x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device)
@@ -599,9 +599,9 @@ def _run_residual_plan(
     residual: torch.Tensor,
 ) -> torch.Tensor | None:
     config = residual_plan.get(x.shape[0])
-    if config is None or not shape_dynamic_skinny_gemm.is_available():
+    if config is None or not _SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL.is_available():
         return None
-    return shape_dynamic_skinny_gemm(x, weight, config, residual)
+    return _SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL(x, weight, config, residual)
 
 
 def try_low_latency_gemm(
@@ -734,10 +734,15 @@ def enable_kimi_k3_low_latency_gemm(
         warmup_configs.update(config for _, config in spec.cute_configs)
         residual_warmup_configs.update(config for _, config in spec.residual_configs)
 
-    if shape_dynamic_skinny_gemm.is_available():
+    if _SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL.is_available():
         if warmup_configs:
-            shape_dynamic_skinny_gemm.request_warmup_configs(dtype, warmup_configs)
+            _SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL.register_warmup(
+                dtype=dtype,
+                configs=tuple(warmup_configs),
+            )
         if residual_warmup_configs:
-            shape_dynamic_skinny_gemm.request_warmup_configs(
-                dtype, residual_warmup_configs, has_residual=True
+            _SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL.register_warmup(
+                dtype=dtype,
+                configs=tuple(residual_warmup_configs),
+                has_residual=True,
             )

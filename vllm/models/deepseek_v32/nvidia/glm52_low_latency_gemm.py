@@ -13,8 +13,8 @@ from torch import nn
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
+    _SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL,
     SkinnyGemmConfig,
-    shape_dynamic_skinny_gemm,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -120,9 +120,9 @@ def run_glm52_plan(
 
     backend, config = entry
     if backend == "cute":
-        if not shape_dynamic_skinny_gemm.is_available():
+        if not _SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL.is_available():
             return None
-        return shape_dynamic_skinny_gemm(x, weight, config)
+        return _SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL(x, weight, config)
 
     if not hasattr(torch.ops._C, "dsv3_fused_a_gemm"):
         return None
@@ -136,8 +136,11 @@ def run_glm52_plan(
 
 
 def _request_warmup(dtype: torch.dtype, configs: set[SkinnyGemmConfig]) -> None:
-    if configs and shape_dynamic_skinny_gemm.is_available():
-        shape_dynamic_skinny_gemm.request_warmup_configs(dtype, configs)
+    if configs and _SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL.is_available():
+        _SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL.register_warmup(
+            dtype=dtype,
+            configs=tuple(configs),
+        )
 
 
 def build_glm52_plan(

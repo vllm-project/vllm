@@ -335,7 +335,7 @@ def test_glm52_installer_maps_only_selected_unquantized_shapes(
     monkeypatch.setattr(glm52_gemm, "LinearBase", FakeLinearBase)
     monkeypatch.setattr(glm52_gemm, "_is_sm103", lambda: True)
     monkeypatch.setattr(
-        glm52_gemm.shape_dynamic_skinny_gemm,
+        glm52_gemm._SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL,
         "is_available",
         lambda: False,
     )
@@ -533,16 +533,16 @@ def test_installation_is_shape_specific_and_unquantized(
     monkeypatch.setattr(k3_gemm, "_is_sm103", lambda: True)
     warmup_configs: set[SkinnyGemmConfig] = set()
     residual_warmup_configs: set[SkinnyGemmConfig] = set()
-    monkeypatch.setattr(k3_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: True)
+    monkeypatch.setattr(k3_gemm._SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL, "is_available", lambda: True)
 
-    def request_warmup_configs(dtype, configs, *, has_residual=False):
+    def register_warmup(*, dtype, configs, has_residual=False):
         target = residual_warmup_configs if has_residual else warmup_configs
         target.update(configs)
 
     monkeypatch.setattr(
-        k3_gemm.shape_dynamic_skinny_gemm,
-        "request_warmup_configs",
-        request_warmup_configs,
+        k3_gemm._SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL,
+        "register_warmup",
+        register_warmup,
     )
 
     k3_gemm.enable_kimi_k3_low_latency_gemm(root, torch.bfloat16)
@@ -609,7 +609,7 @@ def _require_sm103_and_dsv3() -> None:
 def _require_sm103_and_cute() -> None:
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 3):
         pytest.skip("Kimi-K3 production selection requires SM103")
-    if not k3_gemm.shape_dynamic_skinny_gemm.is_available():
+    if not k3_gemm._SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL.is_available():
         pytest.skip("CuTe DSL is not available")
 
 
@@ -856,7 +856,7 @@ def test_cute_residual_epilogue(n: int, k: int, num_tokens: int) -> None:
     config = spec.residual_config(num_tokens)
     assert config is not None
 
-    output = k3_gemm.shape_dynamic_skinny_gemm(x, weight, config, residual)
+    output = k3_gemm._SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL(x, weight, config, residual)
 
     reference = x.float() @ weight.float().t() + residual.float()
     cosine = torch.nn.functional.cosine_similarity(
@@ -869,16 +869,16 @@ def test_cute_residual_epilogue(n: int, k: int, num_tokens: int) -> None:
 def test_cute_residual_epilogue_all_supported_token_counts(num_tokens: int) -> None:
     _require_sm103_and_cute()
     from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
-        ShapeDynamicSkinnyGemm,
+        ShapeDynamicSkinnyGemmKernel,
     )
 
     n, k = 64, 512
     x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
     residual = torch.randn(num_tokens, n, dtype=torch.bfloat16, device="cuda")
-    config = ShapeDynamicSkinnyGemm._config(num_tokens, n, k)
+    config = ShapeDynamicSkinnyGemmKernel._config(num_tokens, n, k)
 
-    output = k3_gemm.shape_dynamic_skinny_gemm(x, weight, config, residual)
+    output = k3_gemm._SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL(x, weight, config, residual)
 
     reference = x.float() @ weight.float().t() + residual.float()
     torch.testing.assert_close(output.float(), reference, rtol=2e-2, atol=2e-1)
@@ -893,12 +893,12 @@ def test_cute_residual_epilogue_cuda_graph_capture(num_tokens: int) -> None:
     x = torch.randn(num_tokens, spec.k, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(spec.n, spec.k, dtype=torch.bfloat16, device="cuda")
     residual = torch.randn(num_tokens, spec.n, dtype=torch.bfloat16, device="cuda")
-    k3_gemm.shape_dynamic_skinny_gemm(x, weight, config, residual)
+    k3_gemm._SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL(x, weight, config, residual)
     torch.accelerator.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        output = k3_gemm.shape_dynamic_skinny_gemm(x, weight, config, residual)
+        output = k3_gemm._SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL(x, weight, config, residual)
     graph.replay()
     torch.accelerator.synchronize()
 
@@ -950,8 +950,8 @@ def test_latent_moe_production_layout_residual(
     method = k3_gemm.KimiK3LowLatencyLinearMethod(
         k3_gemm._build_plan(spec), k3_gemm._build_residual_plan(spec)
     )
-    spy = _SkinnyGemmSpy(k3_gemm.shape_dynamic_skinny_gemm)
-    monkeypatch.setattr(k3_gemm, "shape_dynamic_skinny_gemm", spy)
+    spy = _SkinnyGemmSpy(k3_gemm._SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL)
+    monkeypatch.setattr(k3_gemm, "_SHAPE_DYNAMIC_SKINNY_GEMM_KERNEL", spy)
 
     layer = SimpleNamespace(weight=weight)
     output = method.apply_with_residual(layer, latent, residual)

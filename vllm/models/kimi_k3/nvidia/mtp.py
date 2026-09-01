@@ -36,7 +36,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
-from ..common.mtp import fused_mtp_input
+from ..common.mtp import _FUSED_MTP_INPUT_KERNEL, fused_mtp_input
 from .low_latency_gemm import enable_kimi_k3_low_latency_gemm
 from .model import (
     KimiDecoderLayer,
@@ -104,6 +104,7 @@ class KimiK3MultiTokenPredictorLayer(nn.Module):
         self.mtp_block = KimiDecoderLayer(
             block_config, vllm_config, prefix=prefix, aux_stream=aux_stream
         )
+        _FUSED_MTP_INPUT_KERNEL.register_warmup()
 
     def forward(
         self,

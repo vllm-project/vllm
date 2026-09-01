@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Warm up Kimi-K3 Triton kernels."""
+"""Warm up Kimi-K3 Triton kernels not yet using the shared contract."""
 
 from __future__ import annotations
 
@@ -37,56 +37,6 @@ def _get_kda_layer(worker: Worker) -> KimiK3DeltaAttention | None:
         ),
         None,
     )
-
-
-def _warm_attn_res(worker: Worker) -> None:
-    from vllm.models.kimi_k3.nvidia.ops.attn_res import (
-        attn_res,
-        get_attn_res_triton_warmup_profiles,
-    )
-
-    config = worker.model_config.hf_text_config
-    block_size = getattr(config, "attn_res_block_size", None)
-    if block_size is None:
-        return
-
-    hidden_size = int(config.hidden_size)
-    max_blocks = (int(config.num_hidden_layers) + block_size - 1) // block_size
-    if max_blocks < 2:
-        return
-
-    dtype = worker.model_config.dtype
-    device = torch.device("cuda")
-    eps = float(config.rms_norm_eps)
-    prefix = torch.zeros((1, hidden_size), dtype=dtype, device=device)
-    delta = torch.zeros_like(prefix)
-    blocks = torch.zeros(
-        (1, max_blocks, hidden_size),
-        dtype=dtype,
-        device=device,
-    )
-    norm_weight = torch.zeros(hidden_size, dtype=dtype, device=device)
-    qk_weight = torch.zeros_like(norm_weight)
-    output_norm_weight = torch.zeros_like(norm_weight)
-
-    for (
-        num_blocks,
-        has_delta,
-        block_write_idx,
-        apply_output_norm,
-    ) in get_attn_res_triton_warmup_profiles(max_blocks):
-        attn_res(
-            prefix,
-            delta if has_delta else None,
-            blocks,
-            norm_weight,
-            qk_weight,
-            output_norm_weight if apply_output_norm else None,
-            num_blocks=num_blocks,
-            block_write_idx=block_write_idx,
-            eps=eps,
-            output_norm_eps=eps if apply_output_norm else 0.0,
-        )
 
 
 def _warm_recurrent_kda(
@@ -170,7 +120,7 @@ def _warm_recurrent_kda(
 
 @torch.inference_mode()
 def kimi_k3_triton_warmup(worker: Worker) -> None:
-    """Warm Kimi-K3 Triton kernels reachable by this server."""
+    """Warm Kimi-K3 Triton kernels not yet using the shared contract."""
     if not current_platform.is_cuda():
         return
 
@@ -178,5 +128,4 @@ def kimi_k3_triton_warmup(worker: Worker) -> None:
     if layer is None:
         return
 
-    _warm_attn_res(worker)
     _warm_recurrent_kda(layer, worker.model_config.dtype)

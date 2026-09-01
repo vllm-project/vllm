@@ -106,7 +106,7 @@ from vllm.models.kimi_k3.nvidia.low_latency_gemm import (
     enable_kimi_k3_low_latency_gemm,
 )
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
-from vllm.models.kimi_k3.nvidia.ops import attn_res
+from vllm.models.kimi_k3.nvidia.ops.attn_res import _ATTN_RES_KERNEL, attn_res
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
@@ -1129,6 +1129,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         self.config = config
         self.attn_res_block_size: int | None = config.attn_res_block_size
         self.use_attn_res = self.attn_res_block_size is not None
+        if self.use_attn_res:
+            _ATTN_RES_KERNEL.register_warmup()
         parallel_config = vllm_config.parallel_config
         use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         self.use_sequence_parallel = (
