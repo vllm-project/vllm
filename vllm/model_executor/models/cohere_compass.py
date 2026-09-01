@@ -44,8 +44,11 @@ from transformers.models.cohere_compass.configuration_cohere_compass import (
 )
 from transformers.models.cohere_compass.image_processing_cohere_compass import (
     CohereCompassImageProcessor,
+)
+from transformers.models.cohere_compass.image_processing_cohere_compass import (
     smart_resize as image_smart_resize,
 )
+
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -75,10 +78,6 @@ from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.video_prune.evs import (
-    compute_mrope_for_media,
-    recompute_mrope_positions,
-)
 from vllm.multimodal.inputs import (
     ImageItem,
     MultiModalFeatureSpec,
@@ -99,11 +98,13 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.multimodal.video_prune.evs import (
+    compute_mrope_for_media,
+    recompute_mrope_positions,
+)
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
@@ -691,6 +692,7 @@ class Cohere_VisionTransformer(nn.Module):
             ".v.": (".qkv.", "v"),
         }
     )
+
     def __init__(
         self,
         vision_config: CohereCompassVisionConfig,
@@ -1090,7 +1092,6 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
         )
         return num_image_tokens
 
-
     def get_image_size_with_most_features(
         self, max_pixels: int | None = None
     ) -> ImageSize:
@@ -1204,7 +1205,7 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
 
         if do_resize:
             smart_resize = image_smart_resize
-            extra_kwargs = {}
+            extra_kwargs: dict[str, Any] = {}
 
             resized_height, resized_width = smart_resize(
                 height=image_height,
@@ -1259,28 +1260,10 @@ class CohereCompassDummyInputsBuilder(
             ),
         }
 
+
 class CohereCompassMultiModalProcessor(
     BaseMultiModalProcessor[CohereCompassProcessingInfo]
 ):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        mm_data = dict(mm_data)
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-        combined_outputs = dict(
-            processed_outputs,
-        )
-        return BatchFeature(combined_outputs)
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -1373,6 +1356,7 @@ class CohereCompassForConditionalGeneration(
         self.model_config = vllm_config.model_config
         self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.multimodal_config = multimodal_config
+        assert multimodal_config is not None
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
@@ -1422,7 +1406,13 @@ class CohereCompassForConditionalGeneration(
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 
             offset = mm_feature.mm_position.offset
-            t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+            feature_data = mm_feature.data
+            assert feature_data is not None
+            grid_item = feature_data.get("image_grid_thw")
+            assert grid_item is not None
+            grid_data = grid_item.data
+            assert isinstance(grid_data, torch.Tensor)
+            t, h, w = grid_data.tolist()
             assert t == 1, f"Image must have 1 frame, got {t}"
             yield offset, 1, h // spatial_merge_size, w // spatial_merge_size, 1.0
 
@@ -1550,7 +1540,7 @@ class CohereCompassForConditionalGeneration(
     def _get_grid_thw_by_modality(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> list[tuple[int, int, int]]:
+    ) -> list[list[int]]:
         grid_thw_key = f"{self.get_input_modality(mm_kwargs)}_grid_thw"
         grid_thw = mm_kwargs[grid_thw_key]
         if not isinstance(grid_thw, list):
@@ -1610,6 +1600,7 @@ class CohereCompassForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1667,7 +1658,8 @@ class CohereCompassForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
-    ):
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
         modality = self.get_input_modality(mm_kwargs)
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
 
@@ -1687,6 +1679,7 @@ class CohereCompassForConditionalGeneration(
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         pixel_values = values.pop("pixel_values")
         metadata = values
@@ -1695,6 +1688,7 @@ class CohereCompassForConditionalGeneration(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
@@ -1723,7 +1717,7 @@ class CohereCompassForConditionalGeneration(
                 image_embeds=image_embeds,
                 image_grid_thw=image_grid_thw,
             )
-
+        raise AssertionError("image input must contain pixels or embeddings")
 
     def _process_image_input(
         self, image_input: Cohere_VLImageInputs
@@ -2229,7 +2223,7 @@ class CohereCompassDecoderLayer(nn.Module):
             config,
             quant_config=quant_config,
             reduce_results=True,
-            prefix=f"{prefix}.mlp"
+            prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = LayerNorm(
             param_shape=config.hidden_size,
