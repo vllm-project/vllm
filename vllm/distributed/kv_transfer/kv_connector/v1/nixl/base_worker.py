@@ -212,6 +212,11 @@ class NixlBaseConnectorWorker:
         region_offsets = np.cumsum([0, *region_num_blocks[:-1]])
         num_fa_descs = sum(region_num_blocks)
 
+        for group in block_ids:
+            for bid in group:
+                if not isinstance(bid, int) or bid < 0 or bid >= num_blocks:
+                    raise ValueError(f"block id {bid!r} out of range [0, {num_blocks})")
+
         # All-attention fast path.
         if num_ssm_regions == 0:
             regions, keys = pairs
