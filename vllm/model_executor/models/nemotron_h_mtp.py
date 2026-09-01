@@ -24,6 +24,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import (
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
@@ -311,6 +312,16 @@ class NemotronHMultiTokenPredictor(nn.Module):
 
 class NemotronHMTP(nn.Module, SupportsPP):
     """NemotronH MTP model."""
+
+    # Quant configs name modules in checkpoint space ("language_model.mtp.layers.0*"),
+    # but this draft is built under "mtp" (maybe_prefix below). SupportsQuant only
+    # re-roots exclude_modules when the model defines a mapper, so without one the
+    # exclusions never match and the MTP experts are wrongly quantized. Mirrors the
+    # prefix handling load_weights() already does by hand.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"language_model.": ""},
+        orig_to_new_substr={"embeddings": "embed_tokens"},
+    )
 
     packed_modules_mapping = {
         "qkv_proj": [

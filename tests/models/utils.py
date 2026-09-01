@@ -552,6 +552,11 @@ def dummy_hf_overrides(
 
     text_config.update(update_dict)
 
+    # Keep per-layer metadata consistent with the reduced layer count.
+    # HY V4 uses this to decide which sparse-attention indexers are shared.
+    if indexer_types := getattr(text_config, "indexer_types", None):
+        text_config.update({"indexer_types": indexer_types[:num_hidden_layers]})
+
     # Update n_layers and moe configs for Moondream3 model
     if model_arch in ("Moondream3ForCausalLM", "HfMoondream"):
         text_config.update(

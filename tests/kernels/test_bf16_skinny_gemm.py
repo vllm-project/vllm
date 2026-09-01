@@ -1031,19 +1031,12 @@ def test_residual_dispatch_falls_back_to_addmm(
     assert output is fallback
 
 
-def test_fallback_preserves_default_method(monkeypatch: pytest.MonkeyPatch) -> None:
-    fallback = torch.empty(2, 8)
-    monkeypatch.setattr(
-        k3_gemm.UnquantizedLinearMethod,
-        "apply",
-        lambda *args: fallback,
-    )
-    # 1-D input fails the runtime check, forcing the base-method fallback.
+def test_fallback_preserves_default_method() -> None:
+    x = torch.randn(2, 4)
+    weight = torch.randn(3, 4)
+    # CPU tensors fail the runtime check, forcing the base-method fallback.
     method = k3_gemm.KimiK3LowLatencyLinearMethod({}, {})
 
-    output = method.apply(
-        SimpleNamespace(weight=torch.empty(0)),
-        torch.empty(0),
-    )
+    output = method.apply(SimpleNamespace(weight=weight), x)
 
-    assert output is fallback
+    torch.testing.assert_close(output, torch.nn.functional.linear(x, weight))
