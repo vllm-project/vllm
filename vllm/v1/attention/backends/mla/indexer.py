@@ -677,6 +677,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.scheduler_metadata_buffer = torch.empty(
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
         )
+        # The deep_gemm metadata populate below is CUDA-only. On other backends
+        # (XPU) the buffer is never written, so the SYCL fp8_paged_mqa_logits
+        # kernel (which self-partitions its work) would read uninitialized
+        # memory -> OOB -> worker SIGKILL. Zero-fill once here.
+        if not current_platform.is_cuda():
+            self.scheduler_metadata_buffer.zero_()
 
         # KV compression. Default to 1 for no compression.
         self.compress_ratio = 1

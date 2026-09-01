@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 
 if TYPE_CHECKING:
@@ -49,5 +50,9 @@ def _warm_inkling_fa4_rel_attention(worker: Worker) -> None:
 
 
 def fa4_cutedsl_warmup(worker: Worker) -> None:
+    # FA4 CuTeDSL kernels are CUDA-only; the compile path can wedge on XPU
+    # (hang without raising). These are pre-JIT perf warmups, so skip on XPU.
+    if current_platform.is_xpu():
+        return
     _warm_fa4_mla_prefill(worker)
     _warm_inkling_fa4_rel_attention(worker)

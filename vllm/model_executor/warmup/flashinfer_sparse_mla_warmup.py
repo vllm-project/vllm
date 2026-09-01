@@ -221,6 +221,11 @@ def flashinfer_sparse_mla_decode_autotune_warmup(worker: "Worker") -> None:
 
 def deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
     """Warm DSv4 sparse-MLA mixed prefill+decode attention."""
+    # The XPU-native sparse-MLA backend short-circuits warmup (forward_mqa
+    # returns without a kernel when attn_metadata is None); driving the generic
+    # mixed prefill+decode warmup here crashes the XPU worker instead.
+    if current_platform.is_xpu():
+        return
     runner = worker.model_runner
     if runner.is_pooling_model or not _has_deepseek_v4_sparse_mla_backend(runner):
         return
