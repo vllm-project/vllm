@@ -231,21 +231,19 @@ def _prefix_cache_hits(llm) -> int:
     )
 
 
-def _check_replayssm_prefix_caching_parity(
+def _check_flashinfer_replayssm_prefix_caching(
     vllm_runner,
     model_name,
+    monkeypatch: pytest.MonkeyPatch,
     *,
-    tensor_parallel_size=1,
-    mamba_backend: str | None = None,
-    require_v2: bool = False,
-    monkeypatch: pytest.MonkeyPatch | None = None,
+    use_ngram: bool,
+    use_v2: bool,
+    tensor_parallel_size: int,
 ):
     # align mode materializes the exact SSM state at each block boundary, so
     # ReplaySSM's cached prefixes must match the always-materialized baseline.
-    if require_v2:
-        assert monkeypatch is not None
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-        envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2 else "0")
+    envs.disable_envs_cache()
 
     common = dict(
         max_model_len=8192,
@@ -253,23 +251,34 @@ def _check_replayssm_prefix_caching_parity(
         enable_prefix_caching=True,
         enable_chunked_prefill=True,
         mamba_cache_mode="align",
+        mamba_backend="flashinfer",
         disable_log_stats=False,  # required for llm.get_metrics()
         tensor_parallel_size=tensor_parallel_size,
     )
-    if mamba_backend is not None:
-        common["mamba_backend"] = mamba_backend
+    if use_ngram:
+        common["speculative_config"] = {
+            "method": "ngram",
+            "num_speculative_tokens": 3,
+            "prompt_lookup_max": 3,
+        }
+
     with vllm_runner(model_name, **common) as llm:
-        if require_v2:
-            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
+        assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is use_v2
+        baseline_block_size = llm.llm.llm_engine.vllm_config.cache_config.block_size
+        llm.generate_greedy_logprobs(
+            PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+        )
         baseline = llm.generate_greedy_logprobs(
             PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
         )
+        baseline_hits = _prefix_cache_hits(llm)
+
     with vllm_runner(
         model_name, use_replayssm=True, replayssm_buffer_len=16, **common
     ) as llm:
-        if require_v2:
-            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
-        # Prime the cache, then measure, so cache hits are deterministic.
+        assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is use_v2
+        replay_block_size = llm.llm.llm_engine.vllm_config.cache_config.block_size
+        assert replay_block_size == baseline_block_size
         llm.generate_greedy_logprobs(
             PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
         )
@@ -278,7 +287,7 @@ def _check_replayssm_prefix_caching_parity(
         )
         replay_hits = _prefix_cache_hits(llm)
 
-    # Without real cache hits the cached path is never exercised.
+    assert baseline_hits > 0
     assert replay_hits > 0, (
         "ReplaySSM align-mode run produced no prefix-cache hits; the shared "
         "prefix may be shorter than one mamba block, so prefix caching is inert"
@@ -286,63 +295,8 @@ def _check_replayssm_prefix_caching_parity(
     check_logprobs_close(
         outputs_0_lst=baseline,
         outputs_1_lst=replay,
-        name_0="baseline_align_pc",
-        name_1="replayssm_align_pc",
-    )
-
-
-@pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_prefix_caching_matches_baseline(vllm_runner, model_name):
-    _check_replayssm_prefix_caching_parity(vllm_runner, model_name)
-
-
-@multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("model_name", [MAMBA2_MODEL])
-def test_replayssm_prefix_caching_matches_baseline_tp2(vllm_runner, model_name):
-    _check_replayssm_prefix_caching_parity(
-        vllm_runner, model_name, tensor_parallel_size=2
-    )
-
-
-def _check_replayssm_ngram_prefix_caching_parity(vllm_runner, model_name):
-    common = dict(
-        max_model_len=8192,
-        trust_remote_code=True,
-        enable_prefix_caching=True,
-        enable_chunked_prefill=True,
-        mamba_cache_mode="align",
-        mamba_backend="flashinfer",
-        disable_log_stats=False,
-        speculative_config={
-            "method": "ngram",
-            "num_speculative_tokens": 3,
-            "prompt_lookup_max": 3,
-        },
-    )
-    with vllm_runner(model_name, **common) as llm:
-        baseline = llm.generate_greedy_logprobs(
-            PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
-        )
-    with vllm_runner(
-        model_name,
-        use_replayssm=True,
-        replayssm_buffer_len=16,
-        **common,
-    ) as llm:
-        llm.generate_greedy_logprobs(
-            PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
-        )
-        replay = llm.generate_greedy_logprobs(
-            PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
-        )
-        replay_hits = _prefix_cache_hits(llm)
-
-    assert replay_hits > 0
-    check_logprobs_close(
-        outputs_0_lst=baseline,
-        outputs_1_lst=replay,
-        name_0="baseline_ngram_align_pc",
-        name_1="replayssm_flashinfer_ngram_align_pc",
+        name_0="flashinfer_baseline_align_pc",
+        name_1="flashinfer_replayssm_align_pc",
     )
 
 
@@ -351,27 +305,47 @@ def _check_replayssm_ngram_prefix_caching_parity(vllm_runner, model_name):
     reason="FlashInfer ReplaySSM materialization APIs not available",
 )
 @pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_flashinfer_ngram_prefix_caching_matches_baseline(
-    vllm_runner, model_name
-):
-    _check_replayssm_ngram_prefix_caching_parity(vllm_runner, model_name)
-
-
-@pytest.mark.skipif(
-    not (HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE),
-    reason="FlashInfer ReplaySSM materialization APIs not available",
+@pytest.mark.parametrize(
+    ("use_v2", "use_ngram"),
+    [
+        pytest.param(False, False, id="v1-stp"),
+        pytest.param(False, True, id="v1-ngram-t4"),
+        pytest.param(True, False, id="v2-stp"),
+    ],
 )
-@pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_flashinfer_prefix_caching_matches_baseline_v2(
-    vllm_runner, model_name, monkeypatch
+def test_flashinfer_replayssm_prefix_cache_tp1(
+    vllm_runner,
+    model_name,
+    monkeypatch: pytest.MonkeyPatch,
+    use_v2: bool,
+    use_ngram: bool,
 ):
-    # This checkpoint has no MTP head, while ModelRunnerV2 rejects both ngram
-    # proposers. Cover its ReplaySSM prefix path without an unsupported proposer;
-    # the V1 test above retains ngram multi-token verification coverage.
-    _check_replayssm_prefix_caching_parity(
+    _check_flashinfer_replayssm_prefix_caching(
         vllm_runner,
         model_name,
-        mamba_backend="flashinfer",
-        require_v2=True,
-        monkeypatch=monkeypatch,
+        monkeypatch,
+        use_ngram=use_ngram,
+        use_v2=use_v2,
+        tensor_parallel_size=1,
+    )
+
+
+@pytest.mark.skipif(
+    not (HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE),
+    reason="FlashInfer ReplaySSM materialization APIs not available",
+)
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("model_name", [MAMBA2_MODEL])
+def test_flashinfer_replayssm_prefix_cache_v2_tp2(
+    vllm_runner,
+    model_name,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _check_flashinfer_replayssm_prefix_caching(
+        vllm_runner,
+        model_name,
+        monkeypatch,
+        use_ngram=False,
+        use_v2=True,
+        tensor_parallel_size=2,
     )

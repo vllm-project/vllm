@@ -440,6 +440,36 @@ def allocate_kv_cache(
     return kv_caches
 
 
+def allocate_replayssm_caches(
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+) -> dict[str, tuple[torch.Tensor, ...]]:
+    """Allocate ReplaySSM ring state separately from canonical Mamba pages."""
+    caches: dict[str, tuple[torch.Tensor, ...]] = {}
+    for group in kv_cache_config.kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+            layer_specs = group_spec.kv_cache_specs.items()
+        else:
+            layer_specs = ((name, group_spec) for name in group.layer_names)
+
+        for layer_name, spec in layer_specs:
+            if not isinstance(spec, MambaSpec) or not spec.replayssm_shapes:
+                continue
+            assert layer_name not in caches
+            caches[layer_name] = tuple(
+                torch.zeros(
+                    (kv_cache_config.num_blocks, *shape),
+                    dtype=dtype,
+                    device=device,
+                )
+                for shape, dtype in zip(
+                    spec.replayssm_shapes, spec.replayssm_dtypes, strict=True
+                )
+            )
+    return caches
+
+
 def prepare_kernel_block_sizes(
     kv_cache_config: KVCacheConfig, attn_groups: list[list[AttentionGroup]]
 ) -> list[int]:
@@ -577,6 +607,7 @@ def bind_kv_cache(
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
     kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+    replayssm_caches: Mapping[str, tuple[torch.Tensor, ...]] | None = None,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -624,6 +655,10 @@ def bind_kv_cache(
     # layer for the KV connector to register.
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].bind_kv_cache(kv_cache)
+        if replayssm_caches is not None and layer_name in replayssm_caches:
+            forward_context[layer_name].bind_replayssm_cache(
+                replayssm_caches[layer_name]
+            )
 
     share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 

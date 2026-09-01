@@ -1227,20 +1227,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None
         assert self.cache_config is not None
-        base_dtype = MambaStateDtypeCalculator.mamba2_state_dtype(
+        return MambaStateDtypeCalculator.mamba2_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
-        if self.use_replayssm:
-            return MambaStateDtypeCalculator.append_replayssm_ring(
-                base_dtype, self.model_config.dtype
-            )
-        return base_dtype
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         tp_world_size = get_tensor_model_parallel_world_size()
-        base_shape = MambaStateShapeCalculator.mamba2_state_shape(
+        return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=self.intermediate_size,
             tp_world_size=tp_world_size,
             n_groups=self.n_groups,
@@ -1250,17 +1245,29 @@ class MambaMixer2(MambaBase, PluggableLayer):
             conv_kernel=self.conv_kernel_size,
             num_spec=self.num_spec,
         )
-        if self.use_replayssm:
-            assert self.replayssm_buffer_len is not None
-            return MambaStateShapeCalculator.append_replayssm_ring(
-                base_shapes=base_shape,
-                n_groups=self.n_groups,
-                tp_world_size=tp_world_size,
-                logical_window=self.replayssm_buffer_len,
-                backend=self.mamba_config.backend,
-                num_speculative_tokens=self.num_spec,
-            )
-        return base_shape
+
+    def get_replayssm_state_dtype(self) -> tuple[torch.dtype, ...]:
+        if not self.use_replayssm:
+            return ()
+        assert self.model_config is not None
+        return MambaStateDtypeCalculator.append_replayssm_ring(
+            (), self.model_config.dtype
+        )
+
+    def get_replayssm_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        if not self.use_replayssm:
+            return ()
+        assert self.replayssm_buffer_len is not None
+        tp_world_size = get_tensor_model_parallel_world_size()
+        base_shape = self.get_state_shape()
+        return MambaStateShapeCalculator.append_replayssm_ring(
+            base_shapes=base_shape,
+            n_groups=self.n_groups,
+            tp_world_size=tp_world_size,
+            logical_window=self.replayssm_buffer_len,
+            backend=self.mamba_config.backend,
+            num_speculative_tokens=self.num_spec,
+        )[len(base_shape) :]
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:

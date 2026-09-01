@@ -11,14 +11,8 @@ from vllm.v1.worker.utils import bind_kv_cache
 
 
 class _TestReplaySSMMixer(MambaMixer2):
-    _state_shapes = ((2,), (3,), (4,), (5,), (6,))
-    _state_dtypes = (
-        torch.float32,
-        torch.float32,
-        torch.float32,
-        torch.float32,
-        torch.float32,
-    )
+    _state_shapes = ((2,), (3,))
+    _state_dtypes = (torch.float32, torch.float32)
 
     def __init__(self):
         torch.nn.Module.__init__(self)
@@ -38,9 +32,15 @@ class _TestReplaySSMMixer(MambaMixer2):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         return self._state_dtypes
 
+    def get_replayssm_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        return ((4,), (5,), (6,))
+
+    def get_replayssm_state_dtype(self) -> tuple[torch.dtype, ...]:
+        return (torch.float32,) * 3
+
 
 def _packed_replayssm_cache(num_blocks: int, fill_value: int = 0) -> torch.Tensor:
-    return torch.full((num_blocks, 1, 1, 80), fill_value, dtype=torch.int8)
+    return torch.full((num_blocks, 1, 1, 20), fill_value, dtype=torch.int8)
 
 
 def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
@@ -57,8 +57,25 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
         SimpleNamespace(layer_names=[layer_names[0], layer_names[2]]),
         SimpleNamespace(layer_names=[layer_names[1]]),
     ]
+    replayssm_caches = {
+        name: [
+            torch.zeros((4, *shape), dtype=torch.float32)
+            for shape in mixer.get_replayssm_state_shape()
+        ]
+        for name, mixer in ctx.items()
+    }
 
-    bind_kv_cache(kv_cache, ctx, [], kv_cache_groups=kv_cache_groups)
+    bind_kv_cache(
+        kv_cache,
+        ctx,
+        [],
+        kv_cache_groups=kv_cache_groups,
+        replayssm_caches={
+            name: tuple(cache) for name, cache in replayssm_caches.items()
+        },
+    )
+
+    assert all(len(mixer.kv_cache) == 5 for mixer in mixers)
 
     assert (
         mixers[0]._replayssm_ring_start.data_ptr()

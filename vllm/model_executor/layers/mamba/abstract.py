@@ -42,6 +42,16 @@ class MambaBase(AttentionLayerBase):
             offset += nbytes
         self.kv_cache = tuple(states)
 
+    def bind_replayssm_cache(self, cache: tuple[torch.Tensor, ...]) -> None:
+        expected_shapes = self.get_replayssm_state_shape()
+        expected_dtypes = self.get_replayssm_state_dtype()
+        assert len(cache) == len(expected_shapes) == len(expected_dtypes)
+        assert all(
+            tuple(state.shape[1:]) == shape and state.dtype == dtype
+            for state, shape, dtype in zip(cache, expected_shapes, expected_dtypes)
+        )
+        self.kv_cache = (*self.kv_cache, *cache)
+
     @abstractmethod
     def get_state_shape(self) -> Iterable[tuple[int, ...]]:
         """
@@ -64,6 +74,12 @@ class MambaBase(AttentionLayerBase):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         pass
 
+    def get_replayssm_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        return ()
+
+    def get_replayssm_state_dtype(self) -> tuple[torch.dtype, ...]:
+        return ()
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
@@ -71,6 +87,8 @@ class MambaBase(AttentionLayerBase):
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
+            replayssm_shapes=self.get_replayssm_state_shape(),
+            replayssm_dtypes=self.get_replayssm_state_dtype(),
             block_size=mamba_block_size,
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,
@@ -82,9 +100,6 @@ class MambaBase(AttentionLayerBase):
                 0
                 if vllm_config.cache_config.use_replayssm
                 else vllm_config.num_speculative_tokens
-            ),
-            num_backend_owned_state_tensors=(
-                3 if vllm_config.cache_config.use_replayssm else 0
             ),
         )
 

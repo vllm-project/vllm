@@ -253,7 +253,6 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
     return None
 
 
-
 _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
 
 

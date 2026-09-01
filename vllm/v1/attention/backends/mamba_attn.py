@@ -182,6 +182,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         ) = None
         self.decode_replayssm_state_indices_d: torch.Tensor | None = None
         # ReplaySSM CUDA-graph buffers for the selected backend.
+        if self.use_replayssm:
+            assert len(kv_cache_spec.replayssm_shapes) == 3
         if self.use_replayssm and not self.use_flashinfer_replayssm:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
@@ -193,9 +195,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int8,
                 device=device,
             )
-            # B_cache shape = (ngroups, replayssm_buffer_len, dstate); the page
-            # layout is (conv_state, ssm_state, x_cache, dt_cache, B_cache).
-            bc_ngroups = kv_cache_spec.shapes[4][0]
+            # B_cache shape = (ngroups, replayssm_buffer_len, dstate).
+            bc_ngroups = kv_cache_spec.replayssm_shapes[2][0]
             bc_scratch_bs = max(
                 self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs
             )
@@ -213,7 +214,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 allocate_checkpointing_ssu_scratch,
             )
 
-            nheads = kv_cache_spec.shapes[2][0]
+            nheads = kv_cache_spec.replayssm_shapes[0][0]
             self.decode_replayssm_scratch = allocate_checkpointing_ssu_scratch(
                 batch_size=scheduler_config.max_num_seqs,
                 num_heads=nheads,

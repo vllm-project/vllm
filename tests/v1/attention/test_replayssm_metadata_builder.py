@@ -200,17 +200,17 @@ def _make_mamba_spec(
         if mamba_backend == MambaBackendEnum.FLASHINFER
         else 0
     )
-    shapes = (
-        (1, 1),
-        (1, 1, 1),
+    replayssm_shapes = (
         (1, ring_buffer_len, 1),
         (1, ring_buffer_len),
         (1, ring_buffer_len, 1),
     )
     return MambaSpec(
         block_size=BLOCK_SIZE,
-        shapes=shapes,
-        dtypes=(torch.float32,),
+        shapes=((1, 1), (1, 1, 1)),
+        dtypes=(torch.float32,) * 2,
+        replayssm_shapes=replayssm_shapes,
+        replayssm_dtypes=(torch.float32,) * 3,
     )
 
 

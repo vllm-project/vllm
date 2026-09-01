@@ -38,7 +38,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
-from vllm.v1.worker.utils import allocate_kv_cache
+from vllm.v1.worker.utils import allocate_kv_cache, allocate_replayssm_caches
 
 MEMORY = 8 * 1024 * 1024
 
@@ -95,6 +95,54 @@ def _expected_bytes_per_block(groups) -> int:
 
 def _bind(config, layout: str):
     return allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout[layout], None)
+
+
+def test_replayssm_rings_do_not_expand_canonical_mamba_page():
+    full_spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float32,
+    )
+    mamba_spec = MambaSpec(
+        block_size=2,
+        shapes=((16,), (16,)),
+        dtypes=(torch.float32, torch.float32),
+        replayssm_shapes=((2,), (1,), (1,)),
+        replayssm_dtypes=(torch.float32,) * 3,
+    )
+    groups = [
+        KVCacheGroupSpec(["full"], full_spec),
+        KVCacheGroupSpec(["mamba"], mamba_spec),
+    ]
+
+    assert full_spec.page_size_bytes == mamba_spec.page_size_bytes == 128
+    assert mamba_spec.replayssm_size_bytes == 16
+    assert _get_kv_cache_bytes_per_block(groups) == 144
+
+    config = get_kv_cache_config_from_groups(
+        _mock_vllm_config("LBNHC"), groups, available_memory=4 * 144
+    )
+    assert config.num_blocks == 4
+    caches = allocate_kv_cache(
+        config,
+        torch.device("cpu"),
+        KVCacheLayout.LBNHC,
+    )
+    replayssm_caches = allocate_replayssm_caches(config, torch.device("cpu"))
+    assert (
+        caches["mamba"].untyped_storage().data_ptr()
+        != replayssm_caches["mamba"][0].untyped_storage().data_ptr()
+    )
+    assert caches["mamba"].untyped_storage().nbytes() == 4 * 128
+    assert [tuple(state.shape) for state in replayssm_caches["mamba"]] == [
+        (4, 2),
+        (4, 1),
+        (4, 1),
+    ]
+    replayssm_caches["mamba"][0].fill_(7)
+    assert torch.count_nonzero(caches["mamba"]) == 0
+    assert torch.count_nonzero(replayssm_caches["mamba"][1]) == 0
 
 
 MAIN_KV_PAGE_BYTES = 2_048

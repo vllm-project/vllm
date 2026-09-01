@@ -732,14 +732,15 @@ def test_mamba_groups_support_different_state_specs():
     assert ctx.state_conv_widths.tolist() == [4, 0, 4, 0, 12]
 
 
-def test_mamba_copy_funcs_allow_backend_owned_state_tensors():
+def test_mamba_copy_funcs_ignore_replayssm_state_tensors():
     replayssm_spec = MambaSpec(
         block_size=16,
-        shapes=((4, 4), (2, 4, 4), (2, 8, 4), (2, 8), (1, 8, 4)),
-        dtypes=(torch.float16,) * 5,
+        shapes=((4, 4), (2, 4, 4)),
+        dtypes=(torch.float16,) * 2,
+        replayssm_shapes=((2, 8, 4), (2, 8), (1, 8, 4)),
+        replayssm_dtypes=(torch.float16,) * 3,
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
         mamba_cache_mode="align",
-        num_backend_owned_state_tensors=3,
     )
 
     validate_mamba_state_copy_funcs({replayssm_spec: [0]}, _COPY_FUNCS)
@@ -753,9 +754,7 @@ def test_mamba_copy_funcs_allow_backend_owned_state_tensors():
             MambaAttentionBackendEnum.MAMBA2: invalid_funcs,
         }
         with pytest.raises(AssertionError, match="expects 2 state copy funcs"):
-            validate_mamba_state_copy_funcs(
-                {replayssm_spec: [0]}, invalid_copy_funcs
-            )
+            validate_mamba_state_copy_funcs({replayssm_spec: [0]}, invalid_copy_funcs)
 
 
 def test_mamba_groups_support_mixed_specs_in_uniform_group():
