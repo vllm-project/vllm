@@ -2868,8 +2868,10 @@ class VllmConfig:
             return
         from vllm.platforms import current_platform
 
-        if not current_platform.is_cuda():
-            raise ValueError("enable_extensible_kv_cache is only supported on CUDA.")
+        if not current_platform.is_cuda_alike():
+            raise ValueError(
+                "enable_extensible_kv_cache is only supported on CUDA and ROCm."
+            )
         if self.cache_config.kv_cache_memory_bytes is not None:
             raise ValueError(
                 "enable_extensible_kv_cache sizes the KV cache from measured "

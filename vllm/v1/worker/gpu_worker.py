@@ -77,6 +77,7 @@ from vllm.utils.mem_utils import (
     memory_profiling,
 )
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
+from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -770,6 +771,12 @@ class Worker(WorkerBase):
             self.model_runner, "_init_kv_zero_meta"
         ):
             self.model_runner._init_kv_zero_meta()
+
+    def extensible_kv_cache_unsupported_reason(self) -> str | None:
+        return vmm_unavailable_reason()
+
+    def disable_extensible_kv_cache(self) -> None:
+        self.cache_config.enable_extensible_kv_cache = False
 
     def _v2_model_runner(self) -> "GPUModelRunnerV2":
         assert self.use_v2_model_runner
