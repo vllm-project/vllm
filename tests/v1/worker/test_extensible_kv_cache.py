@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
+
 import pytest
 import torch
 
@@ -31,7 +33,7 @@ NUM_BLOCKS = 8
 NUM_LAYERS = 3
 
 
-def _make_config(layout: KVCacheLayout):
+def _make_config(layout: KVCacheLayout, num_blocks: int = NUM_BLOCKS):
     spec = FullAttentionSpec(
         block_size=16, num_kv_heads=2, head_size=64, dtype=torch.float16
     )
@@ -41,9 +43,9 @@ def _make_config(layout: KVCacheLayout):
     config = get_kv_cache_config_from_groups(
         vllm_config,
         [KVCacheGroupSpec(layers, spec)],
-        available_memory=NUM_LAYERS * spec.page_size_bytes * NUM_BLOCKS,
+        available_memory=NUM_LAYERS * spec.page_size_bytes * num_blocks,
     )
-    assert config.num_blocks == NUM_BLOCKS
+    assert config.num_blocks == num_blocks
     return config, spec
 
 
@@ -153,5 +155,65 @@ def test_release_and_recommit_for_sleep(vmm):
         kv_cache.recommit()
         assert kv_cache.physical_bytes >= kv_cache.size
         assert torch.count_nonzero(views[0]) == 0
+    finally:
+        kv_cache.free()
+
+
+@requires_cuda
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLNHC])
+def test_committed_views_cover_exactly_the_committed_bytes(vmm, layout):
+    """After the final commit, per-layer views are rebuilt over storages that
+    span only the committed blocks, at the same addresses as the capacity
+    views, so connectors deriving extents from storage size see backed memory."""
+    config, spec = _make_config(layout)
+    device = torch.device("cuda")
+    kv_cache = ExtensibleKVCache(config, device)
+    try:
+        capacity_views = allocate_kv_cache(
+            config, device, layout, allocate=kv_cache.allocate
+        )
+        committed = 5
+        kv_cache.commit(committed)
+        for i, view in enumerate(capacity_views.values()):
+            view[:committed].fill_(float(i + 1))
+        torch.accelerator.synchronize()
+
+        final_config = copy.copy(config)
+        final_config.num_blocks = committed
+        views = kv_cache.committed_views(final_config, layout)
+        assert views is not None and views.keys() == capacity_views.keys()
+        for i, (name, view) in enumerate(views.items()):
+            assert view.shape[0] == committed
+            assert view.data_ptr() == capacity_views[name].data_ptr()
+            assert torch.all(view == float(i + 1))
+            block_stride = view.stride(0) * view.element_size()
+            if layout.is_block_outermost:
+                assert view.untyped_storage().nbytes() == committed * block_stride
+            else:
+                assert (
+                    view.untyped_storage().nbytes() == committed * spec.page_size_bytes
+                )
+    finally:
+        kv_cache.free()
+
+
+@requires_cuda
+def test_defragmenting_commit_leaves_one_allocation_per_segment(vmm):
+    """Incremental commits map one driver allocation each; a defragmenting
+    commit remaps every segment as a single allocation (RDMA cannot span
+    several) and still ends up zero-filled and fully committed."""
+    config, _ = _make_config(KVCacheLayout.LBNHC, num_blocks=1024)
+    kv_cache = ExtensibleKVCache(config, torch.device("cuda"))
+    try:
+        granule_blocks = kv_cache.buffer.granularity // kv_cache.block_stride
+        kv_cache.commit(1)
+        kv_cache.commit(2 * granule_blocks + 1)
+        num_segments = kv_cache.buffer.num_segments
+        assert kv_cache.buffer.num_physical_chunks == 2 * num_segments
+
+        kv_cache.commit(config.num_blocks, defragment=True)
+        assert kv_cache.num_committed_blocks == config.num_blocks
+        assert kv_cache.buffer.num_physical_chunks == num_segments
+        assert torch.count_nonzero(kv_cache.buffer.full_view()) == 0
     finally:
         kv_cache.free()

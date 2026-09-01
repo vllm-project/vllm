@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 
+import copy
 import gc
 import os
 import time
@@ -755,16 +756,18 @@ class Worker(WorkerBase):
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
         # because `initialize_kv_cache` will inject kv cache groups not
         # related to kv cache connector (e.g. kv cache sharing layers).
-        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
-
         allocation_context = self._maybe_get_memory_pool_context(tag="kv_cache")
         if self.cache_config.enable_extensible_kv_cache:
+            # The connector is created in `extend_kv_cache`, once the
+            # memory it registers is final.
+            self._kv_cache_config = kv_cache_config
             self._v2_model_runner().initialize_kv_cache(
                 kv_cache_config,
                 kv_cache_allocation_context=allocation_context,
                 extensible=True,
             )
         else:
+            ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
             self.model_runner.initialize_kv_cache(
                 kv_cache_config, kv_cache_allocation_context=allocation_context
             )
@@ -792,6 +795,9 @@ class Worker(WorkerBase):
 
     def extend_kv_cache(self, num_blocks: int) -> None:
         """Commit the final size of an extensible KV cache."""
+        kv_cache_config = copy.copy(self._kv_cache_config)
+        kv_cache_config.num_blocks = num_blocks
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         extend_kv_cache(self._v2_model_runner(), num_blocks)
         self.cache_config.num_gpu_blocks = num_blocks
 

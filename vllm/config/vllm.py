@@ -2877,10 +2877,6 @@ class VllmConfig:
                 "enable_extensible_kv_cache sizes the KV cache from measured "
                 "memory and cannot be combined with kv_cache_memory_bytes."
             )
-        if self.kv_transfer_config is not None:
-            raise ValueError(
-                "enable_extensible_kv_cache does not yet support KV connectors."
-            )
 
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
         unsupported: list[str] = []
