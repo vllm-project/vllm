@@ -320,16 +320,17 @@ def _lookup_ple_embedding_from_pinned_kernel(
     in_range = (global_idx >= tp_vocab_start) & (global_idx < tp_vocab_end)
     local_idx = tl.where(in_range, global_idx - tp_vocab_start, 0)
     offsets = tl.arange(0, BLOCK_D)
-    mask = offsets < embedding_dim
+    store_mask = offsets < embedding_dim
+    load_mask = store_mask & in_range
     values = tl.load(
         weight_ptr + local_idx * embedding_dim + offsets,
-        mask=mask,
+        mask=load_mask,
         other=0.0,
     ).to(tl.bfloat16)
     tl.store(
         output_ptr + row_id * embedding_dim + offsets,
-        tl.where(in_range, values, 0.0),
-        mask=mask,
+        values,
+        mask=store_mask,
     )
 
 
