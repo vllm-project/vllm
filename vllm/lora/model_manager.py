@@ -454,15 +454,24 @@ class LoRAModelManager:
             if isinstance(module, PPMissingLayer):
                 continue
 
+            is_classifier_head = module_name in self.supported_modules_to_save
+
             target_modules = self.lora_config.target_modules
-            is_configured_target = target_modules is not None and is_in_target_modules(
-                module_name,
-                target_modules,
-                self.packed_modules_mapping,
-            )
             if (
-                not self._match_target_modules(module_name, module)
-                and not is_configured_target
+                not is_in_target_modules(
+                    module_name,
+                    target_modules,
+                    self.packed_modules_mapping,
+                )
+                and not is_classifier_head
+            ):
+                continue
+
+            # Let explicit targets reach wrapping so unsupported modules fail closed.
+            if target_modules is None and not is_supported_lora_module(
+                module_name,
+                module,
+                self.supported_lora_modules,
             ):
                 continue
 
@@ -493,7 +502,7 @@ class LoRAModelManager:
             if (
                 existing_wrapper is not None
                 and "lm_head" not in module_name
-                and module_name not in self.supported_modules_to_save
+                and not is_classifier_head
             ):
                 # Same underlying module was already wrapped under another
                 # path (e.g. a MoE gate held both directly on the block and
@@ -559,7 +568,7 @@ class LoRAModelManager:
                     ),
                 )
 
-            if module_name in self.supported_modules_to_save:
+            if is_classifier_head:
                 new_module = replace_submodule(
                     self.model,
                     module_name,
