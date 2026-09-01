@@ -3,7 +3,7 @@
 """RMSNorm fuser: detect the norm structurally and swap in vLLM's fused RMSNorm."""
 
 import functools
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -53,12 +53,17 @@ def _is_squared(node: object, x: fx.Node) -> bool:
 
 
 def _is_inverse_sqrt(node: object) -> bool:
-    """Detect `rsqrt(v)`, or the `pow(v, -0.5)` / `v ** -0.5` spelling of it."""
-    node = peel(node)
+    """Detect `rsqrt(v)`, or the `pow(v, -0.5)` / `v ** -0.5` spelling of it.
+
+    `v` is `node.args[0]` in every spelling, so callers can read it directly;
+    the exponent may be positional (`pow(v, -0.5)`, `v ** -0.5`) or keyword
+    (`torch.pow(v, exponent=-0.5)`).
+    """
     if is_op(node, "rsqrt"):
         return True
     if is_op(node, "pow"):
-        return len(node.args) == 2 and node.args[1] == -0.5
+        exponent = node.args[1] if len(node.args) > 1 else node.kwargs.get("exponent")
+        return exponent == -0.5
     return False
 
 
@@ -138,30 +143,38 @@ def _norm_impl(base: type[nn.Module]) -> type[nn.Module]:
 
 
 @functools.cache
-def _build_tp_aware(base: type[nn.Module], impl: type[nn.Module]) -> type[nn.Module]:
-    """Cached `type()` call for `_tp_aware`, keyed on the resolved override.
+def _build_tp_aware(impl: type[nn.Module]) -> type[nn.Module]:
+    """The TP-aware subclass of an out-of-tree norm override, memoised on `impl`.
 
-    Named after `impl`, not `base`, so a module repr or stack trace names the
-    implementation that actually runs.
+    The cache is load-bearing, not a freshness optimisation. `recursive_replace`
+    calls `fuse` once per norm *instance* (611 times on the Gemma-4 31B), so
+    without the memo each site would mint its own structurally identical class:
+    one class per instance is the pathological input for dynamo guards and
+    per-class compile caches. The fixed `TPAwareRMSNorm` / `TPAwareGemmaRMSNorm`
+    classes hold the "one class per norm kind, not one per instance" invariant
+    for the in-tree path; this memo holds it once an override makes the class
+    dynamic.
+
+    Named after `impl`, so a module repr or stack trace names the implementation
+    that actually runs. `impl` alone keys the cache: `RMSNorm` and `GemmaRMSNorm`
+    are siblings, so no single class can be a usable override for both.
     """
-    del base  # only part of the cache key
     return type(f"TPAware{impl.__name__}", (TPAwareNormMixin, impl), {})
 
 
 def _tp_aware(base: type[nn.Module]) -> type[nn.Module]:
-    """The TP-aware norm class to build, honouring out-of-tree overrides.
+    """The TP-aware norm class for `base`, honouring out-of-tree overrides.
 
     `CustomOp.__new__` keys the out-of-tree swap on `cls.__name__`, so a fixed
     subclass named `TPAwareRMSNorm` never matches a platform plugin's
-    ``"RMSNorm"`` registration. Thus, derive from the override when one is
-    registered, which keeps both the plugin's kernels and the TP gather. The
-    result is cached on the resolved pair, so a later registration change is
-    picked up rather than stale.
+    ``"RMSNorm"`` registration. When an override is registered, derive the
+    TP-aware class from it so both the plugin's kernels and the TP gather apply
+    (see `_build_tp_aware`); otherwise use the fixed in-tree class.
     """
     impl = _norm_impl(base)
     if impl is base:
-        return TPAwareGemmaRMSNorm if base is GemmaRMSNorm else TPAwareRMSNorm
-    return _build_tp_aware(base, impl)
+        return {RMSNorm: TPAwareRMSNorm, GemmaRMSNorm: TPAwareGemmaRMSNorm}[base]
+    return _build_tp_aware(impl)
 
 
 @dataclass
@@ -176,11 +189,13 @@ class RMSNormFuser(BaseFuser):
     """Attribute holding `eps`, read per instance in `fuse`."""
     eps: float | None = None
     """`eps` itself, when it is not held in an attribute (see `_eps_source`)."""
+    fused_cls: type[nn.Module] | None = field(default=None, init=False, repr=False)
+    """The class `fuse` installed, stashed so `info` names exactly that."""
 
     def info(self, name: str) -> str:
-        base = GemmaRMSNorm if self.zero_centered else RMSNorm
-        norm = _norm_impl(base).__name__
-        return f"Fused: {name} ({self.source_cls}) -> {norm} (CustomOp)"
+        return (
+            f"Fused: {name} ({self.source_cls}) -> {self.fused_cls.__name__} (CustomOp)"
+        )
 
     @classmethod
     def match(cls, graph: fx.Graph, module: nn.Module) -> "RMSNormFuser | None":
@@ -306,9 +321,10 @@ class RMSNormFuser(BaseFuser):
             # If eps was not detected, match torch behaviour.
             dtype = weight.dtype if has_weight else vllm_config.model_config.dtype
             eps = torch.finfo(dtype).eps
+        self.fused_cls = _tp_aware(GemmaRMSNorm if self.zero_centered else RMSNorm)
         if self.zero_centered:
-            return _tp_aware(GemmaRMSNorm)(hidden_size=hidden_size, eps=eps)
-        return _tp_aware(RMSNorm)(
+            return self.fused_cls(hidden_size=hidden_size, eps=eps)
+        return self.fused_cls(
             hidden_size=hidden_size,
             eps=eps,
             has_weight=has_weight,

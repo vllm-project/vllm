@@ -74,6 +74,14 @@ class PowOperatorRMSNorm(Gemma4RMSNorm):
         return x * (x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon) ** -0.5
 
 
+class KwargPowRMSNorm(Gemma4RMSNorm):
+    """The keyword spelling `torch.pow(v, exponent=-0.5)` of the same rsqrt."""
+
+    def _rms(self, x):
+        mean_squared = x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
+        return x * torch.pow(mean_squared, exponent=-0.5)
+
+
 class WeightlessGemma4RMSNorm(Gemma4RMSNorm):
     """Gemma 4 with `with_scale=False`: the `pow` spelling and no scale parameter."""
 
@@ -192,6 +200,7 @@ class UntraceableGatedRMSNorm(RMSNorm):
         (WeightlessRMSNorm, 1e-6, False),
         (Gemma4RMSNorm, 1e-6, False),
         (PowOperatorRMSNorm, 1e-6, False),
+        (KwargPowRMSNorm, 1e-6, False),
         (WeightlessGemma4RMSNorm, 1e-6, False),
         (LayerNorm, 1e-6, False),
         (torch.nn.RMSNorm, 1e-5, False),  # fused `F.rms_norm` op
@@ -252,7 +261,7 @@ def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_c
     assert built.weight.shape[0] == (weight.size(0) if weight is not None else 0)
 
 
-@pytest.mark.parametrize("cls", [Gemma4RMSNorm, PowOperatorRMSNorm])
+@pytest.mark.parametrize("cls", [Gemma4RMSNorm, PowOperatorRMSNorm, KwargPowRMSNorm])
 def test_pow_spelled_norm_fuses_to_equivalent_math(cls, default_vllm_config):
     """Matching `pow(v, -0.5)` is only sound if it really is the reciprocal square
     root: the fused norm must reproduce the unfused forward, not just replace it.
@@ -460,7 +469,7 @@ def test_tp_aware_ignores_an_unusable_registration():
         assert rms_norm._tp_aware(VLLMRMSNorm) is rms_norm.TPAwareRMSNorm
 
 
-def test_tp_aware_class_is_cached_per_resolved_override():
+def test_tp_aware_class_is_cached_per_resolved_override(default_vllm_config):
     """One class per (norm, override) pair -- two `fuse` calls must not produce two
     unrelated types -- but the cache is keyed on the override, so it never serves a
     stale class after the registration changes."""
@@ -471,6 +480,13 @@ def test_tp_aware_class_is_cached_per_resolved_override():
     with _registered(VLLMRMSNorm, override):
         first = rms_norm._tp_aware(VLLMRMSNorm)
         assert rms_norm._tp_aware(VLLMRMSNorm) is first
+        # The path that runs once per norm instance is `fuse`, not `_tp_aware`:
+        # guard the one-class-per-norm-kind invariant where it can regress.
+        m1, m2 = RMSNorm(16), RMSNorm(16)
+        fuser = get_fuser(m1)
+        built1 = fuser.fuse(m1, "norm", default_vllm_config)
+        built2 = fuser.fuse(m2, "norm", default_vllm_config)
+        assert type(built1) is type(built2) is first
     with _registered(VLLMRMSNorm, None):
         assert rms_norm._tp_aware(VLLMRMSNorm) is rms_norm.TPAwareRMSNorm
     with _registered(VLLMRMSNorm, override):
@@ -499,13 +515,19 @@ def test_fuse_builds_the_registered_override(cls, base_name, default_vllm_config
     torch.testing.assert_close(built.forward_native(x), torch.zeros_like(x))
 
 
-def test_info_names_the_implementation_that_runs():
-    """The fuse log has to name the override, or a silently skipped one reads
-    exactly like a working one."""
+def test_info_names_the_implementation_that_runs(default_vllm_config):
+    """The fuse log has to name what was installed, or a silently skipped override
+    reads exactly like a working one. `info` reports the class `fuse` stashed, so
+    the log can never disagree with the module that actually runs."""
     from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
 
     fuser = RMSNormFuser(zero_centered=False, source_cls="HFRMSNorm")
+    module = RMSNorm(16)
     with _registered(VLLMRMSNorm, None):
-        assert "-> RMSNorm (CustomOp)" in fuser.info("norm")
+        built = fuser.fuse(module, "norm", default_vllm_config)
+        assert f"-> {type(built).__name__} (CustomOp)" in fuser.info("norm")
+        assert type(built).__name__ == "TPAwareRMSNorm"
     with _registered(VLLMRMSNorm, _plugin_norm(VLLMRMSNorm, "LoggedPluginRMSNorm")):
-        assert "-> LoggedPluginRMSNorm (CustomOp)" in fuser.info("norm")
+        built = fuser.fuse(module, "norm", default_vllm_config)
+        assert f"-> {type(built).__name__} (CustomOp)" in fuser.info("norm")
+        assert "LoggedPlugin" in type(built).__name__
