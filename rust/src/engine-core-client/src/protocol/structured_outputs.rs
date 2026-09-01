@@ -104,6 +104,26 @@ impl StructuredOutputsParams {
             backend: StructuredOutputBackend::default(),
         }
     }
+
+    /// Reject constraints that would abort EngineCore, regardless of how the
+    /// params were built. Serde deserialization and the gRPC conversion both
+    /// call this so neither entry point can forward an empty constraint that a
+    /// later engine step treats as fatal.
+    pub fn validate(&self) -> Result<()> {
+        match &self.constraint {
+            StructuredOutputConstraint::Grammar(grammar) if grammar.trim().is_empty() => {
+                Err(Error::InvalidStructuredOutputsParams {
+                    message: "structured_outputs.grammar cannot be an empty string".to_string(),
+                })
+            }
+            StructuredOutputConstraint::Json(Value::String(value)) if value.trim().is_empty() => {
+                Err(Error::InvalidStructuredOutputsParams {
+                    message: "structured_outputs.json cannot be an empty string".to_string(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Wire-compatible structured-output payload used by Python engine-core.
@@ -176,7 +196,7 @@ impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
         }
         insert_constraint!("structural_tag", raw.structural_tag.map(StructuralTag));
 
-        Ok(Self {
+        let params = Self {
             constraint: constraint.map(|(_, c)| c).ok_or_else(|| {
                 Error::InvalidStructuredOutputsParams {
                     message: "missing structured output constraint".to_string(),
@@ -188,7 +208,9 @@ impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
                 whitespace_pattern: raw.whitespace_pattern,
             },
             backend: raw.backend,
-        })
+        };
+        params.validate()?;
+        Ok(params)
     }
 }
 
@@ -287,6 +309,47 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("json_object must be true"));
+    }
+
+    #[test]
+    fn structured_outputs_rejects_empty_json_string() {
+        let error = serde_json::from_value::<StructuredOutputsParams>(serde_json::json!({
+            "json": "  ",
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("json cannot be an empty string"));
+    }
+
+    #[test]
+    fn structured_outputs_rejects_empty_grammar_string() {
+        let error = serde_json::from_value::<StructuredOutputsParams>(serde_json::json!({
+            "grammar": "\n\t",
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("grammar cannot be an empty string"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_grammar_from_constructor() {
+        // The gRPC path builds params via the infallible constructor rather
+        // than Serde, so the shared validate() must still reject it.
+        let error = StructuredOutputsParams::grammar("  ").validate().unwrap_err();
+        assert!(error.to_string().contains("grammar cannot be an empty string"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_json_string_from_constructor() {
+        let error = StructuredOutputsParams::json(Value::String("  ".to_string()))
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("json cannot be an empty string"));
+    }
+
+    #[test]
+    fn validate_accepts_non_empty_grammar() {
+        assert!(StructuredOutputsParams::grammar("root ::= \"a\"").validate().is_ok());
     }
 
     #[test]
