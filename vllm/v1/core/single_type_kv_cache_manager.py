@@ -77,6 +77,8 @@ class SingleTypeKVCacheManager(ABC):
         self.cache_hit_alignment_tokens = scheduler_block_size
         # The block size for this manager; used for actual block allocation.
         self.block_size = kv_cache_spec.block_size
+        self.dcp_world_size = dcp_world_size
+        self.pcp_world_size = pcp_world_size
         if dcp_world_size > 1:
             self.block_size *= dcp_world_size
         self.kv_cache_spec = kv_cache_spec
