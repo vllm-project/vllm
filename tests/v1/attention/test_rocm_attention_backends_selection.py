@@ -34,6 +34,46 @@ def mock_get_cdna_version():
         yield
 
 
+def test_aiter_unified_attention_uses_dedicated_metadata_builder():
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionBackend,
+        RocmAiterUnifiedAttentionMetadataBuilder,
+    )
+    from vllm.v1.attention.backends.rocm_attn import (
+        RocmAttentionBackend,
+        RocmAttentionMetadataBuilder,
+    )
+
+    assert RocmAttentionBackend.get_builder_cls() is RocmAttentionMetadataBuilder
+    assert (
+        RocmAiterUnifiedAttentionBackend.get_builder_cls()
+        is RocmAiterUnifiedAttentionMetadataBuilder
+    )
+
+
+def test_aiter_unified_attention_capture_preserves_query_start_locations():
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionMetadataBuilder,
+    )
+
+    builder = object.__new__(RocmAiterUnifiedAttentionMetadataBuilder)
+    metadata = MagicMock()
+    metadata.seq_lens = torch.tensor([1048576, 524288], dtype=torch.int32)
+    builder.build = MagicMock(return_value=metadata)
+    common = MagicMock()
+    expected_query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
+    common.query_start_loc = expected_query_start_loc.clone()
+    metadata.query_start_loc = common.query_start_loc
+
+    actual = builder.build_for_cudagraph_capture(common)
+
+    builder.build.assert_called_once_with(0, common)
+    assert actual is metadata
+    assert torch.equal(actual.seq_lens, torch.ones_like(actual.seq_lens))
+    assert actual.query_start_loc is common.query_start_loc
+    assert torch.equal(actual.query_start_loc, expected_query_start_loc)
+
+
 @pytest.mark.parametrize(
     "env_vars, selected_backend, expected_backend_path",
     [
