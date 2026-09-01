@@ -45,6 +45,24 @@ def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
 
 
+def get_fp8_block_weight_scale(layer: torch.nn.Module) -> torch.Tensor | None:
+    """Return the block-FP8 weight scale regardless of parameter name.
+
+    ``Fp8LinearMethod`` registers DeepSeek-V3 block scales as
+    ``weight_scale_inv``. Quark per-block FP8 registers ``weight_scale``,
+    matching Quark-exported checkpoints. Prefer ``weight_scale_inv`` when
+    both exist so callers match ``Fp8BlockScaledMMLinearKernel``. Require
+    ``weight_block_size`` before falling back to ``weight_scale`` so
+    per-tensor/per-channel FP8 is not treated as block scales.
+    """
+    scale_inv = getattr(layer, "weight_scale_inv", None)
+    if scale_inv is not None:
+        return scale_inv
+    if getattr(layer, "weight_block_size", None) is None:
+        return None
+    return getattr(layer, "weight_scale", None)
+
+
 def input_to_float8(
     x: torch.Tensor, dtype: torch.dtype | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:

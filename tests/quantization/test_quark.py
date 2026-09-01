@@ -11,6 +11,7 @@ import importlib.metadata
 from dataclasses import dataclass
 from importlib.util import find_spec
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import huggingface_hub
 import lm_eval
@@ -691,6 +692,65 @@ except huggingface_hub.errors.RepositoryNotFoundError:
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+def test_quark_w8a8_fp8_per_block_registers_weight_scale(monkeypatch):
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        get_fp8_block_weight_scale,
+    )
+
+    layer = torch.nn.Module()
+    layer.weight_scale = torch.tensor([2.0])
+    assert get_fp8_block_weight_scale(layer) is None
+    layer.weight_block_size = [128, 128]
+    assert get_fp8_block_weight_scale(layer) is layer.weight_scale
+    layer.weight_scale_inv = torch.tensor([3.0])
+    assert get_fp8_block_weight_scale(layer) is layer.weight_scale_inv
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.quark.schemes."
+        "quark_w8a8_fp8.get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16)),
+    )
+    scheme = QuarkW8A8Fp8PerBlock(kFp8Static128BlockSym, kFp8Dynamic128Sym)
+    loaded = torch.nn.Module()
+
+    def weight_loader(param, loaded_weight):
+        return None
+
+    dummy_param = torch.nn.Parameter(torch.empty(1), requires_grad=False)
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8."
+            "validate_fp8_block_shape"
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8."
+            "create_fp8_weight_parameter",
+            return_value=dummy_param,
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8."
+            "create_fp8_scale_parameter",
+            return_value=dummy_param,
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8."
+            "init_fp8_linear_kernel",
+            return_value=MagicMock(),
+        ),
+    ):
+        scheme.create_weights(
+            loaded,
+            output_partition_sizes=[256],
+            input_size_per_partition=256,
+            params_dtype=torch.bfloat16,
+            weight_loader=weight_loader,
+            input_size=256,
+            output_size=256,
+        )
+    assert hasattr(loaded, "weight_scale")
+    assert not hasattr(loaded, "weight_scale_inv")
 
 
 def test_quark_config_has_no_model_specific_fused_mappings():
