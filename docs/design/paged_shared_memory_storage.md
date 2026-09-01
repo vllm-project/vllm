@@ -21,11 +21,13 @@ Shared memory allows multiple processes to access the same physical memory regio
 Data flows:
 
 ```text
-ZMQ Path (small metadata only):
-[API Server] --ZMQ IPC--> [GPU Worker]  (metadata, no tensor data)
+ZMQ IPC Path:
+[Multi-modal Tensor] ─ZMQ IPC→ [CPU Buffer] ─Pin Memory ─→ [GPU]
+    (API Server)               (GPU Worker)            (H2D)
 
-Shared Memory Path (tensor data):
-[API Server] --SHM write--> [Paged Shared Memory Storage] --SHM read--> [GPU Worker] --H2D--> [GPU]
+Shared Memory Path:
+[Multi-modal Tensor] ─Shared Memory→ [swap_blocks_batch] ─→ [GPU]
+    (API Server)                           (GPU Worker) (H2D)
 ```
 
 The actual tensor bytes are **offloaded** from the ZMQ hot path, eliminating serialization and large‑message overhead.
