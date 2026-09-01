@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused kernels for PLE n-gram IDs, gating, and short convolution."""
+"""Fused Qwen4Exp PLE kernels.
+
+N-gram IDs hash each suffix with
+``offset[h] + (xor_i(token[t-i] * multiplier[i]) % size[h])``. The gate computes
+``d = dot(RMSNorm(key), RMSNorm(query)) / sqrt(H)`` and
+``g = sigmoid(sign(d) * sqrt(max(abs(d), 1e-6)))``. Short convolution adds
+``silu(sum_k weight[k] * history[t + k * dilation])`` to the gated output and
+updates its persistent history.
+"""
 
 from typing import Literal
 
@@ -11,12 +19,8 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+
 # N-gram ID generation
-
-BLOCK_T = 8
-NUM_WARPS = 4
-
-
 @triton.jit(do_not_specialize=["num_tokens", "num_reqs", "binary_search_iters"])
 def _ple_ngram_ids_kernel(
     input_ids_ptr,
@@ -121,6 +125,7 @@ def _ple_ngram_ids(
     out = torch.empty(
         (num_tokens, ngram_heads), dtype=torch.int64, device=input_ids.device
     )
+    BLOCK_T = 8
     _ple_ngram_ids_kernel[(triton.cdiv(num_tokens, BLOCK_T),)](
         input_ids,
         query_start_loc,
@@ -136,7 +141,7 @@ def _ple_ngram_ids(
         NGRAM_CONTEXT_LEN=ctx_len,
         HEADS_PER_NGRAM=heads_per_ngram,
         BLOCK_T=BLOCK_T,
-        num_warps=NUM_WARPS,
+        num_warps=4,
     )
     return out
 
@@ -189,8 +194,6 @@ def ple_ngram_ids(
 
 
 # Gating and normalization
-
-
 @triton.jit
 def _ple_gate_kernel(
     key_ptr,  # [T, HC*H] with row stride key_rs
@@ -325,10 +328,6 @@ def ple_gate(
 
 
 # Dilated short convolution
-
-BLOCK_C = 512
-
-
 @triton.jit(do_not_specialize=["num_reqs", "bs_iters", "has_token_map"])
 def _ple_conv_kernel(
     x_ptr,
@@ -360,6 +359,8 @@ def _ple_conv_kernel(
     pid_c = tl.program_id(1)
     c_offs = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
     c_mask = c_offs < C
+    # Mode-specific launches use logical row indices. Mixed batches map them
+    # back to the original token order without gathering inputs or residuals.
     output_t = tl.load(token_idx_ptr + t, mask=has_token_map, other=t).to(tl.int64)
 
     if MODE == "decode":
@@ -385,6 +386,7 @@ def _ple_conv_kernel(
         in_range = t < total_real
         if MODE == "spec":
             num_acc = tl.load(num_acc_ptr + r)
+            # Roll back draft state to the last accepted token.
             slot_off = tl.minimum(tl.maximum(num_acc - 1, 0), SPEC_QUERY_LEN - 1).to(
                 tl.int32
             )
@@ -399,6 +401,8 @@ def _ple_conv_kernel(
     else:
         has_init = state_ok
     if MODE == "spec":
+        # A new spec chunk can produce output from its own tokens without a
+        # prior state; null slots in other modes denote inactive rows.
         read_state = state_ok
         out_ok = in_range
     else:
@@ -450,7 +454,31 @@ def _ple_conv_kernel(
         mask=c_mask,
     )
 
+    if MODE == "decode":
+        # Decode has one program per request and channel block, so no peer can
+        # still be reading this state slice when it is updated.
+        decode_input = tl.load(
+            x_ptr + output_t * C + c_offs,
+            mask=c_mask & state_ok,
+            other=0.0,
+        )
+        for i in tl.static_range(0, STATE_LEN):
+            if i < STATE_LEN - 1:
+                next_state = tl.load(
+                    base_state + (i + 1) * state_ws + c_offs * state_cs,
+                    mask=c_mask & state_ok & has_init,
+                    other=0.0,
+                )
+            else:
+                next_state = decode_input
+            tl.store(
+                base_state + i * state_ws + c_offs * state_cs,
+                next_state,
+                mask=c_mask & state_ok,
+            )
 
+
+# Prefill and spec write back separately so every token reads the old state.
 @triton.jit(do_not_specialize=["has_token_map"])
 def _ple_conv_writeback_kernel(
     x_ptr,
@@ -483,26 +511,21 @@ def _ple_conv_writeback_kernel(
     if not state_ok:
         return
 
-    if MODE == "decode":
-        q_start = r
-        qlen = 1
-        slot_off = tl.full([], 0, tl.int32)
+    q_start = tl.load(qsl_ptr + r)
+    q_end = tl.load(qsl_ptr + r + 1)
+    qlen = (q_end - q_start).to(tl.int32)
+    if MODE == "spec":
+        num_acc = tl.load(num_acc_ptr + r)
+        # Use the same rollback window as the output kernel.
+        slot_off = tl.minimum(tl.maximum(num_acc - 1, 0), SPEC_QUERY_LEN - 1).to(
+            tl.int32
+        )
         shift = 1
     else:
-        q_start = tl.load(qsl_ptr + r)
-        q_end = tl.load(qsl_ptr + r + 1)
-        qlen = (q_end - q_start).to(tl.int32)
-        if MODE == "spec":
-            num_acc = tl.load(num_acc_ptr + r)
-            slot_off = tl.minimum(tl.maximum(num_acc - 1, 0), SPEC_QUERY_LEN - 1).to(
-                tl.int32
-            )
-            shift = 1
-        else:
-            slot_off = tl.full([], 0, tl.int32)
-            shift = qlen
-            if qlen <= 0:
-                return
+        slot_off = tl.full([], 0, tl.int32)
+        shift = qlen
+        if qlen <= 0:
+            return
 
     has_init = tl.load(has_init_ptr + r) != 0 if HAS_INIT else True
     src_ok = state_ok if MODE == "spec" else state_ok & has_init
@@ -512,6 +535,7 @@ def _ple_conv_writeback_kernel(
     for i in tl.static_range(0, WRITE_W):
         m = shift + i
         from_state = m <= STATE_LEN - 1
+        # Short or graph-padded spec chunks preserve the unused state tail.
         do_write = i < STATE_LEN + qlen - 1 if MODE == "spec" else True
         state_value = tl.load(
             base_state + (slot_off + m) * state_ws + c_offs * state_cs,
@@ -553,6 +577,7 @@ def ple_conv(
     token_indices: torch.Tensor | None = None,
 ) -> None:
     """Add short-convolution output to ``residual`` and update its state."""
+    BLOCK_C = 512
     kernel_spec_query_len = spec_query_len if mode == "spec" else 1
     T, C = inputs.shape
     K = conv_weights.shape[1]
@@ -592,7 +617,8 @@ def ple_conv(
 
     num_warps = 4 if mode == "prefill" else 8
 
-    # MODE and HAS_INIT eliminate accesses to optional None arguments.
+    # Constexpr flags eliminate accesses to optional None arguments. Without a
+    # token map, state_indices is an unused but device-resident placeholder.
     _ple_conv_kernel[(T, triton.cdiv(C, BLOCK_C))](
         inputs,
         conv_state,
@@ -620,25 +646,27 @@ def ple_conv(
         NULL_STATE_ID=NULL_BLOCK_ID,
         num_warps=num_warps,
     )
-    _ple_conv_writeback_kernel[(num_reqs, triton.cdiv(C, BLOCK_C))](
-        inputs,
-        conv_state,
-        state_indices,
-        query_start_loc,
-        num_accepted_tokens,
-        has_initial_states,
-        token_indices if token_indices is not None else state_indices,
-        token_indices is not None,
-        state_bs,
-        state_ws,
-        state_cs,
-        C=C,
-        BLOCK_C=BLOCK_C,
-        STATE_LEN=state_len,
-        SPEC_QUERY_LEN=kernel_spec_query_len,
-        STATE_WIDTH=state_width,
-        MODE=mode,
-        HAS_INIT=has_initial_states_arg,
-        NULL_STATE_ID=NULL_BLOCK_ID,
-        num_warps=num_warps,
-    )
+    # conv state update is fused with the kernel above for decode
+    if mode != "decode":
+        _ple_conv_writeback_kernel[(num_reqs, triton.cdiv(C, BLOCK_C))](
+            inputs,
+            conv_state,
+            state_indices,
+            query_start_loc,
+            num_accepted_tokens,
+            has_initial_states,
+            token_indices if token_indices is not None else state_indices,
+            token_indices is not None,
+            state_bs,
+            state_ws,
+            state_cs,
+            C=C,
+            BLOCK_C=BLOCK_C,
+            STATE_LEN=state_len,
+            SPEC_QUERY_LEN=kernel_spec_query_len,
+            STATE_WIDTH=state_width,
+            MODE=mode,
+            HAS_INIT=has_initial_states_arg,
+            NULL_STATE_ID=NULL_BLOCK_ID,
+            num_warps=num_warps,
+        )

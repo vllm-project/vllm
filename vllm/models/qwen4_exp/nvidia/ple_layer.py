@@ -570,6 +570,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             quant_config=quant_config,
             params_dtype=model_config.dtype,
         )
+        # The PLE cache is TP-replicated, so this merged projection is too.
         self.kv_proj = MergedColumnParallelLinear(
             int(config.ple_embed_dim),
             [self.hc_hidden_size, self.hidden_size],
@@ -806,6 +807,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             )
 
         conv_state = self.kv_cache[0]
+        # Canonicalize both backend cache layouts to [slot, channel, window].
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
         conv_weights = self.conv1d.weight.squeeze(1)
@@ -855,6 +857,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             self.norm_conv.weight,
             self.norm_key.eps,
         )
+        # State routing depends on runtime request metadata and remains outside
+        # the piecewise graph; short convolution accumulates into gated_output.
         torch.ops.vllm.qwen4_exp_ple_short_conv(conv_input, gated_output, self.prefix)
         return gated_output
 
