@@ -2,7 +2,7 @@ group: Attention XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: V1 attention (H100-MI300)
+- label: ':nvidia: (H100) V1 Attention Shard %N'
   device: intel_gpu
   timeout_in_minutes: 85
   parallelism: 2
