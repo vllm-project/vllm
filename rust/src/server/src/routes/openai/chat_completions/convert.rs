@@ -437,7 +437,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use axum::http::HeaderMap;
+    use axum::http::{HeaderMap, StatusCode};
     use expect_test::expect;
     use llm_multimodal::ImageDetail;
     use serde_json::json;
@@ -581,6 +581,35 @@ mod tests {
 
         assert_eq!(prepared.chat_request.sampling_params.min_tokens, Some(0));
         assert_eq!(prepared.chat_request.decode_options.min_tokens, 0);
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_empty_json_schema() {
+        let mut request = base_request();
+        request.response_format = Some(ResponseFormat::JsonSchema {
+            json_schema: JsonSchemaFormat {
+                name: "answer".to_string(),
+                description: None,
+                schema: json!("  "),
+                strict: None,
+            },
+        });
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .to_error_response()
+                .error
+                .message
+                .contains("json cannot be an empty string")
+        );
     }
 
     #[test]

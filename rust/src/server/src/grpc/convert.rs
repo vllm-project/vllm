@@ -4,6 +4,7 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
+use thiserror_ext::AsReport as _;
 use tonic::Status;
 use url::Url;
 use uuid::Uuid;
@@ -350,6 +351,9 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
+    params
+        .validate()
+        .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
     Ok(Some(params))
 }
 
@@ -635,6 +639,20 @@ mod tests {
             .expect("convert ok");
         // The gRPC API defaults to greedy (0.0) when temperature is not specified.
         assert_eq!(text.sampling_params.temperature, Some(0.0));
+    }
+
+    #[test]
+    fn grpc_rejects_empty_grammar_before_engine() {
+        use super::pb::decoding_parameters::StructuredOutput;
+        let req = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                structured_output: Some(StructuredOutput::Grammar("  ".to_string())),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
+        assert!(err.message().contains("grammar cannot be an empty string"));
     }
 
     #[test]
