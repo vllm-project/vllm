@@ -88,6 +88,45 @@ def fit_kpool_indices_to_aiter(
     return torch.where(valid_output, output, -1)
 
 
+_AITER_FOLD_SHIM_INSTALLED = False
+
+
+def _install_aiter_fold_seqlen_indptr_capture_shim() -> None:
+    """Make aiter's persistent-MLA head-fold helper CUDA-graph-capturable.
+
+    aiter's ``mla.py::_fold_seqlen_indptr`` (used by the persistent
+    ``mla_decode_fwd`` path for ``num_heads`` in 32..128, which the sparse
+    decode always takes) builds the folded indptr with an ``out[0] = 0``
+    scalar write. That materializes a CPU scalar and issues an unpinned
+    CPU->CUDA copy, which is rejected during CUDA graph capture ("Cannot
+    copy between CPU and CUDA tensors during CUDA graph capture unless the
+    CPU tensor is pinned"), so the decode step cannot be captured. Swap in
+    an equivalent, fully-on-device construction. No-op off ROCm or if aiter
+    does not expose the helper.
+    """
+    global _AITER_FOLD_SHIM_INSTALLED
+    if _AITER_FOLD_SHIM_INSTALLED or not current_platform.is_rocm():
+        return
+    try:
+        import aiter.mla as aiter_mla
+    except ImportError:
+        return
+    if not hasattr(aiter_mla, "_fold_seqlen_indptr"):
+        return
+
+    def _fold_seqlen_indptr(indptr: torch.Tensor, fold_factor: int) -> torch.Tensor:
+        """Build the head-folded indptr fully on device (CUDA-graph safe)."""
+        lens = indptr[1:] - indptr[:-1]
+        cumsum = torch.cumsum(lens.repeat_interleave(fold_factor), dim=0)
+        return torch.nn.functional.pad(cumsum.to(indptr.dtype), (1, 0))
+
+    aiter_mla._fold_seqlen_indptr = _fold_seqlen_indptr
+    _AITER_FOLD_SHIM_INSTALLED = True
+
+
+_install_aiter_fold_seqlen_indptr_capture_shim()
+
+
 @triton.jit
 def _convert_req_index_to_global_index_kernel(
     req_id_ptr,  # int32 [num_tokens]
