@@ -95,3 +95,18 @@ models:
       tp: "--gpu-memory-utilization 0.9"
     decode:
       tp: "--gpu-memory-utilization 0.9"
+
+  - model: GLM-5.2-FP8
+    env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_MLA: "1"
+      VLLM_ROCM_USE_AITER_MOE: "1"
+      VLLM_ROCM_USE_AITER_RMSNORM: "1"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
+    base_flags: "--trust-remote-code --kv-cache-dtype fp8"
+    prefill:
+      tp: "--gpu-memory-utilization 0.85"
+      ep: "--gpu-memory-utilization 0.85 --enforce-eager"
+    decode:
+      tp: "--gpu-memory-utilization 0.85"
+      ep: '--gpu-memory-utilization 0.85 --compilation-config {"cudagraph_mode":"PIECEWISE"}'
