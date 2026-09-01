@@ -94,6 +94,7 @@ class PagedShmCache:
                     alloc.blocks,
                     self.block_size,
                     self._decoder,
+                    self.device,
                 )
                 return kwargs_item, prompt_updates
             finally:
@@ -199,10 +200,8 @@ class PagedShmSenderCache(PagedShmCache, BaseMultiModalProcessorCache):
     ) -> MultiModalProcessorCacheOutItem:
         self._total += 1
         if mm_item is not None:
-            kwargs_item, prompt_updates = mm_item
-            item = self.create_item(kwargs_item, prompt_updates, mm_hash)
             self._hits += 1
-            return item
+            return self.create_item(mm_item[0], mm_item[1], mm_hash)
         return self.get_item(mm_hash)
 
     def touch_sender_cache_item(self, mm_hash: str) -> None:

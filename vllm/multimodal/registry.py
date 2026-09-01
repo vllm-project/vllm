@@ -11,6 +11,7 @@ from vllm.inputs import MultiModalInput
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 
+from ..utils.torch_utils import PIN_MEMORY
 from .cache import (
     BaseMultiModalProcessorCache,
     BaseMultiModalReceiverCache,
@@ -343,7 +344,9 @@ class MultiModalRegistry:
         elif cache_type == "paged_shm":
             from .paged_shm.cache import PagedShmReceiverCache
 
-            return PagedShmReceiverCache(vllm_config)
+            device = vllm_config.device_config.device
+            assert device is not None
+            return PagedShmReceiverCache(vllm_config, pin=PIN_MEMORY, device=device)
         else:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 
@@ -361,7 +364,9 @@ class MultiModalRegistry:
         elif cache_type == "paged_shm":
             from .paged_shm.cache import PagedShmReceiverCache
 
-            return PagedShmReceiverCache(vllm_config)
+            device = vllm_config.device_config.device
+            assert device is not None
+            return PagedShmReceiverCache(vllm_config, pin=PIN_MEMORY, device=device)
         else:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 
