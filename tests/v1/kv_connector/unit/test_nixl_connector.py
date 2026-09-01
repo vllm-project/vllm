@@ -2491,6 +2491,65 @@ class FailingNixlWrapper(FakeNixlWrapper):
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FailingNixlWrapper,
 )
+@pytest.mark.parametrize("notification_fails", [False, True])
+def test_full_prefix_cache_hit_is_reported_finished(
+    default_vllm_config, dist_init, notification_fails
+):
+    """A full hit has nothing to transfer, but still has to be reported.
+
+    _read_blocks returns early when the local block list is empty -- D already
+    holds the KV and only the producer needs telling -- without recording
+    anything, so the request is named in neither _recving_transfers nor
+    _failed_recv_reqs and never reaches finished_recving.
+
+    The scheduler has no other way to release it: a WAITING_FOR_REMOTE_KVS
+    request is promoted only once it is reported, with no timeout, so it stays
+    in skipped_waiting holding its blocks for the life of the process. Failing
+    to notify does not change that -- the KV is local either way, and the
+    producer frees its own blocks on a timeout.
+    """
+    vllm_config = create_vllm_config()
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config,
+        connector.engine_id,
+        hand_shake_latency=0.0,
+        kv_cache_config=connector._kv_cache_config,
+    )
+    worker = connector.connector_worker
+    worker.nixl_wrapper.fail_send_notif = notification_fails
+
+    request_id = "test_full_prefix_cache_hit"
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id=request_id,
+        local_block_ids=(),  # empty: the whole prompt is already cached locally
+        kv_transfer_params={
+            "remote_block_ids": [[20, 21, 22]],
+            "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_tp_size": 1,
+        },
+    )
+    connector.bind_connector_metadata(metadata)
+    dummy_ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    connector.start_load_kv(dummy_ctx)
+    connector.bind_connector_metadata(NixlConnectorMetadata())
+    time.sleep(0.1)
+    connector.start_load_kv(dummy_ctx)
+
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert request_id in done_recving
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FailingNixlWrapper,
+)
 @pytest.mark.parametrize(
     "failure_type,wrapper_config,needs_get_finished",
     [

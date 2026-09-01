@@ -328,6 +328,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_agent_name=agent_name,
                 )
                 self.xfer_stats.record_failed_notification()
+            # Report the request either way. Its KV is already local, so there
+            # is nothing to wait for and nothing to recompute -- a failed
+            # notification only costs the producer a timeout before it frees
+            # its own blocks. Without an entry here the request is never named
+            # in finished_recving, and the scheduler has no other way to
+            # release it: it stays in skipped_waiting holding the blocks it
+            # was allocated, for the life of the process.
+            self._recving_transfers.setdefault(request_id, [])
             return
 
         assert (
