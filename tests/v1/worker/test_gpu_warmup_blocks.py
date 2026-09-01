@@ -107,6 +107,7 @@ def _make_runner(
         ),
         kv_block_zeroer=None,
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
+        extensible_kv_cache=None,
     )
 
 
