@@ -492,9 +492,11 @@ class FullAttentionSpec(AttentionSpec):
         Merge a list of FullAttentionSpec objects into a single
         FullAttentionSpec object.
         """
-        assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be FullAttentionSpec."
-        )
+        if not all(isinstance(spec, FullAttentionSpec) for spec in specs):
+            raise ValueError(
+                "All attention layers in the same KV cache group must be "
+                "FullAttentionSpec."
+            )
 
         sliding_window = set(
             spec.sliding_window for spec in specs if spec.sliding_window is not None
@@ -504,9 +506,10 @@ class FullAttentionSpec(AttentionSpec):
             for spec in specs
             if spec.attention_chunk_size is not None
         )
-        assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
-        )
+        if any(isinstance(spec, MLAAttentionSpec) for spec in specs):
+            raise ValueError(
+                "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
+            )
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -526,16 +529,18 @@ class FullAttentionSpec(AttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
-                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
-                    "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
-                )
-        assert (merged_spec.sliding_window is not None) + (
+                if getattr(spec, f.name) != getattr(merged_spec, f.name):
+                    raise ValueError(
+                        "All attention layers in the same KV cache group "
+                        "must have the same attention spec."
+                    )
+        if (merged_spec.sliding_window is not None) + (
             merged_spec.attention_chunk_size is not None
-        ) <= 1, (
-            "Model with both sliding window layers and chunked local attention "
-            "layers is not supported."
-        )
+        ) > 1:
+            raise ValueError(
+                "Model with both sliding window layers and chunked local "
+                "attention layers is not supported."
+            )
         return merged_spec
 
 
@@ -566,25 +571,30 @@ class MLAAttentionSpec(FullAttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be MLAAttentionSpec."
-        )
+        if not all(isinstance(spec, MLAAttentionSpec) for spec in specs):
+            raise ValueError(
+                "All attention layers in the same KV cache group must be "
+                "MLAAttentionSpec."
+            )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
-        assert (
+        if not (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
-        ), (
-            "All attention layers in the same KV cache group must use the same "
-            "quantization method, tokens per state, and model version."
-        )
+        ):
+            raise ValueError(
+                "All attention layers in the same KV cache group must use "
+                "the same quantization method, tokens per state, and model "
+                "version."
+            )
         non_causal_mtd_set = {spec.non_causal_multi_token_decode for spec in specs}
-        assert len(non_causal_mtd_set) == 1, (
-            "All attention layers in the same KV cache group must agree on "
-            "non_causal_multi_token_decode."
-        )
+        if len(non_causal_mtd_set) != 1:
+            raise ValueError(
+                "All attention layers in the same KV cache group must agree "
+                "on non_causal_multi_token_decode."
+            )
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -601,10 +611,11 @@ class MLAAttentionSpec(FullAttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
-                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
-                    "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
-                )
+                if getattr(spec, f.name) != getattr(merged_spec, f.name):
+                    raise ValueError(
+                        "All attention layers in the same KV cache group "
+                        "must have the same attention spec."
+                    )
         return merged_spec
 
 
@@ -630,13 +641,17 @@ class RSWASpec(FullAttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[RSWASpec]) -> RSWASpec:
-        assert all(isinstance(spec, RSWASpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be RSWASpec."
-        )
+        if not all(isinstance(spec, RSWASpec) for spec in specs):
+            raise ValueError(
+                "All attention layers in the same KV cache group must be "
+                "RSWASpec."
+            )
         rswa_windows = {spec.rswa_window for spec in specs}
-        assert len(rswa_windows) == 1, (
-            f"All R-SWA layers must share the same rswa_window, got {rswa_windows}"
-        )
+        if len(rswa_windows) != 1:
+            raise ValueError(
+                "All R-SWA layers must share the same rswa_window, "
+                f"got {rswa_windows}"
+            )
         # Delegate common field merging to the parent, then reattach rswa_window.
         base = FullAttentionSpec.merge(specs)  # type: ignore[arg-type]
         return cls(
@@ -800,34 +815,39 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     head_size_v: int = 0
 
     def __post_init__(self):
-        assert self.model_version in (None, "deepseek_v4"), (
-            f"Unsupported model version: {self.model_version}"
-        )
+        if self.model_version not in (None, "deepseek_v4"):
+            raise ValueError(
+                f"Unsupported model version: {self.model_version}"
+            )
         super().__post_init__()
         _apply_alignment_padding(self)
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, SlidingWindowMLASpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be "
-            "SlidingWindowMLASpec."
-        )
+        if not all(
+            isinstance(spec, SlidingWindowMLASpec) for spec in specs
+        ):
+            raise ValueError(
+                "All attention layers in the same KV cache group must be "
+                "SlidingWindowMLASpec."
+            )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
         extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
-        assert (
+        if not (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
             and len(sliding_window_set) == 1
             and len(extra_retained_set) == 1
-        ), (
-            "All attention layers in the same KV cache group must use the same "
-            "quantization method, tokens per state, model version, sliding "
-            "window size, and retained token count."
-        )
+        ):
+            raise ValueError(
+                "All attention layers in the same KV cache group must use "
+                "the same quantization method, tokens per state, model "
+                "version, sliding window size, and retained token count."
+            )
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -954,9 +974,11 @@ class SinkFullAttentionSpec(FullAttentionSpec):
         Merge a list of FullAttentionSpec objects into a single
         FullAttentionSpec object.
         """
-        assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be FullAttentionSpec."
-        )
+        if not all(isinstance(spec, FullAttentionSpec) for spec in specs):
+            raise ValueError(
+                "All attention layers in the same KV cache group must be "
+                "FullAttentionSpec."
+            )
 
         sliding_window = set(
             spec.sliding_window for spec in specs if spec.sliding_window is not None
@@ -966,9 +988,10 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             for spec in specs
             if spec.attention_chunk_size is not None
         )
-        assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
-        )
+        if any(isinstance(spec, MLAAttentionSpec) for spec in specs):
+            raise ValueError(
+                "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
+            )
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -986,16 +1009,18 @@ class SinkFullAttentionSpec(FullAttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
-                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
-                    "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
-                )
-        assert (merged_spec.sliding_window is not None) + (
+                if getattr(spec, f.name) != getattr(merged_spec, f.name):
+                    raise ValueError(
+                        "All attention layers in the same KV cache group "
+                        "must have the same attention spec."
+                    )
+        if (merged_spec.sliding_window is not None) + (
             merged_spec.attention_chunk_size is not None
-        ) <= 1, (
-            "Model with both sliding window layers and chunked local attention "
-            "layers is not supported."
-        )
+        ) > 1:
+            raise ValueError(
+                "Model with both sliding window layers and chunked local "
+                "attention layers is not supported."
+            )
         return merged_spec
 
 
@@ -1038,10 +1063,11 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             spec.max_num_blocks_per_req(vllm_config, max_len)
             for spec in self.kv_cache_specs.values()
         }
-        assert len(widths) == 1, (
-            "All layers in the same KV cache group must need the same number "
-            f"of block table entries, got {sorted(widths)}."
-        )
+        if len(widths) != 1:
+            raise ValueError(
+                "All layers in the same KV cache group must need the same "
+                f"number of block table entries, got {sorted(widths)}."
+            )
         return next(iter(widths))
 
     @classmethod
