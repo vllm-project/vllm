@@ -23,6 +23,8 @@ class AttentionLayerBase(ABC):
     impl: "AttentionImpl"
     supports_dcp: bool = True
 
+    supports_direct_kv: bool = False
+
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Bind the allocated KV cache tensor to this layer.
 

@@ -309,7 +309,7 @@ def sparse_attn_indexer(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
-    use_pcp: bool,
+    use_pcp_kv_gather: bool,
     dense_mha_metadata_layer_name: LayerNameType,
     use_fp4_cache: bool = False,
     dcp_rank: int = 0,
@@ -358,7 +358,7 @@ def sparse_attn_indexer(
             total_seq_lens,
             topk_indices_buffer,
             skip_k_cache_insert,
-            use_pcp,
+            use_pcp_kv_gather,
             dense_mha_metadata_layer_name,
             use_fp4_cache,
         )
@@ -381,7 +381,7 @@ def sparse_attn_indexer(
     # out-of-bounds reads in the kernel.
     # Keep PCP padding so every rank contributes the same all-gather shape.
     num_tokens = slot_mapping.shape[0]
-    if use_pcp:
+    if use_pcp_kv_gather:
         num_tokens //= get_pcp_group().world_size
     if k is not None:
         k = k[:num_tokens]
@@ -392,7 +392,7 @@ def sparse_attn_indexer(
             k,
             slot_mapping,
             num_decode_tokens,
-            use_pcp,
+            use_pcp_kv_gather=use_pcp_kv_gather,
         )
         # scale_fmt can be None, but the function expects str
         assert scale_fmt is not None
@@ -705,7 +705,7 @@ def sparse_attn_indexer_fake(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool,
-    use_pcp: bool,
+    use_pcp_kv_gather: bool,
     dense_mha_metadata_layer_name: LayerNameType,
     use_fp4_cache: bool = False,
     dcp_rank: int = 0,
@@ -772,7 +772,7 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
-        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        self.use_pcp_kv_gather = parallel_config.prefill_context_parallel_size > 1
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -825,7 +825,7 @@ class SparseAttnIndexer(CustomOp):
             self.max_total_seq_len,
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
-            self.use_pcp,
+            self.use_pcp_kv_gather,
             _encode_layer_name(self.dense_mha_metadata_layer_name),
             self.use_fp4_cache,
             self.dcp_rank,

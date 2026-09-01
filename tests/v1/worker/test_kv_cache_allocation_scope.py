@@ -9,7 +9,9 @@ import torch
 
 import vllm.v1.worker.gpu.attn_utils as attn_utils
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner
+import vllm.v1.worker.utils as worker_utils
 from vllm.v1.worker.gpu_worker import Worker
+from vllm.v1.worker.utils import KVCache
 
 
 class _AllocationScope(AbstractContextManager):
@@ -30,23 +32,53 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
     scope = _AllocationScope()
     kv_caches = {"layer": torch.empty(0)}
 
+    class SymmMemDomain:
+        def __init__(self) -> None:
+            self.finalized = False
+
+        def rendezvous(self, storage):
+            pass
+
+        def finalize(self, caches, storage):
+            assert not scope.active
+            assert caches["shared"] is caches["layer"]
+            self.finalized = True
+
+        def close(self):
+            pass
+
+    domain = SymmMemDomain()
+
     def allocate(*args, **kwargs):
         assert scope.active
+        buffer_allocator = kwargs["buffer_allocator"]
+        assert buffer_allocator.__self__ is kv_cache
+        kv_caches["layer"] = buffer_allocator(1, torch.device("cpu"))
         return kv_caches
 
     def bind(*args, **kwargs):
         assert not scope.active
 
-    monkeypatch.setattr(attn_utils, "allocate_kv_cache", allocate)
+    monkeypatch.setattr(worker_utils, "allocate_kv_cache", allocate)
+    monkeypatch.setattr(
+        worker_utils,
+        "allocate_symmetric_memory_storage",
+        lambda *_args, **_kwargs: torch.empty(1, dtype=torch.int8),
+    )
     monkeypatch.setattr(attn_utils, "bind_kv_cache", bind)
-    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda config: {})
+    monkeypatch.setattr(
+        attn_utils,
+        "get_shared_kv_cache_layers",
+        lambda config: {"shared": "layer"},
+    )
 
     config = SimpleNamespace(
         cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="test")),
     )
+    kv_cache = KVCache(pcp_domain=cast(Any, domain))
     result = attn_utils.init_kv_cache(
-        [],
+        kv_cache,
         {},
         object(),
         torch.device("cpu"),
@@ -56,6 +88,7 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
     )
 
     assert result is kv_caches
+    assert domain.finalized
     assert not scope.active
 
 

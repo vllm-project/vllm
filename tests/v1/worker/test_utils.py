@@ -34,6 +34,33 @@ def test_bind_kv_cache(default_vllm_config):
     assert runner_kv_caches[3] is kv_cache["layers.3.self_attn"]
 
 
+def test_bind_kv_cache_passes_pcp_domain_only_to_supported_layers():
+    class Layer:
+        def __init__(self, supports_direct_kv: bool):
+            self.supports_direct_kv = supports_direct_kv
+            self.bound: tuple[object, object | None] | None = None
+
+        def bind_kv_cache(self, kv_cache, runtime=None):
+            self.bound = (kv_cache, runtime)
+
+    direct_layer = Layer(supports_direct_kv=True)
+    regular_layer = Layer(supports_direct_kv=False)
+    ctx = {
+        "layers.0.self_attn": direct_layer,
+        "layers.1.self_attn": regular_layer,
+    }
+    kv_caches = {
+        "layers.0.self_attn": torch.zeros(1),
+        "layers.1.self_attn": torch.zeros(1),
+    }
+    pcp_domain = object()
+
+    bind_kv_cache(kv_caches, ctx, [], pcp_symm_mem_domain=pcp_domain)
+
+    assert direct_layer.bound == (kv_caches["layers.0.self_attn"], pcp_domain)
+    assert regular_layer.bound == (kv_caches["layers.1.self_attn"], None)
+
+
 def test_bind_kv_cache_non_attention(default_vllm_config):
     from vllm.model_executor.layers.attention import Attention
 

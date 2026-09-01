@@ -23,6 +23,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu import cudagraph_utils as cgu
 from vllm.v1.worker.gpu import model_runner as mrv2
+from vllm.v1.worker.utils import KVCache
 
 GLOBAL_POOL = "global-pool"
 THROWAWAY_POOL = "throwaway-pool"
@@ -355,7 +356,7 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
     runner.compilation_config.static_forward_context = {}
     runner.model_state = SimpleNamespace(supports_mm_inputs=False)
     runner.cache_config = SimpleNamespace(num_gpu_blocks=1)
-    runner.kv_caches = []
+    runner.kv_cache = KVCache()
     runner.attn_groups = []
     runner.kv_cache_config = SimpleNamespace()
     runner.lora_config = None
@@ -371,7 +372,7 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
     def _init(r):
         r.events.append("init")
         kv_cache = torch.empty(allocation_bytes, dtype=torch.uint8, device="cuda")
-        r.kv_caches = [kv_cache]
+        r.kv_cache.tensors.append(kv_cache)
         r.compilation_config.static_forward_context = {
             "layer": SimpleNamespace(kv_cache=kv_cache)
         }
