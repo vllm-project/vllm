@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
+
 import pytest
 import torch
 
@@ -10,6 +12,7 @@ from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
+    KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -35,7 +38,7 @@ NUM_BLOCKS = 8
 NUM_LAYERS = 3
 
 
-def _make_config(layout: KVCacheLayout):
+def _make_config(layout: KVCacheLayout, num_blocks: int = NUM_BLOCKS):
     spec = FullAttentionSpec(
         block_size=16, num_kv_heads=2, head_size=64, dtype=torch.float16
     )
@@ -45,9 +48,9 @@ def _make_config(layout: KVCacheLayout):
     config = get_kv_cache_config_from_groups(
         vllm_config,
         [KVCacheGroupSpec(layers, spec)],
-        available_memory=NUM_LAYERS * spec.page_size_bytes * NUM_BLOCKS,
+        available_memory=NUM_LAYERS * spec.page_size_bytes * num_blocks,
     )
-    assert config.num_blocks == NUM_BLOCKS
+    assert config.num_blocks == num_blocks
     return config, spec
 
 
@@ -180,6 +183,15 @@ def test_mixed_block_strides_commit_per_layer(vmm):
         assert kv_cache.physical_bytes >= 3 * kv_cache.bytes_per_block
         for i, view in enumerate(views.values()):
             assert torch.all(view[:3] == float(i + 1))
+
+        final = copy.copy(config)
+        final.num_blocks = 3
+        committed = kv_cache.committed_views(final, KVCacheLayout.LBNHC)
+        assert committed is not None
+        for name, view in committed.items():
+            assert view.shape[0] == 3
+            assert view.data_ptr() == views[name].data_ptr()
+            assert view.untyped_storage().nbytes() == 3 * specs[name].page_size_bytes
     finally:
         kv_cache.free()
 
@@ -208,5 +220,102 @@ def test_release_and_recommit_for_sleep(vmm):
         kv_cache.recommit()
         assert kv_cache.physical_bytes >= kv_cache.size
         assert torch.count_nonzero(views[0]) == 0
+    finally:
+        kv_cache.free()
+
+
+@requires_cuda
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLNHC])
+def test_committed_views_cover_exactly_the_committed_bytes(vmm, layout):
+    """After the final commit, per-layer views are rebuilt over storages that
+    span only the committed blocks, at the same addresses as the capacity
+    views, so connectors deriving extents from storage size see backed memory."""
+    config, spec = _make_config(layout)
+    device = torch.device("cuda")
+    kv_cache = ExtensibleKVCache(config, device)
+    try:
+        capacity_views = allocate_kv_cache(
+            config, device, layout, allocate=kv_cache.allocate
+        )
+        committed = 5
+        kv_cache.commit(committed)
+        for i, view in enumerate(capacity_views.values()):
+            view[:committed].fill_(float(i + 1))
+        torch.accelerator.synchronize()
+
+        final_config = copy.copy(config)
+        final_config.num_blocks = committed
+        views = kv_cache.committed_views(final_config, layout)
+        assert views is not None and views.keys() == capacity_views.keys()
+        for i, (name, view) in enumerate(views.items()):
+            assert view.shape[0] == committed
+            assert view.data_ptr() == capacity_views[name].data_ptr()
+            assert torch.all(view == float(i + 1))
+            block_stride = view.stride(0) * view.element_size()
+            if layout.is_block_outermost:
+                assert view.untyped_storage().nbytes() == committed * block_stride
+            else:
+                assert (
+                    view.untyped_storage().nbytes() == committed * spec.page_size_bytes
+                )
+    finally:
+        kv_cache.free()
+
+
+@requires_cuda
+def test_defragmenting_commit_leaves_one_allocation_per_segment(vmm):
+    """Incremental commits map one driver allocation each; a defragmenting
+    commit remaps every segment as a single allocation (RDMA cannot span
+    several) and still ends up zero-filled and fully committed."""
+    config, _ = _make_config(KVCacheLayout.LBNHC, num_blocks=1024)
+    kv_cache = ExtensibleKVCache(config, torch.device("cuda"))
+    try:
+        granule_blocks = kv_cache.buffer.granularity // kv_cache.segment_strides[0]
+        kv_cache.commit(1)
+        kv_cache.commit(2 * granule_blocks + 1)
+        num_segments = kv_cache.buffer.num_segments
+        assert kv_cache.buffer.num_physical_chunks == 2 * num_segments
+
+        kv_cache.commit(config.num_blocks, defragment=True)
+        assert kv_cache.num_committed_blocks == config.num_blocks
+        assert kv_cache.buffer.num_physical_chunks == num_segments
+        assert torch.count_nonzero(kv_cache.buffer.full_view()) == 0
+    finally:
+        kv_cache.free()
+
+
+@requires_cuda
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLNHC])
+def test_committed_kv_cache_tensors_match_views(vmm, layout):
+    """The connector-facing placements locate every block of every layer at
+    the same bytes as the committed views, within storages of their size."""
+    config, _ = _make_config(layout)
+    device = torch.device("cuda")
+    kv_cache = ExtensibleKVCache(config, device)
+    try:
+        allocate_kv_cache(config, device, layout, allocate=kv_cache.allocate)
+        committed = 5
+        kv_cache.commit(committed)
+        final = copy.copy(config)
+        final.num_blocks = committed
+        views = kv_cache.committed_views(final, layout)
+        tensors = kv_cache.committed_kv_cache_tensors(final, layout, committed)
+        assert views is not None
+        assert {name for t in tensors for name in t.layers} == set(views)
+        for tensor in tensors:
+            assert isinstance(tensor, KVCacheTensor)
+            # Consumers read any tensor's size as the whole allocation's.
+            assert tensor.size == committed * kv_cache.bytes_per_block
+            for layer_idx, name in enumerate(tensor.layers):
+                view = views[name]
+                storage = view.untyped_storage()
+                layer_start = tensor.offset + layer_idx * tensor.layer_stride
+                page_bytes = view[0].numel() * view.element_size()
+                last_page_end = (
+                    layer_start + (committed - 1) * tensor.block_stride + page_bytes
+                )
+                assert storage.nbytes() >= last_page_end
+                assert storage.data_ptr() + layer_start == view.data_ptr()
+                assert view.stride(0) * view.element_size() == tensor.block_stride
     finally:
         kv_cache.free()
