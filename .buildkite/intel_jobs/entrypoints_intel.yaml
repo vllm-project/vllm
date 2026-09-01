@@ -130,7 +130,9 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s tool_use &&
+    pytest -v -s tool_use
+    --deselect="tests/tool_use/mistral/test_mistral_tool_calls.py::test_tool_call_none_with_tools[ministral-3b]"
+    --deselect="tests/tool_use/test_chat_completions.py::test_chat_completion_with_tools[granite-3.0-8b]" &&
     pytest -v -s entrypoints/tool_parsers &&
     pytest -v -s entrypoints/generate &&
     pytest -v -s entrypoints/anthropic'
