@@ -262,6 +262,11 @@ class Worker(WorkerBase):
                     name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
 
+        # An extensible KV cache lives outside the allocator pool; keep its
+        # reservation so views and graphs stay valid.
+        extensible_kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
+        if extensible_kv_cache is not None:
+            extensible_kv_cache.release_physical()
         self.sleep_mode_backend.suspend(level)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             suspend_device_comms()
@@ -287,6 +292,9 @@ class Worker(WorkerBase):
         self.sleep_mode_backend.resume(tags)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             resume_device_comms()
+        extensible_kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
+        if extensible_kv_cache is not None and (tags is None or "kv_cache" in tags):
+            extensible_kv_cache.recommit()
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags
