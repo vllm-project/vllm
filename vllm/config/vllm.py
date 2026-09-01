@@ -69,7 +69,7 @@ logger = init_logger(__name__)
 # TODO(rocm): These models are either unsupported by MRV2 or slower with
 # MRV2 on AMD GPUs.
 ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
-    {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM"}
+    {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM", "GlmMoeDsaForCausalLM"}
 )
 
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
@@ -100,10 +100,10 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES - {
-            "DeepseekV32ForCausalLM",
-            "DeepseekV32MTPModel",
-        }
+        # Breakable CUDA graphs currently regress performance on ROCm, so no
+        # architecture opts in by default here. Users can still force it with
+        # VLLM_USE_BREAKABLE_CUDAGRAPH=1.
+        return frozenset()
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
