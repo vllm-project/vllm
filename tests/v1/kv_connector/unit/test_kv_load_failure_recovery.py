@@ -355,16 +355,26 @@ def test_hybrid_load_failure_uses_runtime_manager_block_sizes(
 ):
     """Hybrid recovery must use DCP-scaled manager block sizes and align the
     shared computed-token boundary for every cache group."""
-    managers = [Mock(block_size=1_536), Mock(block_size=24_576)]
-    scheduler.kv_cache_manager.coordinator.single_type_managers = managers
-    scheduler.block_size = 24_576
+    attn_block = 1_536
+    mamba_block = 24_576
+    num_attn_blocks = 41
+    num_mamba_blocks = 3
+
+    scheduler.kv_cache_manager.coordinator.single_type_managers = [
+        Mock(block_size=attn_block),
+        Mock(block_size=mamba_block),
+    ]
+    scheduler.block_size = mamba_block
 
     block_ids_by_group = (
-        list(range(100, 141)),
-        list(range(200, 203)),
+        list(range(100, 100 + num_attn_blocks)),
+        list(range(200, 200 + num_mamba_blocks)),
     )
     scheduler.kv_cache_manager.get_block_ids = Mock(return_value=block_ids_by_group)
-    request = Mock(request_id="hybrid-request", num_computed_tokens=62_976)
+    request = Mock(
+        request_id="hybrid-request",
+        num_computed_tokens=num_attn_blocks * attn_block,
+    )
     invalid_block_ids = {
         block_ids_by_group[invalid_group][invalid_idx],
     }

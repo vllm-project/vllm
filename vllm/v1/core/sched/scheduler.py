@@ -2932,7 +2932,9 @@ class Scheduler(SchedulerInterface):
         Identify and update requests affected by invalid KV cache blocks.
 
         This method scans the given requests, detects those with invalid blocks
-        and adjusts their `num_computed_tokens` to the longest valid prefix.
+        and adjusts their `num_computed_tokens` to the longest valid prefix
+        rounded down to the scheduler block size, so every hybrid cache group
+        resumes on a compatible boundary.
         For observability, it also accumulates the total number of tokens that
         will need to be recomputed across all affected requests.
 
@@ -2969,6 +2971,9 @@ class Scheduler(SchedulerInterface):
         for request in requests:
             req_id = request.request_id
             req_block_ids_by_group = self.kv_cache_manager.get_block_ids(req_id)
+            group_block_ids = tuple(
+                zip(group_block_sizes, req_block_ids_by_group, strict=True)
+            )
             # We iterate only over blocks that may contain externally computed
             # tokens
             req_num_computed_tokens = (
@@ -2976,11 +2981,7 @@ class Scheduler(SchedulerInterface):
             )
 
             invalid_positions: list[tuple[int, int]] = []
-            for group_block_size, req_block_ids in zip(
-                group_block_sizes,
-                req_block_ids_by_group,
-                strict=True,
-            ):
+            for group_block_size, req_block_ids in group_block_ids:
                 req_num_computed_blocks = (
                     req_num_computed_tokens + group_block_size - 1
                 ) // group_block_size
@@ -3021,11 +3022,9 @@ class Scheduler(SchedulerInterface):
                 if evict_blocks:
                     # Every group can depend on tokens after the failed
                     # boundary, so evict each group's downstream blocks.
-                    for group_block_size, req_block_ids in zip(
-                        group_block_sizes,
-                        req_block_ids_by_group,
-                        strict=True,
-                    ):
+                    for group_block_size, req_block_ids in group_block_ids:
+                        # The new computed-token boundary is scheduler-block
+                        # aligned, which is a multiple of every group block.
                         first_invalid_idx = (
                             request.num_computed_tokens // group_block_size
                         )
@@ -3047,7 +3046,7 @@ class Scheduler(SchedulerInterface):
                 )
                 request.num_computed_tokens = aligned_computed_tokens
 
-            affected_req_ids.add(request.request_id)
+            affected_req_ids.add(req_id)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
 
