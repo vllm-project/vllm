@@ -365,6 +365,12 @@ class WorkerWrapperBase:
         with set_current_vllm_config(self.vllm_config):
             self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        # The KV connector created here reads the current config.
+        assert self.vllm_config is not None
+        with set_current_vllm_config(self.vllm_config):
+            self.worker.extend_kv_cache(num_blocks)  # type: ignore
+
     def init_device(self):
         assert self.vllm_config is not None
         with set_current_vllm_config(self.vllm_config):

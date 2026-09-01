@@ -343,6 +343,11 @@ class ExtensibleTensor:
         return self._buffer.committed_bytes
 
     @property
+    def num_physical_chunks(self) -> int:
+        """Number of driver allocations currently mapped into the reservation."""
+        return len(self._buffer._handles)
+
+    @property
     def granularity(self) -> int:
         return self._buffer.granularity
 
