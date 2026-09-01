@@ -300,10 +300,11 @@ class Glm5NextDecoderLayer(nn.Module):
         self.num_experts = config.n_routed_experts
         self.is_mtp_layer = is_mtp_layer
         self.mhc = config.mhc
-        self.layer_kind = "kda" if config.is_kda_layer(layer_idx) else "mla"
+        is_kda_layer = not is_mtp_layer and config.is_kda_layer(layer_idx)
+        self.layer_kind = "kda" if is_kda_layer else "mla"
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
-        if config.is_kda_layer(layer_idx):
+        if is_kda_layer:
             self.self_attn = Glm5NextLinearAttention(
                 config=config,
                 vllm_config=vllm_config,

@@ -9,9 +9,9 @@ from vllm.platforms import current_platform
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
-if not current_platform.has_device_capability(90):
+if not current_platform.is_cuda() or not current_platform.has_device_capability(90):
     pytest.skip(
-        reason="FlashInfer MLA requires compute capability 9.0 or above.",
+        reason="FlashInfer MLA requires CUDA compute capability 9.0 or above.",
         allow_module_level=True,
     )
 else:
