@@ -47,6 +47,7 @@ from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    finalize_extensible_kv_cache,
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
     get_request_block_hasher,
@@ -347,13 +348,26 @@ class EngineCore:
                 if participating
                 else [g.kv_cache_spec.block_size for g in kv_cache_groups]
             )
+        # With an extensible KV cache, `num_blocks` is the reserved capacity
+        # until the post-warmup measurement below.
+        extensible = vllm_config.cache_config.enable_extensible_kv_cache
+        if kv_cache_groups and not extensible:
             update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
         vllm_config.validate_block_size()
 
         self.model_executor.initialize_from_config(kv_cache_configs)
+        compilation_times = []
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            self.model_executor.compile_or_warm_up_model()
+            compilation_times = self.model_executor.compile_or_warm_up_model()
+        if extensible:
+            num_blocks = finalize_extensible_kv_cache(
+                vllm_config,
+                kv_cache_configs,
+                scheduler_kv_cache_config,
+                compilation_times,
+            )
+            self.model_executor.extend_kv_cache(num_blocks)
 
         elapsed = time.time() - start
         compile_time = vllm_config.compilation_config.compilation_time

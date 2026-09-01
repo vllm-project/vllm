@@ -133,3 +133,13 @@ def test_extensible_kv_cache_from_cli():
     args = parser.parse_args(["--enable-extensible-kv-cache"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.enable_extensible_kv_cache
+
+
+def test_extensible_kv_cache_rejects_manual_kv_cache_size():
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        enable_extensible_kv_cache=True,
+        kv_cache_memory_bytes=1 << 30,
+    )
+    with pytest.raises(ValueError, match="kv_cache_memory_bytes"):
+        engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
