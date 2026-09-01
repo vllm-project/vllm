@@ -17,6 +17,7 @@ import jinja2.meta
 import jinja2.nodes
 import jinja2.parser
 import jinja2.sandbox
+import regex as re
 import torch
 from typing_extensions import override
 
@@ -606,6 +607,12 @@ class AssistantTracker(jinja2.ext.Extension):
         return call_block.set_lineno(lineno)
 
 
+# Matches the Jinja `generation` tag in any of its whitespace-control
+# spellings ({% generation %}, {%- generation -%}, ...), mirroring the
+# detection regex used by `transformers`.
+_GENERATION_TAG_RE = re.compile(r"\{\%-?\s*generation\s*-?\%\}")
+
+
 def _resolve_chat_template_kwargs(chat_template: str) -> Set[str]:
     env = jinja2.sandbox.ImmutableSandboxedEnvironment(
         trim_blocks=True,
@@ -753,17 +760,22 @@ def safe_apply_chat_template(
     # request assistant_tokens_mask via return_dict.
     # Check for the actual Jinja tag, not just the word "generation"
     # (which also appears in add_generation_prompt).
-    if return_assistant_tokens_mask and "{% generation %}" in chat_template:
-        resolved_kwargs["return_assistant_tokens_mask"] = True
-        resolved_kwargs["return_dict"] = True
-        resolved_kwargs.pop("tokenize", None)
+    # Keep the mask-specific kwargs out of `resolved_kwargs` so a failed
+    # attempt cannot leak them into the plain fallback call below.
+    if return_assistant_tokens_mask and _GENERATION_TAG_RE.search(chat_template):
+        mask_kwargs = {
+            **resolved_kwargs,
+            "return_assistant_tokens_mask": True,
+            "return_dict": True,
+        }
+        mask_kwargs.pop("tokenize", None)
         try:
             result = tokenizer.apply_chat_template(
                 conversation=conversation,  # type: ignore[arg-type]
                 tools=tools,  # type: ignore[arg-type]
                 chat_template=chat_template,
                 tokenize=True,
-                **resolved_kwargs,
+                **mask_kwargs,
             )
         except (TypeError, ValueError) as exc:
             logger.warning(

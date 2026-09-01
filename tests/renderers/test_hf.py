@@ -910,3 +910,101 @@ class TestConsolidateSystemMessages:
         assert len(conversation) == original_len
         assert conversation[0]["role"] == "user"
         assert conversation[1]["role"] == "system"
+
+
+GENERATION_TAG_TEMPLATE = (
+    "{% for message in messages %}"
+    "{% if message['role'] == 'assistant' %}"
+    "{% generation %}{{ message['content'] }}{% endgeneration %}"
+    "{% else %}{{ message['content'] }}{% endif %}"
+    "{% endfor %}"
+)
+
+WHITESPACE_CONTROL_GENERATION_TAG_TEMPLATE = (
+    "{% for message in messages %}"
+    "{% if message['role'] == 'assistant' %}"
+    "{%- generation -%}{{ message['content'] }}{%- endgeneration -%}"
+    "{% else %}{{ message['content'] }}{% endif %}"
+    "{% endfor %}"
+)
+
+NO_GENERATION_TAG_TEMPLATE = (
+    "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+    "{% if add_generation_prompt %}gen{% endif %}"
+)
+
+
+class _StubTokenizer:
+    def get_chat_template(self, chat_template=None, tools=None):
+        return chat_template
+
+
+class _MaskCapableTokenizer(_StubTokenizer):
+    """Minimal HF-like tokenizer that supports assistant token masks."""
+
+    def apply_chat_template(self, conversation, **kwargs):
+        if kwargs.get("return_assistant_tokens_mask"):
+            return {"input_ids": [1, 2, 3], "assistant_masks": [0, 1, 1]}
+        return [1, 2, 3]
+
+
+class _MaskRejectingTokenizer(_StubTokenizer):
+    """Rejects assistant-mask requests like a slow tokenizer does."""
+
+    def apply_chat_template(self, conversation, **kwargs):
+        if kwargs.get("return_assistant_tokens_mask"):
+            raise ValueError("assistant masks require a fast tokenizer")
+        if kwargs.get("return_dict"):
+            return {"input_ids": [1, 2, 3]}
+        return [1, 2, 3]
+
+
+class TestSafeApplyChatTemplateAssistantTokensMask:
+    """Contract: with return_assistant_tokens_mask=True, templates using the
+    Jinja generation tag (in any spelling) yield (token_ids, mask), and a
+    tokenizer that cannot produce masks degrades to (token_ids, None) instead
+    of failing the request."""
+
+    @pytest.fixture
+    def model_config(self):
+        from unittest.mock import MagicMock
+
+        return MagicMock()
+
+    def _apply(self, model_config, tokenizer, template):
+        return safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ],
+            chat_template=template,
+            return_assistant_tokens_mask=True,
+        )
+
+    def test_mask_returned_for_generation_tag(self, model_config):
+        result = self._apply(
+            model_config, _MaskCapableTokenizer(), GENERATION_TAG_TEMPLATE
+        )
+        assert result == ([1, 2, 3], [0, 1, 1])
+
+    def test_mask_returned_for_whitespace_control_tag(self, model_config):
+        result = self._apply(
+            model_config,
+            _MaskCapableTokenizer(),
+            WHITESPACE_CONTROL_GENERATION_TAG_TEMPLATE,
+        )
+        assert result == ([1, 2, 3], [0, 1, 1])
+
+    def test_add_generation_prompt_does_not_trigger_mask_path(self, model_config):
+        result = self._apply(
+            model_config, _MaskCapableTokenizer(), NO_GENERATION_TAG_TEMPLATE
+        )
+        assert result == ([1, 2, 3], None)
+
+    def test_fallback_when_tokenizer_rejects_mask(self, model_config):
+        result = self._apply(
+            model_config, _MaskRejectingTokenizer(), GENERATION_TAG_TEMPLATE
+        )
+        assert result == ([1, 2, 3], None)
