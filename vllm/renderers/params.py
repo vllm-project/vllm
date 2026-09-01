@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -414,24 +414,39 @@ class TokenizeParams:
 
         return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
 
-    def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
-        """Apply truncation to prompt tokens if necessary."""
+    def _truncation_slice(
+        self, tokenizer: TokenizerLike | None, length: int
+    ) -> slice | None:
+        """The slice truncation applies to a sequence of `length` tokens.
+
+        `None` means no truncation. Anything parallel to the prompt tokens
+        (see `prompt_token_offsets` and `prompt_is_token_ids`) must be reduced
+        with this same slice to stay aligned with them.
+        """
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
             max_length = self.max_input_tokens
 
-        if max_length is None or max_length >= len(tokens):
-            return tokens
+        if max_length is None or max_length >= length:
+            return None
         if max_length == 0:
-            return tokens[:0]
+            return slice(0, 0)
 
         side = self.truncation_side or (
             tokenizer.truncation_side if tokenizer is not None else None
         )
         if side == "left":
-            return tokens[-max_length:]
+            return slice(-max_length, None)
 
-        return tokens[:max_length]
+        return slice(0, max_length)
+
+    def _token_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
+        """Apply truncation to prompt tokens if necessary."""
+        truncation = self._truncation_slice(tokenizer, len(tokens))
+        if truncation is None:
+            return tokens
+
+        return tokens[truncation]
 
     def _token_len_check(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply length checks to prompt tokens if necessary."""
@@ -496,5 +511,15 @@ class TokenizeParams:
                 tokenizer,
                 prompt["prompt_embeds"],  # type: ignore[typeddict-item]
             )
+        offsets = cast(TokensPrompt, prompt).get("prompt_token_offsets")
+        if offsets is not None:
+            truncation = self._truncation_slice(tokenizer, len(offsets))
+            if truncation is not None:
+                prompt["prompt_token_offsets"] = offsets[truncation]  # type: ignore[typeddict-unknown-key]
+        is_token_ids = cast(EmbedsPrompt, prompt).get("prompt_is_token_ids")
+        if is_token_ids is not None:
+            truncation = self._truncation_slice(tokenizer, len(is_token_ids))
+            if truncation is not None:
+                prompt["prompt_is_token_ids"] = is_token_ids[truncation]  # type: ignore[typeddict-unknown-key]
 
         return prompt
