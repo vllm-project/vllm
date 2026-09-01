@@ -12,6 +12,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+    convert_flashinfer_moe_output,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -432,7 +436,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
 
@@ -469,8 +473,11 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             n_group = num_expert_group or 0
             selected_topk_group = topk_group or 0
 
+        num_tokens = hidden_states.shape[0]
+        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+
         routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=hidden_states.shape[0],
+            num_tokens=num_tokens,
             device=hidden_states.device,
         )
 
@@ -500,14 +507,19 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             fp8_quantization_type=fp8_quant_type,
             routing_replay_out=routing_replay_out,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
+            do_finalize=not defer,
         )
         if is_mxfp8 or activation == MoEActivation.RELU2_NO_MUL:
             kwargs["activation_type"] = activation_type
-        result = flashinfer.fused_moe.trtllm_fp8_block_scale_moe(**kwargs)
-        self._maybe_dispatch_routing_replay(
-            routing_replay_out, num_tokens=hidden_states.shape[0]
+        flashinfer_output = flashinfer.fused_moe.trtllm_fp8_block_scale_moe(**kwargs)
+        routed_output = convert_flashinfer_moe_output(
+            flashinfer_output,
+            do_finalize=not defer,
+            num_tokens=num_tokens,
+            top_k=self.topk,
         )
-        return result
+        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
+        return routed_output
 
     def _apply_per_tensor(
         self,
@@ -589,7 +601,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         if self.quant_config.block_shape is not None:
             return self._apply_block_scale(
                 hidden_states,
