@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from importlib import import_module
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
 
+import vllm.model_executor.layers.mamba.ops.ssu_dispatch as ssu_dispatch
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
@@ -14,6 +16,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     TritonSSUBackend,
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
+    materialize_replayssm_prefix,
     materialize_replayssm_prefix_gpu,
     materialize_replayssm_prefix_mtp_gpu,
     reset_replayssm_ring_trackers,
@@ -58,6 +61,7 @@ def restore_backend_state():
     mod._flashinfer_replayssm_kernel = old_replayssm_kernel
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_flashinfer_replayssm_ring_tracker_lifecycle():
     ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
     prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
@@ -213,6 +217,7 @@ def test_flashinfer_import_error():
         FlashInferSSUBackend(MambaConfig())
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_triton_basic_call():
     set_random_seed(0)
     initialize_mamba_ssu_backend(
@@ -449,6 +454,120 @@ def _flashinfer_replayssm_mixer() -> Mock:
     return mixer
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (0, 0),
+        ((1 << 63) - 1, (1 << 63) - 1),
+        (1 << 63, -(1 << 63)),
+        ((1 << 64) - 1, -1),
+    ],
+)
+def test_reinterpret_u64_as_i64(value: int, expected: int):
+    assert ssu_dispatch._reinterpret_u64_as_i64(value) == expected
+
+
+def _materialize_mixer(device: str = "cpu") -> Mock:
+    mixer = Mock()
+    mixer.kv_cache = [
+        torch.empty(0, device=device),
+        torch.empty(8, 4, 3, 5, device=device),
+        torch.empty(8, 4, 20, 3, device=device),
+        torch.empty(8, 4, 20, device=device),
+        torch.empty(8, 2, 20, 5, device=device),
+    ]
+    mixer.A = torch.empty(4, 3, 5, device=device)
+    mixer._replayssm_ring_start = torch.arange(8, dtype=torch.int32, device=device)
+    mixer._replayssm_prev_num_accepted = torch.zeros(
+        8, dtype=torch.int32, device=device
+    )
+    mixer._replayssm_prev_query_len = torch.zeros(8, dtype=torch.int32, device=device)
+    mixer.replayssm_buffer_len = 16
+    mixer.mamba_config = SimpleNamespace(
+        backend=MambaBackendEnum.FLASHINFER,
+        enable_stochastic_rounding=True,
+        stochastic_rounding_philox_rounds=6,
+    )
+    return mixer
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_replayssm_materialize_ready_rejects_incomplete_cache():
+    mixer = _materialize_mixer(device="cuda")
+
+    mixer.kv_cache[1] = torch.empty(0, device="cuda")
+    assert not ssu_dispatch._replayssm_materialize_ready([mixer])
+
+    mixer = _materialize_mixer(device="cuda")
+    mixer.kv_cache[2] = torch.empty(0, device="cuda")
+    with pytest.raises(RuntimeError, match="replay ring buffers"):
+        ssu_dispatch._replayssm_materialize_ready([mixer])
+
+    mixer = _materialize_mixer(device="cuda")
+    mixer._replayssm_ring_start = torch.empty(0, dtype=torch.int32, device="cuda")
+    with pytest.raises(RuntimeError, match="ring trackers"):
+        ssu_dispatch._replayssm_materialize_ready([mixer])
+
+    mixer = _materialize_mixer(device="cuda")
+    mixer.replayssm_buffer_len = 0
+    with pytest.raises(RuntimeError, match="buffer-len >= 1"):
+        ssu_dispatch._replayssm_materialize_ready([mixer])
+
+
+def test_replayssm_materialize_ready_requires_cuda_ssm_state():
+    mixer = _materialize_mixer(device="cpu")
+
+    with pytest.raises(RuntimeError, match="requires a CUDA SSM state cache"):
+        ssu_dispatch._replayssm_materialize_ready([mixer])
+
+
+def test_launch_replayssm_materialize_derives_kernel_arguments():
+    mixers = [_materialize_mixer(), _materialize_mixer()]
+    src_row = torch.tensor([2, 3], dtype=torch.int32)
+    dst_row = torch.tensor([4, 5], dtype=torch.int32)
+    flush_count = torch.tensor([6, 7], dtype=torch.int32)
+    kernel = Mock()
+
+    ssu_dispatch._launch_replayssm_materialize(
+        mixers, src_row, dst_row, flush_count, kernel
+    )
+
+    args = kernel.call_args.args
+    kwargs = kernel.call_args.kwargs
+    assert all(arg.dtype == torch.int64 and arg.shape == (2,) for arg in args[:11])
+    torch.testing.assert_close(args[11], src_row.expand(2, -1))
+    torch.testing.assert_close(args[12], dst_row.expand(2, -1))
+    torch.testing.assert_close(args[13], torch.tensor([2, 3], dtype=torch.int32))
+    assert args[14] is flush_count
+    assert kwargs["state_dtype"] == torch.float32
+    assert kwargs["input_dtype"] == torch.float32
+    assert kwargs["matrixA_dtype"] == torch.float32
+    assert kwargs["dim"] == 3
+    assert kwargs["dstate"] == 5
+    assert kwargs["num_heads"] == 4
+    assert kwargs["heads_per_group"] == 2
+    assert kwargs["max_window"] == 16
+    assert kwargs["ring_buffer_len"] == 20
+    assert kwargs["rand_seed"].shape == (1,)
+    assert kwargs["rand_seed"].dtype == torch.int64
+    assert kwargs["philox_rounds"] == 6
+
+
+def test_empty_mixer_group_materialization_contract():
+    config = Mock(kv_cache_groups=[])
+    empty_i32 = torch.empty(0, dtype=torch.int32)
+
+    with pytest.raises(RuntimeError, match="requires FlashInfer ReplaySSM mixers"):
+        materialize_replayssm_prefix(config, [], {}, [], {}, [], [], 0)
+    with pytest.raises(RuntimeError, match="requires FlashInfer ReplaySSM mixers"):
+        materialize_replayssm_prefix_gpu(
+            config, [], {}, [], empty_i32, empty_i32, empty_i32, 0
+        )
+    materialize_replayssm_prefix_mtp_gpu(
+        config, [], {}, [], empty_i32, empty_i32, empty_i32, 0
+    )
+
+
 def test_materialize_replayssm_prefix_gpu_gathers_copied_slots(monkeypatch):
     """V2 gather: only src_col != dst_col rows are copied; hashed slot is src."""
     mixer = _flashinfer_replayssm_mixer()
@@ -523,35 +642,52 @@ def test_materialize_replayssm_prefix_gpu_gathers_copied_slots(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize(
+    (
+        "src_col",
+        "dst_col",
+        "prev_count",
+        "query_count",
+        "initial_ring_start",
+        "token_count",
+        "expected_flush_count",
+        "expected_ring_start",
+    ),
+    [
+        pytest.param(0, 1, 4, 4, 0, 2, 6, 0, id="spec-decode-partial-window"),
+        pytest.param(-1, 0, 0, 0, 0, 0, -1, 0, id="skipped-request"),
+        pytest.param(1, 2, 5, 4, 0, 3, 8, 0, id="spec-decode-later-block"),
+        pytest.param(0, 1, 12, 4, 3, 4, 4, 15, id="checkpoint-full-window"),
+        pytest.param(0, 1, 10, 4, 5, 2, 2, 15, id="checkpoint-crossed-window"),
+        pytest.param(0, 1, 8, 4, 7, 2, 10, 7, id="exact-window-no-checkpoint"),
+        pytest.param(0, 1, 3, 0, 9, 1, 3, 9, id="single-token"),
+    ],
+)
 def test_materialize_replayssm_prefix_mtp_gpu_uses_committed_boundary(
     monkeypatch,
+    src_col: int,
+    dst_col: int,
+    prev_count: int,
+    query_count: int,
+    initial_ring_start: int,
+    token_count: int,
+    expected_flush_count: int,
+    expected_ring_start: int,
 ):
     mixer = _flashinfer_replayssm_mixer()
     mixer.replayssm_buffer_len = 12
     mixer.kv_cache[2] = torch.empty(32, 1, 16, 1)
-    mixer._replayssm_prev_num_accepted[10] = 4
-    mixer._replayssm_prev_num_accepted[21] = 5
-    mixer._replayssm_prev_num_accepted[23] = 12
-    mixer._replayssm_prev_num_accepted[25] = 10
-    mixer._replayssm_prev_num_accepted[27] = 8
-    mixer._replayssm_prev_num_accepted[29] = 3
-    mixer._replayssm_prev_query_len[10] = 4
-    mixer._replayssm_prev_query_len[21] = 4
-    mixer._replayssm_prev_query_len[23] = 4
-    mixer._replayssm_prev_query_len[25] = 4
-    mixer._replayssm_prev_query_len[27] = 4
-    mixer._replayssm_ring_start[23] = 3
-    mixer._replayssm_ring_start[25] = 5
-    mixer._replayssm_ring_start[27] = 7
-    mixer._replayssm_ring_start[29] = 9
+    source_slot = 10
+    destination_slot = 11
+    mixer._replayssm_prev_num_accepted[source_slot] = prev_count
+    mixer._replayssm_prev_query_len[source_slot] = query_count
+    mixer._replayssm_ring_start[source_slot] = initial_ring_start
     kv_cache_config = Mock()
     kv_cache_config.kv_cache_groups = [Mock(layer_names=["mixer"])]
     launches: list[dict[str, list]] = []
     resets: list[list[int]] = []
 
-    def fake_launch(
-        mixers, src_row, dst_row, flush_count, _kernel, *, ring_start=None
-    ):
+    def fake_launch(mixers, src_row, dst_row, flush_count, _kernel, *, ring_start=None):
         launches.append(
             {
                 "src_row": src_row.tolist(),
@@ -581,36 +717,27 @@ def test_materialize_replayssm_prefix_mtp_gpu_uses_committed_boundary(
         lambda _start, _accepted, _query, slots: resets.append(slots.tolist()),
     )
 
+    block_row = [source_slot] * 3
+    if src_col >= 0:
+        block_row[src_col] = source_slot
+        block_row[dst_col] = destination_slot
     materialize_replayssm_prefix_mtp_gpu(
         kv_cache_config,
         [0],
         {"mixer": mixer},
-        [
-            torch.tensor(
-                [
-                    [10, 11, 12],
-                    [0, 0, 0],
-                    [20, 21, 22],
-                    [23, 24, 0],
-                    [25, 26, 0],
-                    [27, 28, 0],
-                    [29, 30, 0],
-                ],
-                dtype=torch.int32,
-            )
-        ],
-        torch.tensor([0, -1, 1, 0, 0, 0, 0], dtype=torch.int32),
-        torch.tensor([1, 0, 2, 1, 1, 1, 1], dtype=torch.int32),
-        torch.tensor([2, 0, 3, 4, 2, 2, 1], dtype=torch.int32),
-        num_reqs=7,
+        [torch.tensor([block_row], dtype=torch.int32)],
+        torch.tensor([src_col], dtype=torch.int32),
+        torch.tensor([dst_col], dtype=torch.int32),
+        torch.tensor([token_count], dtype=torch.int32),
+        num_reqs=1,
     )
 
     assert launches == [
         {
-            "src_row": [10, 0, 21, 23, 25, 27, 29],
-            "dst_row": [11, 0, 22, 24, 26, 28, 30],
-            "flush_count": [6, -1, 8, 4, 2, 10, 3],
-            "ring_start": [0, 0, 0, 15, 15, 7, 9],
+            "src_row": [source_slot],
+            "dst_row": [destination_slot if src_col >= 0 else source_slot],
+            "flush_count": [expected_flush_count],
+            "ring_start": [expected_ring_start],
         }
     ]
-    assert resets == [[11, 22, 24, 26, 28, 30]]
+    assert resets == ([[destination_slot]] if src_col >= 0 else [[]])

@@ -25,10 +25,10 @@ class _TestReplaySSMMixer(MambaMixer2):
         self._updates_replayssm_trackers = True
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
-        return ((2,), (3,), (4,), (5,), (6,))
+        return self._state_shapes
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
-        return (torch.float32,) * 5
+        return self._state_dtypes
 
     def get_replayssm_state_shape(self) -> tuple[tuple[int, ...], ...]:
         return ((4,), (5,), (6,))
@@ -73,7 +73,7 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
         },
     )
 
-    assert all(len(mixer.kv_cache) == 2 for mixer in mixers)
+    assert all(len(mixer.kv_cache) == 5 for mixer in mixers)
 
     assert (
         mixers[0]._replayssm_ring_start.data_ptr()

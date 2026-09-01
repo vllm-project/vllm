@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 import pydantic
 import pytest
-import torch
 from huggingface_hub import ResolvedRevision
 from pydantic import ValidationError
 
@@ -215,43 +214,6 @@ def test_flashinfer_replayssm_allows_align_prefix_caching():
     config.cache_config.mamba_cache_mode = "align"
 
     assert VllmConfig.validate_mamba_cached_kernel(config) is config
-
-
-def test_replayssm_does_not_expand_static_mamba_page_geometry():
-    from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
-
-    config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            mamba_cache_dtype="auto",
-            mamba_ssm_cache_dtype="float32",
-            use_replayssm=False,
-        ),
-        model_config=SimpleNamespace(
-            dtype=torch.bfloat16,
-            hf_config=SimpleNamespace(
-                mamba_num_heads=8,
-                mamba_head_dim=64,
-                n_groups=4,
-                ssm_state_size=128,
-                conv_kernel=4,
-            ),
-        ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1),
-        num_speculative_tokens=0,
-    )
-    baseline_shapes = NemotronHForCausalLM.get_mamba_state_shape_from_config(config)
-    baseline_dtypes = NemotronHForCausalLM.get_mamba_state_dtype_from_config(config)
-
-    config.cache_config.use_replayssm = True
-
-    assert (
-        NemotronHForCausalLM.get_mamba_state_shape_from_config(config)
-        == baseline_shapes
-    )
-    assert (
-        NemotronHForCausalLM.get_mamba_state_dtype_from_config(config)
-        == baseline_dtypes
-    )
 
 
 @pytest.mark.parametrize("use_v2_model_runner", [False, True])

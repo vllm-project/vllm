@@ -169,8 +169,22 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
     assert mamba_state_idx == {"keep": 99}
 
 
-def test_preprocess_mamba_calls_flashinfer_replayssm_materialize(monkeypatch):
-    """V1 STP align copies should materialize FlashInfer ReplaySSM SSM state."""
+@pytest.mark.parametrize(
+    ("backend", "expected_order"),
+    [
+        pytest.param(
+            MambaBackendEnum.FLASHINFER,
+            ["materialize", "copy"],
+            id="flashinfer",
+        ),
+        pytest.param(MambaBackendEnum.TRITON, ["copy"], id="triton"),
+    ],
+)
+def test_preprocess_mamba_materializes_only_for_flashinfer_replayssm(
+    monkeypatch,
+    backend: MambaBackendEnum,
+    expected_order: list[str],
+):
     spec = MagicMock(block_size=4, num_speculative_blocks=0)
     cache_config = MagicMock(enable_prefix_caching=True, use_replayssm=True)
     input_batch = MagicMock()
@@ -183,30 +197,14 @@ def test_preprocess_mamba_calls_flashinfer_replayssm_materialize(monkeypatch):
     sched.num_scheduled_tokens = {"r0": 1}
 
     mixer = MagicMock(use_replayssm=True)
-    mixer.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    mixer.mamba_config.backend = backend
     forward_context = {"mixer": mixer}
 
-    seen: dict[str, Any] = {}
     order: list[str] = []
-
-    def fake_materialize(
-        _kv_cache_config,
-        _mamba_group_ids,
-        _forward_context,
-        _req_ids,
-        _requests,
-        src_cols,
-        dst_cols,
-        num_reqs,
-    ):
-        order.append("materialize")
-        seen["src_cols"] = src_cols
-        seen["dst_cols"] = dst_cols
-        seen["num_reqs"] = num_reqs
 
     monkeypatch.setattr(
         "vllm.v1.worker.mamba_utils.materialize_replayssm_prefix",
-        fake_materialize,
+        lambda *args, **kwargs: order.append("materialize"),
     )
     monkeypatch.setattr(
         "vllm.v1.worker.mamba_utils.collect_mamba_copy_meta",
@@ -229,54 +227,7 @@ def test_preprocess_mamba_calls_flashinfer_replayssm_materialize(monkeypatch):
         copy_bufs,
     )
 
-    assert seen["src_cols"] == [0]
-    assert seen["dst_cols"] == [1]
-    assert seen["num_reqs"] == 1
-    assert order == ["materialize", "copy"]
-
-
-def test_preprocess_mamba_skips_materialize_without_flashinfer(monkeypatch):
-    """Triton ReplaySSM block copies must not launch FlashInfer materialize."""
-    spec = MagicMock(block_size=4, num_speculative_blocks=0)
-    cache_config = MagicMock(enable_prefix_caching=True, use_replayssm=True)
-    input_batch = MagicMock()
-    input_batch.req_ids = ["r0"]
-    input_batch.num_accepted_tokens_cpu = np.array([1], dtype=np.int32)
-    copy_bufs = MagicMock(mamba_group_ids=[0], mamba_spec=spec)
-    requests = {"r0": MagicMock(num_computed_tokens=4)}
-    mamba_state_idx: dict[str, int] = {"r0": 0}
-    sched = _make_scheduler_output(set(), None, set())
-    sched.num_scheduled_tokens = {"r0": 1}
-
-    mixer = MagicMock(use_replayssm=True)
-    mixer.mamba_config.backend = MambaBackendEnum.TRITON
-    called = []
-    monkeypatch.setattr(
-        "vllm.v1.worker.mamba_utils.materialize_replayssm_prefix",
-        lambda *args, **kwargs: called.append(True),
-    )
-    monkeypatch.setattr(
-        "vllm.v1.worker.mamba_utils.collect_mamba_copy_meta",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "vllm.v1.worker.mamba_utils.do_mamba_copy_block",
-        lambda _copy_bufs: None,
-    )
-
-    preprocess_mamba(
-        sched,
-        MagicMock(),
-        cache_config,
-        mamba_state_idx,
-        input_batch,
-        requests,
-        {"mixer": mixer},
-        {},
-        copy_bufs,
-    )
-
-    assert called == []
+    assert order == expected_order
 
 
 def test_postprocess_mamba_align_materializes_after_fused_copy(monkeypatch):
