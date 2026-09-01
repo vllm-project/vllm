@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
@@ -415,37 +416,51 @@ def allocate_kv_cache(
 
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:
-        layer_name = tensor.layers[0]
-        group_id, group = next(
-            (group_id, group)
-            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if layer_name in group.layer_names
-        )
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            spec = spec.kv_cache_specs[layer_name]
-
+        group_id, spec = layer_spec_for_tensor(kv_cache_config, tensor)
         if not spec.has_layer_views:
             kv_caches.update((name, buf) for name in tensor.layers)
             continue
 
-        num_blocks = kv_cache_config.num_blocks_of(tensor)
-        kernel_block_size = None
-        if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
-            kernel_block_size = kernel_block_sizes[group_id]
-        if isinstance(spec, MLAAttentionSpec) and spec.storage_block_size is not None:
-            kernel_block_size = spec.storage_block_size
-
         views = create_kv_cache_views(
             buf,
             spec,
-            num_blocks,
+            kv_cache_config.num_blocks_of(tensor),
             layout,
             tensor,
-            kernel_block_size=kernel_block_size,
+            kernel_block_size=layer_kernel_block_size(
+                spec, group_id, kernel_block_sizes
+            ),
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches
+
+
+def layer_spec_for_tensor(
+    kv_cache_config: KVCacheConfig, tensor: KVCacheTensor
+) -> tuple[int, KVCacheSpec]:
+    """Cache group index and per-layer spec of the layers ``tensor`` places."""
+    layer_name = tensor.layers[0]
+    group_id, group = next(
+        (group_id, group)
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        if layer_name in group.layer_names
+    )
+    spec = group.kv_cache_spec
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        spec = spec.kv_cache_specs[layer_name]
+    return group_id, spec
+
+
+def layer_kernel_block_size(
+    spec: KVCacheSpec, group_id: int, kernel_block_sizes: list[int] | None
+) -> int | None:
+    """Kernel block size to view ``spec``'s pages with, if it differs."""
+    kernel_block_size = None
+    if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
+        kernel_block_size = kernel_block_sizes[group_id]
+    if isinstance(spec, MLAAttentionSpec) and spec.storage_block_size is not None:
+        kernel_block_size = spec.storage_block_size
+    return kernel_block_size
 
 
 def _allocate_kv_cache_buffer(raw_size: int, device: torch.device) -> torch.Tensor:
