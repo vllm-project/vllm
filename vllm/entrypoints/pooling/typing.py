@@ -8,10 +8,12 @@ from typing import Any, Generic, TypeAlias, TypedDict, TypeVar
 from fastapi import Request
 from pydantic import ConfigDict
 
-from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.inputs import DataPrompt, EngineInput
+from vllm.inputs.llm import PromptType
 from vllm.lora.request import LoRARequest
+from vllm.outputs import PoolingRequestOutput
+from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.inputs import DictPrompt
 
