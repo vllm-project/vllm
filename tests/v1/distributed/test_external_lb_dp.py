@@ -119,9 +119,9 @@ class ExternalLBServerManager:
             print(f"Error stopping servers: {e}")
 
 
-@pytest.fixture(scope="module", params=[False, True], ids=["no-ep", "ep"])
-def default_server_args(request):
-    server_args = [
+@pytest.fixture(scope="module")
+def default_server_args():
+    return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -131,16 +131,21 @@ def default_server_args(request):
         "128",
         "--enforce-eager",
     ]
-    if request.param:
-        server_args.append("--enable-expert-parallel")
-    return server_args
 
 
-@pytest.fixture(scope="module", params=[1, 4])
+@pytest.fixture(
+    scope="module",
+    params=[(1, False), (4, False), (1, True)],
+    ids=["api-1-standard", "api-4-standard", "api-1-ep-enabled"],
+)
 def server_manager(request, default_server_args):
-    api_server_count = request.param
+    api_server_count, enable_expert_parallel = request.param
+    server_args = default_server_args.copy()
+    if enable_expert_parallel:
+        server_args.append("--enable-expert-parallel")
+
     server_manager = ExternalLBServerManager(
-        MODEL_NAME, DP_SIZE, api_server_count, default_server_args
+        MODEL_NAME, DP_SIZE, api_server_count, server_args
     )
 
     with server_manager:
@@ -168,6 +173,15 @@ def _get_parallel_config(server: RemoteOpenAIServer):
 
     vllm_config = response.json()["vllm_config"]
     return vllm_config["parallel_config"]
+
+
+def _assert_expert_parallel_config(
+    servers: list[tuple[RemoteOpenAIServer, list[str]]],
+):
+    for server, server_args in servers:
+        expected = "--enable-expert-parallel" in server_args
+        parallel_config = _get_parallel_config(server)
+        assert parallel_config["enable_expert_parallel"] is expected
 
 
 def test_external_lb_server_info(server_manager):
@@ -203,6 +217,8 @@ async def test_external_lb_single_completion(
     servers: list[tuple[RemoteOpenAIServer, list[str]]],
     model_name: str,
 ) -> None:
+    _assert_expert_parallel_config(servers)
+
     async def make_request(client: openai.AsyncOpenAI):
         completion = await client.completions.create(
             model=model_name, prompt="Hello, my name is", max_tokens=10, temperature=1.0
