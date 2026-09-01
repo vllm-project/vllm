@@ -505,13 +505,15 @@ def dispatch_cpu_unquantized_gemm(
     # cross over to favoring oneDNN once batch size grows past decode-sized
     # M, so they keep using oneDNN below.
     if check_cpu_sgl_kernel(N, K, dtype):
+        # For small size GEMM, packed_weight might be float32
         packed_weight = torch.ops._C.convert_weight_packed(layer.weight)
         if getattr(layer, "bias", None) is not None:
-            bias_f32 = layer.bias.to(torch.float32)
-        else:
-            bias_f32 = None
-        layer.cpu_linear = lambda x, weight, bias: torch.ops._C.weight_packed_linear(
-            x, packed_weight, bias_f32 if bias is not None else None, True
+            layer.bias.data = layer.bias.to(torch.float32)
+        layer.cpu_linear = lambda x, weight, bias: ops.weight_packed_linear_cpu(
+            x,
+            packed_weight,
+            N,
+            bias,
         )
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
