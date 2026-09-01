@@ -72,6 +72,9 @@ class SingleTypeKVCacheManager(ABC):
                 block until the request finishes.
         """
         self.scheduler_block_size = scheduler_block_size
+        # Hybrid fine-grained lookup may lower this after all participating
+        # managers have been validated by the coordinator.
+        self.cache_hit_alignment_tokens = scheduler_block_size
         # The block size for this manager; used for actual block allocation.
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
@@ -460,7 +463,7 @@ class SingleTypeKVCacheManager(ABC):
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,
             end_block=num_full_blocks,
-            alignment_tokens=self.scheduler_block_size,
+            alignment_tokens=self.cache_hit_alignment_tokens,
             kv_cache_spec=self.kv_cache_spec,
             use_eagle=self.use_eagle,
             retention_interval=retention_interval,
@@ -922,10 +925,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
-        # Fine-grained partial hits are not supported for sliding window now
-        assert alignment_tokens % kv_cache_spec.block_size == 0, (
-            "SlidingWindowManager does not support fine-grained (partial) cache hits"
-        )
+        # Sliding-window cache hits must stay at the group's physical block
+        # granularity. resolve_block_hashes() converts finer-grained hashes to
+        # that view when the hybrid-cache alignment is smaller than block_size.
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
