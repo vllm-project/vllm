@@ -235,6 +235,32 @@ def test_builtin_json_formatter(monkeypatch):
     assert formatter._fmt == _JSON_FORMAT
 
 
+def test_builtin_json_logging_includes_active_trace_context(monkeypatch):
+    pytest.importorskip("opentelemetry.sdk")
+    from opentelemetry.sdk.trace import TracerProvider
+
+    output = io.StringIO()
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(sys, "stdout", output)
+            context.setattr(vllm_logger, "_vllm_process_info", None)
+            _configure_vllm_root_logger(LoggingConfig(formatter="json"))
+            with (
+                TracerProvider()
+                .get_tracer("vllm-test")
+                .start_as_current_span("request") as span
+            ):
+                init_logger("vllm.structured_log_probe").info("trace probe")
+                span_context = span.get_span_context()
+    finally:
+        _configure_vllm_root_logger(LoggingConfig())
+
+    log = json.loads(output.getvalue())
+    assert log["message"] == "trace probe"
+    assert log["trace_id"] == format(span_context.trace_id, "032x")
+    assert log["span_id"] == format(span_context.span_id, "016x")
+
+
 def test_use_color_force_color(monkeypatch):
     """FORCE_COLOR forces colored logs without a TTY, while NO_COLOR and an
     explicit VLLM_LOGGING_COLOR=0 take precedence over it."""

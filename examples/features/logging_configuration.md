@@ -12,6 +12,9 @@ For `vllm serve`, configure logging with CLI arguments:
 - Disable vLLM logging configuration with
   `--logging-config.configure_logging false`.
 
+The built-in JSON formatter includes `trace_id` and `span_id` when an
+OpenTelemetry span is current.
+
 ## CLI logging configuration
 
 `--logging-config` accepts a JSON object. Its fields are `log_level`,
