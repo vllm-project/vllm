@@ -127,45 +127,33 @@ def test_amd_balanced_decode_score_budget_by_request_count(
     assert (
         _decode_score_program_budget(
             num_reqs,
-            1,
             128,
-            4,
-            4,
             torch.bfloat16,
             torch.bfloat16,
-            enable_tp4_fastpath=True,
             is_gfx950=True,
         )
         == expected_budget
     )
 
 
-def test_amd_balanced_decode_score_dispatch_is_narrow():
+def test_amd_balanced_decode_score_dispatch_matches_kernel_contract():
     from vllm.models.minimax_m3.amd.ops.index_topk import (
         _decode_score_program_budget,
     )
 
     accepted = {
         "num_reqs": 4,
-        "num_idx_heads": 1,
         "head_dim": 128,
-        "decode_query_len": 4,
-        "max_decode_query_len": 4,
         "query_dtype": torch.bfloat16,
         "cache_dtype": torch.bfloat16,
-        "enable_tp4_fastpath": True,
         "is_gfx950": True,
     }
     assert _decode_score_program_budget(**accepted) == 1024
     rejected_overrides = (
-        {"enable_tp4_fastpath": False},
         {"is_gfx950": False},
         {"num_reqs": 0},
         {"num_reqs": 12},
-        {"num_idx_heads": 2},
         {"head_dim": 64},
-        {"decode_query_len": 1},
-        {"max_decode_query_len": 1},
         {"query_dtype": torch.float16},
         {"cache_dtype": torch.float16},
     )
@@ -181,13 +169,9 @@ def test_amd_balanced_decode_score_mapping_exact_coverage(num_reqs: int):
 
     budget = _decode_score_program_budget(
         num_reqs,
-        1,
         128,
-        4,
-        4,
         torch.bfloat16,
         torch.bfloat16,
-        enable_tp4_fastpath=True,
         is_gfx950=True,
     )
     assert budget is not None
@@ -232,28 +216,33 @@ def test_amd_balanced_decode_score_mapping_exact_coverage(num_reqs: int):
     (
         "num_reqs",
         "max_block",
+        "num_idx_heads",
         "decode_query_len",
+        "max_decode_query_len",
         "init_blocks",
         "local_blocks",
     ),
     [
-        (1, 37, 4, 1, 0),
-        (2, 37, 4, 2, 1),
-        (3, 37, 4, 0, 2),
-        (4, 37, 4, 1, 3),
-        (5, 37, 4, 2, 0),
-        (6, 37, 4, 0, 1),
-        (7, 37, 4, 1, 2),
-        (8, 37, 4, 2, 3),
-        (9, 37, 4, 0, 0),
-        (10, 37, 4, 1, 1),
-        (11, 37, 4, 2, 2),
+        (1, 37, 1, 1, 1, 1, 0),
+        (8, 37, 1, 1, 4, 2, 1),
+        (9, 37, 1, 4, 4, 0, 2),
+        (11, 37, 1, 3, 5, 1, 3),
+        (1, 37, 2, 1, 1, 2, 0),
+        (8, 37, 2, 1, 4, 0, 1),
+        (9, 37, 2, 4, 4, 1, 2),
+        (11, 37, 2, 3, 5, 2, 3),
+        (1, 37, 4, 1, 1, 0, 0),
+        (8, 37, 4, 1, 4, 1, 1),
+        (9, 37, 4, 4, 4, 2, 2),
+        (11, 37, 4, 3, 5, 0, 3),
     ],
 )
 def test_amd_balanced_decode_score_bitwise_and_graph_replay(
     num_reqs: int,
     max_block: int,
+    num_idx_heads: int,
     decode_query_len: int,
+    max_decode_query_len: int,
     init_blocks: int,
     local_blocks: int,
 ):
@@ -264,9 +253,8 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
     )
 
     torch.manual_seed(0)
-    num_idx_heads = 1
     head_dim = 128
-    max_decode_query_len = 4
+    block_size_q = 1 << (max_decode_query_len - 1).bit_length()
     score_stride = (max_block + 15) // 16 * 16
     num_pages = num_reqs * max_block
     block_table = torch.arange(
@@ -293,13 +281,9 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
     balanced_score = torch.empty_like(deployed_score)
     budget = _decode_score_program_budget(
         num_reqs,
-        num_idx_heads,
         head_dim,
-        decode_query_len,
-        max_decode_query_len,
         idx_q.dtype,
         index_kv_cache.dtype,
-        enable_tp4_fastpath=True,
         is_gfx950=True,
     )
     assert budget is not None
@@ -329,7 +313,7 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
             deployed_score.stride(2),
             block_table.stride(0),
             BLOCK_SIZE_K=BLOCK_SIZE,
-            BLOCK_SIZE_Q=max_decode_query_len,
+            BLOCK_SIZE_Q=block_size_q,
             num_kv_chunks=deployed_chunks,
             USE_PDL=False,
         )
@@ -359,7 +343,7 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
             balanced_score.stride(2),
             block_table.stride(0),
             BLOCK_SIZE_K=BLOCK_SIZE,
-            BLOCK_SIZE_Q=max_decode_query_len,
+            BLOCK_SIZE_Q=block_size_q,
             num_warps=2,
             num_stages=1,
         )
@@ -398,8 +382,10 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
 
     def assert_exact(expected_seq_lens: torch.Tensor) -> None:
         write_mask, topk_mask = score_masks(expected_seq_lens)
-        deployed = deployed_score[0]
-        balanced = balanced_score[0]
+        write_mask = write_mask.unsqueeze(0).expand_as(deployed_score)
+        topk_mask = topk_mask.unsqueeze(0)
+        deployed = deployed_score
+        balanced = balanced_score
         assert torch.equal(
             deployed[write_mask].contiguous().view(torch.int32),
             balanced[write_mask].contiguous().view(torch.int32),
@@ -423,16 +409,12 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
     one_active = torch.zeros(num_reqs, device="cuda", dtype=torch.int32)
     one_active[0] = max(1, max_block // 2) * BLOCK_SIZE
     patterns = [uniform, one_active]
-    if decode_query_len == 4:
-        non_aligned = torch.tensor(
-            [
-                (max_block - 1) * BLOCK_SIZE + request % 3 + 1
-                for request in range(num_reqs)
-            ],
-            device="cuda",
-            dtype=torch.int32,
-        )
-        patterns.append(non_aligned)
+    non_aligned = torch.tensor(
+        [(max_block - 1) * BLOCK_SIZE + request % 3 + 1 for request in range(num_reqs)],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    patterns.append(non_aligned)
 
     seq_lens.copy_(uniform)
     deployed_score.fill_(float("nan"))
@@ -1019,42 +1001,21 @@ def test_decode_index_topk_correctness(
         "total_q",
         "num_idx_heads",
         "topk",
-        "decode_query_len",
-        "max_decode_query_len",
-        "enable_tp4_fastpath",
         "is_gfx950",
         "expected",
     ),
     [
-        (0, 24, 1, 16, 4, 4, True, True, (2, False, False)),
-        (512, 4, 1, 16, 4, 4, True, True, (16, True, True)),
-        (513, 24, 1, 16, 4, 4, True, True, (16, True, True)),
-        (512, 16, 1, 16, 4, 4, True, True, (16, True, True)),
-        (513, 16, 1, 16, 4, 4, True, True, (16, True, True)),
-        (2760, 4, 1, 16, 4, 4, True, True, (16, True, True)),
-        (593, 16, 1, 16, 4, 4, True, True, (16, True, True)),
-        (1091, 16, 1, 16, 4, 4, True, True, (16, True, True)),
-        (3591, 24, 1, 16, 4, 4, True, True, (16, True, True)),
-        (8192, 4, 1, 16, 4, 4, True, True, (16, True, True)),
-        (8192, 16, 1, 16, 4, 4, True, True, (16, True, True)),
-        (8192, 24, 1, 16, 4, 4, True, True, (16, True, True)),
-        (8192, 3, 1, 16, 4, 4, True, True, (16, False, False)),
-        (8192, 5, 1, 16, 4, 4, True, True, (8, False, False)),
-        (8192, 12, 1, 16, 4, 4, True, True, (4, False, False)),
-        (8192, 23, 1, 16, 4, 4, True, True, (2, False, False)),
-        (8192, 25, 1, 16, 4, 4, True, True, (2, False, False)),
-        (8193, 4, 1, 16, 4, 4, True, True, (16, False, False)),
-        (8193, 16, 1, 16, 4, 4, True, True, (4, False, False)),
-        (8193, 24, 1, 16, 4, 4, True, True, (2, False, False)),
-        (65534, 4, 1, 16, 4, 4, True, True, (16, False, False)),
-        (65534, 64, 1, 16, 4, 4, True, True, (1, False, False)),
-        (513, 16, 1, 16, 4, 4, False, True, (4, False, False)),
-        (513, 16, 1, 16, 4, 4, True, False, (4, False, False)),
-        (513, 16, 1, 13, 4, 4, True, True, (4, False, False)),
-        (2760, 4, 4, 16, 4, 4, True, True, (4, False, False)),
-        (8192, 4, 1, 16, 1, 4, True, True, (16, False, False)),
-        (8192, 24, 1, 16, 1, 1, True, True, (2, False, False)),
-        (8192, 4, 1, 16, 4, 8, True, True, (16, False, False)),
+        (0, 24, 1, 16, True, (2, False, False)),
+        (1, 1, 1, 16, True, (16, True, True)),
+        (512, 4, 1, 16, True, (16, True, True)),
+        (513, 24, 4, 16, True, (16, True, True)),
+        (2760, 5, 2, 16, True, (16, True, True)),
+        (8192, 64, 4, 16, True, (16, True, True)),
+        (8193, 4, 1, 16, True, (16, False, False)),
+        (8193, 16, 1, 16, True, (4, False, False)),
+        (65534, 64, 1, 16, True, (1, False, False)),
+        (513, 16, 1, 13, True, (4, False, False)),
+        (513, 16, 4, 16, False, (1, False, False)),
     ],
 )
 def test_amd_decode_topk_launch_policy(
@@ -1062,13 +1023,10 @@ def test_amd_decode_topk_launch_policy(
     total_q: int,
     num_idx_heads: int,
     topk: int,
-    decode_query_len: int,
-    max_decode_query_len: int,
-    enable_tp4_fastpath: bool,
     is_gfx950: bool,
     expected: tuple[int, bool, bool],
 ):
-    """Only measured qlen-4 TP4/gfx950 buckets use adaptive selection."""
+    """All supported head and query layouts use adaptive selection."""
     from vllm.models.minimax_m3.amd.ops.index_topk import (
         _decode_topk_launch_policy,
     )
@@ -1079,9 +1037,6 @@ def test_amd_decode_topk_launch_policy(
             total_q,
             num_idx_heads,
             topk,
-            decode_query_len,
-            max_decode_query_len,
-            enable_tp4_fastpath=enable_tp4_fastpath,
             is_gfx950=is_gfx950,
         )
         == expected
@@ -1099,17 +1054,18 @@ def test_amd_decode_topk_launch_policy(
         "adaptive_final_merge",
         "max_blocks",
         "topk",
+        "num_idx_heads",
     ),
     [
-        (1, False, False, 65534, 16),
-        (2, False, False, 8193, 16),
-        (4, False, False, 8193, 16),
-        (8, False, False, 8193, 16),
-        (16, False, False, 8193, 16),
-        (16, False, False, 65534, 16),
-        (2, True, False, 513, 13),
-        (4, False, True, 8192, 16),
-        (16, True, True, 8192, 16),
+        (1, False, False, 65534, 16, 1),
+        (2, False, False, 8193, 16, 1),
+        (4, False, False, 8193, 16, 1),
+        (8, False, False, 8193, 16, 1),
+        (16, False, False, 8193, 16, 1),
+        (16, False, False, 65534, 16, 1),
+        (2, True, False, 513, 13, 1),
+        (4, False, True, 8192, 16, 2),
+        (16, True, True, 8192, 16, 4),
     ],
 )
 def test_amd_decode_fused_topk_total_order_and_replay(
@@ -1118,6 +1074,7 @@ def test_amd_decode_fused_topk_total_order_and_replay(
     adaptive_final_merge: bool,
     max_blocks: int,
     topk: int,
+    num_idx_heads: int,
 ):
     """Atomic multi-chunk selection is ordered and resets graph state."""
     from vllm.models.minimax_m3.amd.ops.index_topk import (
@@ -1162,7 +1119,7 @@ def test_amd_decode_fused_topk_total_order_and_replay(
             num_blocks * SPARSE_BLOCK_SIZE for num_blocks in reversed(boundary_blocks)
         )
     batch = len(long_seq_lens_list)
-    score = torch.randn((1, batch, max_blocks), device="cuda")
+    score = torch.randn((num_idx_heads, batch, max_blocks), device="cuda")
     score[:, :, 0] = float("nan")
     score[:, :, 1] = float("inf")
     score[:, :, 2] = float("-inf")
@@ -1175,13 +1132,15 @@ def test_amd_decode_fused_topk_total_order_and_replay(
 
     seq_lens = torch.empty(batch, device="cuda", dtype=torch.int32)
     partial = torch.full(
-        (num_topk_chunks, 1, batch, block_size_t),
+        (num_topk_chunks, num_idx_heads, batch, block_size_t),
         -1,
         device="cuda",
         dtype=torch.int64,
     )
-    counter = torch.zeros((1, batch), device="cuda", dtype=torch.int32)
-    actual = torch.full((1, batch, topk), -2, device="cuda", dtype=torch.int32)
+    counter = torch.zeros((num_idx_heads, batch), device="cuda", dtype=torch.int32)
+    actual = torch.full(
+        (num_idx_heads, batch, topk), -2, device="cuda", dtype=torch.int32
+    )
     dummy_block_table = torch.zeros(
         (batch, max_blocks), device="cuda", dtype=torch.int32
     )
@@ -1190,7 +1149,7 @@ def test_amd_decode_fused_topk_total_order_and_replay(
     short_seq_lens = torch.tensor(short_seq_lens_list, device="cuda", dtype=torch.int32)
 
     def launch() -> None:
-        _decode_topk_fused_kernel[(batch, 1, num_topk_chunks)](
+        _decode_topk_fused_kernel[(batch, num_idx_heads, num_topk_chunks)](
             score,
             partial,
             counter,
@@ -1231,16 +1190,17 @@ def test_amd_decode_fused_topk_total_order_and_replay(
     score_cpu = score.cpu()
 
     def reference(seq_lens_list: list[int]) -> torch.Tensor:
-        expected = torch.full((1, batch, topk), -1, dtype=torch.int32)
-        for row, seq_len in enumerate(seq_lens_list):
-            num_blocks = (seq_len + SPARSE_BLOCK_SIZE - 1) // SPARSE_BLOCK_SIZE
-            values = score_cpu[0, row, :num_blocks].tolist()
-            values = [-1e30 if value != value else value for value in values]
-            selected = sorted(
-                range(num_blocks),
-                key=lambda index: (-values[index], index),
-            )[:topk]
-            expected[0, row, : len(selected)] = torch.tensor(selected)
+        expected = torch.full((num_idx_heads, batch, topk), -1, dtype=torch.int32)
+        for head in range(num_idx_heads):
+            for row, seq_len in enumerate(seq_lens_list):
+                num_blocks = (seq_len + SPARSE_BLOCK_SIZE - 1) // SPARSE_BLOCK_SIZE
+                values = score_cpu[head, row, :num_blocks].tolist()
+                values = [-1e30 if value != value else value for value in values]
+                selected = sorted(
+                    range(num_blocks),
+                    key=lambda index: (-values[index], index),
+                )[:topk]
+                expected[head, row, : len(selected)] = torch.tensor(selected)
         return expected
 
     seq_lens.copy_(long_seq_lens)
@@ -1294,11 +1254,13 @@ def test_amd_decode_fused_topk_total_order_and_replay(
     reason="MiniMax-M3 fused decode top-k is ROCm-only",
 )
 @pytest.mark.parametrize(
-    ("decode_query_len", "max_decode_query_len"),
-    [(1, 1), (1, 4), (4, 4)],
+    ("num_idx_heads", "decode_query_len", "max_decode_query_len"),
+    [(1, 1, 1), (2, 1, 4), (4, 4, 4), (4, 3, 8)],
 )
 def test_amd_decode_index_topk_end_to_end(
-    decode_query_len: int, max_decode_query_len: int
+    num_idx_heads: int,
+    decode_query_len: int,
+    max_decode_query_len: int,
 ):
     """ROCm BF16 score-to-selector parity crosses the atomic boundary."""
     from vllm.models.minimax_m3.amd.ops.index_topk import (
@@ -1317,7 +1279,11 @@ def test_amd_decode_index_topk_end_to_end(
         max_blocks, device="cuda", dtype=torch.int32
     ).unsqueeze(0)
     idx_q = torch.randn(
-        decode_query_len, 1, head_dim, device="cuda", dtype=torch.bfloat16
+        decode_query_len,
+        num_idx_heads,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
     )
     index_kv_cache = torch.randn(
         max_blocks,
@@ -1327,7 +1293,7 @@ def test_amd_decode_index_topk_end_to_end(
         dtype=torch.bfloat16,
     )
     completion_counter = torch.zeros(
-        (1, decode_query_len), device="cuda", dtype=torch.int32
+        (num_idx_heads, decode_query_len), device="cuda", dtype=torch.int32
     )
 
     actual = amd_minimax_m3_index_decode(
@@ -1339,11 +1305,10 @@ def test_amd_decode_index_topk_end_to_end(
         topk=topk,
         init_blocks=0,
         local_blocks=1,
-        num_kv_heads=1,
+        num_kv_heads=num_idx_heads,
         decode_query_len=decode_query_len,
         max_decode_query_len=max_decode_query_len,
         completion_counter=completion_counter,
-        enable_tp4_fastpath=True,
     )
     expected = _reference_index_topk(
         idx_q,
@@ -2048,7 +2013,6 @@ def test_amd_decode_fused_topk_emits_sparse_table(
         "num_kv_heads": 1,
         "decode_query_len": decode_query_len,
         "max_decode_query_len": decode_query_len,
-        "enable_tp4_fastpath": True,
     }
     completion_counter = torch.zeros((1, total_q), device="cuda", dtype=torch.int32)
 

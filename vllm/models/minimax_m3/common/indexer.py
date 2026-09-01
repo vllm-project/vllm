@@ -366,9 +366,6 @@ class MiniMaxM3IndexerImpl(nn.Module):
         self.num_index_heads = num_index_heads
         self.index_head_dim = index_head_dim
         self.indexer_kv_dtype = indexer_kv_dtype
-        self.enable_tp4_fastpath = (
-            current_platform.is_rocm() and get_tensor_model_parallel_world_size() == 4
-        )
         # Shared, stable-address top-k output buffer (set by the model for the
         # cudagraph-safe MSA impl); None -> impl allocates fresh (eager).
         self.topk_indices_buffer = topk_indices_buffer
@@ -450,7 +447,6 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 decode_backend_kwargs["completion_counter"] = (
                     self.topk_completion_counter
                 )
-                decode_backend_kwargs["enable_tp4_fastpath"] = self.enable_tp4_fastpath
             decode_topk = minimax_m3_index_decode(
                 iq[:nd],
                 kv,

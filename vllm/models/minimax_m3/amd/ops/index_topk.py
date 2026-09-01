@@ -7,11 +7,13 @@ then the top-k blocks (plus forced init/local blocks) are selected per query
 token. Adapted to vLLM's paged KV cache: the KV page size is forced to equal the
 sparse block size (128), so one sparse block maps to exactly one page.
 
-Index-K cache layout (vLLM): ``(num_blocks, 128, idx_head_dim)`` (single head).
+Index-K cache layout (vLLM): ``(num_blocks, 128, idx_head_dim)`` (one shared
+key vector per token).
 
 Only the paths MiniMax M3 uses are implemented: score_type="max", index value
-disabled (score-only indexer), single shared index head. The selected block ids
-feed the block-sparse attention kernels in ``sparse_attn``.
+disabled (score-only indexer), and shared index keys. Each local index-query
+head selects its own block ids for the block-sparse attention kernels in
+``sparse_attn``.
 """
 
 import torch
@@ -32,28 +34,19 @@ MAX_DECODE_SCORE_BALANCED_REQUESTS = 11
 DECODE_TOPK_BLOCKS_PER_CHUNK = 512
 MAX_DECODE_TOPK_FAST_CHUNKS = 16
 DECODE_TOPK_TARGET_GRID = 64
-DECODE_TOPK_TP4_FIXED16_TOTAL_Q = frozenset((4, 16, 24))
 
 
 def _decode_score_program_budget(
     num_reqs: int,
-    num_idx_heads: int,
     head_dim: int,
-    decode_query_len: int,
-    max_decode_query_len: int,
     query_dtype: torch.dtype,
     cache_dtype: torch.dtype,
     *,
-    enable_tp4_fastpath: bool,
     is_gfx950: bool,
 ) -> int | None:
     if not (
-        enable_tp4_fastpath
-        and is_gfx950
-        and num_idx_heads == 1
+        is_gfx950
         and head_dim == 128
-        and decode_query_len == 4
-        and max_decode_query_len == 4
         and query_dtype == torch.bfloat16
         and cache_dtype == torch.bfloat16
     ):
@@ -70,22 +63,14 @@ def _decode_topk_launch_policy(
     total_q: int,
     num_idx_heads: int,
     topk: int,
-    decode_query_len: int,
-    max_decode_query_len: int,
     *,
-    enable_tp4_fastpath: bool,
     is_gfx950: bool,
 ) -> tuple[int, bool, bool]:
-    """Choose the graph grid and measured TP4 selector specialization."""
+    """Choose the graph grid and bounded-context selector specialization."""
     if (
-        enable_tp4_fastpath
-        and is_gfx950
-        and num_idx_heads == 1
+        is_gfx950
         and topk == 16
-        and decode_query_len == 4
-        and max_decode_query_len == 4
         and 0 < max_block <= MAX_DECODE_TOPK_FAST_CHUNKS * DECODE_TOPK_BLOCKS_PER_CHUNK
-        and total_q in DECODE_TOPK_TP4_FIXED16_TOTAL_Q
     ):
         return MAX_DECODE_TOPK_FAST_CHUNKS, True, True
 
@@ -1273,7 +1258,6 @@ def minimax_m3_index_decode(
     sparse_context_lens_out: torch.Tensor | None = None,
     block_page_stride: int | None = None,
     completion_counter: torch.Tensor | None = None,
-    enable_tp4_fastpath: bool = False,
 ) -> torch.Tensor:
     """Decode index block-score followed by fused adaptive top-k selection.
 
@@ -1285,14 +1269,12 @@ def minimax_m3_index_decode(
     provides stable per-query synchronization storage for CUDA graphs. It must
     be zero before its first launch and must not be shared by overlapping
     selector invocations; every completed launch resets its active entries.
-    ``enable_tp4_fastpath`` must be set explicitly by the model's TP-aware
-    caller; it does not infer TP4 from the local index-head count.
     """
     total_q, num_idx_heads, head_dim = idx_q.shape
     assert num_idx_heads == num_kv_heads, (
         "M3 expects num_idx_heads == num_kv_heads (no topk index reduce)"
     )
-    assert decode_query_len <= max_decode_query_len
+    assert 0 < decode_query_len <= max_decode_query_len
     assert total_q == seq_lens.shape[0] * decode_query_len
     batch = total_q
     emit_sparse_table = attention_block_table is not None
@@ -1395,7 +1377,7 @@ def minimax_m3_index_decode(
         from vllm.platforms.rocm import on_gfx950
 
         is_gfx950 = on_gfx950()
-    # TP=1 spec decode scores a wide 4-head x 4-position query tile per K block;
+    # Multi-head spec decode scores a wider head-position tile per K block;
     # reduce stages to ease memory/register pressure on the fallback path.
     score_kwargs = pdl_kwargs.copy()
     if num_idx_heads > 1 and max_decode_query_len > 1:
@@ -1414,13 +1396,9 @@ def minimax_m3_index_decode(
     num_reqs = seq_lens.shape[0]
     score_program_budget = _decode_score_program_budget(
         num_reqs,
-        num_idx_heads,
         head_dim,
-        decode_query_len,
-        max_decode_query_len,
         idx_q.dtype,
         index_kv_cache.dtype,
-        enable_tp4_fastpath=enable_tp4_fastpath,
         is_gfx950=is_gfx950,
     )
     grid_score: tuple[int, ...]
@@ -1511,9 +1489,6 @@ def minimax_m3_index_decode(
         batch,
         num_idx_heads,
         topk,
-        decode_query_len,
-        max_decode_query_len,
-        enable_tp4_fastpath=enable_tp4_fastpath,
         is_gfx950=is_gfx950,
     )
     block_size_t = triton.next_power_of_2(topk)
