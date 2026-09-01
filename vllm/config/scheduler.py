@@ -71,6 +71,37 @@ class SchedulerConfig:
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default)."""
 
+    max_num_queued_reqs: int | None = Field(default=None, ge=0)
+    """Maximum number of requests that can be in-flight (waiting or running)
+    at the same time, or None for no limit. When the limit is reached, new
+    requests are rejected with HTTP 503 so the client can retry on another
+    instance. This bounds vLLM's otherwise unbounded request queue and is
+    primarily a coarse capacity valve."""
+
+    max_num_queued_tokens: int | None = Field(default=None, ge=0)
+    """Maximum total prompt tokens of requests currently in the prefill
+    phase, or None for no limit. When the limit is reached, new requests
+    are rejected with HTTP 503.
+
+    This is a TTFT QoS mechanism: by setting it to
+    ``target_TTFT * prefill_throughput`` you reject requests when the
+    prefill backlog would exceed the latency target.  In a disaggregated
+    prefill-decode setup this maps directly to the prefill pool's
+    capacity.
+
+    Note: the count is conservative.  A partially prefilled request
+    still contributes its full ``prompt_len`` until it transitions out
+    of the prefill phase, because the scheduler's per-iteration
+    ``num_computed_tokens`` progress is not propagated to the API
+    server process during prefill (``EngineCoreOutput`` is only
+    emitted once the request starts producing tokens).  Similarly,
+    prefix-cache hits (``num_cached_tokens``) are only known to the
+    OutputProcessor after prefill completes.  This overestimates the
+    real backlog, causing earlier rejection than strictly necessary
+    — the safe direction for QoS.  The impact is limited to long
+    prompts under chunked prefill; short prompts that prefill in a
+    single iteration are unaffected."""
+
     enable_chunked_prefill: bool = True
     """If True, prefill requests can be chunked based
     on the remaining `max_num_batched_tokens`.
