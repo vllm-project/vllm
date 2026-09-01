@@ -195,17 +195,12 @@ class Mistral3HFEncoderInfo(PixtralHFEncoderInfo):
             image_width = math.floor(image_width / ratio)
             image_height = math.floor(image_height / ratio)
 
-        patch_size = self.vision_config.patch_size
-        spatial_merge_size = self.hf_config.spatial_merge_size
+        merged_patch_size = (
+            self.vision_config.patch_size * self.hf_config.spatial_merge_size
+        )
 
-        # The HF processor rounds each dimension up to the vision patch size
-        # before the projector drops incomplete spatial-merge groups. This is
-        # not equivalent to rounding directly to the merged patch size.
-        num_width_patches = (image_width - 1) // patch_size + 1
-        num_height_patches = (image_height - 1) // patch_size + 1
-
-        ncols = num_width_patches // spatial_merge_size
-        nrows = num_height_patches // spatial_merge_size
+        ncols = (image_width - 1) // merged_patch_size + 1
+        nrows = (image_height - 1) // merged_patch_size + 1
         return ncols, nrows
 
 
