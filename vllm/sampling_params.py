@@ -346,14 +346,6 @@ class SamplingParams(
     """Arbitrary additional args, that can be used by custom sampling
     implementations, plugins, etc. Not used by any in-tree sampling
     implementations."""
-    routed_experts_prompt_start: int = 0
-    """When enable_return_routed_experts is active, skip the first
-    routed_experts_prompt_start prompt tokens from the returned routing
-    data. In multi-turn agent scenarios, set this to the length of the
-    already-returned prefix to avoid duplicating routing for prompt tokens
-    covered by earlier turns. Default 0 returns routing for all prompt
-    tokens."""
-
     # Fields used for bad words
     bad_words: list[str] | None = None
     """Words that are not allowed to be generated. More precisely, only the
@@ -372,6 +364,19 @@ class SamplingParams(
     when they hit the maximum output length (e.g. 'abcdabcdabcd...' or
     '\\emoji \\emoji \\emoji ...'). This feature can detect such behavior
     and terminate early, saving time and tokens."""
+
+    # Debugging / RL-specific parameters. Not intended for production serving.
+    routed_experts_prompt_start: int = 0
+    """When enable_return_routed_experts is active, skip the first
+    routed_experts_prompt_start prompt tokens from the returned routing
+    data. In multi-turn agent scenarios, set this to the length of the
+    already-returned prefix to avoid duplicating routing for prompt tokens
+    covered by earlier turns. Default 0 returns routing for all prompt
+    tokens."""
+    trace_decode_token_ids: list[int] | None = None
+    """If provided, forces the engine to emit this predetermined sequence of
+    token IDs during decoding instead of sampling randomly. Real logprobs are
+    still computed. Conflict checking is performed at the engine level."""
 
     @staticmethod
     def from_optional(
@@ -407,6 +412,8 @@ class SamplingParams(
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
         routed_experts_prompt_start: int = 0,
+        # Debugging / RL-specific parameters.
+        trace_decode_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -470,6 +477,7 @@ class SamplingParams(
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
             routed_experts_prompt_start=routed_experts_prompt_start,
+            trace_decode_token_ids=trace_decode_token_ids,
         )
 
     def __post_init__(self) -> None:
@@ -699,6 +707,17 @@ class SamplingParams(
                     text=prompt, add_special_tokens=False
                 )
 
+                if not prompt_token_ids:
+                    if not add_prefix_space:
+                        raise VLLMValidationError(
+                            "bad_words entries must tokenize to at least one token.",
+                            parameter="bad_words",
+                            value=self.bad_words,
+                        )
+                    # The unprefixed form is still enforceable when only the
+                    # optional space-prefixed form tokenizes to nothing.
+                    continue
+
                 # If no space at the beginning
                 # or if prefix space produces a new word token
                 if (not add_prefix_space) or (
@@ -780,8 +799,10 @@ class SamplingParams(
     ) -> None:
         self._validate_logprobs(model_config)
         self._validate_logit_bias(model_config)
+        self._validate_trace_replay(model_config, speculative_config)
+        self._validate_stop_token_ids(model_config)
         self._validate_logits_processors(model_config)
-        self._validate_allowed_token_ids(tokenizer)
+        self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
         self._validate_structured_outputs(
@@ -850,6 +871,31 @@ class SamplingParams(
                     value=num_prompt_logprobs,
                 )
 
+    def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
+        """Validate stop_token_ids are within vocabulary range."""
+        if not self.stop_token_ids:
+            return
+
+        # stop_token_ids are used as column indices into the logits tensor,
+        # whose width is the model's vocab size (LogitsProcessor is built from
+        # config.vocab_size, InputBatch.vocab_size comes from
+        # model_config.get_vocab_size()), so use the same bound here — like
+        # _validate_logit_bias, which indexes the same tensor.
+        vocab_size = model_config.get_vocab_size()
+        invalid_token_ids = [
+            token_id
+            for token_id in self.stop_token_ids
+            if token_id < 0 or token_id >= vocab_size
+        ]
+
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                f"token_id(s) {invalid_token_ids} in stop_token_ids contain "
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
+                parameter="stop_token_ids",
+                value=invalid_token_ids,
+            )
+
     def _validate_logit_bias(self, model_config: ModelConfig) -> None:
         """Validate logit_bias token IDs are within vocabulary range."""
         if not self.logit_bias:
@@ -870,6 +916,61 @@ class SamplingParams(
                 value=invalid_token_ids,
             )
 
+    def _validate_trace_replay(
+        self,
+        model_config: ModelConfig,
+        speculative_config: SpeculativeConfig | None,
+    ) -> None:
+        """Validate trace replay request compatibility."""
+        if self.trace_decode_token_ids is None:
+            return
+
+        if len(self.trace_decode_token_ids) == 0:
+            raise ValueError("trace_decode_token_ids must be a non-empty list.")
+        if self.n != 1:
+            raise ValueError("trace_decode_token_ids requires n=1.")
+        if not all(isinstance(t, int) and t >= 0 for t in self.trace_decode_token_ids):
+            raise ValueError(
+                "trace_decode_token_ids must contain non-negative integers."
+            )
+
+        if self.prompt_logprobs is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with prompt_logprobs."
+            )
+        if speculative_config is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with speculative decoding."
+            )
+        if self.structured_outputs is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with structured outputs."
+            )
+        if self.repetition_detection is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with repetition_detection."
+            )
+        if self.thinking_token_budget is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with thinking_token_budget."
+            )
+        if self.bad_words:
+            raise ValueError("trace_decode_token_ids is not supported with bad_words.")
+
+        vocab_size = model_config.get_vocab_size()
+        invalid_token_ids = [
+            token_id
+            for token_id in self.trace_decode_token_ids
+            if token_id < 0 or token_id >= vocab_size
+        ]
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                f"token_id(s) {invalid_token_ids} in trace_decode_token_ids "
+                f"contain out-of-vocab token ids. Vocabulary size: {vocab_size}",
+                parameter="trace_decode_token_ids",
+                value=invalid_token_ids,
+            )
+
     def _validate_logits_processors(self, model_config: ModelConfig) -> None:
         from vllm.v1.sample.logits_processor import (
             validate_logits_processors_parameters,
@@ -877,7 +978,7 @@ class SamplingParams(
 
         validate_logits_processors_parameters(model_config.logits_processors, self)
 
-    def _validate_allowed_token_ids(self, tokenizer: TokenizerLike | None) -> None:
+    def _validate_allowed_token_ids(self, model_config: ModelConfig) -> None:
         allowed_token_ids = self.allowed_token_ids
         if allowed_token_ids is None:
             return
@@ -889,19 +990,24 @@ class SamplingParams(
                 value=allowed_token_ids,
             )
 
-        if tokenizer is not None:
-            vocab_size = len(tokenizer)
-            invalid_token_ids = [
-                token_id
-                for token_id in allowed_token_ids
-                if token_id < 0 or token_id >= vocab_size
-            ]
-            if invalid_token_ids:
-                raise VLLMValidationError(
-                    "allowed_token_ids contains out-of-vocab token id!",
-                    parameter="allowed_token_ids",
-                    value=invalid_token_ids,
-                )
+        # allowed_token_ids are client-supplied ids used as column indices
+        # into the logits tensor (the mask in InputBatch is sized by
+        # model_config.get_vocab_size(), and the ids are written as
+        # mask[req_index][allowed_token_ids]), so use the same bound here —
+        # like _validate_stop_token_ids and _validate_logit_bias, which
+        # index the same tensor.
+        vocab_size = model_config.get_vocab_size()
+        invalid_token_ids = [
+            token_id
+            for token_id in allowed_token_ids
+            if token_id < 0 or token_id >= vocab_size
+        ]
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                "allowed_token_ids contains out-of-vocab token id!",
+                parameter="allowed_token_ids",
+                value=invalid_token_ids,
+            )
 
     def _validate_spec_decode(
         self,
@@ -909,20 +1015,6 @@ class SamplingParams(
     ) -> None:
         if speculative_config is None:
             return
-
-        # Adaptive verification compacts logits after the forward pass, while
-        # compute_topk_scores uses the scheduled layout in cu_num_logits_np.
-        # TODO(lucas): lift this restriction. The true boundaries exist on device as
-        # cu_num_logits; cu_num_generated_tokens is only read host-side after
-        # the logprobs D2H, so it could ride along on that copy.
-        if (
-            speculative_config.enable_adaptive_verification
-            and self.num_logprobs is not None
-        ):
-            raise ValueError(
-                "Output logprobs are not supported with DSpark confidence-based "
-                "verification."
-            )
 
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.min_p > _SAMPLING_EPS or self.logit_bias:

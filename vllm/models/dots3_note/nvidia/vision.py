@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 import math
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -14,11 +15,13 @@ from transformers.modeling_utils import PreTrainedModel
 from vllm.third_party.deep_gemm import per_block_cast_to_fp8
 
 from .vision_attention import (
+    VisionRMSNorm,
     VisionRotaryEmbedding,
+    VisionRotaryPositionEmbedding,
     apply_vision_attention_residual,
     attn_uses_seqlens,
     build_vision_attention,
-    prepare_seqlens_for_attention,
+    prepare_rotary_pos_emb_vision,
     resolve_attn_implementation,
 )
 from .vision_moe import note_vision_fused_moe_fp8
@@ -103,23 +106,6 @@ class DotsMoEVitConfig(PretrainedConfig):
         self.pre_pixel_shuffle = pre_pixel_shuffle
         self.enable_torch_compile = enable_torch_compile
         self.enable_fp8_moe = enable_fp8_moe
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
-
-    def extra_repr(self) -> str:
-        return f"{tuple(self.weight.shape)}, eps={self.eps}"
-
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
 
 # ---- FFN modules ----
@@ -331,7 +317,7 @@ class DotsPatchEmbed(nn.Module):
             kernel_size=(config.patch_size, config.patch_size),
             stride=(config.patch_size, config.patch_size),
         )
-        self.norm = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
+        self.norm = VisionRMSNorm(config.embed_dim, eps=config.rms_norm_eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.view(
@@ -357,8 +343,8 @@ class MoEVisionBlock(nn.Module):
         )
         self.attn = build_vision_attention(attn_impl, config, eager_fallback="eager_v2")
         self._attn_uses_seqlens = attn_uses_seqlens(attn_impl)
-        self.norm_1 = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
-        self.norm_2 = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
+        self.norm_1 = VisionRMSNorm(config.embed_dim, eps=config.rms_norm_eps)
+        self.norm_2 = VisionRMSNorm(config.embed_dim, eps=config.rms_norm_eps)
 
         is_moe = (
             config.pyramid_num_routed
@@ -502,6 +488,15 @@ _ADAPTER_CLASSES: dict[str, type[nn.Module]] = {
 }
 
 
+@dataclass(frozen=True)
+class VitForwardMeta:
+    cu_seqlens: torch.Tensor
+    max_seqlen: int
+    rotary_pos_emb: VisionRotaryPositionEmbedding
+    grid_thw_cpu: torch.Tensor
+    seqlens: list[int] | None = None
+
+
 # ---- Full Model ----
 
 
@@ -523,7 +518,9 @@ class DotsMoEVitModel(PreTrainedModel):
         )
 
         if config.post_norm:
-            self.post_trunk_norm = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
+            self.post_trunk_norm = VisionRMSNorm(
+                config.embed_dim, eps=config.rms_norm_eps
+            )
 
         adapter_cls = _ADAPTER_CLASSES.get(config.adapter_type)
         if adapter_cls is None:
@@ -562,7 +559,7 @@ class DotsMoEVitModel(PreTrainedModel):
             block.norm_1 = torch.compile(block.norm_1, **compile_kwargs)
             block.norm_2 = torch.compile(block.norm_2, **compile_kwargs)
 
-    def get_pos_ids_by_grid(self, grid_thw):
+    def get_pos_ids_by_grid(self, grid_thw_cpu: torch.Tensor):
         # Mirrors ``cybertron`` ``AIMv2NativeModel.rot_pos_emb``: when ``pre_pixel_shuffle``
         # is set, RoPE positions follow the qwen ``merge_size`` grouped layout (default 2x2);
         # otherwise positions are flat row-major regardless of ``spatial_merge_size``.
@@ -573,10 +570,8 @@ class DotsMoEVitModel(PreTrainedModel):
         else:
             rope_merge_size = 1
         pos_ids = []
-        for t, h, w in grid_thw:
-            hpos_ids = (
-                torch.arange(h, device=grid_thw.device).unsqueeze(1).expand(-1, w)
-            )
+        for t, h, w in grid_thw_cpu:
+            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
             hpos_ids = hpos_ids.reshape(
                 h // rope_merge_size,
                 rope_merge_size,
@@ -585,9 +580,7 @@ class DotsMoEVitModel(PreTrainedModel):
             )
             hpos_ids = hpos_ids.permute(0, 2, 1, 3).flatten()
 
-            wpos_ids = (
-                torch.arange(w, device=grid_thw.device).unsqueeze(0).expand(h, -1)
-            )
+            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
             wpos_ids = wpos_ids.reshape(
                 h // rope_merge_size,
                 rope_merge_size,
@@ -598,80 +591,67 @@ class DotsMoEVitModel(PreTrainedModel):
             pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
         return pos_ids
 
-    def rot_pos_emb(self, grid_thw):
-        pos_ids = self.get_pos_ids_by_grid(grid_thw)
-        pos_ids = torch.cat(pos_ids, dim=0)
-        max_grid_size = grid_thw[:, 1:].max()
+    def rot_pos_emb(self, grid_thw_cpu: torch.Tensor):
+        pos_ids = torch.cat(self.get_pos_ids_by_grid(grid_thw_cpu), dim=0)
+        pos_ids = pos_ids.to(self.device, non_blocking=True)
+        max_grid_size = int(grid_thw_cpu[:, 1:].max())
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
-        return rotary_pos_emb
+        return rotary_pos_emb_full[pos_ids].flatten(1)
 
-    def _build_cu_seqlens_from_grid(self, grid_thw: torch.Tensor):
-        cu_seqlens = torch.repeat_interleave(
-            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-        ).cumsum(
-            dim=0,
-            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
-        )
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
-        # Same as (cu_seqlens[1:] - cu_seqlens[:-1]).max(); computed here to avoid D2H inside attention.
-        max_seqlen = int((grid_thw[:, 1] * grid_thw[:, 2]).max().item())
-        return cu_seqlens, max_seqlen
+    def prepare_meta(self, grid_thw_cpu: torch.Tensor) -> VitForwardMeta:
+        if grid_thw_cpu.device.type != "cpu":
+            raise ValueError("NOTE vision grid_thw must remain on CPU")
 
-    def _build_single_temporal_cu_seqlens_from_grid(self, grid_thw: torch.Tensor):
-        seq_lens = grid_thw[:, 1] * grid_thw[:, 2]
-        cu_seqlens = torch.empty(
-            (grid_thw.shape[0] + 1,), device=grid_thw.device, dtype=torch.int32
+        seq_per_frame = grid_thw_cpu[:, 1] * grid_thw_cpu[:, 2]
+        frame_lengths = torch.repeat_interleave(seq_per_frame, grid_thw_cpu[:, 0])
+        cu_seqlens_cpu = F.pad(
+            frame_lengths.cumsum(dim=0, dtype=torch.int32), (1, 0), value=0
         )
-        cu_seqlens[0] = 0
-        torch.cumsum(seq_lens, dim=0, dtype=torch.int32, out=cu_seqlens[1:])
-        max_seqlen = int(seq_lens.max().item())
-        return cu_seqlens, max_seqlen
+        resolved_attn = resolve_attn_implementation(
+            self.config.attn_implementation, eager_fallback="eager_v2"
+        )
+        return VitForwardMeta(
+            cu_seqlens=cu_seqlens_cpu.to(self.device, non_blocking=True),
+            max_seqlen=int(seq_per_frame.max()),
+            rotary_pos_emb=prepare_rotary_pos_emb_vision(
+                self.rot_pos_emb(grid_thw_cpu)
+            ),
+            grid_thw_cpu=grid_thw_cpu,
+            seqlens=(
+                frame_lengths.tolist() if attn_uses_seqlens(resolved_attn) else None
+            ),
+        )
 
     def forward(
-        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, bf16=True
+        self, hidden_states: torch.Tensor, meta: VitForwardMeta, bf16=True
     ) -> torch.Tensor:
-        grid_thw = grid_thw.to(device=self.device)
         if bf16:
-            hidden_states = hidden_states.to(device=self.device, dtype=self.dtype)
-        hidden_states = self.patch_embed(hidden_states)
-
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
-
-        if grid_thw[:, 0].sum().item() == grid_thw.shape[0]:
-            cu_seqlens, max_seqlen = self._build_single_temporal_cu_seqlens_from_grid(
-                grid_thw
+            hidden_states = hidden_states.to(
+                device=self.device, dtype=self.dtype, non_blocking=True
             )
-        else:
-            cu_seqlens, max_seqlen = self._build_cu_seqlens_from_grid(grid_thw)
-
-        seqlens = prepare_seqlens_for_attention(
-            self.config.attn_implementation,
-            cu_seqlens,
-            eager_fallback="eager_v2",
-        )
+        hidden_states = self.patch_embed(hidden_states)
 
         for blk in self.blocks:
             if self.gradient_checkpointing and self.training:
                 hidden_states = self._gradient_checkpointing_func(
                     blk.__call__,
                     hidden_states,
-                    cu_seqlens,
-                    rotary_pos_emb,
-                    max_seqlen,
-                    seqlens,
+                    meta.cu_seqlens,
+                    meta.rotary_pos_emb,
+                    meta.max_seqlen,
+                    meta.seqlens,
                 )
             else:
                 hidden_states = blk(
                     hidden_states,
-                    cu_seqlens,
-                    rotary_pos_emb,
-                    max_seqlen,
-                    seqlens=seqlens,
+                    meta.cu_seqlens,
+                    meta.rotary_pos_emb,
+                    meta.max_seqlen,
+                    seqlens=meta.seqlens,
                 )
 
         if self.config.post_norm:
             hidden_states = self.post_trunk_norm(hidden_states)
 
-        hidden_states = self.adapter(hidden_states, grid_thw)
+        hidden_states = self.adapter(hidden_states, meta.grid_thw_cpu)
         return hidden_states
