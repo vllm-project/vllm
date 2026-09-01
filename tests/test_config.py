@@ -2152,6 +2152,23 @@ def test_draft_sample_method_probabilistic_is_accepted():
     assert speculative_config.draft_sample_method == "probabilistic"
 
 
+@pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
+def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
+    disable_eagle_block_drop: bool,
+):
+    # Start from an ngram config to avoid loading model metadata: these predicates
+    # depend only on the speculative method and the new switch.
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=3,
+        disable_eagle_block_drop=disable_eagle_block_drop,
+    )
+    speculative_config.method = "eagle3"
+
+    assert speculative_config.use_eagle()
+    assert speculative_config.use_eagle_block_drop() is not disable_eagle_block_drop
+
+
 def test_draft_sample_method_gumbel_is_rejected():
     with pytest.raises(ValidationError):
         SpeculativeConfig(
