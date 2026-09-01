@@ -17,9 +17,6 @@ from vllm.distributed.device_communicators.flashinfer_pcie_ipc_all_reduce import
     warmup_flashinfer_pcie_ipc_allreduce,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    flashinfer_replayssm_autotune_supported,
-)
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
@@ -43,9 +40,6 @@ from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
-)
-from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
-    sparse_mla_triton_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -257,7 +251,6 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
             if isinstance(kernel, FlashInferCuteDslNvFp4LinearKernel):
                 return {"fp4_gemm"}
     return None
-
 
 
 _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
