@@ -121,6 +121,18 @@ def _largest_kernel_block_within(
     return max(fitting) if fitting else smallest
 
 
+def _supports_unsplit_block(
+    attn_backend: "type[AttentionBackend]", block_size: int
+) -> bool:
+    """Whether the backend can run ``block_size`` as its kernel block as-is."""
+    from vllm.v1.attention.backend import MultipleOf
+
+    return any(
+        block_size % s.base == 0 if isinstance(s, MultipleOf) else block_size == s
+        for s in attn_backend.get_supported_kernel_block_sizes()
+    )
+
+
 def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) -> None:
     """Sets default quantization scales for the layer."""
     if register_buffer:
@@ -616,8 +628,15 @@ class Attention(nn.Module, AttentionLayerBase):
             # When this SW layer is a padded spec (skip-quant: its page is
             # padded up to ``skip_page_size_padded``), pick the largest kernel
             # block that still fits the shared page so we waste fewer padding
-            # bytes per block. Otherwise (page_size_padded is None) the smallest
-            # block is fine — ``unify`` scales it up by an integer ratio.
+            # bytes per block. Otherwise (page_size_padded is None) take the
+            # primary block size when the backend can run it unsplit: if this
+            # page does not divide the primary page, ``unify`` then pads it
+            # (padded pages cannot be split) instead of scaling a small block
+            # to a size coprime with the primary one, which inflates the
+            # scheduler LCM (e.g. a 1024 B/token SWA draft next to a 1152
+            # B/token MLA target: 1728 vs 1536 gives LCM 13824). Backends that
+            # cannot run the primary block start from their smallest block and
+            # ``unify`` scales it up by an integer ratio.
             shared_page = vllm_config.cache_config.skip_page_size_padded
             # The backend owns its packing
             sw_per_token = self.attn_backend.customize_spec(
@@ -631,9 +650,14 @@ class Attention(nn.Module, AttentionLayerBase):
                     sliding_window=self.sliding_window,
                 )
             ).real_page_size_bytes
-            sw_block_size = _largest_kernel_block_within(
-                self.attn_backend, sw_per_token, shared_page, block_size
-            )
+            if shared_page is None and _supports_unsplit_block(
+                self.attn_backend, block_size
+            ):
+                sw_block_size = block_size
+            else:
+                sw_block_size = _largest_kernel_block_within(
+                    self.attn_backend, sw_per_token, shared_page, block_size
+                )
             return SlidingWindowSpec(
                 block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,
