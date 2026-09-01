@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
@@ -17,7 +17,7 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -126,15 +126,18 @@ if current_platform.is_rocm():
             # for kv cache layout as
             # K: [num_blocks, num_head, head_dim // x, page_size, x]
             # V: [num_blocks, num_head, page_size // x, head_dim, x]
+
+            # Use the individual given tensor strides:
+            #    k_cache_stride0 and v_cache_stride0.
             key_cache_ptr_offset = (
                 key_cache_ptr
-                + block_id * num_heads * head_size * PAGE_SIZE
+                + block_id * k_cache_stride0
                 + head_id * head_size * PAGE_SIZE
                 + slot_id * x
             )
             value_cache_ptr_offset = (
                 value_cache_ptr
-                + block_id * num_heads * head_size * PAGE_SIZE
+                + block_id * v_cache_stride0
                 + head_id * head_size * PAGE_SIZE
                 + (slot_id // x) * head_size * x
                 + slot_id % x
@@ -771,13 +774,24 @@ class AiterFlashAttentionBackend(AttentionBackend):
         # 16-token units by the ROCm kernel.
         if spec.block_size != 1 and spec.block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return spec
+        if not rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+            return spec
+        if spec.state_content_bytes is not None:
+            return spec
+        # K and V have two head groups in this case.
+        assert spec.head_size == spec.head_size_v, (
+            "Separate K/V head groups require symmetric K/V head sizes."
+        )
+        return replace(
+            spec,
+            num_head_slots=2,  # separate kv head groups
+            state_content_bytes=spec.num_kv_heads  # separate kv head groups
+            * spec.head_size
+            * get_dtype_size(spec.dtype),
+        )
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        # K and V come out of the content dim as transposed views rather than
-        # copies, so the head dim may sit on either side of the block dim, but
-        # the layer must stay outermost.
         return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
 
     @classmethod
@@ -1393,6 +1407,18 @@ class AiterFlashAttentionImpl(AttentionImpl):
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Mirrors customize_spec's [B, 2, N, H*hs].
+        # Makes .view() raise instead of copying.
+        if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+            num_blocks, _, block_size, _ = kv_cache.shape
+            return (
+                kv_cache[:, 0].view(
+                    num_blocks, block_size, self.num_kv_heads, self.head_size
+                ),
+                kv_cache[:, 1].view(
+                    num_blocks, block_size, self.num_kv_heads, self.head_size
+                ),
+            )
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
@@ -1405,7 +1431,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         slot_mapping: torch.Tensor,
     ):
         key_cache, value_cache = self._split_kv_cache(kv_cache)
-
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
         # in KV cache.
