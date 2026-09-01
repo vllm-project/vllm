@@ -597,3 +597,95 @@ def test_parse_delta_multi_turn_reason_and_tool(
         )
         if i < len(cities) - 1:
             conversation.append(UserMessage(content=f"And in {cities[i + 1]}?"))
+
+
+_UNPAIRED_REASONING = "two plus two is four"
+_UNPAIRED_ANSWER = "The answer is 4."
+_UNPAIRED_GENERATION = f"{_UNPAIRED_REASONING}[/THINK]{_UNPAIRED_ANSWER}"
+
+
+def _unpaired_parser(tokenizer: MistralTokenizer):
+    """Compose the parser `ParserManager` builds for `--tool-call-parser mistral`
+    with no `--reasoning-parser`, leaving the reasoning segment unconsumed.
+    """
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name=_PARSER_NAME,
+        reasoning_parser_name=None,
+        enable_auto_tools=True,
+    )
+    return parser_cls(tokenizer, None)
+
+
+class TestReasoningEndWithoutReasoningParser:
+    """A tool parser with no reasoning parser must not eat the only `[/THINK]`.
+
+    The config absorbs a stray `[/THINK]` so it cannot leak as text once a
+    reasoning parser has consumed the real one. Unpaired, nothing else can
+    surface it, so absorbing silently fuses reasoning into content and strips
+    the client's only boundary marker.
+    """
+
+    def test_unpaired_non_streaming_keeps_reasoning_end_in_content(
+        self, mistral_tokenizer: MistralTokenizer
+    ) -> None:
+        parser = _unpaired_parser(mistral_tokenizer)
+        request = ChatCompletionRequest(messages=[], model="test", tool_choice="none")
+        gen_ids = _encode_v13(mistral_tokenizer, _UNPAIRED_GENERATION)
+
+        reasoning, content, _tool_calls = parser.parse(
+            _UNPAIRED_GENERATION,
+            request,
+            enable_auto_tools=True,
+            model_output_token_ids=gen_ids,
+        )
+
+        assert reasoning is None
+        assert content == _UNPAIRED_GENERATION
+
+    def test_unpaired_streaming_keeps_reasoning_end_in_content(
+        self, mistral_tokenizer: MistralTokenizer
+    ) -> None:
+        parser = _unpaired_parser(mistral_tokenizer)
+        request = ChatCompletionRequest(messages=[], model="test", tool_choice="none")
+        gen_ids = _encode_v13(mistral_tokenizer, _UNPAIRED_GENERATION)
+
+        reasoning, content = _stream_parse_delta(
+            parser, mistral_tokenizer, gen_ids, request, []
+        )
+
+        assert reasoning == ""
+        assert content == _UNPAIRED_GENERATION
+
+    def test_paired_still_absorbs_a_second_reasoning_end(
+        self, mistral_tokenizer: MistralTokenizer
+    ) -> None:
+        """Guards the absorb rule's original purpose."""
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name=_PARSER_NAME,
+            reasoning_parser_name=_PARSER_NAME,
+            enable_auto_tools=True,
+        )
+        parser = parser_cls(mistral_tokenizer, None)
+        request = ChatCompletionRequest(messages=[], model="test", tool_choice="none")
+        generation = f"[THINK]{_UNPAIRED_REASONING}[/THINK]{_UNPAIRED_ANSWER}[/THINK]"
+        # _encode_v13 only maps the first [/THINK]; build the ids so the second
+        # one is the END_THINK special token too.
+        encode = mistral_tokenizer.tokenizer.encode
+        gen_ids = (
+            [mistral_tokenizer.instruct.BEGIN_THINK]
+            + encode(_UNPAIRED_REASONING, False, False)
+            + [mistral_tokenizer.instruct.END_THINK]
+            + encode(_UNPAIRED_ANSWER, False, False)
+            + [mistral_tokenizer.instruct.END_THINK]
+        )
+
+        reasoning, content, _tool_calls = parser.parse(
+            generation,
+            request,
+            enable_auto_tools=True,
+            model_output_token_ids=gen_ids,
+        )
+
+        assert reasoning == _UNPAIRED_REASONING
+        assert content is not None
+        assert "[/THINK]" not in content

@@ -176,10 +176,13 @@ def mistral_config(
                 ParserState.CONTENT,
                 (EventType.REASONING_END,),
             ),
-            # Absorb stray THINK_END that arrives after reasoning ended.
+            # A THINK_END arriving in CONTENT is absorbed when a reasoning
+            # parser already consumed the real one, and surfaced when none is
+            # attached and this is the client's only boundary marker.
             (ParserState.CONTENT, "THINK_END"): Transition(
                 ParserState.CONTENT,
                 (),
+                surface_reasoning_end_when_unconsumed=True,
             ),
             # [TOOL_CALLS] directly from reasoning implicitly ends it.
             (ParserState.REASONING, "TOOL_CALLS"): Transition(
