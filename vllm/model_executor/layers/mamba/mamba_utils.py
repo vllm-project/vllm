@@ -350,9 +350,9 @@ class MambaStateShapeCalculator:
         local_num_heads, head_dim, _ = base_shapes[1]
         return (
             *base_shapes,
-            (replayssm_cache_len, local_num_heads, head_dim),
-            (replayssm_cache_len, local_num_heads, head_dim),
-            (replayssm_cache_len, local_num_heads, head_dim),
+            (local_num_heads, replayssm_cache_len, head_dim),
+            (local_num_heads, replayssm_cache_len, head_dim),
+            (local_num_heads, replayssm_cache_len, head_dim),
         )
 
 
