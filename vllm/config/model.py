@@ -343,6 +343,10 @@ class ModelConfig:
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
+    enable_nccl_comm_suspend: bool = False
+    """Enable releasing NCCL communicator memory during sleep mode
+    (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
+    (the default) sleep still releases weights/KV-cache memory as before."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
@@ -1842,6 +1846,10 @@ class ModelConfig:
     @property
     def uses_xdrope_dim(self) -> int:
         return uses_xdrope_dim(self.hf_config)
+
+    @property
+    def uses_xdrope(self) -> bool:
+        return self.uses_xdrope_dim > 0
 
     @property
     def is_multimodal_model(self) -> bool:
