@@ -6,6 +6,7 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import sys
 import time
 from typing import TYPE_CHECKING
 
@@ -95,6 +96,18 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
+def _warmup_kimi_k3_gemm_rs_ar() -> None:
+    # Kimi-K3 model construction imports this module only when GEMM-RS/AR is
+    # enabled and initializes its singleton before kernel_warmup runs. Avoid
+    # importing it here so other models do not compile the RS/AR variants.
+    module = sys.modules.get("vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar")
+    if module is None:
+        return
+    compiled = module.warmup_gemm_rs_ar()
+    if compiled:
+        logger.info_once("Warmed up %d Kimi-K3 GEMM-RS/AR variants.", compiled)
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
@@ -146,6 +159,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
 
+    _warmup_kimi_k3_gemm_rs_ar()
+
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
         # to the shared JIT warmup infrastructure.
@@ -160,9 +175,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
-        envs.VLLM_USE_DEEP_GEMM
-        and is_deep_gemm_supported()
-        and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
+        is_deep_gemm_supported() and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
     if do_deep_gemm_warmup:
         model = worker.get_model()
@@ -234,6 +247,31 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
     return None
 
 
+_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
+
+
+def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    linear_backend = runner.vllm_config.kernel_config.linear_backend
+    if (
+        linear_backend == "flashinfer_cutedsl"
+        and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
+    ):
+        return max_tokens, _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
+    return (max_tokens,)
+
+
+def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
+    for num_tokens in _flashinfer_autotune_token_counts(runner):
+        logger.info("Running FlashInfer autotune with %d tokens.", num_tokens)
+        runner._dummy_run(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            randomize_inputs=True,
+        )
+
+
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """
     Autotune FlashInfer operations.
@@ -271,20 +309,10 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
 
     # We skip EPLB here since we don't want to record dummy metrics.
-    # When autotuning with number of tokens m, flashinfer will autotune
-    # operations for all number of tokens up to m, so we only need to
-    # run with the max number of tokens.
     # Randomize inputs to avoid every token pick the same experts,
     # which lead to some EP ranks receiving no tokens and skipping their
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
-    dummy_run_kwargs = dict(
-        num_tokens=runner.scheduler_config.max_num_batched_tokens,
-        skip_eplb=True,
-        is_profile=True,
-        randomize_inputs=True,
-    )
-
     # Read cached autotune results and broadcast to all ranks.
     cached_results: bytes | None = None
     if is_leader and cache_path.exists():
@@ -303,7 +331,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             torch.inference_mode(),
             fi_utils.autotune(tune_mode=True, **autotune_kwargs),
         ):
-            runner._dummy_run(**dummy_run_kwargs)
+            _run_flashinfer_autotune_dummy_runs(runner)
     finally:
         set_autotune_process_group(None)
 
