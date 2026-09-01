@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 
 import torch
 
@@ -477,10 +478,24 @@ class TrtLlmNvFp4ExpertsMonolithic(
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        """The modular implementation should be used for the Dp/Ep or EPLB case."""
+        """The modular implementation should be used for the Dp/Ep or EPLB case.
+
+        GDN R3 (fused routing): additionally allow the monolithic kernel under
+        the naive allgather-reducescatter all2all backend. The monolithic
+        prepare/finalize (MoEPrepareAndFinalizeNaiveDPEPMonolithic) allgathers
+        the activations + router logits and the trtllm-gen kernel routes
+        internally with local_expert_offset, so no dispatch metadata is
+        needed. Gated by VLLM_GDN_MOE_MONO_AGRS (default "0" = the previous
+        behavior, the Modular kernel; set "1" to opt in). The
+        EPLB exclusion and every other all2all backend rejection are kept.
+        """
+        if moe_parallel_config.enable_eplb:
+            return False
+        if not moe_parallel_config.use_all2all_kernels:
+            return True
         return (
-            not moe_parallel_config.use_all2all_kernels
-            and not moe_parallel_config.enable_eplb
+            moe_parallel_config.use_ag_rs_all2all_kernels
+            and os.environ.get("VLLM_GDN_MOE_MONO_AGRS", "0") == "1"
         )
 
     @staticmethod

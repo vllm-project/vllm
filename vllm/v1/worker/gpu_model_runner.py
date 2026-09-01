@@ -67,6 +67,10 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
+from vllm.model_executor.layers.mamba.ops.gdn_index_prep import (
+    GDNBlockIdxPrepBuffers,
+    gdn_inkernel_ckpt_idx_enabled,
+)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -1005,6 +1009,14 @@ class GPUModelRunner(
             self.mamba_prev_last_scheduled_idx = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
             )
+        # All-mode GDN: shared per-step block-index buffers written by the
+        # once-per-step prep kernel and consumed by every GDN metadata builder
+        # (allocated lazily once GDN attn groups are known).
+        self.gdn_block_idx_prep: GDNBlockIdxPrepBuffers | None = None
+        self._gdn_block_idx_prep_enabled = (
+            self.cache_config.mamba_cache_mode == "all"
+            and gdn_inkernel_ckpt_idx_enabled()
+        )
         self.layerwise_nvtx_hooks_registered = False
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -2316,6 +2328,47 @@ class GPUModelRunner(
             int(num_sampled_tokens.max()),
         )
 
+    def _prepare_gdn_block_idx(
+        self,
+        cm_base: CommonAttentionMetadata,
+        num_reqs_padded: int,
+    ) -> GDNBlockIdxPrepBuffers | None:
+        """All-mode GDN (VLLM_GDN_INKERNEL_CKPT_IDX): run the once-per-step
+        block-index prep kernel into shared persistent buffers consumed by
+        every GDN metadata builder."""
+        if (
+            not self._gdn_block_idx_prep_enabled
+            or self.cache_config.mamba_block_size is None
+        ):
+            return None
+        if self.gdn_block_idx_prep is None:
+            if not self.attn_groups:
+                return None
+            has_gdn = any(
+                isinstance(group.get_metadata_builder(), GDNAttentionMetadataBuilder)
+                for groups in self.attn_groups
+                for group in groups
+            )
+            if not has_gdn:
+                self._gdn_block_idx_prep_enabled = False
+                return None
+            self.gdn_block_idx_prep = GDNBlockIdxPrepBuffers(
+                self.max_num_reqs * (self.num_spec_tokens + 1), self.device
+            )
+        prev = (
+            self.mamba_prev_last_scheduled_idx.gpu[:num_reqs_padded]
+            if self.mamba_prev_last_scheduled_idx is not None
+            else None
+        )
+        self.gdn_block_idx_prep.prepare(
+            cm_base.seq_lens,
+            cm_base.compute_num_computed_tokens(),
+            prev,
+            self.cache_config.mamba_block_size,
+            num_reqs_padded,
+        )
+        return self.gdn_block_idx_prep
+
     def _build_attention_metadata(
         self,
         num_tokens: int,
@@ -2505,6 +2558,11 @@ class GPUModelRunner(
                 logits_indices
             )
 
+        # All-mode GDN: compute the per-request block anchors once per step
+        # (one kernel launch) into shared persistent buffers instead of the
+        # eager cdiv/clamp chains in each of the GDN builders.
+        gdn_block_idx_prep = self._prepare_gdn_block_idx(cm_base, num_reqs_padded)
+
         # Cache attention metadata builds across hybrid KV-cache groups
         # The only thing that changes between different hybrid KV-cache groups when the
         # same metadata builder and KVCacheSpec is the same is the block table, so we
@@ -2534,6 +2592,13 @@ class GPUModelRunner(
             )
 
             extra_attn_metadata_args = {}
+            # GDN metadata (and the shared prep buffers) are global-row
+            # indexed, while per-ubatch builds receive request-sliced,
+            # renumbered metadata — fail loudly for ANY GDN ubatch build,
+            # not just the spec-decode ones asserted below.
+            assert ubid is None or not isinstance(
+                builder, GDNAttentionMetadataBuilder
+            ), "UBatching not supported with GDN yet"
             if use_spec_decode and isinstance(
                 builder,
                 (
@@ -2553,17 +2618,46 @@ class GPUModelRunner(
                     ],
                 )
                 if (
-                    isinstance(builder, Mamba2AttentionMetadataBuilder)
+                    isinstance(
+                        builder,
+                        (
+                            Mamba2AttentionMetadataBuilder,
+                            GDNAttentionMetadataBuilder,
+                        ),
+                    )
                     and self.mamba_prev_last_scheduled_idx is not None
                 ):
                     extra_attn_metadata_args["prev_last_scheduled_idx"] = (
                         self.mamba_prev_last_scheduled_idx.gpu[:num_reqs_padded]
                     )
+            if (
+                ubid is None
+                and gdn_block_idx_prep is not None
+                and isinstance(builder, GDNAttentionMetadataBuilder)
+            ):
+                # Never hand the global-row prep buffers to a per-ubatch
+                # (request-sliced) build — it would consume another ubatch's
+                # anchors; sliced builds fall back to the eager per-builder
+                # math, which is per-slice-correct.
+                assert (
+                    self.cache_config.mamba_block_size
+                    == builder.kv_cache_spec.block_size
+                ), "prep-kernel block size diverged from the GDN kv_cache_spec"
+                extra_attn_metadata_args["block_idx_prep"] = gdn_block_idx_prep
 
             if for_cudagraph_capture:
-                attn_metadata_i = builder.build_for_cudagraph_capture(
-                    common_attn_metadata
-                )
+                if gdn_block_idx_prep is not None and isinstance(
+                    builder, GDNAttentionMetadataBuilder
+                ):
+                    # Capture must bake the shared prep-buffer addresses the
+                    # replay-time prep kernel refreshes.
+                    attn_metadata_i = builder.build_for_cudagraph_capture(
+                        common_attn_metadata, block_idx_prep=gdn_block_idx_prep
+                    )
+                else:
+                    attn_metadata_i = builder.build_for_cudagraph_capture(
+                        common_attn_metadata
+                    )
             elif (
                 cache_key in cached_attn_metadata
                 and builder.supports_update_block_table
