@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! CORS support mirroring Python's Starlette `CORSMiddleware`.
 //!
 //! Built on `tower_http::cors::CorsLayer`, configured to reproduce Starlette's

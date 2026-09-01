@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Shared Conformer encoder components for FireRedASR2 and FireRedLID.
+Conformer encoder components for FireRedASR2.
 
-Both models use the same Conformer-based audio encoder architecture
+The audio encoder architecture is
 (Conv2dSubsampling → RelPositionalEncoding → N × RelPosEmbConformerBlock).
-This module factors out the common building blocks to avoid duplication.
 """
 
 import torch
@@ -69,7 +68,9 @@ class RelPositionalEncoding(nn.Module):
 
         pe_positive = torch.flip(pe_positive, [0]).unsqueeze(0)
         pe_negative = pe_negative[1:].unsqueeze(0)
-        self.pe = torch.cat([pe_positive, pe_negative], dim=1)
+        self.register_buffer(
+            "pe", torch.cat([pe_positive, pe_negative], dim=1), persistent=False
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Tmax = 2 * max_len - 1
@@ -288,7 +289,7 @@ class RelPosEmbConformerBlock(nn.Module):
 
 class ConformerEncoder(nn.Module):
     """
-    Conformer encoder shared by FireRedASR2 and FireRedLID.
+    Conformer encoder used by FireRedASR2.
     """
 
     def __init__(

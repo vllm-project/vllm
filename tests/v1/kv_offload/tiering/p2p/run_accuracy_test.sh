@@ -16,6 +16,12 @@
 #   NUM_DECODE_INSTANCES        default 1
 #   PREFILLER_TP_SIZE           default 1
 #   DECODER_TP_SIZE             default 1
+#   DP_EP                       when set, deploy the decoder in DP-EP attention
+#                               mode (dp=DECODER_TP_SIZE, tp=1,
+#                               --enable-expert-parallel) instead of tensor
+#                               parallel; the proxy round-robins decode across
+#                               the DP replicas. Mirrors
+#                               nixl_integration/run_accuracy_test.sh.
 #   GPU_MEMORY_UTILIZATION      default 0.45
 #   MAX_MODEL_LEN               default 512
 #   PREFILL_BLOCK_SIZE          default 128
@@ -29,6 +35,8 @@
 #   NUM_PREFILL_INSTANCES=2 NUM_DECODE_INSTANCES=2 \
 #       bash tests/v1/kv_offload/tiering/p2p/run_accuracy_test.sh
 #   bash tests/v1/kv_offload/tiering/p2p/run_accuracy_test.sh --decoder-first
+#   DP_EP=1 DECODER_TP_SIZE=2 \
+#       bash tests/v1/kv_offload/tiering/p2p/run_accuracy_test.sh
 
 set -xe
 
@@ -71,6 +79,14 @@ NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1}
 NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
+# DP-EP attention mode (see header). When DP_EP is set the decoder uses
+# data-parallel replicas (dp=DECODER_TP_SIZE) that the proxy round-robins over.
+DP_EP=${DP_EP:-}
+if [[ -n "$DP_EP" ]]; then
+  DECODER_DP_SIZE=${DECODER_TP_SIZE}
+else
+  DECODER_DP_SIZE=1
+fi
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.45}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-512}
 PREFILL_BLOCK_SIZE=${PREFILL_BLOCK_SIZE:-128}
@@ -162,7 +178,11 @@ run_tests_for_model() {
   echo "================================"
   echo "Testing model: $model_name"
   echo "  prefillers=${NUM_PREFILL_INSTANCES} (tp=${PREFILLER_TP_SIZE})"
-  echo "  decoders=${NUM_DECODE_INSTANCES}   (tp=${DECODER_TP_SIZE})"
+  if [[ -n "$DP_EP" ]]; then
+    echo "  decoders=${NUM_DECODE_INSTANCES}   (dp-ep=${DECODER_TP_SIZE}, tp=1)"
+  else
+    echo "  decoders=${NUM_DECODE_INSTANCES}   (tp=${DECODER_TP_SIZE})"
+  fi
   echo "  decoder_first=${DECODER_FIRST}"
   echo "================================"
 
@@ -241,8 +261,18 @@ run_tests_for_model() {
     --block-size ${DECODE_BLOCK_SIZE} \
     --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
     --max-model-len ${MAX_MODEL_LEN} \
-    --tensor-parallel-size ${DECODER_TP_SIZE} \
     --kv-transfer-config '${kv_cfg}'"
+
+    # DP-EP attention mode: data-parallel + expert-parallel decode replicas
+    # (dp=DECODER_TP_SIZE, tp=1) instead of tensor parallel. Mirrors
+    # nixl_integration/run_accuracy_test.sh.
+    if [[ -z "$DP_EP" ]]; then
+      BASE_CMD="${BASE_CMD} --tensor-parallel-size ${DECODER_TP_SIZE}"
+    else
+      echo "DP-EP Attention enabled, deploying decoder with dp=${DECODER_TP_SIZE} and tp=1"
+      BASE_CMD="${BASE_CMD} --data-parallel-size ${DECODER_TP_SIZE} \
+      --tensor-parallel-size 1 --enable-expert-parallel"
+    fi
 
     if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
       IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
@@ -282,7 +312,8 @@ run_tests_for_model() {
     --p2p-connector-host ${P2P_HOST} \
     --p2p-connector-port ${PREFILL_PD_PORTS[0]} \
     --decoder-p2p-connector-host ${P2P_HOST} \
-    --decoder-p2p-connector-port ${DECODE_PD_PORTS[0]}"
+    --decoder-p2p-connector-port ${DECODE_PD_PORTS[0]} \
+    --decoder-dp-size ${DECODER_DP_SIZE}"
 
   if [[ "${DECODER_FIRST}" == "true" ]]; then
     PROXY_CMD="${PROXY_CMD} --decoder-first"

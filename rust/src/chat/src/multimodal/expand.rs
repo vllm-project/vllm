@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Prompt placeholder expansion shared across modalities.
 
 use std::collections::{HashMap, VecDeque};
@@ -83,20 +86,30 @@ pub(super) fn expand_prompt_token_ids(
         }
 
         let replacement_len = replacement.tokens.len();
+        let structural_prefix = replacement.structural_prefix;
+        if structural_prefix > expanded.len() {
+            bail_multimodal!(
+                "placeholder token `{}` declares a structural prefix of {} token(s), but only {} token(s) precede it",
+                lane.placeholder_token,
+                structural_prefix,
+                expanded.len()
+            );
+        }
+        let range_len = replacement_len.saturating_add(structural_prefix);
         let is_embed = {
-            let mask = replacement
-                .tokens
-                .iter()
-                .map(|&token| token as u32 == lane.embed_token_id)
-                .collect::<Vec<_>>();
-            WireTensor::from_bool(vec![replacement_len], mask).map_err(Error::Multimodal)?
+            let mut mask = Vec::with_capacity(range_len);
+            mask.extend(std::iter::repeat_n(false, structural_prefix));
+            mask.extend(
+                replacement.tokens.iter().map(|&token| token as u32 == lane.embed_token_id),
+            );
+            WireTensor::from_bool(vec![range_len], mask).map_err(Error::Multimodal)?
         };
 
-        let expanded_offset = expanded.len();
+        let expanded_offset = expanded.len() - structural_prefix;
         expanded.extend(replacement.tokens.iter().map(|&token| token as u32));
         ranges.entry(lane.modality).or_default().push(PlaceholderRange {
             offset: expanded_offset,
-            length: replacement_len,
+            length: range_len,
             is_embed: Some(is_embed),
         });
     }
@@ -219,7 +232,9 @@ mod tests {
         assert_eq!(tensor.shape, vec![expected.len()]);
         assert_eq!(
             tensor.data,
-            WireArrayData::RawView(expected.iter().map(|value| u8::from(*value)).collect())
+            WireArrayData::RawView(
+                expected.iter().map(|value| u8::from(*value)).collect::<Vec<_>>().into(),
+            )
         );
     }
 
@@ -413,6 +428,90 @@ mod tests {
         assert_eq!(video_ranges[0].offset, 4);
         assert_eq!(video_ranges[0].length, 4);
         assert_bool_mask(&video_ranges[0], &[true, true, true, true]);
+    }
+
+    #[test]
+    fn expand_prompt_tokens_includes_structural_prefix_in_video_range() {
+        const VISION_START_ID: u32 = 151652;
+        const VISION_END_ID: u32 = 151653;
+
+        let mut prompt_token_ids = vec![1, VISION_START_ID, QWEN3_VIDEO_PAD_ID, VISION_END_ID, 2];
+        let replacement = PromptReplacement::repeated(
+            Modality::Video,
+            "<|video_pad|>",
+            QWEN3_VIDEO_PAD_ID as TokenId,
+            3,
+        )
+        .with_structural_prefix(1);
+        let prepared = vec![qwen3_video_prepared(vec![replacement])];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+
+        let range = &ranges[&Modality::Video][0];
+        assert_eq!(range.offset, 1);
+        assert_eq!(range.length, 4);
+        assert_bool_mask(range, &[false, true, true, true]);
+    }
+
+    const QWEN3_AUDIO_PAD_ID: u32 = 151_676;
+
+    fn qwen3_audio_prepared(replacements: Vec<PromptReplacement>) -> PreparedMedia {
+        prepared_media(
+            Modality::Audio,
+            "<|audio_pad|>",
+            QWEN3_AUDIO_PAD_ID,
+            QWEN3_AUDIO_PAD_ID,
+            replacements,
+        )
+    }
+
+    fn qwen3_audio_replacement(tokens: usize) -> PromptReplacement {
+        PromptReplacement::repeated(
+            Modality::Audio,
+            "<|audio_pad|>",
+            QWEN3_AUDIO_PAD_ID as TokenId,
+            tokens,
+        )
+    }
+
+    #[test]
+    fn expand_prompt_tokens_interleaves_audio_and_image_prepared_media() {
+        // Audio marker precedes the image marker: the image range offset must
+        // account for the earlier audio expansion growth.
+        let mut prompt_token_ids = vec![1, QWEN3_AUDIO_PAD_ID, 2, LLAMA4_IMAGE_ID, 3];
+        let prepared = vec![
+            llama4_prepared(vec![llama4_single_tile_replacement()]),
+            qwen3_audio_prepared(vec![qwen3_audio_replacement(3)]),
+        ];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+
+        assert_eq!(
+            prompt_token_ids,
+            vec![
+                1,
+                QWEN3_AUDIO_PAD_ID,
+                QWEN3_AUDIO_PAD_ID,
+                QWEN3_AUDIO_PAD_ID,
+                2,
+                LLAMA4_IMAGE_START_ID,
+                LLAMA4_IMAGE_ID,
+                LLAMA4_PATCH_ID,
+                LLAMA4_PATCH_ID,
+                LLAMA4_IMAGE_END_ID,
+                3,
+            ]
+        );
+
+        let audio_ranges = &ranges[&Modality::Audio];
+        assert_eq!(audio_ranges[0].offset, 1);
+        assert_eq!(audio_ranges[0].length, 3);
+        assert_bool_mask(&audio_ranges[0], &[true, true, true]);
+
+        let image_ranges = &ranges[&Modality::Image];
+        assert_eq!(image_ranges[0].offset, 5);
+        assert_eq!(image_ranges[0].length, 5);
+        assert_bool_mask(&image_ranges[0], &[false, false, true, true, false]);
     }
 
     #[test]

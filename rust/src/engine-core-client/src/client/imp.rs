@@ -1,12 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
+use bytes::Bytes;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
@@ -18,21 +22,35 @@ use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_outpu
 use crate::metrics::{LoraInfoExporter, SchedulerStatsRecorder};
 use crate::protocol::encode_msgpack;
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
-use crate::protocol::request::EngineCoreRequestType;
+use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
+
+const MSGPACK_ZERO_COPY_THRESHOLD_ENV: &str = "VLLM_MSGPACK_ZERO_COPY_THRESHOLD";
+const DEFAULT_MSGPACK_ZERO_COPY_THRESHOLD: usize = 256;
+
+fn msgpack_zero_copy_threshold() -> usize {
+    std::env::var(MSGPACK_ZERO_COPY_THRESHOLD_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_MSGPACK_ZERO_COPY_THRESHOLD)
+}
 
 pub(crate) struct ClientInner {
     input_send: RouterSendHalf,
     /// The runtime handle used for sending messages to the engine.
     handle: Handle,
     model_name: String,
+    /// Per-tensor byte threshold loaded from env variable
+    /// `VLLM_MSGPACK_ZERO_COPY_THRESHOLD` when this inner client is created.
+    msgpack_zero_copy_threshold: usize,
     scheduler_stats_recorder: SchedulerStatsRecorder,
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
     health_error: ArcSwapOption<Error>,
+    health_tx: watch::Sender<bool>,
 }
 
 impl ClientInner {
@@ -50,10 +68,12 @@ impl ClientInner {
             input_send,
             handle,
             model_name,
+            msgpack_zero_copy_threshold: msgpack_zero_copy_threshold(),
             scheduler_stats_recorder,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
             utility_reg: Mutex::new(UtilityRegistry::default()),
             health_error: ArcSwapOption::empty(),
+            health_tx: watch::Sender::new(true),
         }
     }
 
@@ -96,6 +116,11 @@ impl ClientInner {
     /// the full set without first filtering successful sends.
     pub fn unregister_utility_calls(&self, call_ids: impl IntoIterator<Item = u64>) {
         self.utility_reg.lock().unregister_many(call_ids);
+    }
+
+    #[cfg(test)]
+    pub fn pending_utility_call_count(&self) -> usize {
+        self.utility_reg.lock().len()
     }
 
     /// Undo a request registration when `add_request()` fails.
@@ -166,6 +191,7 @@ impl ClientInner {
     /// persistent health error.
     pub fn close_registries(&self, error: Arc<Error>) {
         let persistent_error = self.record_health_error(error);
+        self.publish_unhealthy();
         let request_senders = self.request_reg.lock().close();
         let utility_senders = self.utility_reg.lock().close();
 
@@ -186,6 +212,12 @@ impl ClientInner {
     /// Return whether the client still considers the engine healthy.
     pub fn is_healthy(&self) -> bool {
         self.health_error.load().is_none()
+    }
+
+    /// Subscribe to engine health changes. The current value is `true` while
+    /// the client is healthy and changes permanently to `false` on failure.
+    pub fn subscribe_health(&self) -> watch::Receiver<bool> {
+        self.health_tx.subscribe()
     }
 
     /// Resolve one utility output to the waiting caller. Returns `true` if a
@@ -217,9 +249,29 @@ impl ClientInner {
     where
         T: serde::Serialize + std::fmt::Debug,
     {
-        // TODO: for `EngineCoreRequest`, split outbound tensor raw views into aux
-        // frames instead of always producing a single msgpack frame.
-        let payload = encode_msgpack(payload)?;
+        let payload = Bytes::from(encode_msgpack(payload)?);
+        self.send_encoded_to_engine(engine_id, request_type, payload, Vec::new()).await
+    }
+
+    /// Send an add request, moving large tensor buffers into auxiliary frames.
+    pub async fn send_request_to_engine(
+        &self,
+        engine_id: &EngineId,
+        mut payload: EngineCoreRequest,
+    ) -> Result<()> {
+        let aux_frames = payload.extract_aux_frames(self.msgpack_zero_copy_threshold);
+        let payload = Bytes::from(encode_msgpack(&payload)?);
+        self.send_encoded_to_engine(engine_id, EngineCoreRequestType::Add, payload, aux_frames)
+            .await
+    }
+
+    async fn send_encoded_to_engine(
+        &self,
+        engine_id: &EngineId,
+        request_type: EngineCoreRequestType,
+        payload: Bytes,
+        aux_frames: Vec<Bytes>,
+    ) -> Result<()> {
         let mut input_send = self.input_send.clone();
         let engine_id = engine_id.clone();
 
@@ -230,6 +282,7 @@ impl ClientInner {
                     &engine_id,
                     request_type.to_frame(),
                     payload,
+                    aux_frames,
                 )
                 .await
             })
@@ -275,6 +328,11 @@ impl ClientInner {
         self.health_error
             .load_full()
             .expect("health error must be recorded before registries close")
+    }
+
+    /// Publish the sticky healthy-to-unhealthy transition.
+    fn publish_unhealthy(&self) {
+        self.health_tx.send_if_modified(|healthy| std::mem::replace(healthy, false));
     }
 
     /// Assert there is a recorded health error and return a `Shared` variant
@@ -458,13 +516,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn close_registries_records_first_health_error_only() {
         let inner = test_inner().await;
+        let mut health = inner.subscribe_health();
+        assert!(*health.borrow());
 
         inner.close_registries(Arc::new(Error::EngineCoreDead));
+        health.changed().await.expect("health sender remains open");
         assert!(!inner.is_healthy());
+        assert!(!*health.borrow());
         assert!(matches!(
             inner.health_error().as_deref(),
             Some(Error::EngineCoreDead)
         ));
+        assert!(!*inner.subscribe_health().borrow());
 
         inner.close_registries(Arc::new(client_closed!("shutdown")));
         assert!(matches!(

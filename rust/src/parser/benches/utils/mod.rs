@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 // This module is shared by multiple benchmark targets.
 // There could be false positives for unused code or imports, and fixing them would lead to some other benchmarks failing to compile.
 #![allow(dead_code)]

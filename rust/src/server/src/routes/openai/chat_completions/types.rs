@@ -1,5 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,12 +11,13 @@ use serde_with::SerializeDisplay;
 use validator::Validate;
 use vllm_chat::ReasoningEffort;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_text::TruncationSide;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, Normalizable, StreamOptions, StringOrArray, Tool, ToolCall,
-    ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference, UNKNOWN_MODEL_ID, Usage,
-    default_true, validate_messages, validate_stop, validate_top_p_value,
+    ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope,
+    StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, Usage, default_true,
+    deserialize_request_top_k, validate_messages, validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -30,8 +35,7 @@ pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
 
     /// ID of the model to use
-    #[serde(default = "default_model")]
-    pub model: String,
+    pub model: Option<String>,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
     /// on their existing frequency in the text so far
@@ -117,6 +121,7 @@ pub struct ChatCompletionRequest {
     pub use_beam_search: bool,
 
     /// Top-k sampling parameter
+    #[serde(default, deserialize_with = "deserialize_request_top_k")]
     pub top_k: Option<u32>,
 
     /// Min-p nucleus sampling parameter
@@ -142,7 +147,6 @@ pub struct ChatCompletionRequest {
     pub ignore_eos: bool,
 
     /// Minimum number of tokens to generate
-    #[validate(range(min = 1))]
     pub min_tokens: Option<u32>,
 
     /// Skip special tokens during detokenization
@@ -155,6 +159,9 @@ pub struct ChatCompletionRequest {
 
     /// Truncate prompt tokens to this length
     pub truncate_prompt_tokens: Option<i64>,
+
+    /// Which side to truncate from when truncate_prompt_tokens is active
+    pub truncation_side: Option<TruncationSide>,
 
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
@@ -219,6 +226,9 @@ pub struct ChatCompletionRequest {
     /// External request ID used for response correlation.
     pub request_id: Option<String>,
 
+    /// Stable session identity shared by related requests.
+    pub session_id: Option<String>,
+
     /// Tokens represented as strings of the form 'token_id:{token_id}' in
     /// logprobs
     pub return_tokens_as_token_ids: Option<bool>,
@@ -227,10 +237,14 @@ pub struct ChatCompletionRequest {
     pub return_token_ids: Option<bool>,
 
     /// Salt for prefix cache isolation in multi-user environments
+    #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
 
     /// KV transfer parameters for disaggregated serving
     pub kv_transfer_params: Option<HashMap<String, Value>>,
+
+    /// Encoder cache transfer parameters for disaggregated serving
+    pub ec_transfer_params: Option<HashMap<String, Value>>,
 
     /// Additional request parameters with string or numeric values for custom
     /// extensions
@@ -245,7 +259,7 @@ impl Default for ChatCompletionRequest {
     fn default() -> Self {
         Self {
             messages: Vec::new(),
-            model: default_model(),
+            model: None,
             frequency_penalty: None,
             logit_bias: None,
             logprobs: false,
@@ -280,6 +294,7 @@ impl Default for ChatCompletionRequest {
             skip_special_tokens: true,
             spaces_between_special_tokens: true,
             truncate_prompt_tokens: None,
+            truncation_side: None,
             prompt_logprobs: None,
             allowed_token_ids: None,
             bad_words: None,
@@ -295,10 +310,12 @@ impl Default for ChatCompletionRequest {
             structured_outputs: None,
             priority: None,
             request_id: None,
+            session_id: None,
             return_tokens_as_token_ids: None,
             return_token_ids: None,
             cache_salt: None,
             kv_transfer_params: None,
+            ec_transfer_params: None,
             vllm_xargs: None,
             repetition_detection: None,
         }
@@ -313,19 +330,6 @@ impl Normalizable for ChatCompletionRequest {
         if self.max_completion_tokens.is_none() && self.max_tokens.is_some() {
             self.max_completion_tokens = self.max_tokens;
             self.max_tokens = None;
-        }
-
-        // Apply tool_choice defaults
-        // If tools is None, leave tool_choice as None (don't set it)
-        if self.tool_choice.is_none()
-            && let Some(tools) = &self.tools
-        {
-            let choice_value = if tools.is_empty() {
-                ToolChoiceValue::None
-            } else {
-                ToolChoiceValue::Auto
-            };
-            self.tool_choice = Some(ToolChoice::Value(choice_value));
         }
     }
 }
@@ -343,9 +347,10 @@ pub(super) struct ChatCompletionResponse {
     pub choices: Vec<ChatCompletionChoice>,
     pub usage: Option<Usage>,
     pub system_fingerprint: Option<String>,
-    pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
+    pub prompt_logprobs: Option<PromptLogprobs>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub kv_transfer_params: Option<Value>,
+    pub ec_transfer_params: Option<Value>,
 }
 
 /// Mirrors the Python vLLM `ChatCompletionResponseChoice` class.
@@ -384,10 +389,8 @@ pub(super) struct ChatCompletionMessage {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionStreamResponse {
-    pub id: String,
-    pub object: String,
-    pub created: u64,
-    pub model: String,
+    #[serde(flatten)]
+    pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub prompt_token_ids: Option<Vec<u32>>,
@@ -395,12 +398,9 @@ pub(super) struct ChatCompletionStreamResponse {
 
 impl ChatCompletionStreamResponse {
     /// Create a stream response with the standard envelope fields pre-filled.
-    pub fn new(id: &str, model: &str, created: u64) -> Self {
+    pub fn new(envelope: &Arc<StreamResponseEnvelope>) -> Self {
         Self {
-            id: id.to_string(),
-            object: "chat.completion.chunk".to_string(),
-            created,
-            model: model.to_string(),
+            envelope: Arc::clone(envelope),
             choices: Vec::new(),
             usage: None,
             prompt_token_ids: None,
@@ -428,10 +428,6 @@ pub(super) struct ChatMessageDelta {
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ToolCallDelta>>,
     pub reasoning: Option<String>,
-}
-
-fn default_model() -> String {
-    UNKNOWN_MODEL_ID.to_string()
 }
 
 /// Schema-level validation for cross-field dependencies
@@ -478,100 +474,6 @@ fn validate_chat_cross_parameters(
         let mut e = validator::ValidationError::new("json_schema_name_empty");
         e.message = Some("JSON schema name cannot be empty".into());
         return Err(e);
-    }
-
-    // 5. Validate tool_choice requires tools (except for "none")
-    if let Some(ref tool_choice) = req.tool_choice {
-        let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
-
-        // Check if tool_choice is anything other than "none"
-        let is_some_choice = !matches!(tool_choice, ToolChoice::Value(ToolChoiceValue::None));
-
-        if is_some_choice && !has_tools {
-            let mut e = validator::ValidationError::new("tool_choice_requires_tools");
-            e.message = Some("Invalid value for 'tool_choice': 'tool_choice' is only allowed when 'tools' are specified.".into());
-            return Err(e);
-        }
-
-        // Additional validation when tools are present
-        if let Some(tools) = req.tools.as_ref().filter(|t| !t.is_empty()) {
-            match tool_choice {
-                ToolChoice::Function { function, .. } => {
-                    // Validate that the specified function name exists in tools
-                    let function_exists = tools.iter().any(|tool| {
-                        tool.tool_type == "function" && tool.function.name == function.name
-                    });
-
-                    if !function_exists {
-                        let mut e =
-                            validator::ValidationError::new("tool_choice_function_not_found");
-                        e.message = Some(
-                            format!(
-                            "Invalid value for 'tool_choice': function '{}' not found in 'tools'.",
-                            function.name
-                        )
-                            .into(),
-                        );
-                        return Err(e);
-                    }
-                }
-                ToolChoice::AllowedTools {
-                    mode,
-                    tools: allowed_tools,
-                    ..
-                } => {
-                    // Validate mode is "auto" or "required"
-                    if mode != "auto" && mode != "required" {
-                        let mut e = validator::ValidationError::new("tool_choice_invalid_mode");
-                        e.message = Some(format!(
-                            "Invalid value for 'tool_choice.mode': must be 'auto' or 'required', got '{mode}'."
-                        ).into());
-                        return Err(e);
-                    }
-
-                    // Validate that all ToolReferences are Function type (Chat API only supports
-                    // function tools)
-                    for tool_ref in allowed_tools {
-                        match tool_ref {
-                            ToolReference::Function { name } => {
-                                // Validate that the function exists in tools array
-                                let tool_exists = tools.iter().any(|tool| {
-                                    tool.tool_type == "function" && tool.function.name == *name
-                                });
-
-                                if !tool_exists {
-                                    let mut e = validator::ValidationError::new(
-                                        "tool_choice_tool_not_found",
-                                    );
-                                    e.message = Some(
-                                        format!(
-                                            "Invalid value for 'tool_choice.tools': tool '{name}' not found in 'tools'."
-                                        )
-                                        .into(),
-                                    );
-                                    return Err(e);
-                                }
-                            }
-                            _ => {
-                                // Chat Completion API only supports function tools in tool_choice
-                                let mut e = validator::ValidationError::new(
-                                    "tool_choice_invalid_tool_type",
-                                );
-                                e.message = Some(
-                                    format!(
-                                        "Invalid value for 'tool_choice.tools': Chat Completion API only supports function tools, got '{}'.",
-                                        tool_ref.identifier()
-                                    )
-                                    .into(),
-                                );
-                                return Err(e);
-                            }
-                        }
-                    }
-                }
-                ToolChoice::Value(_) => {}
-            }
-        }
     }
 
     Ok(())

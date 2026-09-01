@@ -39,11 +39,15 @@ __global__ void marlin_int4_fp8_preprocess_kernel_awq(
     // AWQ zeros: (size_k // group_size, size_n // 8)
     const int32_t* __restrict__ qzeros, int32_t size_n, int32_t size_k,
     int32_t group_size) {
-  int32_t val =
-      qweight[(blockIdx.x * 32 + threadIdx.x) * size_n / 8 + blockIdx.y];
-  int32_t zero =
-      qzeros[(blockIdx.x * 32 + threadIdx.x) / group_size * size_n / 8 +
-             blockIdx.y];
+  // Thread mapping: threadIdx.x -> column dim (coalesced read within a row),
+  // blockIdx.x -> row dim. Adjacent threads read consecutive int32 in the
+  // same row (stride 1) instead of striding across rows (stride size_n/8).
+  int col = blockIdx.y * 32 + threadIdx.x;
+  if (col >= size_n / 8) return;
+  (void)size_k;
+
+  int32_t val = qweight[blockIdx.x * (size_n / 8) + col];
+  int32_t zero = qzeros[blockIdx.x / group_size * (size_n / 8) + col];
   int32_t new_val = 0;
 
 #pragma unroll
@@ -58,7 +62,7 @@ __global__ void marlin_int4_fp8_preprocess_kernel_awq(
     zero >>= 4;
   }
 
-  output[(blockIdx.x * 32 + threadIdx.x) * size_n / 8 + blockIdx.y] = new_val;
+  output[blockIdx.x * (size_n / 8) + col] = new_val;
 }
 
 torch::stable::Tensor marlin_int4_fp8_preprocess(
@@ -102,7 +106,7 @@ torch::stable::Tensor marlin_int4_fp8_preprocess(
                     "qweight.size(0) % qzeros.size(0) != 0");
     STD_TORCH_CHECK(group_size % 8 == 0, "group_size % 8 != 0");
 
-    dim3 blocks(size_k / 32, size_n / 8);
+    dim3 blocks(size_k, (size_n / 8 + 31) / 32);
     marlin_int4_fp8_preprocess_kernel_awq<<<blocks, 32, 0, stream>>>(
         reinterpret_cast<const int32_t*>(qweight.const_data_ptr()),
         reinterpret_cast<int32_t*>(output.mutable_data_ptr()),

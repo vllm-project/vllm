@@ -77,24 +77,6 @@ class BartScaledWordEmbedding(VocabParallelEmbedding):
         return super().forward(input_ids) * self.embed_scale
 
 
-class BartParallelLMHead(ParallelLMHead):
-    """
-    This module overrides ParallelLMHead's
-    forward by dividing by embeddings scale,
-    yielding effectively the inverse of
-    BartScaledWordEmbedding
-    """
-
-    def __init__(
-        self, num_embeddings: int, embedding_dim: int, embed_scale: float = 1.0
-    ):
-        super().__init__(num_embeddings, embedding_dim)
-        self.embed_scale = embed_scale
-
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return super().forward(input_ids) / self.embed_scale
-
-
 class BartDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -424,29 +406,10 @@ class NemotronParseMultiModalProcessor(
 ):
     def create_encoder_prompt(
         self,
-        prompt: str | list[int],
+        prompt: list[int],
         mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
+    ) -> list[int]:
         return [0]
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if mm_data:
-            processed_outputs = super()._call_hf_processor(
-                prompt, mm_data, mm_kwargs, tok_kwargs
-            )
-        else:
-            hf_processor = self.info.get_hf_processor()
-            tokenizer = hf_processor.tokenizer
-            processed_outputs = tokenizer(
-                prompt, add_special_tokens=False, return_tensors="pt"
-            )
-        return processed_outputs
 
     def _get_mm_fields_config(
         self,
