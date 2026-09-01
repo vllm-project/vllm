@@ -260,6 +260,12 @@ class DraftModelSpeculator(BaseSpeculator):
         query_start_loc_np: np.ndarray | None = None,
         dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
+        # Freshness invariant: this constructs a new metadata object (and
+        # the dict holding it) per propose()/capture call, so state cached
+        # across draft steps can never go stale across proposes. If
+        # metadata pooling is ever introduced, any per-object cache flag
+        # (e.g. an eager physical-topk validity bit) must be invalidated
+        # at object acquisition instead.
         if query_start_loc_np is not None:
             # Non-uniform query layout (e.g. multi-module MTP's mixed
             # prefill/decode queries); num_query_per_req is ignored.
