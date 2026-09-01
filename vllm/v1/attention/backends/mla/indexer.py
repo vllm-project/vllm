@@ -614,6 +614,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             else 0
         )
         self.use_fp4_indexer_cache = dsa_indexer_uses_fp4(self.vllm_config)
+        # Fused multi-step draft decode opt-in (see
+        # update_draft_decode_metadata). Default-off: without the env
+        # opt-in the builder declares no support, keeping pre-change
+        # behavior; the disable flag wins over the opt-in. Scoped to CUDA
+        # — the in-place refresh was only audited for the deep_gemm path.
+        self.supports_draft_decode_metadata_update = (
+            envs.VLLM_ENABLE_FUSED_DRAFT_SPARSE_MLA
+            and not envs.VLLM_DISABLE_FUSED_DRAFT_SPARSE_MLA
+            and current_platform.is_cuda()
+        )
 
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
@@ -1128,6 +1138,58 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
 
         return attn_metadata
+
+    def update_draft_decode_metadata(
+        self, metadata: DeepseekV32IndexerMetadata
+    ) -> None:
+        """Refresh the two step-dependent decode fields in place.
+
+        Runs inside the captured fused draft loop, so it must only write
+        the persistent tensors ``build()`` attached (captured kernels bind
+        addresses). For the uniform draft batch (``decode_lens == 1``) the
+        per-token context bound of request b is ``seq_lens[b]``, matching
+        every ``_prepare_decode_tensors`` branch, so the refresh copies the
+        advanced bounds — DCP-localized when ``build()`` localized them —
+        into the existing ``decode_seq_lens_buffer`` view.
+
+        ``decode.global_seq_lens`` is a direct alias of the speculator's
+        in-graph-incremented seq_lens buffer (``max_decode_len == 1``
+        skips the expansion), so it is read here but never written:
+        copying it would freeze the alias. ``decode.indices``,
+        ``block_table`` rows, ``decode_lens`` and ``requires_padding`` are
+        step-constants and stay untouched.
+        """
+        decode = metadata.decode
+        if decode is None:
+            return
+        seq_lens = decode.global_seq_lens
+        if seq_lens is None:
+            seq_lens = metadata.seq_lens[: decode.seq_lens.shape[0]]
+        else:
+            # This metadata was DCP-localized at build time: recompute the
+            # rank-local bounds from the advanced global lengths rather
+            # than incrementing cached local lengths.
+            seq_lens = get_dcp_local_seq_lens(
+                seq_lens,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.cp_kv_cache_interleave_size,
+            )
+        if self.compress_ratio > 1:
+            seq_lens = seq_lens // self.compress_ratio
+        decode.seq_lens.copy_(seq_lens)
+        if current_platform.is_cuda() and has_deep_gemm():
+            # A stale captured schedule can deadlock the paged MQA logits
+            # kernel when the runtime work decomposition diverges (cf.
+            # SGLang's _refresh_paged_mqa_schedule_metadata), so the
+            # refresh is mandatory, never optional.
+            schedule_metadata = get_paged_mqa_logits_metadata(
+                decode.seq_lens,
+                self.kv_cache_spec.num_states,
+                self.num_sms,
+                indices=decode.indices,
+            )
+            decode.schedule_metadata.copy_(schedule_metadata)
 
 
 def build_prefill_chunk_metadata(
