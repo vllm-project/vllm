@@ -56,8 +56,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight()
 
         renderer = self.online_renderer
 
