@@ -1103,3 +1103,134 @@ def test_target_modules_match_packed_runtime_modules(
         ],
         vllm_config=default_vllm_config,
     )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lru_cache_worker_adapter_manager_loaded_state(
+    dist_init, dummy_model, device, tmp_path
+):
+    """get_loaded_state/get_loaded_names track both cache tiers, pinning,
+    and forget names once an adapter is evicted."""
+    lora_config = LoRAConfig(
+        max_lora_rank=8, max_cpu_loras=3, max_loras=2, lora_dtype=DEFAULT_DTYPE
+    )
+
+    dummy_lora_files = f"{tmp_path}/lora_adapter"
+    os.makedirs(dummy_lora_files, exist_ok=True)
+    create_peft_lora(
+        dummy_model,
+        save_dir=dummy_lora_files,
+        target_modules=["layer1.dense1", "dense2"],
+        lora_dtype=DEFAULT_DTYPE,
+    )
+
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
+    manager = LRUCacheWorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
+    manager.create_lora_manager(dummy_model, vllm_config)
+
+    def request(i: int) -> LoRARequest:
+        return LoRARequest(f"adapter-{i}", i, dummy_lora_files)
+
+    def names():
+        return manager.get_loaded_names(manager.get_loaded_state())
+
+    assert names() == ([], [], [])
+
+    manager.add_adapter(request(1))
+    manager.add_adapter(request(2))
+    assert names() == (["adapter-1", "adapter-2"], ["adapter-1", "adapter-2"], [])
+
+    # Third add: GPU slots are full, so 1 drops to the CPU tier.
+    manager.add_adapter(request(3))
+    assert names() == (
+        ["adapter-2", "adapter-3"],
+        ["adapter-1", "adapter-2", "adapter-3"],
+        [],
+    )
+
+    manager.pin_adapter(1)
+    gpu, cpu, pinned = names()
+    assert "adapter-1" in gpu
+    assert pinned == ["adapter-1"]
+
+    # Fourth add: CPU capacity is 3, so the oldest unpinned adapter is
+    # evicted and its name forgotten.
+    manager.add_adapter(request(4))
+    gpu, cpu, pinned = names()
+    assert "adapter-4" in gpu
+    assert len(cpu) == 3 and "adapter-1" in cpu and "adapter-4" in cpu
+    assert set(manager._adapter_names) == set(manager.list_adapters())
+
+    manager.remove_all_adapters()
+    assert names() == ([], [], [])
+    assert manager._adapter_names == {}
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_model_runner_mixin_publishes_lora_load_events(
+    dist_init, dummy_model, device, tmp_path
+):
+    """The mixin publishes one LoRALoadEvent per change of the loaded set
+    and nothing when the set is unchanged."""
+    from vllm.v1.notifications import LoRALoadEvent, take_worker_notifications
+    from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+
+    lora_config = LoRAConfig(
+        max_lora_rank=8, max_cpu_loras=3, max_loras=2, lora_dtype=DEFAULT_DTYPE
+    )
+    dummy_lora_files = f"{tmp_path}/lora_adapter"
+    os.makedirs(dummy_lora_files, exist_ok=True)
+    create_peft_lora(
+        dummy_model,
+        save_dir=dummy_lora_files,
+        target_modules=["layer1.dense1", "dense2"],
+        lora_dtype=DEFAULT_DTYPE,
+    )
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
+
+    runner = LoRAModelRunnerMixin.__new__(LoRAModelRunnerMixin)
+    runner.lora_config = lora_config
+    runner.lora_manager = LRUCacheWorkerLoRAManager(
+        vllm_config, device, EMBEDDING_MODULES
+    )
+    runner.lora_manager.create_lora_manager(dummy_model, vllm_config)
+    take_worker_notifications()
+
+    assert runner.add_lora(LoRARequest("adapter-1", 1, dummy_lora_files))
+    assert take_worker_notifications() == [
+        LoRALoadEvent(gpu_adapters=["adapter-1"], cpu_adapters=["adapter-1"])
+    ]
+
+    # Re-adding a loaded adapter changes nothing, so no event.
+    assert not runner.add_lora(LoRARequest("adapter-1", 1, dummy_lora_files))
+    assert take_worker_notifications() is None
+
+    assert runner.pin_lora(1)
+    assert take_worker_notifications() == [
+        LoRALoadEvent(
+            gpu_adapters=["adapter-1"],
+            cpu_adapters=["adapter-1"],
+            pinned_adapters=["adapter-1"],
+        )
+    ]
+
+    assert runner.remove_lora(1)
+    assert take_worker_notifications() == [LoRALoadEvent()]
+
+    # Step-time activation goes through _set_active_loras (both model runners
+    # call it), so it must publish as well.
+    runner._set_active_loras(
+        (2,), (2,), {LoRARequest("adapter-2", 2, dummy_lora_files)}
+    )
+    assert take_worker_notifications() == [
+        LoRALoadEvent(gpu_adapters=["adapter-2"], cpu_adapters=["adapter-2"])
+    ]
+
+    runner.maybe_remove_all_loras(lora_config)
+    assert take_worker_notifications() == [LoRALoadEvent()]

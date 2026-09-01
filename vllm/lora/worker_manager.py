@@ -12,6 +12,7 @@ from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.model_manager import (
+    LoRALoadedState,
     LoRAModelManager,
     LRUCacheLoRAModelManager,
     create_lora_manager,
@@ -68,6 +69,9 @@ class WorkerLoRAManager:
                 text_config, "max_position_embeddings", None
             )
         self.device = device
+        # Adapter int id -> adapter name; pruned to the registered set on
+        # each get_loaded_names() call.
+        self._adapter_names: dict[int, str] = {}
         # Lazily initialized by create_lora_manager.
         self._adapter_manager: LoRAModelManager
 
@@ -169,6 +173,7 @@ class WorkerLoRAManager:
         except Exception as e:
             raise e
 
+        self._adapter_names[lora_request.lora_int_id] = lora_request.lora_name
         return lora
 
     def add_dummy_lora(self, lora_request: LoRARequest, rank: int) -> bool:
@@ -238,6 +243,32 @@ class WorkerLoRAManager:
 
     def list_adapters(self) -> set[int]:
         return set(self._adapter_manager.list_adapters())
+
+    def get_loaded_state(self) -> LoRALoadedState:
+        return self._adapter_manager.get_loaded_state()
+
+    def get_loaded_names(
+        self, state: LoRALoadedState
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Resolve a loaded state into sorted `(gpu, cpu, pinned)` name lists.
+
+        Dummy/warmup adapters never go through `_load_adapter`, so they fall
+        back to their int id.
+        """
+        self._adapter_names = {
+            lora_id: name
+            for lora_id, name in self._adapter_names.items()
+            if lora_id in state.registered_ids
+        }
+
+        def names(ids: set[int]) -> list[str]:
+            return sorted({self._adapter_names.get(i, str(i)) for i in ids})
+
+        return (
+            names(state.active_ids),
+            names(state.registered_ids),
+            names(state.pinned_ids),
+        )
 
 
 class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
