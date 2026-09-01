@@ -59,6 +59,7 @@ from .minicpmv import (
     MiniCPMVMultiModalProcessor,
     MiniCPMVProcessingInfo,
     MiniCPMVVideoEmbeddingItems,
+    _image_kwargs_from_video,
 )
 from .module_mapping import MultiModelKeys
 from .qwen3_5 import Qwen3_5ForCausalLM
@@ -1200,18 +1201,12 @@ class MiniCPMV4_6ForConditionalGeneration(
                     for t in use_vit_merger_tensors
                 )
 
-        # Split kwargs into image / video buckets (videos are processed via
-        # the same vision pipeline; their fields just carry a ``video_`` prefix).
         image_kwargs = {
             k: v
             for k, v in kwargs.items()
             if k in ("pixel_values", "image_embeds", "tgt_sizes")
         }
-        video_kwargs = {
-            k.removeprefix("video_"): v
-            for k, v in kwargs.items()
-            if k.startswith("video_")
-        }
+        video_kwargs = _image_kwargs_from_video(kwargs)
 
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
