@@ -294,6 +294,7 @@ class Qwen3_5ForCausalLMBase(
     nn.Module,
     HasInnerState,
     IsHybrid,
+    SupportsReplaySSM,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMRoPE,
