@@ -2,11 +2,11 @@ group: Weight Loading XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: Weight Loading Multiple GPU
+- label: ':nvidia: (L4) Weight Loading Multi-GPU'
   device: intel_gpu
   timeout_in_minutes: 50
   num_devices: 2
-  optional: true
+  optional: false
   working_dir: .
   no_plugin: true
   env:

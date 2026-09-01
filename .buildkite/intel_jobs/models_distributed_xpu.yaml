@@ -2,7 +2,7 @@ group: Models - Distributed XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: Distributed Model Tests (2 GPUs)
+- label: ':nvidia: (L4) Distributed Models'
   device: intel_gpu
   timeout_in_minutes: 60
   num_devices: 2
@@ -40,4 +40,4 @@ steps:
     pytest models/language -v -s -m distributed(num_gpus=2) || true &&
     pytest models/multimodal/generation/test_phi4siglip.py -v -s -m distributed(num_gpus=2) || true &&
     pytest models/multimodal -v -s -m distributed(num_gpus=2) --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py || true &&
-    VLLM_WORKER_MULTIPROC_METHOD=spawn  pytest models/multimodal/generation/test_whisper.py -v -s -m distributed(num_gpus=2) || true'
+    VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m distributed(num_gpus=2) || true'
