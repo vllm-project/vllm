@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -25,8 +24,8 @@ from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
     XPUExpertsMxFp4,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-    B12X_BACKENDS,
     Mxfp4MoeBackend,
+    convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     select_mxfp4_moe_backend,
@@ -48,17 +47,17 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.group_size = 32
         self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
-        # Backend selection must match the weight preparation below: CUTLASS
-        # swizzles scales, b12x and XPU consume checkpoint packing, and Marlin
-        # repacks weights and scales.
-        self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
+        self.use_cutlass_mxfp4 = False
         self.experts_cls: type[mk.FusedMoEExperts]
-        if moe.moe_backend == "b12x":
+        if True:
             self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
+            print(f"{experts_cls=}")
             assert experts_cls is not None
             self.experts_cls = experts_cls
-            self.use_cutlass_mxfp4 = False
-        elif self.use_cutlass_mxfp4:
+        elif CutlassExpertsMxfp4._supports_current_device():
+            # use cutlass if supported, otherwise fallback to marlin
+            # for weight-only FP4
+            self.use_cutlass_mxfp4 = True
             logger.info_once("Using CutlassExpertsMxfp4 for MXFP4 MoE")
             self.experts_cls = CutlassExpertsMxfp4
         elif current_platform.is_xpu():
@@ -147,7 +146,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 w2_scale=layer.w2_weight_scale,
             )
         else:
-            # b12x selects W4A8 or W4A16; XPU uses W4A4; Marlin uses W4A16.
+            # W4A16: weight-only via Marlin / XPU / Humming
             return make_mxfp4_moe_quant_config(
                 mxfp4_backend=self.mxfp4_backend,
                 w1_scale=layer.w13_weight_scale,
@@ -166,7 +165,17 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         delattr(layer, "w2_weight_packed")
 
-        if self.use_cutlass_mxfp4:
+        if self.mxfp4_backend == Mxfp4MoeBackend.HUMMING:
+            # Repacks the weights and scales on the layer in place.
+            convert_weight_to_mxfp4_moe_kernel_format(
+                mxfp4_backend=self.mxfp4_backend,
+                layer=layer,
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+                w13_weight_scale=layer.w13_weight_scale,
+                w2_weight_scale=layer.w2_weight_scale,
+            )
+        elif self.use_cutlass_mxfp4:
             # Swizzle weight scales from flat checkpoint layout [E, N, K//32]
             # to CUTLASS tiled layout [E, numMTiles*numKTiles*512].
             from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
@@ -197,7 +206,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_scale = torch.nn.Parameter(
                 torch.stack(swizzled_w2), requires_grad=False
             )
-        elif self.mxfp4_backend in B12X_BACKENDS or current_platform.is_xpu():
+        elif current_platform.is_xpu():
             pass
         else:
             logger.warning_once(
@@ -217,7 +226,6 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 mxfp4_backend=self.mxfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
             )
-            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def apply(
         self,
