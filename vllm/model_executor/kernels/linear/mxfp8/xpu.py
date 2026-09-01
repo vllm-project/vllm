@@ -3,13 +3,14 @@
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-    xpu_mxfp8_quantize as quant_mxfp8,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
+
+_MXFP8_GROUP_SIZE = 32
 
 
 class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
@@ -26,6 +27,14 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
+
+    def __init__(self, config: Mxfp8LinearLayerConfig):
+        super().__init__(config)
+        self._quant = QuantFP8(
+            static=False,
+            group_shape=GroupShape(1, _MXFP8_GROUP_SIZE),
+            use_ue8m0=True,
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Checkpoint scale is [N, K//32] (one E8M0 scale per 32 elements).
@@ -68,10 +77,8 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         out_dtype = x.dtype
-        x_fp8, x_scale = quant_mxfp8(x)
-        # Weight is [N, K]; .t() gives a [K, N] view without copying.
-        # Scale is stored as [N, K//32]; .t() recovers the contiguous
-        # [K//32, N] buffer that oneDNN expects.
+        x_fp8, x_scale = self._quant(x)
+        x_scale = x_scale.to(torch.float8_e8m0fnu)
         return torch.ops._xpu_C.fp8_gemm(
             x_fp8,
             layer.weight.t(),
