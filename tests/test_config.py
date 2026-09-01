@@ -239,7 +239,8 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
 
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
-    """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled MRV1 paths."""
+    """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their
+    compiled MRV1 paths."""
     from vllm.config.vllm import ROCM_DEFAULT_MRV1_ARCHITECTURES
     from vllm.platforms import current_platform
 
@@ -255,6 +256,7 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"])
     )
     assert VllmConfig.use_v2_model_runner.fget(config) is False
+
 
 @pytest.mark.parametrize(
     ("model", "architecture"),
@@ -277,6 +279,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
 
     model_config = SimpleNamespace(
         model=model,
@@ -308,15 +311,14 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
 
 
-@pytest.mark.parametrize("is_rocm", [False, True])
-def test_breakable_cudagraph_default_on_opt_out(monkeypatch, is_rocm):
-    """VLLM_USE_BREAKABLE_CUDAGRAPH defaults to on (all platforms and
+def test_breakable_cudagraph_default_on_opt_out(monkeypatch):
+    """VLLM_USE_BREAKABLE_CUDAGRAPH defaults to on for CUDA (all
     architectures); setting it to 0 opts out."""
     import vllm.envs as envs
     from vllm.platforms import current_platform
 
     envs.disable_envs_cache()
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
 
     def make_config():
         return SimpleNamespace(
@@ -333,6 +335,34 @@ def test_breakable_cudagraph_default_on_opt_out(monkeypatch, is_rocm):
     config = make_config()
     assert VllmConfig._maybe_enable_breakable_cudagraph(config) is False
     assert config.compilation_config.mode is None
+
+
+def test_breakable_cudagraph_default_off_on_other_platforms(monkeypatch):
+    """Off CUDA, breakable does not default on: on platforms without CUDA
+    graph support (e.g. CPU) it would only disable torch.compile, and on ROCm
+    it currently regresses performance. An explicit env opt-in is still
+    honored."""
+    import vllm.envs as envs
+    from vllm.platforms import current_platform
+
+    envs.disable_envs_cache()
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+
+    def make_config():
+        return SimpleNamespace(
+            model_config=None,
+            compilation_config=CompilationConfig(),
+        )
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    config = make_config()
+    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is False
+    assert config.compilation_config.mode is None
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    config = make_config()
+    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is True
+    assert config.compilation_config.mode == CompilationMode.NONE
 
 
 def test_breakable_cudagraph_yields_to_explicit_compilation(monkeypatch):

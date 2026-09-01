@@ -686,8 +686,15 @@ class VllmConfig:
                 "compilation. Either set VLLM_USE_BREAKABLE_CUDAGRAPH=0 or "
                 "drop the explicit compilation mode."
             )
-        # None (unset) means default-on unless compilation is explicit.
-        enabled = enabled_env if enabled_env is not None else not explicitly_compiled
+        if enabled_env is not None:
+            enabled = enabled_env
+        else:
+            # None (unset) means default-on unless compilation is explicit,
+            # and only on CUDA.
+            # On ROCm, breakable cudagraphs currently regress performance.
+            from vllm.platforms import current_platform
+
+            enabled = not explicitly_compiled and current_platform.is_cuda()
         if enabled:
             self.compilation_config.mode = CompilationMode.NONE
         return enabled
