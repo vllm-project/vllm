@@ -10,6 +10,7 @@ from vllm.models.qwen4_exp.nvidia.ops.hc import (
     hc_combine_norm,
     hc_gate_mix,
 )
+from vllm.models.qwen4_exp.nvidia.ops.mtp import mtp_residual_add_norm
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
@@ -92,3 +93,22 @@ def test_hc_combine_norm() -> None:
 
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(actual_norm, expected_norm.to(torch.bfloat16))
+
+
+@pytest.mark.parametrize("num_tokens", [1, 17, 2048])
+def test_mtp_residual_add_norm(num_tokens: int) -> None:
+    torch.manual_seed(0)
+    embedding = torch.randn(
+        num_tokens, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+    )
+    hidden = torch.randn(
+        num_tokens, HC, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+    )
+    weight = torch.randn(HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+
+    actual, actual_norm = mtp_residual_add_norm(embedding, hidden, weight, EPS)
+
+    expected = (hidden + embedding.unsqueeze(1)).flatten(1)
+    expected_norm = grouped_gemma_rmsnorm(expected, weight, EPS, HC)
+    assert torch.equal(actual, expected)
+    assert torch.equal(actual_norm, expected_norm)
