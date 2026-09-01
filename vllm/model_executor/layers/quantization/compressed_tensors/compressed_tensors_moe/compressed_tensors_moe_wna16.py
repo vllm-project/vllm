@@ -7,9 +7,7 @@ from typing import Any
 
 import torch
 from compressed_tensors.quantization import (
-    ActivationOrdering,
     QuantizationArgs,
-    QuantizationStrategy,
 )
 
 from vllm.logger import init_logger
@@ -100,11 +98,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
         weight_key = QuantKey(self.quant_type, scale, symmetric=self.symmetric)
 
-        is_actorder = self.strategy == QuantizationStrategy.GROUP and self.actorder in (
-            ActivationOrdering.GROUP,
-            ActivationOrdering.DYNAMIC,
-        )
-
         # Select WNA16 MoE backend via oracle.
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
             config=self.moe,
@@ -112,7 +105,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             quant_config=self.weight_quant,
             may_have_zp=not self.symmetric,
             may_have_bias=False,
-            allow_tile_padding=not is_actorder,
+            allow_tile_padding=True,
         )
 
         self.is_marlin = self.wna16_backend in [
@@ -126,7 +119,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
         if self.is_marlin:
             assert check_moe_marlin_supports_config(
-                self.moe, self.group_size, allow_tile_padding=not is_actorder
+                self.moe, self.group_size, allow_tile_padding=True
             )
             self.input_dtype = get_marlin_input_dtype(layer_name)
         else:

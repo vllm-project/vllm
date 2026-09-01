@@ -11,7 +11,6 @@ from unittest.mock import Mock
 import pytest
 import torch
 from compressed_tensors.quantization import (
-    ActivationOrdering,
     QuantizationArgs,
     QuantizationStrategy,
     QuantizationType,
@@ -968,13 +967,6 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
 @pytest.mark.parametrize(
     "actorder,group_size,part,full,expected",
     [
-        # actorder="group" with real grouping: must load full-K w2 scales and,
-        # when sharded (part != full), report is_k_full=False.
-        (ActivationOrdering.GROUP, 32, 64, 128, (True, 128, False)),
-        # actorder="group" but unsharded (part == full): full scales, k_full.
-        (ActivationOrdering.GROUP, 32, 128, 128, (True, 128, True)),
-        # actorder="group" with channel-wise (group_size == -1): no full load.
-        (ActivationOrdering.GROUP, -1, 64, 128, (False, 64, False)),
         # "static"/"weight" reorder at quant time -> shard normally + k_full.
         # Regression: static actorder under TP must keep is_k_full=True so the
         # Marlin kernel never gets the invalid (group_size=16, is_k_full=0).

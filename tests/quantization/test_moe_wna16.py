@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 from compressed_tensors.quantization import (
-    ActivationOrdering,
     QuantizationArgs,
     QuantizationStrategy,
     QuantizationType,
@@ -46,21 +45,6 @@ def test_map_wna16_backend_supports_triton():
         (
             WNA16MoEBackend.TRITON,
             AutoGPTQConfig(4, 128, True, True, False, {}, {}),
-            False,
-            False,
-            "activation ordering",
-        ),
-        (
-            WNA16MoEBackend.TRITON,
-            QuantizationArgs(
-                num_bits=4,
-                type=QuantizationType.INT,
-                strategy=QuantizationStrategy.GROUP,
-                symmetric=True,
-                dynamic=False,
-                group_size=128,
-                actorder=ActivationOrdering.GROUP,
-            ),
             False,
             False,
             "activation ordering",

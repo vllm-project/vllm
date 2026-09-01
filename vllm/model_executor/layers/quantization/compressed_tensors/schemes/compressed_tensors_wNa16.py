@@ -6,7 +6,6 @@ from collections.abc import Callable
 from fractions import Fraction
 
 import torch
-from compressed_tensors.quantization import ActivationOrdering
 
 from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
@@ -57,7 +56,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         num_bits: int,
         group_size: int | None = None,
         symmetric: bool | None = True,
-        actorder: ActivationOrdering | None = None,
+        actorder: str | None = None,
         layer_name: str | None = None,
     ):
         self.num_bits = num_bits
@@ -65,7 +64,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self.strategy = strategy
         self.symmetric = symmetric
         self.group_size = -1 if group_size is None else group_size
-        self.has_g_idx = actorder == ActivationOrdering.GROUP
+        self.has_g_idx = False
         self.layer_name = layer_name
 
         if self.group_size == -1 and self.strategy != "channel":

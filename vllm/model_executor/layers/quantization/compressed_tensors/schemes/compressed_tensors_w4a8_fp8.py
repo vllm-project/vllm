@@ -4,7 +4,6 @@
 from collections.abc import Callable
 
 import torch
-from compressed_tensors.quantization import ActivationOrdering
 
 from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
@@ -43,13 +42,13 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
         num_bits: int,
         group_size: int | None = None,
         symmetric: bool | None = True,
-        actorder: ActivationOrdering | None = None,
+        actorder: str | None = None,
     ):
         self.pack_factor = 32 // num_bits
         self.strategy = strategy
         self.symmetric = symmetric
         self.group_size = -1 if group_size is None else group_size
-        self.has_g_idx = actorder == ActivationOrdering.GROUP
+        self.has_g_idx = False
 
         if self.group_size != 128 or self.strategy != "group":
             raise ValueError(
