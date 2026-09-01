@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
@@ -221,8 +221,22 @@ class DraftModelSpeculator(BaseSpeculator):
     @property
     def attn_vllm_config(self) -> VllmConfig:
         """Config for the draft's attention metadata builders. Overridden by
-        speculators whose attention mode differs from the target's."""
-        return self.vllm_config
+        speculators whose attention mode differs from the target's.
+
+        An explicit ``attention_backend`` in the speculative config applies to
+        the draft only. Without it the draft would inherit the target's
+        backend, which the V1 proposer deliberately avoids: draft and target
+        attention shapes differ and not every backend supports both.
+        """
+        backend = self.speculative_config.attention_backend
+        if backend is None:
+            return self.vllm_config
+        return replace(
+            self.vllm_config,
+            attention_config=replace(
+                self.vllm_config.attention_config, backend=backend
+            ),
+        )
 
     def set_attn(
         self,
