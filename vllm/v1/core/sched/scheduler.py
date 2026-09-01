@@ -2959,6 +2959,7 @@ class Scheduler(SchedulerInterface):
         # these requests must be rescheduled, but only the first will recompute
         # it. This set tracks blocks already marked for recomputation.
         marked_invalid_block_ids: set[int] = set()
+        null_block_id = self.kv_cache_manager.block_pool.null_block.block_id
         managers = self.kv_cache_manager.coordinator.single_type_managers
         # num_computed_tokens is a single cross-group value, so it can only be
         # truncated to an alignment every group agrees on. Groups whose own
@@ -2989,7 +2990,7 @@ class Scheduler(SchedulerInterface):
                     for idx, block_id in enumerate(
                         req_block_ids[:req_num_computed_blocks]
                     )
-                    if block_id in invalid_block_ids
+                    if block_id != null_block_id and block_id in invalid_block_ids
                 )
 
             if not invalid_positions:
@@ -3029,7 +3030,11 @@ class Scheduler(SchedulerInterface):
                         first_invalid_idx = (
                             request.num_computed_tokens // manager.block_size
                         )
-                        blocks_to_evict.update(req_block_ids[first_invalid_idx:])
+                        blocks_to_evict.update(
+                            block_id
+                            for block_id in req_block_ids[first_invalid_idx:]
+                            if block_id != null_block_id
+                        )
             else:
                 # All invalid blocks are shared with previous requests and
                 # will be recomputed by them. Revert to considering only

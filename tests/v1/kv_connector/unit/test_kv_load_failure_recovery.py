@@ -380,8 +380,7 @@ def test_hybrid_load_failure_uses_runtime_manager_block_sizes(
     assert request.num_computed_tokens == expected_computed_tokens
 
 
-def test_async_load_failure_with_hybrid_cache_groups():
-    """Exercise recovery with block tables from a real hybrid coordinator."""
+def _make_hybrid_async_load():
     vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
     kv_cache_config = make_kv_cache_config(
         block_size=16,
@@ -405,6 +404,21 @@ def test_async_load_failure_with_hybrid_cache_groups():
     scheduler_output = scheduler.schedule()
     block_ids_by_group = scheduler.kv_cache_manager.get_block_ids(request.request_id)
     assert len(block_ids_by_group) == 2
+    return scheduler, request, scheduler_output, block_ids_by_group
+
+
+def test_async_load_failure_with_hybrid_cache_groups():
+    """Exercise recovery with block tables from a real hybrid coordinator."""
+    scheduler, request, scheduler_output, block_ids_by_group = _make_hybrid_async_load()
+
+    affected, _, _ = scheduler._update_requests_with_invalid_blocks(
+        [request],
+        {scheduler.kv_cache_manager.block_pool.null_block.block_id},
+        num_scheduled_tokens={},
+        evict_blocks=False,
+    )
+    assert not affected
+    assert request.num_computed_tokens == 48
 
     model_runner_output = create_model_runner_output(
         reqs=[],
@@ -417,3 +431,25 @@ def test_async_load_failure_with_hybrid_cache_groups():
     assert request.num_computed_tokens == 32
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert scheduler.failed_recving_kv_req_ids == {request.request_id}
+
+
+def test_hybrid_load_failure_evicts_downstream_blocks_from_every_group():
+    scheduler, request, _, block_ids_by_group = _make_hybrid_async_load()
+
+    affected, _, blocks_to_evict = scheduler._update_requests_with_invalid_blocks(
+        [request],
+        {block_ids_by_group[1][2]},
+        num_scheduled_tokens={},
+        evict_blocks=True,
+    )
+
+    null_block_id = scheduler.kv_cache_manager.block_pool.null_block.block_id
+    expected_blocks = {
+        block_id
+        for group in block_ids_by_group
+        for block_id in group[2:]
+        if block_id != null_block_id
+    }
+    assert affected == {request.request_id}
+    assert request.num_computed_tokens == 32
+    assert blocks_to_evict == expected_blocks
