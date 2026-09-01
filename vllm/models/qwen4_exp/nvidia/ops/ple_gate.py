@@ -55,6 +55,7 @@ def _ple_gate_kernel(
     nk = tl.load(nk_ptr + offs, mask=mask, other=0.0).to(tl.float32)
     nq = tl.load(nq_ptr + offs, mask=mask, other=0.0).to(tl.float32)
 
+    # Match eager BF16 materialization at each intermediate tensor boundary.
     k_n = (k * tl.rsqrt(tl.sum(k * k) / H + eps) * (1.0 + nk)).to(tl.bfloat16)
     q_n = (q * tl.rsqrt(tl.sum(q * q) / H + eps) * (1.0 + nq)).to(tl.bfloat16)
 

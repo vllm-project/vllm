@@ -122,6 +122,7 @@ def _ple_conv_kernel(
         ).to(tl.float32)
         acc += weight * tap
 
+    # F.conv1d materializes its output dtype before SiLU.
     conv = acc.to(residual_ptr.dtype.element_ty).to(tl.float32)
     y = conv * tl.sigmoid(conv)
     conv_output = tl.where(out_ok, y, 0.0).to(residual_ptr.dtype.element_ty)
@@ -299,6 +300,7 @@ def ple_conv(
     else:
         raise ValueError(f"Unsupported short-conv mode: {mode}")
 
+    # MODE and HAS_INIT eliminate accesses to optional None arguments.
     _ple_conv_kernel[(T, triton.cdiv(C, BLOCK_C))](
         inputs,
         conv_state,

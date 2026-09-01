@@ -93,6 +93,7 @@ def _ple_ngram_ids_kernel(
     # Map each hash into its embedding-table partition.
     sizes = tl.load(sizes_ptr + g, mask=head_mask, other=1)[None, :]
     head_offsets = tl.load(offsets_ptr + g, mask=head_mask, other=0)[None, :]
+    # Hash products may overflow int64; preserve torch.remainder semantics.
     remainders = mixed % sizes
     remainders = tl.where(remainders < 0, remainders + sizes, remainders)
     ids = remainders + head_offsets

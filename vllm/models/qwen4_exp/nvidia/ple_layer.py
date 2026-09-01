@@ -1301,6 +1301,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
     def _short_conv(self, inputs: torch.Tensor, residual: torch.Tensor) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
+        # Profiling omits all metadata or this Mamba entry. The residual
+        # already contains the gated output, so short convolution is a no-op.
         if attn_metadata is None:
             return
 
