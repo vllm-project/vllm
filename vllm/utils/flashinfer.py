@@ -197,6 +197,9 @@ flashinfer_cutlass_fused_moe = _lazy_import_wrapper(
 flashinfer_cutedsl_grouped_gemm_nt_masked = _lazy_import_wrapper(
     "flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"
 )
+flashinfer_prepare_bf16_fp4_weights = _lazy_import_wrapper(
+    "flashinfer.gemm", "prepare_bf16_fp4_weights"
+)
 flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
 flashinfer_mxfp4_quantize = _lazy_import_wrapper("flashinfer", "mxfp4_quantize")
 nvfp4_batched_quantize = _lazy_import_wrapper("flashinfer", "nvfp4_batched_quantize")
@@ -330,6 +333,17 @@ def has_flashinfer_cutedsl() -> bool:
     """Return ``True`` if FlashInfer cutedsl module is available."""
     return (
         has_flashinfer() and importlib.util.find_spec("flashinfer.cute_dsl") is not None
+    )
+
+
+@functools.cache
+def has_flashinfer_bf16_fp4() -> bool:
+    """Return ``True`` if FlashInfer's CuTe-DSL W4A16 GEMM is available."""
+    if not has_flashinfer_cutedsl():
+        return False
+    mod = _get_submodule("flashinfer.gemm")
+    return mod is not None and all(
+        hasattr(mod, name) for name in ("mm_bf16_fp4", "prepare_bf16_fp4_weights")
     )
 
 
@@ -705,6 +719,39 @@ if has_flashinfer():
         use_nvfp4: bool = True,
     ) -> torch.Tensor:
         return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
+
+    @torch.library.custom_op(
+        "vllm::flashinfer_mm_bf16_fp4",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_mm_bf16_fp4(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        B_scale: torch.Tensor,
+        global_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        from flashinfer.gemm import mm_bf16_fp4
+
+        return mm_bf16_fp4(
+            A,
+            B,
+            B_scale,
+            global_scale,
+            backend="cute-dsl",
+        )
+
+    @torch.library.register_fake(
+        "vllm::flashinfer_mm_bf16_fp4",
+    )
+    def flashinfer_mm_bf16_fp4_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        B_scale: torch.Tensor,
+        global_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        output_size = B.shape[0] if B.dtype == torch.uint8 else B.shape[1] // 2
+        return torch.empty(A.shape[0], output_size, dtype=A.dtype, device=A.device)
 
     @torch.library.custom_op(
         "vllm::flashinfer_mxfp4_quantize",
@@ -1158,6 +1205,7 @@ __all__ = [
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",
+    "flashinfer_prepare_bf16_fp4_weights",
     "flashinfer_fp4_quantize",
     "silu_and_mul_scaled_nvfp4_experts_quantize",
     "scaled_fp4_grouped_quantize",
@@ -1177,6 +1225,7 @@ __all__ = [
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_cutedsl_moe_nvfp4",
+    "has_flashinfer_bf16_fp4",
     "has_flashinfer_b12x_moe",
     "has_flashinfer_b12x_gemm",
     "has_flashinfer_fp8_blockscale_gemm",
