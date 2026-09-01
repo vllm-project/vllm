@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 
+import copy
 import gc
 import os
 import time
@@ -845,18 +846,20 @@ class Worker(WorkerBase):
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
         # because `initialize_kv_cache` will inject kv cache groups not
         # related to kv cache connector (e.g. kv cache sharing layers).
-        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
-
-        # If the connector provides a custom memory pool (e.g. Mooncake
-        # NVLink/BAREX), use it for KV cache allocation; otherwise fall
-        # back to the standard CuMem pool.
-        allocation_context = (
-            get_kv_transfer_group().get_mem_pool_context()
-            if has_kv_transfer_group()
-            else None
-        )
-        if allocation_context is None:
-            allocation_context = self._maybe_get_memory_pool_context(tag="kv_cache")
+        allocation_context = self._maybe_get_memory_pool_context(tag="kv_cache")
+        if self.cache_config.enable_extensible_kv_cache:
+            # The connector is created in `extend_kv_cache`, once the
+            # memory it registers is final.
+            self._kv_cache_config = kv_cache_config
+        else:
+            ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+            # If the connector provides a custom memory pool (e.g. Mooncake
+            # NVLink/BAREX), use it for KV cache allocation; otherwise fall
+            # back to the standard CuMem pool.
+            if has_kv_transfer_group():
+                mem_pool_context = get_kv_transfer_group().get_mem_pool_context()
+                if mem_pool_context is not None:
+                    allocation_context = mem_pool_context
 
         # Offload KV-init state, except on XPU, whose outermost pool would win.
         runtime_pool = (
@@ -896,6 +899,18 @@ class Worker(WorkerBase):
 
     def extend_kv_cache(self, num_blocks: int) -> None:
         """Commit the final size of an extensible KV cache."""
+        kv_cache = self._v2_model_runner().extensible_kv_cache
+        assert kv_cache is not None
+        kv_cache_config = copy.copy(self._kv_cache_config)
+        kv_cache_config.num_blocks = num_blocks
+        # Connectors that derive geometry from the config must see the
+        # committed storages the rebuilt views will have.
+        kv_cache_config.kv_cache_tensors = kv_cache.committed_kv_cache_tensors(
+            kv_cache_config,
+            self.cache_config.get_resolved_kv_cache_layout(),
+            num_blocks,
+        )
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         extend_kv_cache(self._v2_model_runner(), num_blocks)
         self.cache_config.num_gpu_blocks = num_blocks
 
