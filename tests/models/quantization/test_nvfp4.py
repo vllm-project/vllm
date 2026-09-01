@@ -135,16 +135,16 @@ def test_nvfp4(vllm_runner, model, eager, backend):
         "RedHatAI/Qwen3-30B-A3B-NVFP4",
     ],
 )
-@pytest.mark.parametrize("backend", ["emulation"])
+@pytest.mark.parametrize("moe_backend", ["emulation", "flydsl"])
 @pytest.mark.skipif(
     not current_platform.is_rocm(),
-    reason="NVFP4 MOE emulation is only useful on AMD Instinct MI3xx",
+    reason="NVFP4 MOE emulation/flydsl backends only useful on AMD Instinct MI3xx",
 )
-def test_nvfp4_moe(vllm_runner, model, backend):
+def test_nvfp4_moe(vllm_runner, model, moe_backend, monkeypatch):
     with vllm_runner(
         model,
-        moe_backend=backend,
-        linear_backend=backend,
+        moe_backend=moe_backend,
+        linear_backend="emulation",
         load_format="dummy",
         hf_overrides={"num_hidden_layers": 2},
     ) as llm:

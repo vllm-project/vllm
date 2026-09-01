@@ -3,6 +3,9 @@
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    ref_nvfp4_quant,
+)
 from vllm.scalar_type import scalar_types
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
@@ -161,3 +164,50 @@ def quant_nvfp4_tensor(
         is_sf_swizzled_layout=is_sf_swizzled_layout,
     )
     return a_quant, a_block_scale, a_global_scale
+
+
+def quantize_nvfp4_weight_for_moe(
+    weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize MoE weights and return packed values, scales, global scale, and QDQ.
+
+    The scale tensor has logical shape ``[experts, n_out, k // 16]`` and uint8
+    storage for ``float8_e4m3fn`` values. Global scales are one FP32 value per
+    expert; this test helper uses one for deterministic reference construction.
+    """
+    if weight.ndim != 3 or weight.shape[-1] % 16:
+        raise ValueError("NVFP4 MoE weights must have shape [E, N, K] with K%16==0")
+
+    experts = weight.shape[0]
+    global_scale = torch.ones(experts, device=weight.device, dtype=torch.float32)
+    packed_weights, block_scales, dequantized_weights = [], [], []
+    for expert, expert_weight in enumerate(weight):
+        fp4, scale = ref_nvfp4_quant(
+            expert_weight.float(), global_scale[expert : expert + 1], block_size=16
+        )
+        packed = _pack_e2m1_fp4(fp4)
+        scale_u8 = scale.to(torch.float8_e4m3fn).view(torch.uint8)
+        dequantized = (
+            break_fp4_bytes(packed, weight.dtype).reshape(
+                *expert_weight.shape[:-1], -1, 16
+            )
+            * scale_u8.view(torch.float8_e4m3fn).to(weight.dtype).unsqueeze(-1)
+        ).reshape_as(expert_weight)
+        packed_weights.append(packed)
+        block_scales.append(scale_u8)
+        dequantized_weights.append(dequantized)
+
+    return (
+        torch.stack(packed_weights).contiguous(),
+        torch.stack(block_scales).contiguous(),
+        global_scale,
+        torch.stack(dequantized_weights).contiguous(),
+    )
+
+
+def _pack_e2m1_fp4(values: torch.Tensor) -> torch.Tensor:
+    codes = torch.empty_like(values, dtype=torch.uint8)
+    for code, value in enumerate(kE2M1ToFloat.tolist()):
+        codes[values.abs() == value] = code
+    codes |= (values < 0).to(torch.uint8) << 3
+    return codes[..., 0::2] | (codes[..., 1::2] << 4)

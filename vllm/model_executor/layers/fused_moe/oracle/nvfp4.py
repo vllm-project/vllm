@@ -49,6 +49,7 @@ class NvFp4MoeBackend(Enum):
     VLLM_CUTLASS = "VLLM_CUTLASS"
     MARLIN = "MARLIN"
     HUMMING = "HUMMING"
+    FLYDSL = "FLYDSL"
     EMULATION = "EMULATION"
 
 
@@ -148,6 +149,13 @@ def backend_to_kernel_cls(
         )
 
         return [Nvfp4QuantizationEmulationTritonExperts]
+    elif backend == NvFp4MoeBackend.FLYDSL:
+        from vllm.model_executor.layers.fused_moe.experts.flydsl_nvfp4_moe import (
+            FlydslNvfp4Experts,
+        )
+
+        return [FlydslNvfp4Experts]
+
     else:
         raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
 
@@ -164,6 +172,7 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
         "marlin": NvFp4MoeBackend.MARLIN,
         "humming": NvFp4MoeBackend.HUMMING,
         "emulation": NvFp4MoeBackend.EMULATION,
+        "flydsl": NvFp4MoeBackend.FLYDSL,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -201,6 +210,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
         NvFp4MoeBackend.HUMMING,
+        NvFp4MoeBackend.FLYDSL,
         NvFp4MoeBackend.EMULATION,
     ]
 
@@ -493,6 +503,39 @@ def convert_to_nvfp4_moe_kernel_format(
         # for other experts - other selection strategies may be used.
         a13_scale = 1.0 / a13_scale.max().to(torch.float32)
         a2_scale = 1.0 / a2_scale.max().to(torch.float32)
+    elif nvfp4_backend == NvFp4MoeBackend.FLYDSL:
+        if a13_scale is None or a2_scale is None:
+            raise ValueError(
+                "Activation global scales should not be None, got"
+                f" a13_scale={a13_scale}, a2_scale={a2_scale}"
+            )
+
+        if torch.unique(a13_scale).numel() != 1 or torch.unique(a2_scale).numel() != 1:
+            logger.warning_once(
+                "In NVFP4 linear, the activation global scale for inputs are different"
+                " for MOE w13 (gate_up_proj) layer or MOE w2 (down_proj). Using"
+                " a13_scale = a13_scale.max() and a2_scale = a2_scale.max()."
+            )
+
+        from vllm.model_executor.layers.fused_moe.experts.flydsl_nvfp4_moe import (
+            FlydslNvfp4Experts,
+        )
+
+        # FlyDSL kernels consume weights in the kpack-bytes-8
+        # preshuffled layout.
+        for weight_name, weight in (("w13", w13), ("w2", w2)):
+            shuffled = FlydslNvfp4Experts.shuffle_nvfp4_weight_for_flydsl(weight)
+            if weight_name == "w13":
+                w13 = shuffled
+            else:
+                w2 = shuffled
+
+        w13_scale = w13_scale.permute(0, 2, 1).contiguous().view(torch.uint8)
+        w2_scale = w2_scale.permute(0, 2, 1).contiguous().view(torch.uint8)
+        w13_scale_2 = w13_scale_2.to(torch.float32).contiguous()
+        w2_scale_2 = w2_scale_2.to(torch.float32).contiguous()
+        a13_scale = a13_scale.max().to(torch.float32)
+        a2_scale = a2_scale.max().to(torch.float32)
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
 
