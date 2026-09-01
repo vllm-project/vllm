@@ -415,6 +415,8 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        topk_ids = topk_ids.to(dtype=torch.int32)
+
         topk = topk_ids.size(-1)
         local_num_experts = w1.size(0)
         local_expert_offset = self.moe_config.ep_rank * local_num_experts
