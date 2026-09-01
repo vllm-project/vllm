@@ -87,6 +87,16 @@ class ExtensibleKVCache:
         """Upper bound on granule rounding for any commit."""
         return self.buffer.num_segments * self.buffer.granularity
 
+    def release_physical(self) -> None:
+        """Drop physical pages for sleep; addresses and views stay valid."""
+        self.buffer.release_physical()
+
+    def recommit(self) -> None:
+        """Map fresh zeroed pages for the blocks committed before release."""
+        num_blocks = self.num_committed_blocks
+        self.num_committed_blocks = 0
+        self.commit(num_blocks)
+
     def free(self) -> None:
         self.buffer.free()
         self.num_committed_blocks = 0
