@@ -124,8 +124,9 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/tool_use
   - tests/entrypoints/tool_parsers
-  - tests/entrypoints/anthropic
   - tests/entrypoints/generate
+  - tests/entrypoints/anthropic
+  - tests/entrypoints/cohere
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -135,7 +136,8 @@ steps:
     --deselect="tests/tool_use/test_chat_completions.py::test_chat_completion_with_tools[granite-3.0-8b]" &&
     pytest -v -s entrypoints/tool_parsers &&
     pytest -v -s entrypoints/generate &&
-    pytest -v -s entrypoints/anthropic'
+    pytest -v -s entrypoints/anthropic &&
+    pytest -v -s entrypoints/cohere'
 
 - label: ":intel: (BMG) Entrypoints Integration (Responses API)"
   key: entrypoints-integration-responses-api-intel
