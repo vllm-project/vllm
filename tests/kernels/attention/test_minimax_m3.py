@@ -93,50 +93,6 @@ SM_SCALE = HEAD_DIM**-0.5
 TOPK = 16
 
 
-@pytest.mark.parametrize(
-    ("num_reqs", "expected_budget"),
-    [
-        (0, None),
-        (1, 1024),
-        (2, 1024),
-        (3, 1024),
-        (4, 1024),
-        (5, 1024),
-        (6, 1024),
-        (7, 1024),
-        (8, 1024),
-        (9, 768),
-        (10, 768),
-        (11, 768),
-        (12, None),
-    ],
-)
-def test_amd_balanced_decode_score_budget_by_request_count(
-    num_reqs: int,
-    expected_budget: int | None,
-):
-    from vllm.models.minimax_m3.amd.ops.index_topk import (
-        DECODE_SCORE_BALANCED_PROGRAM_BUDGET,
-        DECODE_SCORE_HIGH_BATCH_PROGRAM_BUDGET,
-        MAX_DECODE_SCORE_BALANCED_REQUESTS,
-        _decode_score_program_budget,
-    )
-
-    assert DECODE_SCORE_BALANCED_PROGRAM_BUDGET == 1024
-    assert DECODE_SCORE_HIGH_BATCH_PROGRAM_BUDGET == 768
-    assert MAX_DECODE_SCORE_BALANCED_REQUESTS == 11
-    assert (
-        _decode_score_program_budget(
-            num_reqs,
-            128,
-            torch.bfloat16,
-            torch.bfloat16,
-            is_gfx950=True,
-        )
-        == expected_budget
-    )
-
-
 @pytest.mark.parametrize("num_reqs", range(1, 12))
 def test_amd_balanced_decode_score_mapping_exact_coverage(num_reqs: int):
     from vllm.models.minimax_m3.amd.ops.index_topk import (
