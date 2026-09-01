@@ -12,9 +12,10 @@
 namespace {
 
 constexpr int kThreads = 512;
-constexpr int kMaxColumns = 4096;
-constexpr int kItemsPerThread = kMaxColumns / kThreads;
 constexpr int kMaxTopK = 2048;
+constexpr int kItemsPerThread = kMaxTopK / kThreads;
+constexpr int kRadixBits = 8;
+constexpr int kRadixBuckets = 1 << kRadixBits;
 
 __device__ __forceinline__ uint32_t ordered_float_bits(float value) {
   const uint32_t bits = __float_as_uint(value);
@@ -26,17 +27,50 @@ __global__ __launch_bounds__(kThreads) void deterministic_top_k_per_row_prefill(
     int* output, int64_t stride0, int64_t stride1, int top_k) {
   using ScoreSort =
       cub::BlockRadixSort<uint64_t, kThreads, kItemsPerThread>;
-  __shared__ typename ScoreSort::TempStorage temp;
+  union SharedStorage {
+    uint32_t histogram[kRadixBuckets];
+    uint64_t selected[kMaxTopK];
+    typename ScoreSort::TempStorage sort;
+  };
+  __shared__ SharedStorage shared;
+  __shared__ uint64_t selected_prefix;
+  __shared__ int rank;
+  __shared__ int selected_count;
 
   const int row = blockIdx.x;
   const int row_start = row_starts[row];
   const int row_end = row_ends[row];
+  const int row_length = max(0, row_end - row_start);
+  const int effective_top_k = min(top_k, row_length);
   uint64_t score_keys[kItemsPerThread];
 
+  if (effective_top_k == 0) {
+    for (int output_column = threadIdx.x; output_column < top_k;
+         output_column += kThreads) {
+      output[static_cast<int64_t>(row) * top_k + output_column] = -1;
+    }
+    return;
+  }
+
+  if (threadIdx.x == 0) {
+    selected_prefix = 0;
+    // One-indexed rank of the key that bounds the final Top-K set.
+    rank = effective_top_k;
+  }
+  __syncthreads();
+
+  // Select the exact Kth-largest 64-bit (score, local-index) key eight radix
+  // bits at a time.  Unlike the old 4096-element register sort, each pass can
+  // scan a row of any length while retaining the same deterministic tie break.
 #pragma unroll
-  for (int item = 0; item < kItemsPerThread; ++item) {
-    const int local_index = item * kThreads + threadIdx.x;
-    if (row_start + local_index < row_end) {
+  for (int shift = 64 - kRadixBits; shift >= 0; shift -= kRadixBits) {
+    if (threadIdx.x < kRadixBuckets) {
+      shared.histogram[threadIdx.x] = 0;
+    }
+    __syncthreads();
+
+    for (int local_index = threadIdx.x; local_index < row_length;
+         local_index += kThreads) {
       const int absolute_index = row_start + local_index;
       const float score =
           logits[static_cast<int64_t>(row) * stride0 +
@@ -45,14 +79,71 @@ __global__ __launch_bounds__(kThreads) void deterministic_top_k_per_row_prefill(
       // matching vLLM's insertion-sort tie and output semantics. The key is
       // unique, so neither candidate selection nor output depends on warp
       // scheduling or the request's offset in a packed buffer.
-      score_keys[item] =
+      const uint64_t key =
           (static_cast<uint64_t>(ordered_float_bits(score)) << 32) |
           static_cast<uint32_t>(local_index);
-    } else {
-      score_keys[item] = 0;
+      const uint64_t upper_prefix =
+          shift == 64 - kRadixBits ? 0 : key >> (shift + kRadixBits);
+      if (upper_prefix == selected_prefix) {
+        atomicAdd(&shared.histogram[(key >> shift) & (kRadixBuckets - 1)],
+                  1U);
+      }
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+      int remaining_rank = rank;
+      int selected_bucket = 0;
+      for (int bucket = kRadixBuckets - 1; bucket >= 0; --bucket) {
+        const int bucket_count = static_cast<int>(shared.histogram[bucket]);
+        if (remaining_rank <= bucket_count) {
+          selected_bucket = bucket;
+          break;
+        }
+        remaining_rank -= bucket_count;
+      }
+      selected_prefix =
+          (selected_prefix << kRadixBits) | selected_bucket;
+      rank = remaining_rank;
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    selected_count = 0;
+  }
+  __syncthreads();
+
+  // Composite keys are unique because their low bits contain the row-local
+  // index, so exactly effective_top_k keys are >= the selected threshold.
+  for (int local_index = threadIdx.x; local_index < row_length;
+       local_index += kThreads) {
+    const int absolute_index = row_start + local_index;
+    const float score =
+        logits[static_cast<int64_t>(row) * stride0 +
+               static_cast<int64_t>(absolute_index) * stride1];
+    const uint64_t key =
+        (static_cast<uint64_t>(ordered_float_bits(score)) << 32) |
+        static_cast<uint32_t>(local_index);
+    if (key >= selected_prefix) {
+      const int slot = atomicAdd(&selected_count, 1);
+      if (slot < effective_top_k) {
+        shared.selected[slot] = key;
+      }
     }
   }
-  ScoreSort(temp).SortDescendingBlockedToStriped(score_keys);
+  __syncthreads();
+
+#pragma unroll
+  for (int item = 0; item < kItemsPerThread; ++item) {
+    const int slot = item * kThreads + threadIdx.x;
+    score_keys[item] =
+        slot < effective_top_k ? shared.selected[slot] : uint64_t{0};
+  }
+  // All reads from the selected-key view must finish before CUB reuses the
+  // same union storage for its sort scratch space.
+  __syncthreads();
+  ScoreSort(shared.sort).SortDescendingBlockedToStriped(score_keys);
   __syncthreads();
 
 #pragma unroll
@@ -60,9 +151,9 @@ __global__ __launch_bounds__(kThreads) void deterministic_top_k_per_row_prefill(
     const int output_column = item * kThreads + threadIdx.x;
     if (output_column < top_k) {
       output[static_cast<int64_t>(row) * top_k + output_column] =
-          score_keys[item] == 0
-              ? -1
-              : static_cast<int>(static_cast<uint32_t>(score_keys[item]));
+          output_column < effective_top_k
+              ? static_cast<int>(static_cast<uint32_t>(score_keys[item]))
+              : -1;
     }
   }
 }
@@ -78,9 +169,6 @@ void ds4_top_k_per_row_prefill(
   TORCH_CHECK(row_ends.scalar_type() == at::kInt, "row_ends must be int32");
   TORCH_CHECK(indices.scalar_type() == at::kInt, "indices must be int32");
   TORCH_CHECK(logits.dim() == 2, "logits must be rank 2");
-  TORCH_CHECK(logits.size(1) <= kMaxColumns,
-              "DS4 deterministic Top-K supports at most ", kMaxColumns,
-              " packed columns, got ", logits.size(1));
   TORCH_CHECK(top_k > 0 && top_k <= kMaxTopK,
               "DS4 deterministic Top-K requires 0 < top_k <= ", kMaxTopK,
               ", got ", top_k);
