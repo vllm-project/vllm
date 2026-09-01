@@ -150,7 +150,7 @@ def _backend_incompatibility_reason(
             isinstance(quant_config, QuantizationArgs)
             and quant_config.actorder == "group"
         ):
-            return "group activation ordering is no longer supported"
+            return "group activation ordering is not supported"
 
     # Marlin only supports certain problem/group sizes.
     allow_marlin = not isinstance(quant_config, MoeWNA16Config)
