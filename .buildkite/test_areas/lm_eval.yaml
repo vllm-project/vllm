@@ -109,9 +109,11 @@ steps:
   num_devices: 4
   optional: true
   source_file_dependencies:
-  - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-confidence-TP4.yaml
+  - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-confidence-TEP4.yaml
+  - tests/evals/gsm8k/configs/Kimi-K3-pruned75-DSpark-TP4.yaml
   - tests/evals/gsm8k/configs/models-spec-decode.txt
   - vllm/models/deepseek_v4/
+  - vllm/models/kimi_k3/
   - vllm/model_executor/models/qwen3_dspark.py
   - vllm/v1/spec_decode/metrics.py
   - vllm/v1/worker/gpu/spec_decode/adaptive_verification.py
