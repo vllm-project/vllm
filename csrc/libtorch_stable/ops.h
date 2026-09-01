@@ -411,13 +411,14 @@ void fused_gdn_decode_post_conv_mtp(
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
 void kimi_k3_attn_res(torch::stable::Tensor& prefix,
-                      torch::stable::Tensor const& delta,
-                      torch::stable::Tensor const& blocks,
+                      std::optional<torch::stable::Tensor> delta,
+                      torch::stable::Tensor& blocks,
                       torch::stable::Tensor const& norm_weight,
                       torch::stable::Tensor const& qk_weight,
-                      torch::stable::Tensor const& output_norm_weight,
+                      std::optional<torch::stable::Tensor> output_norm_weight,
                       torch::stable::Tensor& output, int64_t num_blocks,
-                      double eps, double output_norm_eps);
+                      int64_t block_write_idx, double eps,
+                      double output_norm_eps);
 #endif
 
 // Sampler kernels (shared CUDA/ROCm)
