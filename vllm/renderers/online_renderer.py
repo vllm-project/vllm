@@ -47,6 +47,21 @@ from vllm.utils.mistral import mt as _mt
 logger = init_logger(__name__)
 
 
+def _sort_tool_keys(value: Any) -> Any:
+    """Recursively sort dict keys so tool serialization is deterministic.
+
+    In P/D disaggregation the prefill and decode sides independently
+    serialize ``tools`` dicts.  If the key iteration order differs between
+    the two processes the resulting token sequences can diverge, causing
+    block-count assertion failures in the KV-transfer connector.
+    """
+    if isinstance(value, dict):
+        return {k: _sort_tool_keys(value[k]) for k in sorted(value)}
+    if isinstance(value, (list, tuple)):
+        return [_sort_tool_keys(item) for item in value]
+    return value
+
+
 def _reused_prompt_token_ids(request: Any) -> list[int] | None:
     """Pop prompt token ids forwarded for decode-side reuse, if any.
 
@@ -177,7 +192,9 @@ class OnlineRenderer:
         ):
             tool_dicts = None
         else:
-            tool_dicts = [tool.model_dump() for tool in request.tools]
+            tool_dicts = [
+                _sort_tool_keys(tool.model_dump()) for tool in request.tools
+            ]
 
         if not self.use_harmony:
             # Common case.

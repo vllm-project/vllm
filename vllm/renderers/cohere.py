@@ -336,7 +336,7 @@ def _normalize_tool_call(tc: dict[str, Any] | Any) -> dict[str, Any]:
         args = tc.get("arguments", {})
     # melody expects a JSON-encoded string
     if not isinstance(args, str):
-        args = json.dumps(args, ensure_ascii=False)
+        args = json.dumps(args, ensure_ascii=False, sort_keys=True)
     return {
         "id": tc.get("id") or "",
         "name": name,
