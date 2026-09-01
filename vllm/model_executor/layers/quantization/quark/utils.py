@@ -11,6 +11,8 @@ from vllm.model_executor.layers.quantization.utils.config_utils import (
     find_matching_patterns,
 )
 
+QuarkQTensorHint = dict[str, Any] | list[dict[str, Any]] | None
+
 
 def deep_compare(dict1: Any, dict2: Any) -> bool:
     if type(dict1) is not type(dict2):
