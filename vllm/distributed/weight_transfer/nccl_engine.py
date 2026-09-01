@@ -5,7 +5,7 @@
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from typing_extensions import Self
@@ -225,21 +225,6 @@ class NCCLWeightTransferEngine(
         if self.model_update_group is not None:
             # Clean up the communicator by removing the reference
             self.model_update_group = None
-
-    @staticmethod
-    def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
-        """Removed. Use the stateful `NCCLTrainerWeightTransferEngine` instead.
-
-        Transitional stub kept only to satisfy the (still abstract)
-        `WeightTransferEngine.trainer_send_weights`; that member is dropped from
-        the worker ABC once every backend has migrated to the trainer engine.
-        """
-        raise NotImplementedError(
-            "The static NCCL trainer path has been replaced by "
-            "NCCLTrainerWeightTransferEngine. Build it via "
-            "WeightTransferTrainerFactory.trainer_init(NCCLTrainerInitInfo(...), "
-            "client=..., source=...) and drive it with send_weights()."
-        )
 
 
 class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerInitInfo]):
