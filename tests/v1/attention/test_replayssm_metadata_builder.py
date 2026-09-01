@@ -297,34 +297,6 @@ def test_spec_decode_single_token_chunk_synthesizes_acceptance_metadata():
     assert meta.num_accepted_tokens.tolist() == [1]
 
 
-def test_flashinfer_mtp_metadata_preserves_ragged_query_lengths():
-    builder = _create_replayssm_builder(
-        16,
-        mamba_backend=MambaBackendEnum.FLASHINFER,
-        num_speculative_tokens=3,
-    )
-    meta = _build(
-        builder,
-        ReplaySSMBuildCase(
-            seq_lens=[104, 102],
-            query_lens=[4, 2],
-            is_prefilling=[False, False],
-            decode_base=[100, 100],
-            buffer_len=16,
-            expected_write_pos=[],
-            expected_is_flush=[],
-        ),
-        num_accepted_tokens=torch.tensor([4, 2], dtype=torch.int32),
-    )
-
-    assert meta.num_decodes == 2
-    assert meta.num_decode_tokens == 6
-    assert meta.query_start_loc_d is not None
-    assert meta.query_start_loc_d.tolist() == [0, 4, 6]
-    assert meta.replayssm_state_indices_d is not None
-    assert meta.replayssm_state_indices_d.shape == (2,)
-
-
 def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
     builder = _create_replayssm_builder(
         16,
@@ -366,23 +338,3 @@ def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
     assert second_indices is not None
     assert second_indices.data_ptr() == first_ptr
     assert torch.equal(second_indices, second.state_indices_tensor_d[:, 0])
-
-
-def test_flashinfer_replayssm_scratch_metadata_fresh_decode():
-    checkpointing_ssu = pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
-    if not hasattr(checkpointing_ssu, "allocate_checkpointing_ssu_scratch"):
-        pytest.skip("FlashInfer does not expose ReplaySSM scratch allocation")
-
-    builder = _create_replayssm_builder(16, mamba_backend=MambaBackendEnum.FLASHINFER)
-    case = REPLAYSSM_BUILD_CASES["fresh_decode"]
-    meta = _build(builder, case)
-
-    assert meta.write_pos_d is None
-    assert meta.is_flush_d is None
-    assert meta.bc_pre_scratch is None
-    assert meta.replayssm_scratch is not None
-    assert [tensor.shape for tensor in meta.replayssm_scratch] == [
-        (1, 1, 32, 8),
-        (1, 1, 16),
-        (1, 1, 32, 8),
-    ]

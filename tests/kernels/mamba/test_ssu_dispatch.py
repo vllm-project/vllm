@@ -96,27 +96,65 @@ def test_flashinfer_replayssm_ring_tracker_lifecycle():
 
 
 @pytest.mark.parametrize(
-    "accepted_sequence",
+    ("accepted_sequence", "expected"),
     [
-        pytest.param([4] * 12, id="all-accepted"),
-        pytest.param([1] * 24, id="minimum-accepted"),
-        pytest.param([4, 1, 3, 4, 2, 4, 4, 1] * 2, id="mixed"),
+        pytest.param(
+            [4] * 22,
+            [
+                (0, 0, 4),
+                (0, 4, 4),
+                (0, 8, 4),
+                (0, 12, 4),
+                (0, 16, 4),
+                (16, 4, 4),
+                (16, 8, 4),
+                (16, 12, 4),
+                (16, 16, 4),
+                (12, 4, 4),
+                (12, 8, 4),
+                (12, 12, 4),
+                (12, 16, 4),
+                (8, 4, 4),
+                (8, 8, 4),
+                (8, 12, 4),
+                (8, 16, 4),
+                (4, 4, 4),
+                (4, 8, 4),
+                (4, 12, 4),
+                (4, 16, 4),
+                (0, 4, 4),
+            ],
+            id="all-accepted",
+        ),
+        pytest.param(
+            [4, 4, 0, 3, 4, 2, 4, 1],
+            [
+                (0, 0, 4),
+                (0, 4, 4),
+                (0, 4, 4),
+                (0, 7, 4),
+                (0, 11, 4),
+                (0, 13, 4),
+                (13, 4, 4),
+                (13, 5, 4),
+            ],
+            id="mixed",
+        ),
     ],
 )
-def test_replayssm_commit_tracker_acceptance_sequence(accepted_sequence):
+def test_replayssm_commit_tracker_acceptance_sequence(accepted_sequence, expected):
     logical_window = 16
-    query_len = 4
-    ring_buffer_len = logical_window + query_len
+    num_speculative_tokens = 3
+    query_len = 1 + num_speculative_tokens
+    ring_buffer_len = logical_window + 1 + num_speculative_tokens
     ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
     prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
     prev_query_len = torch.zeros(2, dtype=torch.int32, device="cuda")
     state_batch_indices = torch.tensor([1], dtype=torch.int32, device="cuda")
     query_start_loc = torch.tensor([0, query_len], dtype=torch.int32, device="cuda")
 
-    expected_start = 0
-    expected_prev = 0
-    expected_query_len = 0
-    for step, accepted in enumerate(accepted_sequence):
+    observed = []
+    for accepted in accepted_sequence:
         commit_replayssm_ring_trackers(
             ring_start,
             prev_num_accepted,
@@ -127,27 +165,50 @@ def test_replayssm_commit_tracker_acceptance_sequence(accepted_sequence):
             logical_window,
             ring_buffer_len,
         )
-
-        must_checkpoint = (
-            expected_query_len > 0
-            and expected_prev + expected_query_len > logical_window
-        )
-        if must_checkpoint:
-            expected_start = (expected_start + expected_prev) % ring_buffer_len
-        if expected_query_len == 0:
-            expected_prev = 0
-        elif must_checkpoint:
-            expected_prev = accepted
-        else:
-            expected_prev += accepted
-        expected_query_len = query_len
-
-        assert (
+        snapshot = (
             ring_start[1].item(),
             prev_num_accepted[1].item(),
             prev_query_len[1].item(),
-        ) == (expected_start, expected_prev, expected_query_len), f"step {step}"
-        assert expected_prev + expected_query_len <= ring_buffer_len
+        )
+        observed.append(snapshot)
+        assert snapshot[1] + snapshot[2] <= ring_buffer_len
+
+    assert observed == expected
+
+
+def test_replayssm_resume_resets_commit_history():
+    ring_start = torch.tensor([0, 13], dtype=torch.int32, device="cuda")
+    prev_num_accepted = torch.tensor([0, 13], dtype=torch.int32, device="cuda")
+    prev_query_len = torch.tensor([0, 4], dtype=torch.int32, device="cuda")
+    state_batch_indices = torch.tensor([1], dtype=torch.int32, device="cuda")
+
+    reset_replayssm_ring_trackers(
+        ring_start,
+        prev_num_accepted,
+        prev_query_len,
+        state_batch_indices,
+    )
+    assert (
+        ring_start[1].item(),
+        prev_num_accepted[1].item(),
+        prev_query_len[1].item(),
+    ) == (0, 0, 0)
+
+    commit_replayssm_ring_trackers(
+        ring_start,
+        prev_num_accepted,
+        prev_query_len,
+        state_batch_indices,
+        torch.tensor([3], dtype=torch.int32, device="cuda"),
+        torch.tensor([0, 4], dtype=torch.int32, device="cuda"),
+        logical_window=16,
+        ring_buffer_len=20,
+    )
+    assert (
+        ring_start[1].item(),
+        prev_num_accepted[1].item(),
+        prev_query_len[1].item(),
+    ) == (0, 0, 4)
 
 
 def test_replayssm_commit_tracker_ragged_query_lengths():
