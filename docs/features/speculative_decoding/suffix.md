@@ -12,6 +12,28 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
 !!! tip "Suffix Decoding Speculative Tokens"
     Suffix Decoding will speculate a dynamic number of tokens for each request at each decoding step, so the `num_speculative_tokens` configuration specifies the *maximum* number of speculative tokens. It is suggested to use a high number such as `16` or `32` (default).
 
+!!! tip "Enabling FULL CUDA Graph Dispatch"
+    Because Suffix Decoding produces a dynamic number of draft tokens per request, CUDA Graph dispatch typically falls back to PIECEWISE mode. Set `force_max_spec_tokens=true` in the speculative config to pad all non-empty draft lists to `num_speculative_tokens`, ensuring uniform batch size and enabling FULL CUDA Graph dispatch for better latency.
+
+    ```python
+    llm = LLM(
+        model="Qwen/Qwen3-8B",
+        tensor_parallel_size=1,
+        speculative_config={
+            "method": "suffix",
+            "num_speculative_tokens": 5,
+            "force_max_spec_tokens": True,
+        },
+    )
+    ```
+
+    The padding token is the model's `eos_token_id`, which is verified and rejected by the rejection sampler at the non-target positions. Empty lists (`[]`, e.g. from skipped requests) are never padded.
+
+    This feature is most effective when the speculative acceptance length is high. In agent workloads with acceptance lengths of 2.5–3, average ITL can be reduced by ~15% (measured on MiniMaxM2, TP8+EP, Ascend Hardware). When `force_max_spec_tokens` is disabled (default), behavior is unchanged.
+
+    !!! note
+        This option is currently only supported for `method='suffix'`.
+
 ```python
 from vllm import LLM, SamplingParams
 
