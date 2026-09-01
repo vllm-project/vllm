@@ -62,7 +62,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: other + whisper"
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: other + whisper %N"
   device: h200_35gb
   key: multi-modal-models-standard-4-other-whisper
   timeout_in_minutes: 75
@@ -71,13 +71,17 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal
   commands:
-    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
-    - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
-    - pytest models/multimodal/generation/test_memory_leak.py -m core_model
-    - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
+    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - >-
+      case "$$BUILDKITE_PARALLEL_JOB" in 0) pytest -v -s 'models/multimodal/generation/test_vit_cudagraph.py::test_vit_cudagraph_image[gemma4]' -m core_model && pytest -v -s 'models/multimodal/generation/test_vit_cudagraph.py::test_vit_cudagraph_video[gemma4]' -m core_model ;; 1|2|3) : ;; *) echo "Unexpected shard index $$BUILDKITE_PARALLEL_JOB" >&2; exit 2 ;; esac
+    - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model -k 'not gemma4' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - >-
+      case "$$BUILDKITE_PARALLEL_JOB" in 0) pytest -v -s models/multimodal/generation/test_memory_leak.py -m core_model ;; 1|2|3) : ;; *) echo "Unexpected shard index $$BUILDKITE_PARALLEL_JOB" >&2; exit 2 ;; esac
+    - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB  # Otherwise, mp_method="spawn" doesn't work
+  parallelism: 4
   mirror:
     amd:
-      label: ":amd: (MI300) Multimodal Models (Standard) 4: other + whisper"
+      label: ":amd: (MI300) Multimodal Models (Standard) 4: other + whisper %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 70
@@ -99,7 +103,7 @@ steps:
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 4
 
-- label: ":nvidia: (H200 MIG 18GB) Multimodal Processor"
+- label: ":nvidia: (H200 MIG 18GB) Multimodal Processor %N"
   key: multi-modal-processor
   timeout_in_minutes: 98
   device: h200_18gb
@@ -109,10 +113,11 @@ steps:
   - tests/models/multimodal
   - tests/models/registry.py
   commands:
-    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+    - pytest -v -s models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 4
   mirror:
     amd:
-      label: ":amd: (MI355) Multimodal Processor"
+      label: ":amd: (MI355) Multimodal Processor %N"
       dind: false
       device: mi355_1
       timeout_in_minutes: 115
@@ -145,9 +150,10 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/model_executor/model_loader/
 
-- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 1)"
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 1) Shard %N"
   device: h200_35gb
   key: multi-modal-models-extended-generation-1
+  parallelism: 4
   optional: true
   source_file_dependencies:
   - vllm/
@@ -155,11 +161,11 @@ steps:
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
-    - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
-    - pytest -v -s models/multimodal/test_mapping.py
+    - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s models/multimodal/test_mapping.py
   mirror:
     amd:
-      label: ":amd: (MI300) Multimodal Models (Extended Generation 1)"
+      label: ":amd: (MI300) Multimodal Models (Extended Generation 1) Shard %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 90
