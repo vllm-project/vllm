@@ -16,6 +16,8 @@ BUDGET = 1000
 def _make(**kwargs) -> PrefillDelayer:
     kwargs.setdefault("prefill_token_budget", BUDGET)
     kwargs.setdefault("target_fill", 0.9)
+    # These tests exercise the global-prefill (IDLE) decision, which is opt-in.
+    kwargs.setdefault("idle_non_prefill_ranks", True)
     return PrefillDelayer(dp_size=DP_SIZE, **kwargs)
 
 
@@ -171,6 +173,38 @@ def test_queue_length_holds_short_queue():
         waiting_count=10,
     )
     assert d2.should_throttle is False
+
+
+def test_coalesce_min_ranks_holds_until_threshold():
+    # Hold (pure-decode steps) until coalesce_min_ranks are prefill-ready, then
+    # release the whole burst together.
+    d = _make(coalesce_min_ranks=4, max_delay_passes=100, max_delay_ms=1e9)
+    for count in (1, 2, 3):
+        d.update_throttle(prefillable_count=count, pending_prefill_tokens=1)
+        assert d.should_throttle is True, f"{count} ranks should still hold"
+    d.update_throttle(prefillable_count=4, pending_prefill_tokens=1)
+    assert d.should_throttle is False, "threshold reached -> release coalesced"
+
+
+def test_coalesce_release_bounded_by_delay():
+    # If the threshold is never reached, the pass bound force-releases so a
+    # prefill cannot be held forever.
+    d = _make(coalesce_min_ranks=8, max_delay_passes=2, max_delay_ms=1e9)
+    seen = []
+    for _ in range(3):
+        d.update_throttle(prefillable_count=2, pending_prefill_tokens=1)
+        seen.append(d.should_throttle)
+    assert seen[-1] is False, f"pass bound should force release, got {seen}"
+
+
+def test_idle_disabled_by_default():
+    # Without idle_non_prefill_ranks, decode-only ranks never idle.
+    d = PrefillDelayer(dp_size=DP_SIZE, prefill_token_budget=BUDGET, target_fill=0.0)
+    d.update_throttle(
+        prefillable_count=DP_SIZE, pending_prefill_tokens=DP_SIZE * BUDGET
+    )
+    assert d.should_throttle is False
+    assert d.is_global_prefill_step is False
 
 
 if __name__ == "__main__":

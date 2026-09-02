@@ -53,6 +53,8 @@ class PrefillDelayer:
         max_consecutive_prefill_steps: int = 4,
         max_prefill_bs: int = 0,
         queue_min_ratio: float = 0.0,
+        coalesce_min_ranks: int = 0,
+        idle_non_prefill_ranks: bool = False,
     ):
         self.dp_size = dp_size
         # Per-forward prefill token budget (max_num_batched_tokens); sizes the
@@ -69,6 +71,12 @@ class PrefillDelayer:
         self.max_consecutive_prefill_steps = max(1, max_consecutive_prefill_steps)
         self.max_prefill_bs = max(0, max_prefill_bs)
         self.queue_min_ratio = max(0.0, queue_min_ratio)
+        # Release prefills only once this many ranks are prefill-ready (coalesce
+        # a dense cross-rank burst); 0 disables and keeps per-rank release.
+        self.coalesce_min_ranks = min(max(0, coalesce_min_ranks), dp_size)
+        # Whether decode-only ranks idle on a global-prefill step (off by
+        # default: idling forgoes free decode without shortening the prefill).
+        self.idle_non_prefill_ranks = idle_non_prefill_ranks
 
         self._delayed_count: int = 0
         self._delay_start_ts: float = 0.0
@@ -145,6 +153,9 @@ class PrefillDelayer:
         self._is_global_prefill_step = self._compute_global_prefill_step()
 
     def _compute_global_prefill_step(self) -> bool:
+        # IDLE disabled -> never idle decode-only ranks; they decode for free.
+        if not self.idle_non_prefill_ranks:
+            return False
         # Not a release step, or nothing to prefill anywhere -> normal decode.
         if self._throttle or self._last_prefillable_count == 0:
             self._consecutive_prefill_steps = 0
@@ -175,6 +186,15 @@ class PrefillDelayer:
         if token_watermark_force_allow:
             self.reset()
             return True
+
+        # Cross-rank coalescing: hold (steps run pure decode on all ranks) until
+        # enough ranks are prefill-ready, then release them as one dense burst so
+        # most steps stay pure-decode. Bounded by _hold to cap worst-case TTFT.
+        if self.coalesce_min_ranks > 0:
+            if prefillable_count >= self.coalesce_min_ranks:
+                self.reset()
+                return True
+            return not self._hold(prefillable_count)
 
         aligned = prefillable_count == self.dp_size
         if aligned and not self._hold_aligned(

@@ -2080,6 +2080,10 @@ class DPEngineCoreProc(EngineCoreProc):
                 ),
                 max_prefill_bs=scheduler_config.prefill_delayer_max_prefill_bs,
                 queue_min_ratio=scheduler_config.prefill_delayer_queue_min_ratio,
+                coalesce_min_ranks=(
+                    scheduler_config.prefill_delayer_coalesce_min_ranks
+                ),
+                idle_non_prefill_ranks=scheduler_config.enable_prefill_idle_ranks,
             )
         self._token_usage_low_watermark = (
             scheduler_config.prefill_delayer_token_usage_low_watermark

@@ -650,6 +650,10 @@ class EngineArgs:
     prefill_delayer_queue_min_ratio: float = (
         SchedulerConfig.prefill_delayer_queue_min_ratio
     )
+    prefill_delayer_coalesce_min_ranks: int = (
+        SchedulerConfig.prefill_delayer_coalesce_min_ranks
+    )
+    enable_prefill_idle_ranks: bool = SchedulerConfig.enable_prefill_idle_ranks
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1637,6 +1641,14 @@ class EngineArgs:
             **scheduler_kwargs["prefill_delayer_queue_min_ratio"],
         )
         scheduler_group.add_argument(
+            "--prefill-delayer-coalesce-min-ranks",
+            **scheduler_kwargs["prefill_delayer_coalesce_min_ranks"],
+        )
+        scheduler_group.add_argument(
+            "--enable-prefill-idle-ranks",
+            **scheduler_kwargs["enable_prefill_idle_ranks"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2422,6 +2434,10 @@ class EngineArgs:
             ),
             prefill_delayer_max_prefill_bs=self.prefill_delayer_max_prefill_bs,
             prefill_delayer_queue_min_ratio=self.prefill_delayer_queue_min_ratio,
+            prefill_delayer_coalesce_min_ranks=(
+                self.prefill_delayer_coalesce_min_ranks
+            ),
+            enable_prefill_idle_ranks=self.enable_prefill_idle_ranks,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,

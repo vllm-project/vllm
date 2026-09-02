@@ -198,6 +198,21 @@ class SchedulerConfig:
     disables the queue trigger; only active when
     `prefill_delayer_max_prefill_bs` > 0."""
 
+    prefill_delayer_coalesce_min_ranks: int = Field(default=0, ge=0)
+    """Cross-rank prefill coalescing target. When > 0, the PrefillDelayer holds
+    prefills (those steps run pure decode on all ranks) until at least this many
+    DP ranks are prefill-ready, then releases them together as one dense prefill
+    burst - concentrating prefill into few steps so most steps stay pure-decode
+    (the ATOM pattern). Bounded by `prefill_delayer_max_delay_ms` /
+    `prefill_delayer_max_delay_passes` to cap TTFT. 0 (the default) keeps the
+    per-rank release behaviour."""
+
+    enable_prefill_idle_ranks: bool = False
+    """Whether, on a global-prefill step, decode-only DP ranks defer their
+    decodes and run an idle batch instead. Disabled by default: idling does not
+    shorten the prefill step (decodes ride it for free), so it only forgoes
+    decode progress. Kept as an opt-in for experimentation."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
