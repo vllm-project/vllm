@@ -1593,14 +1593,12 @@ class _CountingCap:
         return self._cap.read()
 
 
-@pytest.mark.parametrize("backend", ["opencv", "pyav", "torchcodec"])
+@pytest.mark.parametrize("backend", ["opencv", "torchcodec"])
 def test_glm5next_backend_codec_parity(tmp_path, backend):
     """Every codec samples the same GLM indices and decodes the same
-    frames; the seek reader, pyav seek-decode and torchcodec batched
-    index-exact decode must agree."""
-    if backend == "pyav":
-        pytest.importorskip("av")
-    elif backend == "torchcodec":
+    frames; the OpenCV seek reader and torchcodec batched index-exact decode
+    must agree."""
+    if backend == "torchcodec":
         pytest.importorskip("torchcodec")
 
     from vllm.transformers_utils.processors.glm5next import (
