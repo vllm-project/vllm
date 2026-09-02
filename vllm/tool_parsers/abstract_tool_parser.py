@@ -369,7 +369,13 @@ class ToolParserManager:
     def import_tool_parser(cls, plugin_path: str) -> None:
         """Import a user-defined parser file from arbitrary path."""
 
-        module_name = os.path.splitext(os.path.basename(plugin_path))[0]
+        # Imported under the vllm.* namespace so that a plugin doing the usual
+        # `logger = init_logger(__name__)` lands inside the logging config: only
+        # the "vllm" logger is configured, so a module-named logger has no
+        # handler at all and its INFO/DEBUG records are dropped.
+        module_name = "vllm.tool_parsers.plugins." + os.path.splitext(
+            os.path.basename(plugin_path)
+        )[0]
         try:
             import_from_path(module_name, plugin_path)
         except Exception:
