@@ -5,8 +5,10 @@
 # (vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/).
 """Data classes for MooncakeStoreConnector."""
 
+import hashlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from fractions import Fraction
 from typing import cast
 
 import numpy as np
@@ -16,15 +18,25 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    derive_mamba_conv_split,
+)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashListWithBlockSize,
 )
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 logger = init_logger(__name__)
+
+
+def _schema_fingerprint(parts: tuple[object, ...]) -> str:
+    return hashlib.sha256(repr(parts).encode()).hexdigest()[:16]
 
 
 class BlobBlockHashes(Sequence[BlockHash]):
@@ -179,6 +191,8 @@ RankNamespace = tuple[int, int, int, int]
 class StoreLayout:
     """Store payload layout for one KV-cache group on one local TP rank."""
 
+    store_format = "rank_local"
+
     def __init__(
         self,
         metadata: KeyMetadata,
@@ -223,7 +237,7 @@ class StoreLayout:
 
 
 class RankLocalStoreLayout(StoreLayout):
-    """Historical rank-local Store payload layout."""
+    """Rank-local Store payload layout."""
 
     def __init__(
         self,
@@ -351,15 +365,6 @@ class RankLocalStoreLayout(StoreLayout):
 class TPShardedStoreLayout(StoreLayout):
     """Store layout shared by divisible TP sizes."""
 
-    store_format: str
-
-    @classmethod
-    def shared_namespace(cls, store_tp_size: int, pp_size: int) -> str:
-        return (
-            f"@store_tp:{store_tp_size}@store_pp:{pp_size}"
-            f"@store_format:{cls.store_format}"
-        )
-
     def __init__(
         self,
         metadata: KeyMetadata,
@@ -368,24 +373,25 @@ class TPShardedStoreLayout(StoreLayout):
         local_tp_size: int,
         store_tp_size: int,
         tp_rank: int,
-        num_kv_heads: int,
+        store_chunk_size: int | None = None,
     ) -> None:
         super().__init__(metadata, block_size, hash_block_size)
+        self.store_chunk_size = store_chunk_size or block_size
+        if block_size % self.store_chunk_size:
+            raise ValueError("Store chunk size must divide the local block size")
         self.shards_per_rank = store_tp_size // local_tp_size
         first_shard = tp_rank * self.shards_per_rank
         self.store_shard_ids = tuple(
             range(first_shard, first_shard + self.shards_per_rank)
         )
         self.store_tp_size = store_tp_size
-        self.heads_per_store_shard = num_kv_heads // store_tp_size
-        self.local_num_kv_heads = num_kv_heads // local_tp_size
         self._shard_key_prefixes = {
             shard_id: PoolKey.build_prefix(metadata, tp_rank=shard_id)
             for shard_id in self.store_shard_ids
         }
-        self._shard_addr_bases = np.empty((self.shards_per_rank, 0), dtype=np.uint64)
-        self._shard_block_strides = np.empty((self.shards_per_rank, 0), dtype=np.uint64)
-        self._shard_sizes = np.empty((self.shards_per_rank, 0), dtype=np.uint64)
+        self._chunk_addr_bases: list[np.ndarray] = []
+        self._chunk_block_strides: list[np.ndarray] = []
+        self._chunk_sizes: list[np.ndarray] = []
 
     @property
     def local_shard_ids(self) -> tuple[StoreShardId, ...]:
@@ -408,70 +414,21 @@ class TPShardedStoreLayout(StoreLayout):
         )
 
     def _set_segment_templates(
-        self, templates: Sequence[tuple[list[int], list[int], list[int]]]
-    ) -> None:
-        self._shard_addr_bases = np.asarray(
-            [template[0] for template in templates], dtype=np.uint64
-        )
-        self._shard_block_strides = np.asarray(
-            [template[1] for template in templates], dtype=np.uint64
-        )
-        self._shard_sizes = np.asarray(
-            [template[2] for template in templates], dtype=np.uint64
-        )
-
-    def _has_packed_strides(
-        self, head_stride: int, token_stride: int, content_bytes: int
-    ) -> bool:
-        raise NotImplementedError
-
-    def _shard_segments(
-        self, head_start: int, head_stride: int, token_stride: int, content_bytes: int
-    ) -> Iterable[tuple[int, int]]:
-        raise NotImplementedError
-
-    def register_kv_caches(
         self,
-        kv_caches: Sequence[torch.Tensor],
-        num_blocks: int,
+        templates: Sequence[Sequence[tuple[list[int], list[int], list[int]]]],
     ) -> None:
-        templates: list[tuple[list[int], list[int], list[int]]] = [
-            ([], [], []) for _ in range(self.shards_per_rank)
+        self._chunk_addr_bases = [
+            np.asarray([template[0] for template in chunk], dtype=np.uint64)
+            for chunk in templates
         ]
-        for cache in kv_caches:
-            if cache.ndim != 4 or tuple(cache.shape[:3]) != (
-                num_blocks,
-                self.local_num_kv_heads,
-                self.block_size,
-            ):
-                raise ValueError(
-                    "TP-shared Mooncake store requires packed KV caches with "
-                    "logical shape (num_blocks, local_kv_heads, block_size, content)"
-                )
-
-            element_size = cache.element_size()
-            block_stride, head_stride, token_stride, content_stride = (
-                stride * element_size for stride in cache.stride()
-            )
-            content_bytes = cache.shape[3] * element_size
-            if content_stride != element_size or not self._has_packed_strides(
-                head_stride, token_stride, content_bytes
-            ):
-                raise ValueError(
-                    "TP-shared Mooncake store requires packed "
-                    f"{self.store_format} KV layout"
-                )
-
-            for local_shard, (addr_bases, block_strides, sizes) in enumerate(templates):
-                head_start = local_shard * self.heads_per_store_shard
-                for offset, size in self._shard_segments(
-                    head_start, head_stride, token_stride, content_bytes
-                ):
-                    addr_bases.append(cache.data_ptr() + offset)
-                    block_strides.append(block_stride)
-                    sizes.append(size)
-
-        self._set_segment_templates(templates)
+        self._chunk_block_strides = [
+            np.asarray([template[1] for template in chunk], dtype=np.uint64)
+            for chunk in templates
+        ]
+        self._chunk_sizes = [
+            np.asarray([template[2] for template in chunk], dtype=np.uint64)
+            for chunk in templates
+        ]
 
     def prepare_values(
         self,
@@ -484,74 +441,492 @@ class TPShardedStoreLayout(StoreLayout):
         if len(chunks) != len(shard_ids):
             raise ValueError("Each Store chunk must have one shard ID")
 
-        count = len(chunks)
-        starts = np.fromiter(
-            (chunk[0] for chunk in chunks), dtype=np.int64, count=count
-        )
-        ends = np.fromiter((chunk[1] for chunk in chunks), dtype=np.int64, count=count)
-        if np.any(ends - starts != self.block_size):
-            raise ValueError("TP-shared Mooncake store requires full KV blocks")
-
         first_shard = self.store_shard_ids[0]
-        local_shards = np.fromiter(
-            (shard_id - first_shard for shard_id in shard_ids),
-            dtype=np.int64,
-            count=count,
+        addrs: list[list[int]] = []
+        sizes: list[list[int]] = []
+        selected_block_ids: list[int] = []
+        for (start, end), shard_id in zip(chunks, shard_ids, strict=True):
+            if (
+                start % self.store_chunk_size
+                or not 0 < end - start <= self.store_chunk_size
+            ):
+                raise ValueError("Invalid Store chunk boundary")
+            block_index, block_offset = divmod(start, self.block_size)
+            chunk_index = block_offset // self.store_chunk_size
+            local_shard = shard_id - first_shard
+            if not 0 <= local_shard < self.shards_per_rank:
+                raise ValueError("Store shard is not owned by this TP rank")
+            if block_index >= len(block_ids):
+                raise ValueError("Store chunk has no local cache block")
+            block_id = block_ids[block_index]
+            bases = self._chunk_addr_bases[chunk_index][local_shard]
+            strides = self._chunk_block_strides[chunk_index][local_shard]
+            addrs.append((bases + block_id * strides).tolist())
+            sizes.append(self._chunk_sizes[chunk_index][local_shard].tolist())
+            selected_block_ids.append(block_id)
+        return addrs, sizes, selected_block_ids
+
+
+class AttentionStoreLayout(TPShardedStoreLayout):
+    store_format: str
+
+    def __init__(
+        self,
+        metadata: KeyMetadata,
+        block_size: int,
+        hash_block_size: int,
+        local_tp_size: int,
+        store_tp_size: int,
+        tp_rank: int,
+        layer_specs: Sequence[AttentionSpec],
+        store_chunk_size: int | None = None,
+    ) -> None:
+        super().__init__(
+            metadata,
+            block_size,
+            hash_block_size,
+            local_tp_size,
+            store_tp_size,
+            tp_rank,
+            store_chunk_size,
         )
-        if np.any(local_shards < 0) or np.any(local_shards >= self.shards_per_rank):
-            raise ValueError("Store shard is not owned by this TP rank")
-        chunk_block_ids = np.fromiter(
-            (block_ids[index] for index in (starts // self.block_size).tolist()),
-            dtype=np.uint64,
-            count=count,
-        )
-        addr_bases = self._shard_addr_bases[local_shards]
-        block_strides = self._shard_block_strides[local_shards]
-        addrs = addr_bases + chunk_block_ids[:, None] * block_strides
-        sizes = self._shard_sizes[local_shards]
-        return addrs.tolist(), sizes.tolist(), chunk_block_ids.tolist()
-
-
-class LBHNCStoreLayout(TPShardedStoreLayout):
-    """Native head-major layout shared by divisible TP sizes."""
-
-    store_format = "tp_shared_lbhnc"
-
-    def _has_packed_strides(
-        self, head_stride: int, token_stride: int, content_bytes: int
-    ) -> bool:
-        return (
-            token_stride == content_bytes
-            and head_stride == self.block_size * content_bytes
-        )
-
-    def _shard_segments(
-        self, head_start: int, head_stride: int, token_stride: int, content_bytes: int
-    ) -> Iterable[tuple[int, int]]:
-        yield head_start * head_stride, self.heads_per_store_shard * head_stride
-
-
-class LBNHCStoreLayout(TPShardedStoreLayout):
-    """Native token-major layout shared by divisible TP sizes."""
-
-    store_format = "tp_shared_lbnhc"
-
-    def _has_packed_strides(
-        self, head_stride: int, token_stride: int, content_bytes: int
-    ) -> bool:
-        return (
-            head_stride == content_bytes
-            and token_stride == self.local_num_kv_heads * content_bytes
-        )
-
-    def _shard_segments(
-        self, head_start: int, head_stride: int, token_stride: int, content_bytes: int
-    ) -> Iterable[tuple[int, int]]:
-        for token_idx in range(self.block_size):
-            yield (
-                token_idx * token_stride + head_start * head_stride,
-                self.heads_per_store_shard * content_bytes,
+        self.layer_specs = tuple(layer_specs)
+        self.chunks_per_block = block_size // self.store_chunk_size
+        global_head_slots = {
+            spec.num_heads * local_tp_size for spec in self.layer_specs
+        }
+        if len(global_head_slots) != 1:
+            raise ValueError("Attention layers in a Store group need equal head slots")
+        global_num_head_slots = global_head_slots.pop()
+        if global_num_head_slots % store_tp_size:
+            raise ValueError(
+                "Attention head slots must be divisible by the Store shard count"
             )
+        self.heads_per_store_shard = global_num_head_slots // store_tp_size
+
+    @staticmethod
+    def resolve_store_shard_count(
+        layer_specs: Sequence[AttentionSpec],
+        local_tp_size: int,
+        requested_store_tp_size: int,
+    ) -> int | None:
+        global_head_slots = {spec.num_heads * local_tp_size for spec in layer_specs}
+        if len(global_head_slots) != 1:
+            return None
+        global_num_head_slots = global_head_slots.pop()
+        smaller = min(requested_store_tp_size, global_num_head_slots)
+        larger = max(requested_store_tp_size, global_num_head_slots)
+        if larger % smaller or smaller < local_tp_size or smaller % local_tp_size:
+            return None
+        return smaller
+
+    @staticmethod
+    def resolve_store_chunk_size(
+        layer_specs: Sequence[AttentionSpec],
+        requested_store_chunk_size: int | None = None,
+    ) -> int | None:
+        if requested_store_chunk_size is not None:
+            for spec in layer_specs:
+                states = Fraction(requested_store_chunk_size, 1) / spec.tokens_per_state
+                if (
+                    spec.block_size % requested_store_chunk_size
+                    or states.denominator != 1
+                ):
+                    return None
+            return requested_store_chunk_size
+
+        block_sizes = {spec.block_size for spec in layer_specs}
+        return block_sizes.pop() if len(block_sizes) == 1 else None
+
+    @staticmethod
+    def schema_fingerprint(
+        layer_specs: Sequence[AttentionSpec],
+        local_tp_size: int,
+        store_shard_count: int,
+        store_chunk_size: int,
+    ) -> str:
+        global_num_head_slots = layer_specs[0].num_heads * local_tp_size
+        heads_per_store_shard = global_num_head_slots // store_shard_count
+        layers = tuple(
+            (
+                type(spec).__name__,
+                store_chunk_size,
+                str(Fraction(store_chunk_size, 1) / spec.tokens_per_state),
+                spec.state_content_size_bytes,
+                heads_per_store_shard,
+                str(spec.dtype),
+                str(spec.kv_quant_mode),
+                str(getattr(spec, "cache_dtype_str", None)),
+                str(spec.tokens_per_state),
+            )
+            for spec in layer_specs
+        )
+        return _schema_fingerprint(layers)
+
+    @staticmethod
+    def _state_range(
+        spec: AttentionSpec, store_chunk_size: int, chunk_index: int
+    ) -> tuple[int, int]:
+        start = Fraction(chunk_index * store_chunk_size, 1) / spec.tokens_per_state
+        end = Fraction((chunk_index + 1) * store_chunk_size, 1) / (
+            spec.tokens_per_state
+        )
+        if start.denominator != 1 or end.denominator != 1:
+            raise ValueError("Store chunk boundaries must align with attention states")
+        return start.numerator, end.numerator
+
+    @staticmethod
+    def _cache_strides(
+        cache: torch.Tensor, spec: AttentionSpec, num_blocks: int
+    ) -> tuple[int, int, int, int, int, int, int]:
+        if cache.ndim == 4:
+            cache = cache.unsqueeze(1)
+        if cache.ndim != 5 or cache.shape[0] != num_blocks:
+            raise ValueError(
+                "TP-shared attention cache needs logical shape "
+                "(blocks, kernel_blocks, heads, states, content)"
+            )
+        _, kernel_blocks, num_heads, num_states, content = cache.shape
+        if num_heads != spec.num_heads:
+            raise ValueError("Attention cache head slots do not match its spec")
+        expected_states = spec.get_num_kernel_states(spec.block_size)
+        if kernel_blocks * num_states != expected_states:
+            raise ValueError("Attention cache state count does not match its spec")
+        element_size = cache.element_size()
+        block_stride, kernel_stride, head_stride, state_stride, content_stride = (
+            stride * element_size for stride in cache.stride()
+        )
+        content_bytes = content * element_size
+        if (
+            content_stride != element_size
+            or content_bytes != spec.state_content_size_bytes
+        ):
+            raise ValueError("TP-shared Mooncake store requires packed KV content")
+        return (
+            block_stride,
+            kernel_stride,
+            head_stride,
+            state_stride,
+            kernel_blocks,
+            num_states,
+            content_bytes,
+        )
+
+
+class HeadMajorStoreLayout(AttentionStoreLayout):
+    """Store descriptors with layer/head/state value ordering."""
+
+    store_format = "attention_head_major"
+
+    def register_kv_caches(
+        self,
+        kv_caches: Sequence[torch.Tensor],
+        num_blocks: int,
+    ) -> None:
+        templates: list[list[tuple[list[int], list[int], list[int]]]] = [
+            [([], [], []) for _ in range(self.shards_per_rank)]
+            for _ in range(self.chunks_per_block)
+        ]
+        for cache, spec in zip(kv_caches, self.layer_specs, strict=True):
+            (
+                block_stride,
+                kernel_stride,
+                head_stride,
+                state_stride,
+                kernel_blocks,
+                num_states,
+                content_bytes,
+            ) = self._cache_strides(cache, spec, num_blocks)
+            if state_stride != content_bytes:
+                raise ValueError(
+                    "TP-shared Mooncake store requires a packed head-major layout"
+                )
+
+            for chunk_index, chunk_templates in enumerate(templates):
+                state_start, state_end = self._state_range(
+                    spec, self.store_chunk_size, chunk_index
+                )
+                for local_shard, (
+                    addr_bases,
+                    block_strides,
+                    sizes,
+                ) in enumerate(chunk_templates):
+                    head_start = local_shard * self.heads_per_store_shard
+                    for head_index in range(
+                        head_start, head_start + self.heads_per_store_shard
+                    ):
+                        state_index = state_start
+                        while state_index < state_end:
+                            kernel_index, state_in_kernel = divmod(
+                                state_index, num_states
+                            )
+                            count = min(
+                                state_end - state_index,
+                                num_states - state_in_kernel,
+                            )
+                            if kernel_index >= kernel_blocks:
+                                raise ValueError(
+                                    "Store chunk exceeds the local attention block"
+                                )
+                            addr_bases.append(
+                                cache.data_ptr()
+                                + kernel_index * kernel_stride
+                                + head_index * head_stride
+                                + state_in_kernel * state_stride
+                            )
+                            block_strides.append(block_stride)
+                            sizes.append(count * content_bytes)
+                            state_index += count
+
+        self._set_segment_templates(templates)
+
+
+class LBHNCStoreLayout(HeadMajorStoreLayout):
+    pass
+
+
+class BLHNCStoreLayout(HeadMajorStoreLayout):
+    pass
+
+
+class LHBNCStoreLayout(HeadMajorStoreLayout):
+    pass
+
+
+class BHLNCStoreLayout(HeadMajorStoreLayout):
+    pass
+
+
+class TokenMajorStoreLayout(AttentionStoreLayout):
+    """Store descriptors with layer/state/head value ordering."""
+
+    store_format = "attention_token_major"
+
+    def register_kv_caches(
+        self,
+        kv_caches: Sequence[torch.Tensor],
+        num_blocks: int,
+    ) -> None:
+        templates: list[list[tuple[list[int], list[int], list[int]]]] = [
+            [([], [], []) for _ in range(self.shards_per_rank)]
+            for _ in range(self.chunks_per_block)
+        ]
+        for cache, spec in zip(kv_caches, self.layer_specs, strict=True):
+            (
+                block_stride,
+                kernel_stride,
+                head_stride,
+                state_stride,
+                kernel_blocks,
+                num_states,
+                content_bytes,
+            ) = self._cache_strides(cache, spec, num_blocks)
+            if not (
+                head_stride == content_bytes
+                and state_stride == spec.num_heads * content_bytes
+            ):
+                raise ValueError(
+                    "TP-shared Mooncake store requires a packed token-major layout"
+                )
+
+            for chunk_index, chunk_templates in enumerate(templates):
+                state_start, state_end = self._state_range(
+                    spec, self.store_chunk_size, chunk_index
+                )
+                for local_shard, (
+                    addr_bases,
+                    block_strides,
+                    sizes,
+                ) in enumerate(chunk_templates):
+                    head_start = local_shard * self.heads_per_store_shard
+                    for state_index in range(state_start, state_end):
+                        kernel_index, state_in_kernel = divmod(state_index, num_states)
+                        if kernel_index >= kernel_blocks:
+                            raise ValueError(
+                                "Store chunk exceeds the local attention block"
+                            )
+                        addr_bases.append(
+                            cache.data_ptr()
+                            + kernel_index * kernel_stride
+                            + state_in_kernel * state_stride
+                            + head_start * head_stride
+                        )
+                        block_strides.append(block_stride)
+                        sizes.append(self.heads_per_store_shard * content_bytes)
+
+        self._set_segment_templates(templates)
+
+
+class LBNHCStoreLayout(TokenMajorStoreLayout):
+    pass
+
+
+class BLNHCStoreLayout(TokenMajorStoreLayout):
+    pass
+
+
+class MambaStoreLayout(TPShardedStoreLayout):
+    """Store descriptors for cache groups represented by ``MambaSpec``.
+
+    This includes Mamba and GDN convolution/recurrent state caches.
+    """
+
+    store_format = "mamba_state"
+
+    def __init__(
+        self,
+        metadata: KeyMetadata,
+        block_size: int,
+        hash_block_size: int,
+        local_tp_size: int,
+        store_tp_size: int,
+        tp_rank: int,
+        layer_specs: Sequence[MambaSpec],
+    ) -> None:
+        super().__init__(
+            metadata,
+            block_size,
+            hash_block_size,
+            local_tp_size,
+            store_tp_size,
+            tp_rank,
+        )
+        self.layer_specs = tuple(layer_specs)
+        self._segments = tuple(
+            self._state_segments(spec, local_tp_size, self.shards_per_rank)
+            for spec in self.layer_specs
+        )
+
+    @staticmethod
+    def _state_segments(
+        spec: MambaSpec, local_tp_size: int, shards_per_rank: int
+    ) -> tuple[tuple[int, int, int], ...]:
+        conv = derive_mamba_conv_split(spec, local_tp_size, require_dim_first=False)
+        segments = []
+        if is_conv_state_dim_first():
+            row_bytes = conv.conv_rows * conv.conv_dtype_size
+            for proj_index, (offset, size) in enumerate(conv.local_conv_offsets):
+                unit_size = row_bytes
+                if (
+                    spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
+                    and proj_index > 0
+                ):
+                    unit_size *= spec.shapes[1][-1]
+                segments.append((offset, size, unit_size))
+        else:
+            proj_offsets = []
+            offset = 0
+            for proj_dim in conv.local_proj_dims:
+                proj_offsets.append(offset)
+                offset += proj_dim
+            for row_index in range(conv.conv_rows):
+                row_offset = row_index * conv.local_conv_dim
+                for proj_index, (proj_offset, proj_dim) in enumerate(
+                    zip(proj_offsets, conv.local_proj_dims, strict=True)
+                ):
+                    unit_size = conv.conv_dtype_size
+                    if (
+                        spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
+                        and proj_index > 0
+                    ):
+                        unit_size *= spec.shapes[1][-1]
+                    segments.append(
+                        (
+                            (row_offset + proj_offset) * conv.conv_dtype_size,
+                            proj_dim * conv.conv_dtype_size,
+                            unit_size,
+                        )
+                    )
+        state_offset = conv.ssm_sizes[0]
+        for state_index, shape in enumerate(spec.shapes[1:], start=1):
+            state_dtype: torch.dtype = spec.dtypes[state_index]
+            element_size = torch.empty((), dtype=state_dtype).element_size()
+            state_bytes = torch.Size(shape).numel() * element_size
+            unit_size = torch.Size(shape[1:]).numel() * element_size
+            segments.append((state_offset, state_bytes, unit_size))
+            state_offset += state_bytes
+        for segment in segments:
+            MambaStoreLayout._shard_slice(segment, 0, shards_per_rank)
+        return tuple(segments)
+
+    @staticmethod
+    def _shard_slice(
+        segment: tuple[int, int, int],
+        shard_index: int,
+        shards_per_rank: int,
+    ) -> tuple[int, int]:
+        offset, size, unit_size = segment
+        if size % unit_size:
+            raise ValueError("Mamba state segment contains a partial state unit")
+        unit_count = size // unit_size
+        if unit_count % shards_per_rank == 0:
+            shard_size = size // shards_per_rank
+            return offset + shard_index * shard_size, shard_size
+        if shards_per_rank % unit_count == 0:
+            # A local state unit can serve several finer Store shards.
+            copies_per_unit = shards_per_rank // unit_count
+            return offset + shard_index // copies_per_unit * unit_size, unit_size
+        raise ValueError("Mamba state units cannot be mapped evenly to Store shards")
+
+    @classmethod
+    def schema_fingerprint(
+        cls,
+        layer_specs: Sequence[MambaSpec],
+        local_tp_size: int,
+        store_tp_size: int,
+    ) -> str:
+        shards_per_rank = store_tp_size // local_tp_size
+        layers = tuple(
+            (
+                type(spec).__name__,
+                tuple(
+                    cls._shard_slice(segment, 0, shards_per_rank)[1]
+                    for segment in cls._state_segments(
+                        spec, local_tp_size, shards_per_rank
+                    )
+                ),
+                tuple(str(dtype) for dtype in spec.dtypes),
+                str(spec.mamba_type),
+                "DS" if is_conv_state_dim_first() else "SD",
+            )
+            for spec in layer_specs
+        )
+        return _schema_fingerprint(layers)
+
+    def register_kv_caches(
+        self,
+        kv_caches: Sequence[torch.Tensor],
+        num_blocks: int,
+    ) -> None:
+        templates: list[tuple[list[int], list[int], list[int]]] = [
+            ([], [], []) for _ in range(self.shards_per_rank)
+        ]
+        for cache, spec, segments in zip(
+            kv_caches, self.layer_specs, self._segments, strict=True
+        ):
+            if cache.ndim != 4 or tuple(cache.shape[:3]) != (num_blocks, 1, 1):
+                raise ValueError(
+                    "TP-shared MambaSpec store requires logical cache shape "
+                    "(num_blocks, 1, 1, state_bytes)"
+                )
+            element_size = cache.element_size()
+            if cache.stride(3) * element_size != 1:
+                raise ValueError(
+                    "TP-shared MambaSpec store requires packed state bytes"
+                )
+            block_stride = cache.stride(0) * element_size
+            content_bytes = cache.shape[3] * element_size
+            if content_bytes < spec.state_content_size_bytes:
+                raise ValueError("MambaSpec cache does not contain the complete state")
+            for shard_index, (addr_bases, block_strides, sizes) in enumerate(templates):
+                for segment in segments:
+                    offset, shard_size = self._shard_slice(
+                        segment, shard_index, self.shards_per_rank
+                    )
+                    addr_bases.append(cache.data_ptr() + offset)
+                    block_strides.append(block_stride)
+                    sizes.append(shard_size)
+        self._set_segment_templates([templates])
 
 
 class ChunkedTokenDatabase:
@@ -566,10 +941,11 @@ class ChunkedTokenDatabase:
     ):
         self.metadata = metadata
         self.block_size = block_size
+        self.chunk_size = block_size
         self.hash_block_size = hash_block_size or block_size
-        if self.block_size % self.hash_block_size != 0:
+        if self.chunk_size % self.hash_block_size != 0:
             raise ValueError(
-                f"block_size ({self.block_size}) must be a multiple of "
+                f"chunk_size ({self.chunk_size}) must be a multiple of "
                 f"hash_block_size ({self.hash_block_size})"
             )
         self.store_layout = store_layout or RankLocalStoreLayout(
@@ -623,11 +999,9 @@ class ChunkedTokenDatabase:
             token_len: Total number of tokens. Must be hash-block aligned and
                 covered by ``block_hashes`` when hashes are present.
             block_hashes: Block hashes computed at ``hash_block_size`` granularity.
-                When ``block_size > hash_block_size`` each group's ``block_size`` chunk
-                is keyed by its last sub-hash via ``chunk_hashes_for_block_size``.
+                A chunk spanning multiple hashes is keyed by its last hash.
             mask_num: Number of tokens to skip from the beginning.
-            chunk_mask: Optional mask relative to the first chunk after
-                ``mask_num``. False entries are skipped before hash access.
+            chunk_mask: Optional mask over chunks after ``mask_num``.
             put_step: Stride for distributing chunks across ranks.
             put_step_rank: ``chunk_id % put_step`` value this rank stores.
         """
@@ -636,17 +1010,17 @@ class ChunkedTokenDatabase:
             return
         assert token_len % self.hash_block_size == 0
         assert token_len // self.hash_block_size <= len(block_hashes)
-        start_chunk = max(0, cdiv(mask_num, self.block_size))
-        max_chunks = cdiv(token_len, self.block_size)
+        start_chunk = max(0, cdiv(mask_num, self.chunk_size))
+        max_chunks = cdiv(token_len, self.chunk_size)
         if chunk_mask is not None:
             max_chunks = min(max_chunks, start_chunk + len(chunk_mask))
         for chunk_id in range(start_chunk, max_chunks):
             if chunk_mask is not None and not chunk_mask[chunk_id - start_chunk]:
                 continue
+            start_idx = chunk_id * self.chunk_size
+            end_idx = min(start_idx + self.chunk_size, token_len)
             if chunk_id % put_step != put_step_rank:
                 continue
-            start_idx = chunk_id * self.block_size
-            end_idx = min(start_idx + self.block_size, token_len)
             h = block_hashes[end_idx // self.hash_block_size - 1]
             yield start_idx, end_idx, h
 
@@ -770,14 +1144,18 @@ class ReqMeta:
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
+        event_block_size: int | None = None,
     ) -> "ReqMeta | None":
         """Create ReqMeta from a RequestTracker."""
         if block_hashes is None:
             block_hashes = []
         input_token_len = tracker.token_len
 
-        token_ids_start = tracker.num_saved_tokens
-        chunk_boundary = cdiv(token_ids_start + 1, block_size) * block_size
+        scheduled_token_len = tracker.num_saved_tokens
+        token_ids_start = scheduled_token_len
+        if event_block_size is not None:
+            token_ids_start = scheduled_token_len // event_block_size * event_block_size
+        chunk_boundary = cdiv(scheduled_token_len + 1, block_size) * block_size
         num_tokens_to_save = input_token_len // block_size * block_size
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
