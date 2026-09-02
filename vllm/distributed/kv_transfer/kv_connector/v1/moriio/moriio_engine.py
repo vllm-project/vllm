@@ -397,9 +397,9 @@ class MoRIIOWriter:
             )
             request_info.transfer_offsets[key] = offsets
 
-        # Get session index
-        layer_names = list(self.worker.layer_name_to_local_kv_cache_metadata.keys())
-        sess_idx = layer_names.index(task.layer_name)
+        # One session per registered region; attention layers map to a single
+        # index (see MoRIIOConnectorWorker._region_session_indices).
+        sess_idx = self.worker._region_session_indices(task.layer_name)[0]
 
         local_off, remote_off, sizes = offsets
 

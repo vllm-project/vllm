@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConfig,
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
+    MoRIIOError,
     MoRIIOMode,
     MoRIIOTransferAck,
     ReqId,
@@ -60,6 +61,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     get_layer_transfer_geometry,
     is_mla_cache_layer,
     iter_layer_registration_regions,
+    kda_conv_ssm,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    MambaConvSplitInfo,
+    derive_mamba_conv_split,
 )
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
@@ -74,6 +80,7 @@ from vllm.utils.network_utils import (
 )
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -1289,6 +1296,13 @@ class MoRIIOConnectorWorker:
 
         self.block_window_per_layer: list[int | None] = []
         self.use_mla = self.model_config.use_mla
+        # Hybrid (mamba/KDA) recurrent-state transfer. Populated in
+        # register_kv_caches when the model has a MambaSpec kv_cache group.
+        self._has_mamba = False
+        self._conv_decomp: MambaConvSplitInfo | None = None
+        # layer_name -> flat session indices (one per registered region:
+        # 1 for attention, 2 (conv, ssm) for a KDA layer). Built once lazily.
+        self._region_session_index: dict[str, list[int]] | None = None
         self.built_session = False
         self.built_write_session: defaultdict[str, list] = defaultdict(list)
         backend = get_attn_backend(
@@ -1363,23 +1377,39 @@ class MoRIIOConnectorWorker:
 
     def _get_built_session(self, remote_engine_id):
         if remote_engine_id not in self.built_write_session:
+            remote_layer_map = self.layer_name_to_remote_kv_cache_metadata[
+                remote_engine_id
+            ]
             cur_remote_engine_sessions = []
-            for ln, local_meta in self.layer_name_to_local_kv_cache_metadata.items():
-                unpacked_local_memory_meta = (
-                    self.moriio_wrapper.get_unpack_memory_metadata(local_meta[0])
-                )
-                unpacked_remote_memory_meta = (
-                    self.moriio_wrapper.get_unpack_memory_metadata(
-                        self.layer_name_to_remote_kv_cache_metadata[remote_engine_id][
-                            ln
-                        ][0]
+            for ln, local_metas in self.layer_name_to_local_kv_cache_metadata.items():
+                remote_metas = remote_layer_map[ln]
+                if len(remote_metas) != len(local_metas):
+                    # Sessions are addressed by region index, so a peer that
+                    # registered a different number of regions for this layer
+                    # would not just lose a region to zip(): every later index
+                    # would point into the wrong layer's session.
+                    raise MoRIIOError(
+                        f"peer {remote_engine_id} registered "
+                        f"{len(remote_metas)} region(s) for layer {ln}, this "
+                        f"engine has {len(local_metas)}; the two sides must run "
+                        "the same model and KV cache layout"
                     )
-                )
-                cur_remote_engine_sessions.append(
-                    self.moriio_wrapper.build_session(
-                        unpacked_local_memory_meta, unpacked_remote_memory_meta
+                # One session per registered region, in registration order:
+                # attention layers have a single region; KDA layers have two
+                # (conv then ssm). This flat layout is indexed via
+                # _region_session_indices(layer_name).
+                for local_meta, remote_meta in zip(local_metas, remote_metas):
+                    unpacked_local_memory_meta = (
+                        self.moriio_wrapper.get_unpack_memory_metadata(local_meta)
                     )
-                )
+                    unpacked_remote_memory_meta = (
+                        self.moriio_wrapper.get_unpack_memory_metadata(remote_meta)
+                    )
+                    cur_remote_engine_sessions.append(
+                        self.moriio_wrapper.build_session(
+                            unpacked_local_memory_meta, unpacked_remote_memory_meta
+                        )
+                    )
             self.built_write_session[remote_engine_id] = cur_remote_engine_sessions
         return self.built_write_session[remote_engine_id], self.remote_moriio_metadata[
             remote_engine_id
@@ -1693,15 +1723,63 @@ class MoRIIOConnectorWorker:
     def _is_mla_cache_layer(self, layer_name: str) -> bool:
         return is_mla_cache_layer(self.layer_to_spec, layer_name)
 
+    def _is_mamba_layer(self, layer_name: str) -> bool:
+        """True for a hybrid/KDA layer whose cache is a (conv, ssm) tuple."""
+        return isinstance(self.layer_to_spec.get(layer_name), MambaSpec)
+
+    @staticmethod
+    def _contiguous_byte_alias(tensor: torch.Tensor) -> torch.Tensor:
+        """Return a contiguous uint8 view over ``tensor``'s full byte extent.
+
+        KDA conv/ssm caches are slot-strided views (``stride(0)`` may exceed the
+        per-slot element count), so they are non-contiguous and cannot be passed
+        to ``register_torch_tensor``. This aliases the same storage (zero-copy,
+        identical ``data_ptr``) as a flat uint8 tensor spanning
+        ``shape[0] * stride(0)`` elements -- the full slot-strided extent that
+        transfer offsets (``slot * stride(0) * elem``) address.
+        """
+        esz = tensor.element_size()
+        storage_nbytes = tensor.untyped_storage().nbytes()
+        offset_bytes = tensor.storage_offset() * esz
+        extent_bytes = tensor.shape[0] * tensor.stride(0) * esz
+        # Clamp to the bytes remaining from the view's storage offset. A shared
+        # conv+ssm page buffer (dev19253 packed layout) places ssm at a
+        # non-zero intra-buffer offset whose slot-strided extent
+        # (shape[0]*stride(0)) would otherwise run past the buffer end; the
+        # clamp still covers every slot (the last slot ends at the buffer end).
+        # For separate buffers (offset 0, full storage) this is a no-op.
+        extent_bytes = min(extent_bytes, storage_nbytes - offset_bytes)
+        assert extent_bytes > 0, (
+            "KDA byte alias empty: storage_offset="
+            f"{tensor.storage_offset()} * esz={esz} >= "
+            f"storage_nbytes={storage_nbytes}"
+        )
+        alias = torch.empty(0, dtype=torch.uint8, device=tensor.device)
+        alias.set_(
+            tensor.untyped_storage(),
+            tensor.storage_offset() * esz,
+            (extent_bytes,),
+            (1,),
+        )
+        return alias
+
     def _get_layer_transfer_geometry(
         self, layer_name: str, remote_num_blocks: int | None = None
     ) -> LayerTransferGeometry:
-        return get_layer_transfer_geometry(
+        geometry = get_layer_transfer_geometry(
             layer_name,
             self.kv_caches[layer_name],
             self.layer_to_spec,
             remote_num_blocks,
         )
+        # get_layer_transfer_geometry also serves mamba layers, whose geometry
+        # is a different NamedTuple with no block fields. Every caller here is
+        # on the attention path (mamba layers return before reaching it), so
+        # narrow the type instead of leaking the union.
+        assert isinstance(geometry, LayerTransferGeometry), (
+            f"layer {layer_name} is a mamba layer; use get_mamba_transfer_geometry"
+        )
+        return geometry
 
     def _iter_layer_registration_regions(
         self, layer_name: str
@@ -1760,21 +1838,32 @@ class MoRIIOConnectorWorker:
         """Register the KV Cache data in moriio."""
 
         self.kv_caches = kv_caches  # layer name to kv cache
+        # KDA layers store a (conv, ssm) tuple which has no `.shape`; only
+        # record shapes for attention tensors.
         self.kv_cache_shapes = {
-            layer_name: kv_cache.shape for layer_name, kv_cache in kv_caches.items()
+            layer_name: kv_cache.shape
+            for layer_name, kv_cache in kv_caches.items()
+            if not self._is_mamba_layer(layer_name)
         }
 
+        # Geometry selection must pick an attention layer (never a KDA tuple):
+        # prefer a standard 5-D K/V layer, else the first attention layer.
+        attn_items = [
+            (layer_name, kv_cache)
+            for layer_name, kv_cache in kv_caches.items()
+            if not self._is_mamba_layer(layer_name)
+        ]
         first_layer_name, first_kv_cache = next(
             (
                 (layer_name, kv_cache)
-                for layer_name, kv_cache in kv_caches.items()
+                for layer_name, kv_cache in attn_items
                 if (
                     not self._is_mla_cache_layer(layer_name)
                     and len(kv_cache.shape) == 5
                     and (kv_cache.shape[0] == 2 or kv_cache.shape[1] == 2)
                 )
             ),
-            next(iter(kv_caches.items())),
+            attn_items[0] if attn_items else next(iter(kv_caches.items())),
         )
         kv_elem_size = first_kv_cache.element_size()
 
@@ -1804,9 +1893,16 @@ class MoRIIOConnectorWorker:
                 self.block_size,
             )
             self.block_size = first_geometry.block_size
-        # TODO(tms): self.block_len needs to be per-layer for sliding window,
-        # hybrid attn, etc
-        # block size in bytes
+        # Block length in bytes, taken from the first attention layer.
+        #
+        # Attention layers need not agree on this: on a hybrid model the group
+        # holding the recurrent layers gets its own, larger page, so requiring
+        # one uniform value aborts registration. Nothing in the transfer path
+        # needs it -- registration sizes each region from its own layer
+        # geometry, transfer sizes and strides are recomputed per layer per
+        # request, and the peer only ever reads num_blocks. Per-layer lengths go
+        # in self.block_lens below; this scalar is only what the handshake
+        # advertises to the peer (MoRIIOAgentMetadata.block_len).
         self.block_len = first_geometry.block_len
         self.kv_cache_shape = first_kv_cache.shape
         self.block_shape = block_shape
@@ -1820,6 +1916,17 @@ class MoRIIOConnectorWorker:
 
         for layer_name in kv_caches:
             self.layer_base_addr_index[layer_name] = base_addr_idx
+            if self._is_mamba_layer(layer_name):
+                # KDA layer: two whole-tensor regions (conv, ssm); no block-size
+                # geometry (recurrent state is per-slot, not paged).
+                for cache, region_len in self._iter_layer_registration_regions(
+                    layer_name
+                ):
+                    base_addr = cache.data_ptr()
+                    caches_data.append((base_addr, region_len, cache.device.index, ""))
+                    kv_caches_base_addr.append(base_addr)
+                    base_addr_idx += 1
+                continue
             geometry = self._get_layer_transfer_geometry(layer_name)
             if geometry.block_size != self.block_size:
                 raise ValueError(
@@ -1833,30 +1940,111 @@ class MoRIIOConnectorWorker:
                 kv_caches_base_addr.append(base_addr)
                 base_addr_idx += 1
 
-        shared_backing = len({id(t.untyped_storage()) for t in kv_caches.values()}) == 1
+        shared_backing = (
+            all(isinstance(t, torch.Tensor) for t in kv_caches.values())
+            and len({id(t.untyped_storage()) for t in kv_caches.values()}) == 1
+        )
         shared_mr = None
         if shared_backing:
             reg_tensor, self.kv_layer_mr_offset = self._build_shared_kv_mr(kv_caches)
             shared_mr = self.moriio_wrapper.register_local_tensor(reg_tensor)
 
+        # Say it out loud when the groups disagree. This is expected on a hybrid
+        # model and used to be fatal, so a run that silently had one page size
+        # and a run that has three should not look identical in the log.
+        distinct_block_lens = sorted(set(self.block_lens.values()))
+        if len(distinct_block_lens) > 1:
+            logger.info(
+                "MoRIIO registered %d attention layers with %d distinct block "
+                "lengths (bytes): %s; transfer sizes and strides are per layer, "
+                "and %d is the page advertised to the peer.",
+                len(self.block_lens),
+                len(distinct_block_lens),
+                distinct_block_lens,
+                self.block_len,
+            )
+
         for layer_name, kv_cache in kv_caches.items():
             if layer_name not in self.layer_name_to_local_kv_cache_metadata:
                 self.layer_name_to_local_kv_cache_metadata[layer_name] = []
 
-            moriio_mem_metadata = shared_mr or (
-                self.moriio_wrapper.register_local_tensor(kv_cache)
-            )
-            self.layer_name_to_local_kv_cache_metadata[layer_name].append(
-                moriio_mem_metadata
-            )
-
-            self.local_kv_cache_size.append(
-                kv_cache.nelement() * kv_cache.element_size()
-            )
+            if self._is_mamba_layer(layer_name):
+                # Register conv and ssm as two whole-tensor regions, appending
+                # both metadata blobs (order: conv then ssm) so the session
+                # layout matches iter_layer_registration_regions. conv/ssm are
+                # slot-strided views and are not contiguous, which
+                # register_torch_tensor rejects; register a contiguous uint8
+                # alias over each tensor's full byte extent instead (zero-copy:
+                # same storage and data_ptr).
+                conv, ssm = kda_conv_ssm(kv_cache, self.layer_to_spec.get(layer_name))
+                logger.debug(
+                    "MoRIIO KDA register %s: conv shape=%s stride=%s contig=%s "
+                    "storage_nbytes=%s ; ssm shape=%s stride=%s contig=%s "
+                    "storage_nbytes=%s",
+                    layer_name,
+                    tuple(conv.shape),
+                    tuple(conv.stride()),
+                    conv.is_contiguous(),
+                    conv.untyped_storage().nbytes(),
+                    tuple(ssm.shape),
+                    tuple(ssm.stride()),
+                    ssm.is_contiguous(),
+                    ssm.untyped_storage().nbytes(),
+                )
+                for tensor in (conv, ssm):
+                    alias = self._contiguous_byte_alias(tensor)
+                    meta = self.moriio_wrapper.register_local_tensor(alias)
+                    self.layer_name_to_local_kv_cache_metadata[layer_name].append(meta)
+                    self.local_kv_cache_size.append(alias.numel())
+            else:
+                moriio_mem_metadata = shared_mr or (
+                    self.moriio_wrapper.register_local_tensor(kv_cache)
+                )
+                self.layer_name_to_local_kv_cache_metadata[layer_name].append(
+                    moriio_mem_metadata
+                )
+                self.local_kv_cache_size.append(
+                    kv_cache.nelement() * kv_cache.element_size()
+                )
 
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
         self.num_layers = len(self.kv_caches.keys())
+
+        # Derive the KDA conv sub-projection decomposition and ssm sizes once,
+        # shared across all KDA layers (all GDN layers are homogeneous).
+        self._has_mamba = any(
+            self._is_mamba_layer(layer_name) for layer_name in kv_caches
+        )
+        if self._has_mamba:
+            from vllm.model_executor.layers.mamba.mamba_utils import (
+                is_conv_state_dim_first,
+            )
+
+            assert is_conv_state_dim_first(), (
+                "MoRIIO KDA conv transfer requires the DS (dim-first) conv "
+                "state layout; set VLLM_SSM_CONV_STATE_LAYOUT=DS."
+            )
+            mamba_spec = next(
+                spec
+                for spec in self.layer_to_spec.values()
+                if isinstance(spec, MambaSpec)
+            )
+            self._conv_decomp = derive_mamba_conv_split(mamba_spec, self.world_size)
+            logger.info(
+                "MoRIIO registered %d KDA (conv+ssm) layer(s); ssm sizes=%s",
+                sum(1 for ln in kv_caches if self._is_mamba_layer(ln)),
+                self._conv_decomp.ssm_sizes,
+            )
+            # The recurrent state is registered but nothing transfers it yet:
+            # the scheduler plumbing and the conv/ssm transfers land in the
+            # follow-up. Serving a hybrid model now would silently start every
+            # decode from a zero recurrent state, so refuse instead.
+            raise MoRIIOError(
+                "MoRIIO does not support hybrid (mamba/KDA) models in "
+                "disaggregated serving yet: the recurrent state is registered "
+                "but not transferred."
+            )
 
         # Optimization for models with local attention (Llama 4)
         if self.vllm_config.model_config.hf_config.model_type == "llama4":
@@ -2646,6 +2834,22 @@ class MoRIIOConnectorWorker:
             remote = [x + remote_off for x in remote]
         return local, remote, sizes
 
+    def _region_session_indices(self, layer_name: str) -> list[int]:
+        """Flat session indices for a layer's registered regions.
+
+        Sessions are built one per region in registration order (see
+        _get_built_session), so an attention layer maps to a single index and a
+        KDA layer to two indices ([conv, ssm]). Built once and cached.
+        """
+        if self._region_session_index is None:
+            mapping: dict[str, list[int]] = {}
+            idx = 0
+            for ln, metas in self.layer_name_to_local_kv_cache_metadata.items():
+                mapping[ln] = list(range(idx, idx + len(metas)))
+                idx += len(metas)
+            self._region_session_index = mapping
+        return self._region_session_index[layer_name]
+
     @staticmethod
     def _is_sq_full_status(status) -> bool:
         """True if a MoRIIO transfer status is a transient RDMA send-queue-full
@@ -2708,9 +2912,7 @@ class MoRIIOConnectorWorker:
         # SQ-full backpressure deadline, shared across this request's layers.
         _sq_deadline = time.monotonic() + self.moriio_config.transfer_timeout
         for layer_name in self.layer_name_to_local_kv_cache_metadata:
-            sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(
-                layer_name
-            )
+            sess_idx = self._region_session_indices(layer_name)[0]
             offs = self._compute_block_transfer_offsets(
                 layer_name,
                 local_block_ids,
