@@ -1,0 +1,187 @@
+group: Entrypoints
+depends_on:
+  - image-build-xpu
+steps:
+- label: ":intel: (BMG) Entrypoints Unit"
+  key: entrypoints-unit-tests-intel
+  timeout_in_minutes: 45
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/entrypoints
+  - tests/entrypoints/unit_tests
+  - tests/entrypoints/weight_transfer
+  - tests/entrypoints/launchers
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s entrypoints/unit_tests &&
+    pytest -v -s entrypoints/weight_transfer'
+
+- label: ":intel: (BMG) Entrypoints Integration (LLM)"
+  key: entrypoints-integration-llm-intel
+  timeout_in_minutes: 70
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/llm
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+    cd tests &&
+    pytest -v -s entrypoints/llm/test_generate.py &&
+    pytest -v -s entrypoints/llm/offline_mode'
+
+- label: ":intel: (BMG) Entrypoints Integration (API Server)"
+  key: entrypoints-integration-api-server-intel
+  timeout_in_minutes: 70
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/entrypoints/serve
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+    cd tests &&
+    pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
+    --deselect="tests/entrypoints/serve/dev/rlhf/state_transitions/test_pause_resume.py::TestPauseResume::test_clear_cache_preserves_output_and_controls_prefix_cache[MRV1]" &&
+    PYTHONPATH=/workspace/vllm pytest -v -s entrypoints/serve/dev/rpc'
+
+- label: ":intel: (BMG) Entrypoints Integration (API Server Scale Out)"
+  key: entrypoints-integration-api-server-scale-out-intel
+  timeout_in_minutes: 40
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/entrypoints/scale_out
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+    cd tests &&
+    pytest -v -s entrypoints/scale_out'
+
+- label: ":intel: (BMG) Entrypoints Integration (API Server Generate)"
+  key: entrypoints-integration-api-server-generate-intel
+  timeout_in_minutes: 65
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/tool_use
+  - tests/entrypoints/tool_parsers
+  - tests/entrypoints/generate
+  - tests/entrypoints/anthropic
+  - tests/entrypoints/cohere
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s tool_use
+    --deselect="tests/tool_use/mistral/test_mistral_tool_calls.py::test_tool_call_none_with_tools[ministral-3b]"
+    --deselect="tests/tool_use/test_chat_completions.py::test_chat_completion_with_tools[granite-3.0-8b]" &&
+    pytest -v -s entrypoints/tool_parsers &&
+    pytest -v -s entrypoints/generate &&
+    pytest -v -s entrypoints/anthropic &&
+    pytest -v -s entrypoints/cohere'
+
+- label: ":intel: (BMG) Entrypoints Integration (Responses API)"
+  key: entrypoints-integration-responses-api-intel
+  timeout_in_minutes: 60
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/entrypoints/openai/responses
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s entrypoints/openai/responses'
+
+- label: ":intel: (BMG) OpenAI API Correctness"
+  key: openai-api-correctness-intel
+  timeout_in_minutes: 30
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - csrc/
+  - vllm/entrypoints/openai/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s entrypoints/openai/correctness/'
