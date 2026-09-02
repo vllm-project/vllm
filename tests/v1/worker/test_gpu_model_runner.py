@@ -2106,6 +2106,73 @@ class TestReloadDraftWeights:
         assert torch.equal(draft_model.lm_head.weight, head_from_ckpt)
         assert torch.equal(draft_model.proj.weight, draft_proj)
 
+    def test_disk_reload_discards_vocab_mismatched_shared_embed(self):
+        """A head narrower on the vocab axis (EAGLE3 low-rank layout) is a real
+        projection, not a tied placeholder: embed tensors are discarded and the
+        head still loads from its own checkpoint entry.
+        """
+
+        class _Head(nn.Module):
+            def __init__(self, weight: nn.Parameter):
+                super().__init__()
+                self.weight = weight
+
+        class _TinyLM(nn.Module):
+            def __init__(self, embed_dim: int, head_vocab: int):
+                super().__init__()
+                self.embed_tokens = nn.Embedding(8, embed_dim)
+                self.lm_head = _Head(nn.Parameter(torch.zeros(head_vocab, embed_dim)))
+                self.proj = nn.Linear(4, 4, bias=False)
+
+            def load_weights(self, weights):
+                from vllm.model_executor.models.utils import AutoWeightsLoader
+
+                return AutoWeightsLoader(self).load_weights(weights)
+
+        target_model = _TinyLM(embed_dim=8, head_vocab=8)
+        draft_model = _TinyLM(embed_dim=8, head_vocab=4)
+        original_embed = target_model.embed_tokens.weight.detach().clone()
+        draft_model.embed_tokens = target_model.embed_tokens
+
+        runner = self._make_runner()
+        runner.get_draft_model = Mock(return_value=draft_model)
+        runner.get_model = Mock(return_value=target_model)
+        embed_placeholder = torch.full((8, 8), 7.0)
+        head_from_ckpt = torch.full((4, 8), 3.0)
+        draft_proj = torch.eye(4)
+        target_weights = iter([("proj.weight", torch.eye(4))])
+
+        def get_loader(_load_config):
+            loader = Mock()
+
+            def get_all_weights(_config, model):
+                if model is draft_model:
+                    return iter(
+                        [
+                            ("embed_tokens.weight", embed_placeholder),
+                            ("lm_head.weight", head_from_ckpt),
+                            ("proj.weight", draft_proj),
+                        ]
+                    )
+                return target_weights
+
+            loader.get_all_weights.side_effect = get_all_weights
+            return loader
+
+        with (
+            patch.object(
+                gpu_model_runner_module, "get_model_loader", side_effect=get_loader
+            ),
+            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+        ):
+            runner.reload_weights()
+
+        assert draft_model.embed_tokens is target_model.embed_tokens
+        assert torch.equal(target_model.embed_tokens.weight, original_embed)
+        assert torch.equal(draft_model.lm_head.weight, head_from_ckpt)
+        assert torch.equal(draft_model.proj.weight, draft_proj)
+
     def test_disk_reload_detaches_repeated_lm_head_aliases(self):
         """MTP shares one target lm_head at draft.lm_head and each shared_head."""
 

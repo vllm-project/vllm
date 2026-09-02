@@ -541,10 +541,15 @@ def _replacement_for_detached_draft_module(
         lm_head = getattr(draft_model, "lm_head", None)
         detached_weight = getattr(module, "weight", None)
         head_weight = getattr(lm_head, "weight", None) if lm_head is not None else None
+        # A tied placeholder head (Gemma4 MTP) keeps the embedding's vocab
+        # width and differs only on the hidden axis; a head that differs on
+        # the vocab axis (EAGLE3 low-rank heads) is a real projection with
+        # its own checkpoint entry, so its embed tensors are discarded.
         if (
             isinstance(detached_weight, nn.Parameter)
             and isinstance(head_weight, nn.Parameter)
             and head_weight is not detached_weight
+            and head_weight.shape[0] == detached_weight.shape[0]
             and head_weight.shape != detached_weight.shape
         ):
             return _TiedDraftWeightSink(lm_head)
