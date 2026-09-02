@@ -323,17 +323,18 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def fused_qk_norm_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
 
-    def fused_qk_norm_mrope_kvcache_supported(self):
-        if not rocm_aiter_ops.is_enabled() or self.attn_type != AttentionType.DECODER:
+    def fused_qk_norm_mrope_kvcache_supported(self) -> bool:
+        if self.attn_type != AttentionType.DECODER:
             return False
-        if not is_aiter_mrope_strided_kv_cache_supported():
+        if not rocm_aiter_ops.is_enabled():
+            return False
+        supported = is_aiter_mrope_strided_kv_cache_supported()
+        if not supported:
             logger.warning_once(
-                "QK-Norm+MRoPE+KV-cache fusion requires an AITER "
-                "v0.1.20.dev1+ development build or v0.1.21.dev0+ containing "
-                "ROCm/aiter#4531."
+                "QK-Norm+MRoPE+KV-cache fusion requires "
+                "AITER strided KV-cache support."
             )
-            return False
-        return True
+        return supported
 
     def do_qk_norm_rope_kvcache_update(
         self,
