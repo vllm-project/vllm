@@ -14,8 +14,11 @@ class CPUOffloadingMetrics:
 
 
 class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
-    """
-    Spec for loading/storing a KV chunk to CPU memory.
+    """Spec for loading/storing KV chunks to/from CPU memory.
+
+    The inherited block_ids field holds chunk indices into the
+    CPU cache (not GPU block IDs). The chunk_ids alias exposes
+    the same array under the name used by the tiering layer.
     """
 
     @property

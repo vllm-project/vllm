@@ -56,7 +56,7 @@ def make_cpu_manager(
 @dataclass
 class ExpectedPrepareStoreOutput:
     keys_to_store: list[int]
-    store_block_ids: list[int]
+    store_chunk_ids: list[int]
     evicted_keys: list[int]
 
 
@@ -93,9 +93,9 @@ def verify_store_output(
     store_spec = prepare_store_output.store_spec
     assert isinstance(store_spec, CPULoadStoreSpec)
     expected_array = np.array(
-        expected_prepare_store_output.store_block_ids, dtype=np.int64
+        expected_prepare_store_output.store_chunk_ids, dtype=np.int64
     )
-    assert np.array_equal(expected_array, store_spec.block_ids)
+    assert np.array_equal(expected_array, store_spec.chunk_ids)
 
 
 def verify_load_output(
@@ -103,7 +103,7 @@ def verify_load_output(
 ):
     assert isinstance(prepare_load_output, CPULoadStoreSpec)
     expected_array = np.array(expected_prepare_load_output, dtype=np.int64)
-    assert np.array_equal(expected_array, prepare_load_output.block_ids)
+    assert np.array_equal(expected_array, prepare_load_output.chunk_ids)
 
 
 def check_split_usage_stats(
@@ -201,7 +201,7 @@ def test_already_stored_chunk_not_evicted_during_prepare_store(eviction_policy):
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[3, 4, 5],
-            store_block_ids=[2, 3, 0],
+            store_chunk_ids=[2, 3, 0],
             evicted_keys=[1],  # chunk 1 evicted, not chunk 2
         ),
     )
@@ -226,7 +226,7 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[],
-            store_block_ids=[],
+            store_chunk_ids=[],
             evicted_keys=[],
         ),
     )
@@ -378,7 +378,7 @@ def test_cpu_manager():
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[1, 2],
-            store_block_ids=[0, 1],
+            store_chunk_ids=[0, 1],
             evicted_keys=[],
         ),
     )
@@ -407,7 +407,7 @@ def test_cpu_manager():
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[3, 4, 5],
-            store_block_ids=[2, 3, 0],
+            store_chunk_ids=[2, 3, 0],
             evicted_keys=[1],
         ),
     )
@@ -445,7 +445,7 @@ def test_cpu_manager():
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[6, 7, 8],
-            store_block_ids=[1, 0, 3],
+            store_chunk_ids=[1, 0, 3],
             evicted_keys=[4, 5, 2],
         ),
     )
@@ -462,7 +462,7 @@ def test_cpu_manager():
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[9],
-            store_block_ids=[3],
+            store_chunk_ids=[3],
             evicted_keys=[8],
         ),
     )
@@ -482,7 +482,7 @@ def test_cpu_manager():
 
 
 def test_prepare_load_preserves_key_order():
-    """block_ids[i] must correspond to keys[i] (co-indexed invariant)."""
+    """chunk_ids[i] must correspond to keys[i] (co-indexed invariant)."""
     manager = make_cpu_manager(num_chunks=4, cache_policy="lru")
 
     key_a, key_b, key_c = to_key(0), to_key(1), to_key(2)
@@ -492,15 +492,15 @@ def test_prepare_load_preserves_key_order():
     assert store_output is not None
     assert isinstance(store_output.store_spec, CPULoadStoreSpec)
     key_to_chunk_id = {
-        k: int(bid)
-        for k, bid in zip(store_output.keys_to_store, store_output.store_spec.block_ids)
+        k: int(cid)
+        for k, cid in zip(store_output.keys_to_store, store_output.store_spec.chunk_ids)
     }
     manager.complete_store([key_a, key_b, key_c], _EMPTY_REQ_CTX)
 
     # Forward order: [a, b, c]
     spec_fwd = manager.prepare_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)
     assert isinstance(spec_fwd, CPULoadStoreSpec)
-    assert [int(x) for x in spec_fwd.block_ids] == [
+    assert [int(x) for x in spec_fwd.chunk_ids] == [
         key_to_chunk_id[key_a],
         key_to_chunk_id[key_b],
         key_to_chunk_id[key_c],
@@ -510,7 +510,7 @@ def test_prepare_load_preserves_key_order():
     # Arbitrary permutation: [b, c, a]
     spec_perm = manager.prepare_load([key_b, key_c, key_a], _EMPTY_REQ_CTX)
     assert isinstance(spec_perm, CPULoadStoreSpec)
-    assert [int(x) for x in spec_perm.block_ids] == [
+    assert [int(x) for x in spec_perm.chunk_ids] == [
         key_to_chunk_id[key_b],
         key_to_chunk_id[key_c],
         key_to_chunk_id[key_a],
@@ -548,7 +548,7 @@ class TestARCPolicy:
             prepare_store_output,
             ExpectedPrepareStoreOutput(
                 keys_to_store=[1, 2],
-                store_block_ids=[0, 1],
+                store_chunk_ids=[0, 1],
                 evicted_keys=[],
             ),
         )
@@ -610,7 +610,7 @@ class TestARCPolicy:
             prepare_store_output,
             ExpectedPrepareStoreOutput(
                 keys_to_store=[1, 2, 3, 4],
-                store_block_ids=[0, 1, 2, 3],
+                store_chunk_ids=[0, 1, 2, 3],
                 evicted_keys=[],
             ),
         )
@@ -846,7 +846,7 @@ class TestARCPolicy:
             prepare_store_output,
             ExpectedPrepareStoreOutput(
                 keys_to_store=[5],
-                store_block_ids=[1],  # reuses chunk 2's storage
+                store_chunk_ids=[1],  # reuses chunk 2's storage
                 evicted_keys=[2],
             ),
         )
