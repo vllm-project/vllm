@@ -6,3 +6,7 @@ from vllm.parser.engine.registered_adapters import DeepSeekV4ParserToolAdapter
 
 class DeepSeekV4EngineToolParser(DeepSeekV4ParserToolAdapter):  # type: ignore[valid-type, misc]
     structural_tag_model = "deepseek_v4"
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs["parse_reasoning"] = False
+        super().__init__(*args, **kwargs)

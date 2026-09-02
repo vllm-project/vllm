@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
+from vllm.parser.parser_manager import ParserManager
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.deepseekv4_engine_tool_parser import (
     DeepSeekV4EngineToolParser,
@@ -78,6 +79,8 @@ def make_parser(tools=None) -> DeepSeekV4EngineToolParser:
 def make_request(tools=None) -> MagicMock:
     req = MagicMock()
     req.tools = tools
+    req.tool_choice = "auto"
+    req.include_reasoning = True
     return req
 
 
@@ -146,6 +149,82 @@ def test_extract_tool_calls():
         "location": "Beijing",
         "unit": "celsius",
     }
+
+
+def test_tool_only_serving_parser_preserves_bare_reasoning_end_tag():
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="deepseek_v4",
+        reasoning_parser_name=None,
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    parser = parser_cls(MOCK_TOKENIZER)
+    model_output = "Let me check.</think> " + build_tool_call(
+        "get_weather", {"location": "Beijing"}
+    )
+
+    reasoning, content, tool_calls = parser.parse(
+        model_output,
+        make_request(),
+        enable_auto_tools=True,
+    )
+
+    assert reasoning is None
+    assert content == "Let me check.</think> "
+    assert tool_calls is not None
+    assert tool_calls[0].name == "get_weather"
+
+
+def test_tool_only_serving_parser_streams_bare_reasoning_end_tag():
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="deepseek_v4",
+        reasoning_parser_name=None,
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    parser = parser_cls(MOCK_TOKENIZER)
+    request = make_request()
+    chunks = ["Let me check.", "</think>", " Here is the answer."]
+    deltas = []
+    for index, chunk in enumerate(chunks):
+        delta = parser.parse_delta(
+            chunk,
+            [],
+            request,
+            finished=index == len(chunks) - 1,
+        )
+        if delta is not None:
+            deltas.append(delta)
+
+    assert "".join(delta.content or "" for delta in deltas) == "".join(chunks)
+    assert all(delta.reasoning is None for delta in deltas)
+
+
+def test_combined_serving_parser_still_extracts_reasoning():
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="deepseek_v4",
+        reasoning_parser_name="deepseek_v4",
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    parser = parser_cls(
+        MOCK_TOKENIZER,
+        chat_template_kwargs={"thinking": True},
+    )
+    model_output = "Let me check.</think> " + build_tool_call(
+        "get_weather", {"location": "Beijing"}
+    )
+
+    reasoning, content, tool_calls = parser.parse(
+        model_output,
+        make_request(),
+        enable_auto_tools=True,
+    )
+
+    assert reasoning == "Let me check."
+    assert content is None
+    assert tool_calls is not None
+    assert tool_calls[0].name == "get_weather"
 
 
 def test_function_calls_block_is_not_accepted():

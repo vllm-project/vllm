@@ -35,6 +35,7 @@ from vllm.parser.deepseek_v4 import (
     _unwrap_wrapper_args,
     deepseek_v4_config,
 )
+from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.parser.engine.registered_adapters import (
     DeepSeekV4ParserReasoningAdapter,
     DeepSeekV4ParserToolAdapter,
@@ -266,6 +267,13 @@ class TestThinkingModeConfig:
             chat_template_kwargs=chat_template_kwargs,
         )
         assert parser.parser_engine_config.initial_state.name == expected_state
+
+    def test_tool_config_preserves_reasoning_tags(self):
+        cfg = deepseek_v4_config(thinking=True, parse_reasoning=False)
+        assert cfg.preserve_tokens == {DSML_THINK_START, DSML_THINK_END}
+        assert "THINK_START" not in cfg.terminals
+        assert "THINK_END" not in cfg.terminals
+        assert cfg.initial_state == ParserState.CONTENT
 
     def test_thinking_mode_reasoning_without_tags(self, mock_tokenizer):
         parser = DeepSeekV4Parser(

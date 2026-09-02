@@ -122,26 +122,45 @@ def _unwrap_wrapper_args(
 
 
 @functools.cache
-def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
+def deepseek_v4_config(
+    thinking: bool = False,
+    parse_reasoning: bool = True,
+) -> ParserEngineConfig:
+    terminals = {
+        "THINK_START": DSML_THINK_START,
+        "THINK_END": DSML_THINK_END,
+        "TOOL_START": DSML_TOOL_START,
+        "TOOL_END": DSML_TOOL_END,
+        "INVOKE_PREFIX": DSML_INVOKE_PREFIX,
+        "INVOKE_NAME_END": DSML_INVOKE_NAME_END,
+        "INVOKE_END": DSML_INVOKE_END,
+        "PARAM_CLOSE": DSML_PARAM_CLOSE,
+    }
+    token_id_terminals = {
+        "THINK_START": DSML_THINK_START,
+        "THINK_END": DSML_THINK_END,
+        "TOOL_START": DSML_TOOL_START,
+        "TOOL_END": DSML_TOOL_END,
+    }
+    if not parse_reasoning:
+        terminals.pop("THINK_START")
+        terminals.pop("THINK_END")
+        token_id_terminals.pop("THINK_START")
+        token_id_terminals.pop("THINK_END")
     return ParserEngineConfig(
         name="deepseek_v4",
-        initial_state=ParserState.REASONING if thinking else ParserState.CONTENT,
-        terminals={
-            "THINK_START": DSML_THINK_START,
-            "THINK_END": DSML_THINK_END,
-            "TOOL_START": DSML_TOOL_START,
-            "TOOL_END": DSML_TOOL_END,
-            "INVOKE_PREFIX": DSML_INVOKE_PREFIX,
-            "INVOKE_NAME_END": DSML_INVOKE_NAME_END,
-            "INVOKE_END": DSML_INVOKE_END,
-            "PARAM_CLOSE": DSML_PARAM_CLOSE,
-        },
-        token_id_terminals={
-            "THINK_START": DSML_THINK_START,
-            "THINK_END": DSML_THINK_END,
-            "TOOL_START": DSML_TOOL_START,
-            "TOOL_END": DSML_TOOL_END,
-        },
+        initial_state=(
+            ParserState.REASONING
+            if thinking and parse_reasoning
+            else ParserState.CONTENT
+        ),
+        terminals=terminals,
+        token_id_terminals=token_id_terminals,
+        preserve_tokens=(
+            frozenset({DSML_THINK_START, DSML_THINK_END})
+            if not parse_reasoning
+            else frozenset()
+        ),
         transitions={
             (ParserState.CONTENT, "THINK_START"): Transition(
                 ParserState.REASONING,
@@ -217,6 +236,7 @@ class DeepSeekV4Parser(ParserEngine):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.pop("chat_template_kwargs", None) or {}
+        parse_reasoning = kwargs.pop("parse_reasoning", True)
         thinking = bool(
             chat_kwargs.get("thinking") or chat_kwargs.get("enable_thinking")
         )
@@ -226,7 +246,10 @@ class DeepSeekV4Parser(ParserEngine):
         super().__init__(
             tokenizer,
             tools,
-            parser_engine_config=deepseek_v4_config(thinking=thinking),
+            parser_engine_config=deepseek_v4_config(
+                thinking=thinking,
+                parse_reasoning=parse_reasoning,
+            ),
             **kwargs,
         )
         self._arg_converter = self._convert_args
