@@ -287,24 +287,24 @@ def _root_schema_properties(params: dict[str, Any]) -> dict[str, Any]:
     direct ``properties``. Which ``anyOf``/``oneOf`` branch applies depends
     on argument values a streaming parser only sees incrementally, so a
     branch property is used only when no other branch declares it
-    differently.
+    differently; it then always applies and refines the schema as well.
     """
-    properties = dict(params.get("properties", {}))
-    for member in params.get("allOf", []):
-        for name, schema in _dict_properties(member).items():
-            base = properties.get(name)
-            properties[name] = base | schema if isinstance(base, dict) else schema
     branches = [
         _dict_properties(branch)
         for keyword in ("anyOf", "oneOf")
         for branch in params.get(keyword, [])
     ]
-    for branch in branches:
-        for name, schema in branch.items():
-            if name not in properties and all(
-                other.get(name, schema) == schema for other in branches
-            ):
-                properties[name] = schema
+    shared = {
+        name: schema
+        for branch in branches
+        for name, schema in branch.items()
+        if all(other.get(name, schema) == schema for other in branches)
+    }
+    properties = dict(params.get("properties", {}))
+    for refinement in (*map(_dict_properties, params.get("allOf", [])), shared):
+        for name, schema in refinement.items():
+            base = properties.get(name)
+            properties[name] = base | schema if isinstance(base, dict) else schema
     return properties
 
 

@@ -703,26 +703,30 @@ class TestFixArgTypes:
 
     @pytest.mark.parametrize("combinator", ["anyOf", "oneOf"])
     def test_root_alternative_branch_properties(self, combinator):
-        """A property declared by one branch is coerced; a property the
-        branches type differently is left alone since no branch is selected."""
+        """A property declared by one branch is coerced, one the branches type
+        differently is left alone since no branch is selected, and one all
+        branches agree on refines the direct schema."""
         tool = ChatCompletionToolsParam(
             type="function",
             function=FunctionDefinition(
                 name="f",
                 parameters={
                     "type": "object",
+                    "properties": {"count": {"type": ["string", "integer"]}},
                     combinator: [
                         {
                             "properties": {
                                 "kind": {"const": "a"},
                                 "payload": {"type": "object"},
                                 "value": {"type": "integer"},
+                                "count": {"type": "string"},
                             },
                         },
                         {
                             "properties": {
                                 "kind": {"const": "b"},
                                 "value": {"type": "string"},
+                                "count": {"type": "string"},
                             },
                         },
                     ],
@@ -731,12 +735,14 @@ class TestFixArgTypes:
         )
         engine = _make_engine(tools=[tool])
         result = engine._fix_arg_types(
-            '{"kind": "a", "payload": "{\\"n\\": 1}", "value": "123"}', "f"
+            '{"kind": "a", "payload": "{\\"n\\": 1}", "value": "123", "count": "7"}',
+            "f",
         )
         assert json.loads(result) == {
             "kind": "a",
             "payload": {"n": 1},
             "value": "123",
+            "count": "7",
         }
 
     def test_root_allof_refines_direct_property(self):
