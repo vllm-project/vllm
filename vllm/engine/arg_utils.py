@@ -640,6 +640,16 @@ class EngineArgs:
         SchedulerConfig.prefill_delayer_max_delay_passes
     )
     prefill_delayer_max_delay_ms: float = SchedulerConfig.prefill_delayer_max_delay_ms
+    prefill_delayer_token_usage_low_watermark: float = (
+        SchedulerConfig.prefill_delayer_token_usage_low_watermark
+    )
+    prefill_delayer_max_consecutive_prefill_steps: int = (
+        SchedulerConfig.prefill_delayer_max_consecutive_prefill_steps
+    )
+    prefill_delayer_max_prefill_bs: int = SchedulerConfig.prefill_delayer_max_prefill_bs
+    prefill_delayer_queue_min_ratio: float = (
+        SchedulerConfig.prefill_delayer_queue_min_ratio
+    )
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1611,6 +1621,22 @@ class EngineArgs:
             **scheduler_kwargs["prefill_delayer_max_delay_ms"],
         )
         scheduler_group.add_argument(
+            "--prefill-delayer-token-usage-low-watermark",
+            **scheduler_kwargs["prefill_delayer_token_usage_low_watermark"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-max-consecutive-prefill-steps",
+            **scheduler_kwargs["prefill_delayer_max_consecutive_prefill_steps"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-max-prefill-bs",
+            **scheduler_kwargs["prefill_delayer_max_prefill_bs"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-queue-min-ratio",
+            **scheduler_kwargs["prefill_delayer_queue_min_ratio"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2388,6 +2414,14 @@ class EngineArgs:
             prefill_delayer_target_fill=self.prefill_delayer_target_fill,
             prefill_delayer_max_delay_passes=self.prefill_delayer_max_delay_passes,
             prefill_delayer_max_delay_ms=self.prefill_delayer_max_delay_ms,
+            prefill_delayer_token_usage_low_watermark=(
+                self.prefill_delayer_token_usage_low_watermark
+            ),
+            prefill_delayer_max_consecutive_prefill_steps=(
+                self.prefill_delayer_max_consecutive_prefill_steps
+            ),
+            prefill_delayer_max_prefill_bs=self.prefill_delayer_max_prefill_bs,
+            prefill_delayer_queue_min_ratio=self.prefill_delayer_queue_min_ratio,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,

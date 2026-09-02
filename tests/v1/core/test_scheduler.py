@@ -544,9 +544,7 @@ def test_throttle_capacity_bound_guard_admits():
 def _make_running_decode(scheduler, req_id="dec0", num_tokens=8):
     """Drive a short request through prefill+output into the running (decode)
     queue and return it."""
-    (req,) = create_requests(
-        num_requests=1, num_tokens=num_tokens, req_ids=[req_id]
-    )
+    (req,) = create_requests(num_requests=1, num_tokens=num_tokens, req_ids=[req_id])
     scheduler.add_request(req)
     output = scheduler.schedule()
     assert req_id in output.num_scheduled_tokens
