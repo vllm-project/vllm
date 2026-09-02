@@ -2385,6 +2385,23 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
+  agent_pool: mi300_1
+  optional: true
+  soft_fail: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization
+  - tests/plugins_tests/test_gguf_plugin.py
+  - tests/plugins_tests/gguf
+  - vllm/platforms/rocm.py
+  commands:
+  - pip install "vllm-gguf-plugin >= 0.0.2"
+  - pytest -v -s plugins_tests/gguf -m 'not distributed(num_gpus=2)'
+
+- label: ":amd: (MI300) GGUF Plugin (Multi-GPU)" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
   agent_pool: mi300_2
   num_gpus: 2
   optional: true
@@ -2397,7 +2414,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pip install "vllm-gguf-plugin >= 0.0.2"
-  - pytest -v -s plugins_tests/gguf
+  - pytest -v -s plugins_tests/gguf -m 'distributed(num_gpus=2)'
 
 #-------------------------------------------------------  mi300 · rust_frontend  -------------------------------------------------------#
 
