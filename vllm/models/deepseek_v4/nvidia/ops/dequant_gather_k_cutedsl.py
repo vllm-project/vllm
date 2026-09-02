@@ -22,10 +22,16 @@ def dequantize_and_gather_k_cache_cutedsl(
     block_table: torch.Tensor,
     block_size: int,
     offset: int,
+    num_workers: int | None = None,
 ) -> None:
+    if num_workers is None:
+        num_workers = DequantGatherKCacheKernel.pick_num_workers(
+            out.shape[1] - offset
+        )
     DequantGatherKCacheKernel.compile(
         block_size=block_size,
         has_gather_lens=gather_lens is not None,
+        num_workers=num_workers,
     )(out, k_cache, seq_lens, gather_lens, block_table, offset)
 
 
@@ -34,8 +40,11 @@ class DequantGatherKCacheKernel:
     head_dim = 512
     group_size = 64  # 1 scale per 64 elems
 
-    def __init__(self, fp8_dim: int = 448, block_size: int = 64):
+    def __init__(
+        self, fp8_dim: int = 448, block_size: int = 64, num_workers: int = 1024
+    ):
         self.fp8_dim = fp8_dim
+        self.num_workers = num_workers
         self.bf16_dim = self.head_dim - fp8_dim
         self.data_dim = fp8_dim + self.bf16_dim * 2
         self.block_size = block_size
@@ -43,6 +52,21 @@ class DequantGatherKCacheKernel:
         self.num_warps = 4
         self.tb_size = self.num_warps * 32
         self.num_stages = 4
+
+    # grid.y per request, baked into the compiled kernel (one variant per
+    # distinct value, so no extra runtime argument on the per-call path). On
+    # GB200 (152 SMs) HBM saturates around 128 CTAs per request for the
+    # compressed cache (~1k rows/req) and 32 CTAs for the 128-row SWA window;
+    # 1024 CTAs/req leaves most CTAs idle and costs ~2x in launch/tail overhead.
+    min_rows_per_worker = 4
+    max_num_workers = 128
+
+    @classmethod
+    def pick_num_workers(cls, max_rows: int) -> int:
+        """Pick grid.y from an upper bound on rows gathered per request."""
+        return max(
+            1, min(cls.max_num_workers, -(-max_rows // cls.min_rows_per_worker))
+        )
 
     @cute.jit
     def __call__(
@@ -73,7 +97,7 @@ class DequantGatherKCacheKernel:
             ),
         )
 
-        grid = (out.shape[0], 1024, 1)
+        grid = (out.shape[0], self.num_workers, 1)
         self.kernel(
             out,
             k_data,
@@ -300,6 +324,7 @@ class DequantGatherKCacheKernel:
         fp8_dim: int = 448,
         block_size: int = 64,
         has_gather_lens: bool = True,
+        num_workers: int = 1024,
     ):
         num_reqs = cute.sym_int()
         head_dim = DequantGatherKCacheKernel.head_dim
@@ -316,7 +341,7 @@ class DequantGatherKCacheKernel:
         gather_lens = make_fake_tensor(Int32, (num_reqs,)) if has_gather_lens else None
         block_table = make_fake_tensor(Int32, (num_reqs, cute.sym_int()))
 
-        kernel = DequantGatherKCacheKernel(fp8_dim, block_size)
+        kernel = DequantGatherKCacheKernel(fp8_dim, block_size, num_workers)
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         return cute.compile(
             kernel,
