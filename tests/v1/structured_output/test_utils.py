@@ -78,10 +78,10 @@ def supported_schema():
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "grade": {"type": "string"},
                 },
-                "required": ["name", "grade"],
-                "patternProperties": {"^grade$": {"type": "string"}},
+                "required": ["name"],
+                "patternProperties": {"^grade_[0-9]+$": {"type": "integer"}},
+                "propertyNames": {"pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"},
             },
         },
         "minProperties": 1,
