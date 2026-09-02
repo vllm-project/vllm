@@ -1439,32 +1439,54 @@ class ModelConfig:
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
         if decode_context_parallel_size > 1 and not self.use_mla:
             total_num_kv_heads = self.get_total_num_kv_heads()
-            if tensor_parallel_size <= total_num_kv_heads:
+            prefill_context_parallel_size = (
+                parallel_config.prefill_context_parallel_size
+            )
+            # DCP shards the KV cache along the sequence to reclaim KV
+            # duplication, which has two independent sources:
+            # - TP replicates every KV head across `tp // num_kv_heads` ranks
+            #   once TP exceeds the model's KV head count.
+            # - PCP replicates the full KV cache on every PCP rank, since K/V
+            #   are all-gathered across the PCP group for prefill attention.
+            # ParallelConfig lays the DCP group out over the PCP axis first
+            # and the TP axis second (`dcp in (1, pcp, tp * pcp)` when PCP is
+            # enabled), so `dcp // pcp` is the part of DCP that reuses TP
+            # ranks and must fit inside the TP-induced replication factor.
+            max_tp_dcp_size = max(1, tensor_parallel_size // total_num_kv_heads)
+            if max_tp_dcp_size == 1 and prefill_context_parallel_size == 1:
                 raise ValueError(
                     "Decode context parallelism for GQA/MQA requires "
                     f"`--tensor-parallel-size` ({tensor_parallel_size}) to be "
                     "greater than the model's total number of KV heads "
-                    f"({total_num_kv_heads}). Increase `--tensor-parallel-size` "
-                    "or set `--decode-context-parallel-size 1`."
+                    f"({total_num_kv_heads}), or "
+                    "`--prefill-context-parallel-size` to be greater than 1. "
+                    "Increase `--tensor-parallel-size` or "
+                    "`--prefill-context-parallel-size`, or set "
+                    "`--decode-context-parallel-size 1`."
                 )
 
-            max_dcp_size = tensor_parallel_size // total_num_kv_heads
+            max_dcp_size = max_tp_dcp_size * prefill_context_parallel_size
             if decode_context_parallel_size > max_dcp_size:
                 raise ValueError(
                     "`--decode-context-parallel-size` "
                     f"({decode_context_parallel_size}) exceeds the maximum "
                     f"supported value ({max_dcp_size}) for "
-                    f"`--tensor-parallel-size` ({tensor_parallel_size}) and "
+                    f"`--tensor-parallel-size` ({tensor_parallel_size}), "
+                    "`--prefill-context-parallel-size` "
+                    f"({prefill_context_parallel_size}) and "
                     f"{total_num_kv_heads} model KV heads."
                 )
 
+            # Query heads are only partitioned along the TP-spanning part of
+            # the DCP group; ranks along the PCP axis hold identical heads.
+            tp_dcp_size = decode_context_parallel_size // prefill_context_parallel_size
             num_q_per_kv = total_num_attention_heads // total_num_kv_heads
-            if num_q_per_kv % decode_context_parallel_size != 0:
+            if num_q_per_kv % tp_dcp_size != 0:
                 raise ValueError(
                     "The model's number of query heads per KV head "
-                    f"({num_q_per_kv}) must be divisible by "
-                    "`--decode-context-parallel-size` "
-                    f"({decode_context_parallel_size}) for GQA/MQA."
+                    f"({num_q_per_kv}) must be divisible by the part of "
+                    f"`--decode-context-parallel-size` ({tp_dcp_size}) that "
+                    "spans the tensor parallel ranks for GQA/MQA."
                 )
 
         # torch_shm uses a single IPC queue to rank 0; DP>1 is

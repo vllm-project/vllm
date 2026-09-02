@@ -209,6 +209,77 @@ def test_kv_offloading_does_not_skip_dcp_interleave_validation():
         VllmConfig.validate_block_size(config)
 
 
+def _gqa_model_config_stub(num_attention_heads: int, num_kv_heads: int):
+    """ModelConfig stand-in exposing only what the DCP checks in
+    `verify_with_parallel_config` read, so no model download is needed."""
+    return SimpleNamespace(
+        model_arch_config=SimpleNamespace(
+            total_num_attention_heads=num_attention_heads
+        ),
+        use_mla=False,
+        multimodal_config=None,
+        get_total_num_kv_heads=lambda: num_kv_heads,
+    )
+
+
+@pytest.mark.parametrize(
+    ("num_attention_heads", "num_kv_heads", "tp", "pcp", "dcp"),
+    [
+        # DCP reuses TP ranks: TP replicates each KV head 16 // 8 = 2 times.
+        (32, 8, 16, 1, 2),
+        # DCP spans the PCP axis, which replicates the whole KV cache, even
+        # though TP alone leaves nothing to reclaim (tp <= num_kv_heads).
+        (32, 8, 4, 2, 2),
+        (32, 8, 8, 2, 2),
+        # MQA: DCP spans the full TP x PCP axis.
+        (32, 1, 4, 2, 8),
+        # Query heads per KV head (3) only have to divide the TP-spanning
+        # part of DCP (1 here), not the PCP-spanning part.
+        (6, 2, 2, 2, 2),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_gqa_dcp_accepted_when_tp_or_pcp_duplicates_kv(
+    num_attention_heads, num_kv_heads, tp, pcp, dcp
+):
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=tp,
+        prefill_context_parallel_size=pcp,
+        decode_context_parallel_size=dcp,
+    )
+    ModelConfig.verify_with_parallel_config(
+        _gqa_model_config_stub(num_attention_heads, num_kv_heads), parallel_config
+    )
+
+
+@pytest.mark.parametrize(
+    ("num_attention_heads", "num_kv_heads", "tp", "pcp", "dcp", "match"),
+    [
+        # Neither TP nor PCP duplicates the KV cache.
+        (32, 8, 4, 1, 2, "greater than the model's total number of KV heads"),
+        # The TP-spanning part of DCP exceeds the TP replication factor.
+        (32, 8, 16, 1, 4, "exceeds the maximum supported value"),
+        (32, 8, 4, 2, 8, "exceeds the maximum supported value"),
+        # Query heads per KV head (3) split unevenly across TP-spanning DCP.
+        (6, 2, 6, 1, 2, "must be divisible"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_gqa_dcp_rejected_without_reclaimable_kv_duplication(
+    num_attention_heads, num_kv_heads, tp, pcp, dcp, match
+):
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=tp,
+        prefill_context_parallel_size=pcp,
+        decode_context_parallel_size=dcp,
+    )
+    with pytest.raises(ValueError, match=match):
+        ModelConfig.verify_with_parallel_config(
+            _gqa_model_config_stub(num_attention_heads, num_kv_heads),
+            parallel_config,
+        )
+
+
 def test_compile_config_repr_succeeds():
     # setup: VllmBackend mutates the config object
     config = VllmConfig()
