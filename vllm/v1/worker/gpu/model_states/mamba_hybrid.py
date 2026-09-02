@@ -117,10 +117,38 @@ class MambaHybridModelState(DefaultModelState):
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
-            # Seed the running state block from the resumed/prefilled position.
-            self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
-            )
+            if new_req_data.num_computed_tokens == 0:
+                # No recurrent state exists before a fresh prefill.
+                state_idx = -1
+            else:
+                # Align-mode Mamba block tables may omit skipped prefix slots.
+                # This happens for connector-loaded prefixes: the table starts
+                # with the one transferred boundary state, followed by the
+                # speculative scratch blocks. Seed from the physical table
+                # column, rather than deriving a logical column from the
+                # globally computed token count.
+                assert self._mamba_spec is not None
+                block_counts = {
+                    len(new_req_data.block_ids[group_id])
+                    for group_id in self._mamba_group_ids
+                }
+                assert len(block_counts) == 1, (
+                    "all Mamba groups must have equal block-table lengths, got "
+                    f"{sorted(block_counts)}"
+                )
+                state_idx = (
+                    block_counts.pop() - 1 - self._mamba_spec.num_speculative_blocks
+                )
+                assert state_idx >= 0, (
+                    "resumed Mamba request has no physical boundary-state block: "
+                    f"computed_tokens={new_req_data.num_computed_tokens}, "
+                    f"state_idx={state_idx}"
+                )
+            self._mamba_state_idx_gpu[req_index].fill_(state_idx)
+
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        if self._align_mode:
+            self._get_mamba_group_info(kv_cache_config)
 
     def _get_mamba_group_info(
         self, kv_cache_config: KVCacheConfig
@@ -298,7 +326,9 @@ class MambaHybridModelState(DefaultModelState):
                     kv_cache_config, mamba_group_ids, block_tables
                 )
                 all_group_indices = ctx.compute_aligned_state_indices(
-                    input_batch.seq_lens, num_reqs
+                    self._mamba_state_idx_gpu,
+                    input_batch.idx_mapping,
+                    num_reqs,
                 )
                 for group_idx, builder in aligned_index_builders:
                     builder.mamba_aligned_state_indices = all_group_indices[group_idx]

@@ -3,13 +3,15 @@
 """Unit tests for MooncakeConnector HMA (Hybrid Memory Architecture) support.
 
 Covers sliding-window clipping, multi-group metadata shape, multi-group
-send trimming, and group-count invariant checking in _build_transfer_params.
+send trimming, and heterogeneous group mapping in _build_transfer_params.
 """
 
 import asyncio
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
@@ -17,9 +19,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     MooncakeConnector,
     MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
+    MooncakeConnectorWorker,
     MooncakeXferMetadata,
     SendBlockMeta,
     TransferRegion,
+)
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
 )
 
 from .test_mooncake_connector import FakeMooncakeWrapper, patch_worker_dependencies
@@ -155,6 +164,65 @@ def test_get_sw_clipped_blocks_noop_no_hma():
     block_ids = ([1, 2, 3],)
     clipped = scheduler.get_sw_clipped_blocks(block_ids)
     assert clipped == [[1, 2, 3]]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "mamba_cache_mode,expected_mamba_blocks",
+    [
+        ("none", [100]),
+        ("align", [100]),
+        ("all", [90, 91, 100]),
+    ],
+)
+def test_get_sw_clipped_blocks_drops_mamba_speculative_scratch(
+    mamba_cache_mode, expected_mamba_blocks
+):
+    """Only state-bearing Mamba blocks participate in a P/D hand-off."""
+    block_size = 16
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_both",
+        block_size=block_size,
+        mamba_cache_mode=mamba_cache_mode,
+    )
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attention"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=16,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((16,),),
+                    dtypes=(torch.float16,),
+                    mamba_cache_mode=mamba_cache_mode,
+                    num_speculative_blocks=7,
+                ),
+            ),
+        ],
+    )
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+
+    clipped = scheduler.get_sw_clipped_blocks(
+        ([1, 2, 3], [90, 91, 100, 101, 102, 103, 104, 105, 106, 107])
+    )
+
+    assert clipped == [[1, 2, 3], expected_mamba_blocks]
 
 
 # ---------------------------------------------------------------------------
@@ -303,93 +371,79 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-#  test_build_transfer_params_group_count_mismatch
+#  test_build_transfer_params_ignores_unmapped_groups
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-    ".mooncake_connector.TransferEngine",
-    FakeMooncakeWrapper,
-)
-async def test_build_transfer_params_group_count_mismatch(monkeypatch):
-    """_build_transfer_params reports an error when group counts differ."""
+async def test_build_transfer_params_ignores_unmapped_groups():
+    """Extra groups are allowed when registered layers do not map to them."""
 
-    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    block_size = 16
+    kv_cache_config = make_kv_cache_config(block_size=block_size, swa_enabled=True)
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+    worker.tp_rank = 0
+    worker.tp_size = 1
+    worker.dcp_size = 1
+    worker.block_size = block_size
+    worker.kv_cache_config = kv_cache_config
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.transfer_topo = SimpleNamespace(local_replicates_kv_cache=False)
+
+    block_len = 4096
+    transfer_id = "xfer-mismatch"
+    send_meta = SendBlockMeta(
+        p_req_id="p-mismatch",
+        transfer_id=transfer_id,
+        # Producer has 2 groups, but only group 0 is registered on this PP stage.
+        local_block_ids=[[10, 11], [20, 21]],
+        ready=asyncio.Event(),
     )
-    kv_cache_config = make_kv_cache_config(
-        block_size=vllm_config.cache_config.block_size, swa_enabled=True
+    xfer_meta = MooncakeXferMetadata(
+        remote_hostname="consumer-host",
+        remote_port=54321,
+        remote_tp_size=1,
+        remote_tp_rank=0,
+        req_blocks={"d-mismatch": (transfer_id, [[30, 31]])},
+        kv_caches_base_addr=[0x2000],
+        block_lens=[block_len],
+        kv_block_lens=[block_len],
+    )
+    local_regions = [
+        TransferRegion(
+            layer_name="model.layers.0.self_attn",
+            layer_index=0,
+            base_addr=0x1000,
+            block_len=block_len,
+            kv_block_len=block_len,
+        ),
+    ]
+    remote_regions = [
+        TransferRegion(
+            layer_name="model.layers.0.self_attn",
+            layer_index=0,
+            base_addr=0x2000,
+            block_len=block_len,
+            kv_block_len=block_len,
+        ),
+    ]
+
+    (
+        src_ptrs,
+        dst_ptrs,
+        lengths,
+        err_reqs,
+        err_msg,
+    ) = await worker._build_transfer_params(
+        [("d-mismatch", send_meta)], xfer_meta, local_regions, remote_regions
     )
 
-    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
-        connector = MooncakeConnector(
-            vllm_config, KVConnectorRole.WORKER, kv_cache_config
-        )
-        worker = connector.connector_worker
-
-        block_len = 4096
-        transfer_id = "xfer-mismatch"
-        send_meta = SendBlockMeta(
-            p_req_id="p-mismatch",
-            transfer_id=transfer_id,
-            # Producer has 2 groups
-            local_block_ids=[[10, 11], [20, 21]],
-            ready=asyncio.Event(),
-        )
-
-        # Consumer has only 1 group — group count mismatch
-        xfer_meta = MooncakeXferMetadata(
-            remote_hostname="consumer-host",
-            remote_port=54321,
-            remote_tp_size=1,
-            remote_tp_rank=0,
-            req_blocks={
-                "d-mismatch": (transfer_id, [[30, 31]]),
-            },
-            kv_caches_base_addr=[0x2000],
-            block_lens=[block_len],
-            kv_block_lens=[block_len],
-        )
-
-        local_regions = [
-            TransferRegion(
-                layer_name="model.layers.0.self_attn",
-                layer_index=0,
-                base_addr=0x1000,
-                block_len=block_len,
-                kv_block_len=block_len,
-            ),
-        ]
-        remote_regions = [
-            TransferRegion(
-                layer_name="model.layers.0.self_attn",
-                layer_index=0,
-                base_addr=0x2000,
-                block_len=block_len,
-                kv_block_len=block_len,
-            ),
-        ]
-
-        ready_reqs = [("d-mismatch", send_meta)]
-        (
-            src_ptrs,
-            dst_ptrs,
-            lengths,
-            err_reqs,
-            err_msg,
-        ) = await worker._build_transfer_params(
-            ready_reqs, xfer_meta, local_regions, remote_regions
-        )
-
-        # Mismatched req is reported via err_reqs/err_msg with no transfers built.
-        assert err_reqs == ["d-mismatch"]
-        assert err_msg == "KV group count mismatch"
-        assert src_ptrs == []
-        assert dst_ptrs == []
-        assert lengths == []
-
-        worker.shutdown()
+    assert err_reqs == []
+    assert err_msg is None
+    assert src_ptrs == [0x1000 + 10 * block_len]
+    assert dst_ptrs == [0x2000 + 30 * block_len]
+    assert lengths == [2 * block_len]
 
 
 # ---------------------------------------------------------------------------

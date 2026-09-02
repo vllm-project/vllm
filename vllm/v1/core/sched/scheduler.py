@@ -1133,6 +1133,7 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.pop_request()
                 if load_kv_async:
+                    assert self.connector is not None
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
@@ -1152,9 +1153,13 @@ class Scheduler(SchedulerInterface):
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
                     self._inflight_prefills.add(request)
-                    if self.needs_kv_cache_zeroing:
-                        # Skip zeroing of the blocks the async load will
-                        # overwrite; the zeroing could race the write.
+                    if (
+                        self.needs_kv_cache_zeroing
+                        and not self.connector.requires_block_zeroing_before_async_load
+                    ):
+                        # Skip zeroing only when the connector overwrites every
+                        # byte that the model may consume. Partial-page loaders
+                        # keep normal zeroing ordered before start_load_kv().
                         self._skip_zero_block_ids.update(
                             self.kv_cache_manager.get_zeroing_block_ids_in_range(
                                 request.request_id,
@@ -2335,6 +2340,13 @@ class Scheduler(SchedulerInterface):
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
                 # The request may have been finished. Skip.
+                continue
+
+            if request.disable_speculative_decoding:
+                # The worker may still return a fixed-width proposal row for a
+                # mixed batch. Do not expose those tokens to scheduling when
+                # the request's external prefix lacks drafter state.
+                request.spec_token_ids = []
                 continue
 
             if request.is_prefill_chunk:

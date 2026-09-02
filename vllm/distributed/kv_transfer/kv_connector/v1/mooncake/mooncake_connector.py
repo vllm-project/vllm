@@ -8,6 +8,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
+from math import prod
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -45,11 +46,12 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
-from vllm.utils.torch_utils import is_non_overlapping_and_dense
+from vllm.utils.torch_utils import get_dtype_size, is_non_overlapping_and_dense
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -93,6 +95,168 @@ class TransferRegion:
     block_len: int
     kv_block_len: int
     group_index: int = 0
+    mamba_layout: "MambaRegionLayout | None" = None
+
+
+class MambaRegionLayout(msgspec.Struct):
+    """Byte layout of the recurrent states packed into one Mamba page.
+
+    KDA speculative decode extends the convolution window from ``kernel-1``
+    rows to ``kernel-1+num_speculative_tokens`` rows.  The total HMA page is
+    padded to the same size on P and D, but that extension moves every state
+    following the convolution state.  Carry the real state geometry so the
+    sender can repack a non-speculative P page into the speculative D layout.
+    """
+
+    state_sizes: tuple[int, ...]
+    conv_dim: int
+    conv_rows: int
+    conv_element_size: int
+    conv_dim_first: bool
+
+
+def _validate_hybrid_dcp_pd_topology(
+    *,
+    producer_tp_size: int,
+    producer_dcp_size: int,
+    producer_use_mla: bool,
+    producer_has_mamba: bool,
+    consumer_tp_size: int,
+    consumer_dcp_size: int,
+    consumer_use_mla: bool,
+    consumer_has_mamba: bool,
+) -> str | None:
+    """Validate the first supported direct-PD hybrid DCP topology.
+
+    A Kimi-K3 producer keeps a full MLA sequence on every TP rank while its
+    KDA/Mamba state is TP-sharded.  The decoder fully reuses those same TP
+    ranks as DCP ranks.  Pairing equal TP ranks therefore gives each decoder
+    rank both the right recurrent-state shard and a producer MLA replica from
+    which its interleaved sequence blocks can be selected.
+
+    Other layouts need per-group rank fan-in/fan-out and are rejected instead
+    of silently applying attention rank mapping to recurrent state.
+    """
+    if producer_dcp_size == 1 and consumer_dcp_size == 1:
+        return None
+    if producer_tp_size != consumer_tp_size:
+        return (
+            "Mooncake hybrid DCP currently requires matching P/D TP sizes: "
+            f"producer_tp={producer_tp_size}, consumer_tp={consumer_tp_size}."
+        )
+    if producer_dcp_size != 1:
+        return (
+            "Mooncake hybrid DCP currently requires DCP=1 on the producer: "
+            f"producer_dcp={producer_dcp_size}."
+        )
+    if consumer_dcp_size != consumer_tp_size:
+        return (
+            "Mooncake hybrid DCP currently requires the decoder DCP group to "
+            "span its full TP group: "
+            f"consumer_dcp={consumer_dcp_size}, consumer_tp={consumer_tp_size}."
+        )
+    if not (
+        producer_use_mla
+        and consumer_use_mla
+        and producer_has_mamba
+        and consumer_has_mamba
+    ):
+        return (
+            "Mooncake direct DCP currently supports only hybrid MLA+Mamba "
+            "models on both producer and consumer."
+        )
+    return None
+
+
+def _build_hybrid_dcp_attention_token_plan(
+    *,
+    producer_block_ids: list[int],
+    consumer_block_ids: list[int],
+    block_size: int,
+    consumer_physical_blocks_per_logical_kv_block: int,
+    consumer_dcp_rank: int,
+    consumer_dcp_size: int,
+    consumer_num_computed_blocks: int,
+    consumer_num_external_tokens: int | None = None,
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Build token locations for a replicated-P to sharded-D attention copy.
+
+    A native-DCP attention page on each consumer rank stores every
+    ``consumer_dcp_size``-th token from the corresponding virtual page.  The
+    producer stores that virtual page as consecutive ordinary pages.  Return
+    ``(block_id, token_offset)`` pairs suitable for token-granular RDMA copies.
+
+    ``consumer_block_ids`` contains only the locally missing virtual-page
+    suffix. ``consumer_num_computed_blocks`` therefore advances the producer
+    by that many complete virtual pages.
+    """
+    if not consumer_block_ids:
+        return [], []
+    if block_size <= 0:
+        raise ValueError(f"Attention block size must be positive, got {block_size}.")
+    if consumer_physical_blocks_per_logical_kv_block <= 0:
+        raise ValueError(
+            "Physical blocks per logical KV block must be positive, got "
+            f"{consumer_physical_blocks_per_logical_kv_block}."
+        )
+    if consumer_dcp_size <= 1:
+        raise ValueError("Hybrid DCP token scatter requires consumer DCP > 1.")
+    if not 0 <= consumer_dcp_rank < consumer_dcp_size:
+        raise ValueError(
+            f"Invalid consumer DCP rank {consumer_dcp_rank} for "
+            f"DCP size {consumer_dcp_size}."
+        )
+    if consumer_num_computed_blocks < 0:
+        raise ValueError(
+            "The number of locally computed DCP blocks cannot be negative."
+        )
+
+    producer_page_offset = (
+        consumer_num_computed_blocks
+        * consumer_physical_blocks_per_logical_kv_block
+        * consumer_dcp_size
+    )
+    producer_pages = producer_block_ids[producer_page_offset:]
+    if not producer_pages:
+        raise ValueError(
+            "Producer attention pages do not cover the decoder DCP suffix: "
+            f"producer_pages={len(producer_block_ids)}, "
+            f"producer_page_offset={producer_page_offset}."
+        )
+
+    source_capacity = len(producer_pages) * block_size
+    if consumer_num_external_tokens is not None:
+        if not 0 <= consumer_num_external_tokens <= source_capacity:
+            raise ValueError(
+                "The external-token count does not fit in the producer "
+                "attention suffix: "
+                f"external_tokens={consumer_num_external_tokens}, "
+                f"source_capacity={source_capacity}."
+            )
+        source_capacity = consumer_num_external_tokens
+    owned_offsets = range(consumer_dcp_rank, source_capacity, consumer_dcp_size)
+    num_owned_tokens = len(owned_offsets)
+    destination_capacity = len(consumer_block_ids) * block_size
+    if num_owned_tokens > destination_capacity:
+        raise ValueError(
+            "Producer attention pages exceed the decoder DCP suffix capacity: "
+            f"owned_tokens={num_owned_tokens}, "
+            f"destination_capacity={destination_capacity}, "
+            f"consumer_dcp_rank={consumer_dcp_rank}."
+        )
+
+    producer_locations = [
+        (producer_pages[offset // block_size], offset % block_size)
+        for offset in owned_offsets
+    ]
+    consumer_locations = [
+        (
+            consumer_block_ids[local_offset // block_size],
+            local_offset % block_size,
+        )
+        for local_offset in range(num_owned_tokens)
+    ]
+    return producer_locations, consumer_locations
 
 
 def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
@@ -123,6 +287,7 @@ def _expand_transfer_regions(
     layer_names: list[str],
     layer_indices: list[int],
     group_indices: list[int] | None = None,
+    mamba_layouts: list[MambaRegionLayout | None] | None = None,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert (
@@ -144,6 +309,13 @@ def _expand_transfer_regions(
         "Mooncake transfer regions require matching group metadata lengths, "
         f"got group_indices={len(group_indices)}, layer_names={len(layer_names)}."
     )
+    if mamba_layouts is None:
+        mamba_layouts = [None] * len(layer_names)
+    assert len(mamba_layouts) == len(layer_names), (
+        "Mooncake transfer regions require matching Mamba-layout metadata "
+        f"lengths, got mamba_layouts={len(mamba_layouts)}, "
+        f"layer_names={len(layer_names)}."
+    )
     regions: list[TransferRegion] = []
     for (
         base_addr,
@@ -152,6 +324,7 @@ def _expand_transfer_regions(
         layer_name,
         layer_index,
         group_index,
+        mamba_layout,
     ) in zip(
         base_addrs,
         block_lens,
@@ -159,6 +332,7 @@ def _expand_transfer_regions(
         layer_names,
         layer_indices,
         group_indices,
+        mamba_layouts,
     ):
         regions.append(
             TransferRegion(
@@ -168,6 +342,7 @@ def _expand_transfer_regions(
                 block_len=block_len,
                 kv_block_len=kv_block_len,
                 group_index=group_index,
+                mamba_layout=mamba_layout,
             )
         )
     return regions
@@ -330,17 +505,6 @@ def _align_transfer_regions(
                     f"{remote_region.layer_index}."
                 ),
             )
-        if local_region.group_index != remote_region.group_index:
-            return (
-                [],
-                [],
-                (
-                    "Mooncake registered group index mismatch for "
-                    f"{local_region.layer_name}: producer="
-                    f"{local_region.group_index}, consumer="
-                    f"{remote_region.group_index}."
-                ),
-            )
         aligned_local.append(local_region)
         aligned_remote.append(remote_region)
 
@@ -369,6 +533,18 @@ class MooncakeXferMetadata(
     registered_layer_names: list[str] = msgspec.field(default_factory=list)
     registered_layer_indices: list[int] = msgspec.field(default_factory=list)
     registered_group_indices: list[int] = msgspec.field(default_factory=list)
+    registered_mamba_layouts: list[MambaRegionLayout | None] = msgspec.field(
+        default_factory=list
+    )
+    remote_dcp_size: int = 1
+    remote_block_size: int = 0
+    remote_physical_blocks_per_logical_kv_block: int = 1
+    remote_use_mla: bool = False
+    remote_has_mamba: bool = False
+    local_num_computed_blocks: dict[ReqId, tuple[int, ...]] = msgspec.field(
+        default_factory=dict
+    )
+    local_num_external_tokens: dict[ReqId, int] = msgspec.field(default_factory=dict)
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -397,6 +573,8 @@ class PullReqMeta:
     local_block_ids: list[list[int]]
     remote_engine_id: EngineId
     remote_bootstrap_addr: str
+    local_num_computed_blocks: tuple[int, ...] = ()
+    local_num_external_tokens: int = 0
     # Set expire time to avoid infinitely sending requests.
     expire_time: float = float("inf")
     # Designed for one D pairing to multiple P
@@ -428,6 +606,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         request_id: ReqId,
         local_block_ids: list[list[int]],
         kv_transfer_params: dict[str, Any],
+        local_num_computed_blocks: tuple[int, ...] = (),
+        local_num_external_tokens: int = 0,
         load_remote_cache: bool = True,
     ):
         transfer_id = kv_transfer_params["transfer_id"]
@@ -439,6 +619,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
                 remote_engine_id=remote_engine_id,
                 remote_bootstrap_addr=kv_transfer_params["remote_bootstrap_addr"],
                 transfer_id=transfer_id,
+                local_num_computed_blocks=local_num_computed_blocks,
+                local_num_external_tokens=local_num_external_tokens,
             )
         else:
             self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
@@ -470,6 +652,19 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker = MooncakeConnectorWorker(
                 vllm_config, self.engine_id, kv_cache_config
             )
+
+    @property
+    def requires_block_zeroing_before_async_load(self) -> bool:
+        # Native DCP scatters externally loaded tokens into physical attention
+        # pages while recurrent state shares the same logical HMA allocation.
+        # Page padding is intentionally not transferred, so recycled blocks
+        # must be cleared before the receiver starts writing.
+        dcp_size = self._vllm_config.parallel_config.decode_context_parallel_size or 1
+        return (
+            self._kv_transfer_config.is_kv_consumer
+            and dcp_size > 1
+            and self._kv_cache_config.has_mamba_layers
+        )
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
@@ -627,7 +822,9 @@ class MooncakeConnectorScheduler:
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[ReqId, tuple[Request, list[list[int]]]] = {}
+        self._reqs_need_recv: dict[
+            ReqId, tuple[Request, list[list[int]], tuple[int, ...], int]
+        ] = {}
         self._reqs_need_send: dict[ReqId, tuple[Request, list[list[int]]]] = {}
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
@@ -646,18 +843,49 @@ class MooncakeConnectorScheduler:
             cdiv(n_tokens, block_size) + 1 if n_tokens else 0
             for n_tokens, block_size in sw_sizes_tokens
         ]
+        # Mamba managers append one scratch state block per speculative token.
+        # These blocks belong to the local draft decode and must never be part
+        # of a P/D state hand-off.  Keep this indexed by the original cache
+        # group id: unlike connectors that exchange transfer_groups only,
+        # direct Mooncake preserves all group positions so heterogeneous P/D
+        # layouts can be aligned later by layer metadata.
+        self._ssm_spec_blocks = [
+            g.kv_cache_spec.num_speculative_blocks
+            if isinstance(g.kv_cache_spec, MambaSpec)
+            else None
+            for g in kv_cache_config.kv_cache_groups
+        ]
+        # Only "all" mode keeps a recurrent state for every block position.
+        # "none" and "align" keep one running state after scratch removal.
+        self._ssm_state_slots_are_positional = (
+            vllm_config.cache_config.mamba_cache_mode == "all"
+        )
 
     def get_sw_clipped_blocks(
         self,
         block_ids: tuple[list[int], ...] | list[list[int]],
     ) -> list[list[int]]:
-        """Clip per-group block IDs to sliding window size."""
+        """Clip per-group block IDs to externally transferable state.
+
+        Sliding-window groups keep only their in-window tail. Mamba groups
+        drop speculative scratch slots; single-state modes additionally keep
+        only the current running state. Group positions are preserved.
+        """
         if len(block_ids) == 0 or not self._is_hma_required:
             return list(block_ids)
-        return [
-            blocks[-self.blocks_per_sw[i] :] if self.blocks_per_sw[i] > 0 else blocks
-            for i, blocks in enumerate(block_ids)
-        ]
+        clipped: list[list[int]] = []
+        for i, blocks in enumerate(block_ids):
+            if n_sw := self.blocks_per_sw[i]:
+                blocks = blocks[-n_sw:]
+            elif blocks and (n_spec_blocks := self._ssm_spec_blocks[i]) is not None:
+                if n_spec := min(n_spec_blocks, len(blocks) - 1):
+                    blocks = blocks[:-n_spec]
+                if not self._ssm_state_slots_are_positional:
+                    # Never empty: downstream treats an empty group as a full
+                    # prefix hit, rather than a recurrent-state transfer.
+                    blocks = blocks[-1:]
+            clipped.append(blocks)
+        return clipped
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
@@ -755,6 +983,23 @@ class MooncakeConnectorScheduler:
 
         if params.get("do_remote_prefill"):
             assert not self.is_kv_producer
+            spec_config = self.vllm_config.speculative_config
+            if (
+                num_external_tokens > 0
+                and spec_config is not None
+                and spec_config.use_dspark()
+            ):
+                # Direct Mooncake transfers target KV/recurrent state, but the
+                # producer does not run DSpark and therefore has no draft
+                # context KV to send. DSpark would otherwise attend to an
+                # uninitialized prefix immediately after the hand-off.
+                request.disable_speculative_decoding = True
+                logger.warning_once(
+                    "Disabling DSpark for requests with a Mooncake-loaded "
+                    "prefix because direct Mooncake does not yet bootstrap "
+                    "the DSpark context cache. Target-model decoding remains "
+                    "enabled."
+                )
             if all(
                 p in params
                 for p in ("remote_engine_id", "remote_bootstrap_addr", "transfer_id")
@@ -768,8 +1013,20 @@ class MooncakeConnectorScheduler:
                     else ()
                 )
                 local_block_ids = self.get_sw_clipped_blocks(unhashed_block_ids)
+                local_num_computed_blocks = tuple(
+                    sum(
+                        block.block_hash is not None and not block.is_null
+                        for block in group
+                    )
+                    for group in blocks.blocks
+                )
                 # Get unhashed blocks to pull from remote.
-                self._reqs_need_recv[request.request_id] = (request, local_block_ids)
+                self._reqs_need_recv[request.request_id] = (
+                    request,
+                    local_block_ids,
+                    local_num_computed_blocks,
+                    num_external_tokens,
+                )
             else:
                 logger.warning(
                     "Got invalid KVTransferParams: %s. This "
@@ -795,12 +1052,19 @@ class MooncakeConnectorScheduler:
 
         # Loop through scheduled reqs and convert to PullReqMeta.
         if not self.is_kv_producer:
-            for req_id, (req, block_ids) in self._reqs_need_recv.items():
+            for req_id, (
+                req,
+                block_ids,
+                local_num_computed_blocks,
+                local_num_external_tokens,
+            ) in self._reqs_need_recv.items():
                 assert req.kv_transfer_params is not None
                 meta.add_new_req(
                     request_id=req_id,
                     local_block_ids=block_ids,
                     kv_transfer_params=req.kv_transfer_params,
+                    local_num_computed_blocks=local_num_computed_blocks,
+                    local_num_external_tokens=local_num_external_tokens,
                 )
             self._reqs_need_recv.clear()
 
@@ -848,7 +1112,7 @@ class MooncakeConnectorScheduler:
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
             assert not self.is_kv_producer
-            self._reqs_need_recv[request.request_id] = (request, [])
+            self._reqs_need_recv[request.request_id] = (request, [], (), 0)
             params["do_remote_prefill"] = False
             return False, None
 
@@ -943,11 +1207,13 @@ class MooncakeConnectorWorker:
         self.registered_layer_names: list[str] = []
         self.registered_layer_indices: list[int] = []
         self.registered_group_indices: list[int] = []
+        self.registered_mamba_layouts: list[MambaRegionLayout | None] = []
         self.seen_base_addresses: list[int] = []
 
         assert (parallel_config := vllm_config.parallel_config)
         dp_rank = parallel_config.data_parallel_index
         dp_local_rank = parallel_config.data_parallel_rank_local
+        self.dcp_size = parallel_config.decode_context_parallel_size or 1
         self.dp_rank = dp_local_rank if parallel_config.local_engines_only else dp_rank
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.pp_rank = get_pp_group().rank_in_group
@@ -1003,6 +1269,20 @@ class MooncakeConnectorWorker:
         self.cache_config = vllm_config.cache_config
         self.kv_cache_config = kv_cache_config
         self.use_mla = self.model_config.use_mla
+        self.has_mamba = kv_cache_config.has_mamba_layers
+        if self.dcp_size > 1 and not (
+            self.is_kv_consumer
+            and self.use_mla
+            and self.has_mamba
+            and self.dcp_size == self.tp_size
+        ):
+            raise ValueError(
+                "Mooncake direct DCP currently supports only a hybrid "
+                "MLA+Mamba consumer whose DCP size equals its TP size. "
+                f"Got role={kv_transfer_config.kv_role}, tp={self.tp_size}, "
+                f"dcp={self.dcp_size}, use_mla={self.use_mla}, "
+                f"has_mamba={self.has_mamba}."
+            )
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
 
@@ -1013,6 +1293,9 @@ class MooncakeConnectorWorker:
         )
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
+        self._dcp_size: dict[EngineId, int] = {self.engine_id: self.dcp_size}
+        self._remote_use_mla: dict[EngineId, bool] = {self.engine_id: self.use_mla}
+        self._remote_has_mamba: dict[EngineId, bool] = {self.engine_id: self.has_mamba}
         self._layer_specs: dict[str, KVCacheSpec] = {}
         for group in kv_cache_config.kv_cache_groups:
             group_spec = group.kv_cache_spec
@@ -1035,6 +1318,7 @@ class MooncakeConnectorWorker:
             is_mamba=kv_cache_config.has_mamba_layers,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
+            dcp_size=self.dcp_size,
         )
 
         self.async_zmq_ctx = zmq.asyncio.Context()
@@ -1091,6 +1375,9 @@ class MooncakeConnectorWorker:
             tp_rank=self.tp_rank,
             pp_rank=self.pp_rank,
             addr=worker_addr,
+            dcp_size=self.dcp_size,
+            use_mla=self.use_mla,
+            has_mamba=self.has_mamba,
         )
         while True:
             try:
@@ -1176,7 +1463,38 @@ class MooncakeConnectorWorker:
         self, identity: bytes, sock: zmq.asyncio.Socket, meta: MooncakeXferMetadata
     ):
         pending_reqs: dict[ReqId, SendBlockMeta] = {}
-        remote_tp_ranks = self.transfer_topo.handshake_target_ranks(meta.remote_tp_size)
+        uses_dcp = self.dcp_size > 1 or meta.remote_dcp_size > 1
+        if uses_dcp:
+            topology_err = _validate_hybrid_dcp_pd_topology(
+                producer_tp_size=self.tp_size,
+                producer_dcp_size=self.dcp_size,
+                producer_use_mla=self.use_mla,
+                producer_has_mamba=self.has_mamba,
+                consumer_tp_size=meta.remote_tp_size,
+                consumer_dcp_size=meta.remote_dcp_size,
+                consumer_use_mla=meta.remote_use_mla,
+                consumer_has_mamba=meta.remote_has_mamba,
+            )
+            if topology_err is None and meta.remote_block_size != self.block_size:
+                topology_err = (
+                    "Mooncake hybrid DCP requires matching physical block sizes: "
+                    f"producer={self.block_size}, consumer={meta.remote_block_size}."
+                )
+            if topology_err is not None:
+                logger.error(topology_err)
+                response = MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.ERROR,
+                    err_msg=topology_err,
+                )
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+                return
+            # Equal-rank pairing is deliberate: MLA is replicated on P, while
+            # the KDA/Mamba state is TP-sharded and must stay on the same rank.
+            remote_tp_ranks = [self.tp_rank]
+        else:
+            remote_tp_ranks = self.transfer_topo.handshake_target_ranks(
+                meta.remote_tp_size
+            )
         if meta.remote_tp_rank not in remote_tp_ranks:
             # This D worker does not pair with the P worker.
             msg = (
@@ -1198,6 +1516,7 @@ class MooncakeConnectorWorker:
             self.registered_layer_names,
             self.registered_layer_indices,
             self.registered_group_indices,
+            self.registered_mamba_layouts,
         )
         remote_regions = self._get_transfer_regions(
             meta.kv_caches_base_addr,
@@ -1206,6 +1525,7 @@ class MooncakeConnectorWorker:
             meta.registered_layer_names,
             meta.registered_layer_indices,
             meta.registered_group_indices,
+            meta.registered_mamba_layouts,
         )
         local_regions, remote_regions, align_err = _align_transfer_regions(
             local_regions, remote_regions
@@ -1299,48 +1619,101 @@ class MooncakeConnectorWorker:
                         "Request %s expired before sending on P side.", d_req_id
                     )
 
-            (
-                src_ptrs,
-                dst_ptrs,
-                lengths,
-                err_reqs,
-                err_msg,
-            ) = await self._build_transfer_params(
+            if ready_reqs:
+                # Request completion is observed by the scheduler thread, but
+                # Mooncake reads cache memory from this background thread,
+                # outside PyTorch's stream dependency tracking. Publish all
+                # model-stream writes before either staging or direct RDMA.
+                torch.accelerator.synchronize(self.device_id)
+
+            staging_capacity = self._get_mamba_staging_capacity(
                 ready_reqs,
                 meta,
                 local_regions,
                 remote_regions,
             )
-            err_req_set = set(err_reqs)
-            ok_ready_reqs = [
-                (d_req_id, send_meta)
-                for d_req_id, send_meta in ready_reqs
-                if d_req_id not in err_req_set
-            ]
+            mamba_staging: torch.Tensor | None = None
+            staging_addr: int | None = None
+            if staging_capacity:
+                current_platform.set_device(self.device_id)
+                mamba_staging = torch.empty(
+                    staging_capacity,
+                    dtype=torch.uint8,
+                    device=torch.device("cuda", self.device_id),
+                )
+                staging_storage = mamba_staging.untyped_storage()
+                staging_addr = staging_storage.data_ptr()
+                ret_value = self.engine.batch_register_memory(
+                    [staging_addr], [staging_storage.nbytes()]
+                )
+                if ret_value != 0:
+                    raise RuntimeError(
+                        "Mooncake failed to register the KDA repack staging "
+                        f"buffer (ret={ret_value})."
+                    )
 
-            if src_ptrs:
-                remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
-                ret_value = await self.sender_loop.run_in_executor(
-                    self._sender_executor,
-                    self._send_blocks,
-                    remote_session,
+            try:
+                (
                     src_ptrs,
                     dst_ptrs,
                     lengths,
+                    err_reqs,
+                    err_msg,
+                ) = await self._build_transfer_params(
+                    ready_reqs,
+                    meta,
+                    local_regions,
+                    remote_regions,
+                    mamba_staging=mamba_staging,
                 )
+                if mamba_staging is not None:
+                    # The transfer engine reads the staging allocation outside
+                    # PyTorch's stream model. Publish all GPU repack writes
+                    # before handing its addresses to Mooncake.
+                    torch.cuda.current_stream(self.device_id).synchronize()
 
-                if ret_value != 0:
-                    transfer_err_msg = f"Mooncake transfer engine returned {ret_value}"
-                    err_msg = (
-                        transfer_err_msg
-                        if err_msg is None
-                        else f"{err_msg}; {transfer_err_msg}"
+                err_req_set = set(err_reqs)
+                ok_ready_reqs = [
+                    (d_req_id, send_meta)
+                    for d_req_id, send_meta in ready_reqs
+                    if d_req_id not in err_req_set
+                ]
+
+                if src_ptrs:
+                    remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
+                    ret_value = await self.sender_loop.run_in_executor(
+                        self._sender_executor,
+                        self._send_blocks,
+                        remote_session,
+                        src_ptrs,
+                        dst_ptrs,
+                        lengths,
                     )
-                    err_reqs = list(err_reqs)
-                    for d_req_id, _ in ok_ready_reqs:
-                        err_reqs.append(d_req_id)
-                        err_req_set.add(d_req_id)
-                    ok_ready_reqs = []
+
+                    if ret_value != 0:
+                        transfer_err_msg = (
+                            f"Mooncake transfer engine returned {ret_value}"
+                        )
+                        err_msg = (
+                            transfer_err_msg
+                            if err_msg is None
+                            else f"{err_msg}; {transfer_err_msg}"
+                        )
+                        err_reqs = list(err_reqs)
+                        for d_req_id, _ in ok_ready_reqs:
+                            err_reqs.append(d_req_id)
+                            err_req_set.add(d_req_id)
+                        ok_ready_reqs = []
+            finally:
+                if staging_addr is not None:
+                    ret_value = self.engine.batch_unregister_memory([staging_addr])
+                    if ret_value != 0:
+                        logger.warning(
+                            "Mooncake failed to unregister the KDA repack "
+                            "staging buffer at %d (ret=%d).",
+                            staging_addr,
+                            ret_value,
+                        )
 
             for d_req_id, send_meta in ready_reqs:
                 send_meta.sending -= 1
@@ -1378,24 +1751,29 @@ class MooncakeConnectorWorker:
         )
 
     def _logical_to_kernel_block_ids(
-        self, block_ids: list[list[int]]
+        self,
+        block_ids: list[list[int]],
+        physical_blocks_per_logical_kv_block: int | None = None,
     ) -> list[list[int]]:
         # For example, if a 544-token logical block is served by 32-token
         # FA kernel blocks, FA block id k expands to [17k, ..., 17k + 16],
         # while the matching Mamba/GDN state block remains k. Only attention
         # groups need logical block ids expanded to kernel block ids; Mamba/GDN
         # state block ids stay in the logical/page-id space.
-        if self._physical_blocks_per_logical_kv_block == 1:
+        expansion = (
+            self._physical_blocks_per_logical_kv_block
+            if physical_blocks_per_logical_kv_block is None
+            else physical_blocks_per_logical_kv_block
+        )
+        if expansion == 1:
             return block_ids
 
-        block_arange = np.arange(self._physical_blocks_per_logical_kv_block).reshape(
-            1, -1
-        )
+        block_arange = np.arange(expansion).reshape(1, -1)
         group_specs = self.kv_cache_config.kv_cache_groups
         return [
             BlockTable.map_to_kernel_blocks(
                 np.array(group),
-                self._physical_blocks_per_logical_kv_block,
+                expansion,
                 block_arange,
             ).tolist()
             if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
@@ -1403,19 +1781,197 @@ class MooncakeConnectorWorker:
             for i, group in enumerate(block_ids)
         ]
 
+    def _logical_to_kernel_group_block_ids(
+        self,
+        block_ids: list[int],
+        group_index: int,
+        physical_blocks_per_logical_kv_block: int | None = None,
+    ) -> list[int]:
+        """Expand one attention group's logical blocks into kernel blocks."""
+        expansion = (
+            self._physical_blocks_per_logical_kv_block
+            if physical_blocks_per_logical_kv_block is None
+            else physical_blocks_per_logical_kv_block
+        )
+        if (
+            not block_ids
+            or expansion == 1
+            or isinstance(
+                self.kv_cache_config.kv_cache_groups[group_index].kv_cache_spec,
+                MambaSpec,
+            )
+        ):
+            return block_ids
+
+        return BlockTable.map_to_kernel_blocks(
+            np.array(block_ids),
+            expansion,
+            np.arange(expansion).reshape(1, -1),
+        ).tolist()
+
+    @staticmethod
+    def _mamba_region_needs_repack(
+        local_region: TransferRegion,
+        remote_region: TransferRegion,
+    ) -> bool:
+        return (
+            local_region.mamba_layout is not None
+            or remote_region.mamba_layout is not None
+        ) and local_region.mamba_layout != remote_region.mamba_layout
+
+    def _get_mamba_staging_capacity(
+        self,
+        ready_reqs: list[tuple[ReqId, SendBlockMeta]],
+        agent_meta: MooncakeXferMetadata,
+        local_regions: list[TransferRegion],
+        remote_regions: list[TransferRegion],
+    ) -> int:
+        """Return the byte-exact staging capacity for asymmetric KDA pages."""
+        capacity = 0
+        for d_req_id, send_meta in ready_reqs:
+            remote_groups = agent_meta.req_blocks[d_req_id][1]
+            for local_region, remote_region in zip(local_regions, remote_regions):
+                if not self._mamba_region_needs_repack(local_region, remote_region):
+                    continue
+                local_group = send_meta.local_block_ids[local_region.group_index]
+                remote_group = remote_groups[remote_region.group_index]
+                capacity += (
+                    min(len(local_group), len(remote_group))
+                    * remote_region.kv_block_len
+                )
+        return capacity
+
+    def _stage_mamba_page(
+        self,
+        *,
+        staging_page: torch.Tensor,
+        layer_name: str,
+        local_block_id: int,
+        local_layout: MambaRegionLayout,
+        remote_layout: MambaRegionLayout,
+    ) -> None:
+        """Repack one non-speculative KDA page into a speculative layout.
+
+        KDA stores convolution state as either ``[projection_dim, history_rows]``
+        or ``[history_rows, projection_dim]``.  DSpark extends only
+        ``history_rows``; a flat memcpy would place the recurrent state at the
+        old offset and, for dim-first layout, use the wrong row stride.  Build
+        the exact destination page on GPU, preserving the compact P history in
+        the leading rows and relocating subsequent states.
+        """
+        if local_layout.conv_dim != remote_layout.conv_dim:
+            raise ValueError(
+                "Mooncake KDA page repacking requires matching convolution "
+                f"dimensions for {layer_name}: producer={local_layout.conv_dim}, "
+                f"consumer={remote_layout.conv_dim}."
+            )
+        if local_layout.conv_element_size != remote_layout.conv_element_size:
+            raise ValueError(
+                "Mooncake KDA page repacking requires matching convolution "
+                f"dtypes for {layer_name}."
+            )
+        if local_layout.conv_dim_first != remote_layout.conv_dim_first:
+            raise ValueError(
+                "Mooncake KDA page repacking requires matching convolution "
+                f"layouts for {layer_name}."
+            )
+        if local_layout.conv_rows > remote_layout.conv_rows:
+            raise ValueError(
+                "Mooncake cannot contract a producer KDA convolution window: "
+                f"layer={layer_name}, producer_rows={local_layout.conv_rows}, "
+                f"consumer_rows={remote_layout.conv_rows}."
+            )
+        if len(local_layout.state_sizes) > len(remote_layout.state_sizes):
+            raise ValueError(
+                "Mooncake consumer KDA page has fewer states than the producer: "
+                f"layer={layer_name}, producer={len(local_layout.state_sizes)}, "
+                f"consumer={len(remote_layout.state_sizes)}."
+            )
+
+        cache = self.device_kv_caches[layer_name]
+        source_page = cache[local_block_id].view(torch.uint8).reshape(-1)
+        local_content_size = sum(local_layout.state_sizes)
+        remote_content_size = sum(remote_layout.state_sizes)
+        if source_page.numel() < local_content_size:
+            raise ValueError(
+                f"Mooncake source KDA page for {layer_name} is too small: "
+                f"page={source_page.numel()}, content={local_content_size}."
+            )
+        if staging_page.numel() < remote_content_size:
+            raise ValueError(
+                f"Mooncake staging KDA page for {layer_name} is too small: "
+                f"page={staging_page.numel()}, content={remote_content_size}."
+            )
+
+        staging_page.zero_()
+        elem_size = local_layout.conv_element_size
+        if local_layout.conv_dim_first:
+            source_conv = source_page[: local_layout.state_sizes[0]].view(
+                local_layout.conv_dim,
+                local_layout.conv_rows * elem_size,
+            )
+            staged_conv = staging_page[: remote_layout.state_sizes[0]].view(
+                remote_layout.conv_dim,
+                remote_layout.conv_rows * elem_size,
+            )
+            staged_conv[:, : local_layout.conv_rows * elem_size].copy_(source_conv)
+        else:
+            source_conv = source_page[: local_layout.state_sizes[0]].view(
+                local_layout.conv_rows,
+                local_layout.conv_dim * elem_size,
+            )
+            staged_conv = staging_page[: remote_layout.state_sizes[0]].view(
+                remote_layout.conv_rows,
+                remote_layout.conv_dim * elem_size,
+            )
+            staged_conv[: local_layout.conv_rows].copy_(source_conv)
+
+        source_offset = local_layout.state_sizes[0]
+        staged_offset = remote_layout.state_sizes[0]
+        for state_index in range(1, len(local_layout.state_sizes)):
+            source_size = local_layout.state_sizes[state_index]
+            remote_size = remote_layout.state_sizes[state_index]
+            if source_size != remote_size:
+                raise ValueError(
+                    "Mooncake KDA non-convolution state size mismatch: "
+                    f"layer={layer_name}, state={state_index}, "
+                    f"producer={source_size}, consumer={remote_size}."
+                )
+            staging_page[staged_offset : staged_offset + remote_size].copy_(
+                source_page[source_offset : source_offset + source_size]
+            )
+            source_offset += source_size
+            staged_offset += remote_size
+
     async def _build_transfer_params(
         self,
         ready_reqs: list[tuple[ReqId, SendBlockMeta]],
         agent_meta: MooncakeXferMetadata,
         local_regions: list[TransferRegion],
         remote_regions: list[TransferRegion],
+        mamba_staging: torch.Tensor | None = None,
     ) -> tuple[list[int], list[int], list[int], list[ReqId], str | None]:
         src_ptrs = []
         dst_ptrs = []
         lengths = []
         err_reqs: list[ReqId] = []
         err_msg: str | None = None
+        mamba_staging_offset = 0
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
+        assert len(local_regions) == len(remote_regions), (
+            "Mooncake transfer regions must be aligned before building transfers."
+        )
+        # A speculative decoder can register draft-model cache groups before
+        # the target-model groups. Match request block tables through the group
+        # indices carried by each aligned layer rather than assuming P and D
+        # assigned the target groups the same positional index.
+        group_pairs = list(
+            dict.fromkeys(
+                (local.group_index, remote.group_index)
+                for local, remote in zip(local_regions, remote_regions)
+            )
+        )
+        group_specs = self.kv_cache_config.kv_cache_groups
 
         for d_req_id, send_meta in ready_reqs:
             _, remote_block_ids_per_group = agent_meta.req_blocks[d_req_id]
@@ -1425,33 +1981,66 @@ class MooncakeConnectorWorker:
             ):
                 continue
 
-            if len(send_meta.local_block_ids) != len(remote_block_ids_per_group):
+            invalid_group_pair = next(
+                (
+                    (local_group_index, remote_group_index)
+                    for local_group_index, remote_group_index in group_pairs
+                    if local_group_index >= len(send_meta.local_block_ids)
+                    or local_group_index >= len(group_specs)
+                    or remote_group_index >= len(remote_block_ids_per_group)
+                ),
+                None,
+            )
+            if invalid_group_pair is not None:
                 logger.error(
-                    "req %s: KV group count mismatch: local=%d, remote=%d",
+                    "req %s: KV group mapping %s references missing request "
+                    "blocks: local_groups=%d, remote_groups=%d",
                     d_req_id,
+                    invalid_group_pair,
                     len(send_meta.local_block_ids),
                     len(remote_block_ids_per_group),
                 )
                 err_reqs.append(d_req_id)
                 if err_msg is None:
-                    err_msg = "KV group count mismatch"
+                    err_msg = "KV group mapping references missing request blocks"
                 continue
 
             # Keep KV-cache group identity. Hybrid/HMA groups can carry
             # different semantics (e.g. full-attention KV pages vs GDN/Mamba
             # inner-state slots), so their block IDs must not be flattened and
             # reused for every registered region.
-            local_block_ids_by_group: list[list[int]] = []
-            remote_block_ids_by_group: list[list[int]] = []
+            local_block_ids_by_group_pair: dict[tuple[int, int], list[int]] = {}
+            remote_block_ids_by_group_pair: dict[tuple[int, int], list[int]] = {}
             has_block_error = False
-            group_specs = self.kv_cache_config.kv_cache_groups
-            for group_index, (local_group, remote_group) in enumerate(
-                zip(send_meta.local_block_ids, remote_block_ids_per_group)
-            ):
+            block_error_msg = "P num blocks less than D"
+            uses_dcp = self.dcp_size > 1 or agent_meta.remote_dcp_size > 1
+            local_num_computed_blocks = agent_meta.local_num_computed_blocks.get(
+                d_req_id, ()
+            )
+            for local_group_index, remote_group_index in group_pairs:
+                local_group = send_meta.local_block_ids[local_group_index]
+                remote_group = remote_block_ids_per_group[remote_group_index]
                 is_mamba_group = isinstance(
-                    group_specs[group_index].kv_cache_spec,
+                    group_specs[local_group_index].kv_cache_spec,
                     MambaSpec,
                 )
+                if (
+                    uses_dcp
+                    and not is_mamba_group
+                    and remote_group_index >= len(local_num_computed_blocks)
+                ):
+                    logger.error(
+                        "req %s: missing local prefix count for remote hybrid "
+                        "DCP group %d: counts=%d",
+                        d_req_id,
+                        remote_group_index,
+                        len(local_num_computed_blocks),
+                    )
+                    has_block_error = True
+                    block_error_msg = (
+                        "Missing per-group local prefix counts for hybrid DCP"
+                    )
+                    break
                 if is_mamba_group:
                     # Mamba/GDN prefix caching can use null blocks only as
                     # align-mode placeholders. They do not carry transferable
@@ -1467,53 +2056,194 @@ class MooncakeConnectorWorker:
                         if block_id != NULL_BLOCK_ID
                     ]
 
-                n_local = len(local_group)
-                n_remote = len(remote_group)
-                if n_local < n_remote:
-                    logger.error(
-                        "req %s: local blocks(%d) < remote blocks(%d) "
-                        "in a KV cache group (is_mamba_group=%s)",
-                        d_req_id,
-                        n_local,
-                        n_remote,
-                        is_mamba_group,
+                if not (uses_dcp and not is_mamba_group):
+                    n_local = len(local_group)
+                    n_remote = len(remote_group)
+                    if n_local < n_remote:
+                        logger.error(
+                            "req %s: local blocks(%d) < remote blocks(%d) "
+                            "in a KV cache group (is_mamba_group=%s)",
+                            d_req_id,
+                            n_local,
+                            n_remote,
+                            is_mamba_group,
+                        )
+                        has_block_error = True
+                        break
+                    elif n_local > n_remote:
+                        # Partial prefix cache hit: just read uncomputed blocks.
+                        local_group = local_group[-n_remote:] if n_remote > 0 else []
+                group_pair = (local_group_index, remote_group_index)
+                local_block_ids_by_group_pair[group_pair] = (
+                    self._logical_to_kernel_group_block_ids(
+                        local_group,
+                        local_group_index,
                     )
-                    has_block_error = True
-                    break
-                elif n_local > n_remote:
-                    # Partial prefix cache hit: just read uncomputed blocks.
-                    local_group = local_group[-n_remote:] if n_remote > 0 else []
-                local_block_ids_by_group.append(local_group)
-                remote_block_ids_by_group.append(remote_group)
+                )
+                remote_block_ids_by_group_pair[group_pair] = (
+                    self._logical_to_kernel_group_block_ids(
+                        remote_group,
+                        local_group_index,
+                        agent_meta.remote_physical_blocks_per_logical_kv_block,
+                    )
+                )
 
             if has_block_error:
                 err_reqs.append(d_req_id)
                 if err_msg is None:
-                    err_msg = "P num blocks less than D"
+                    err_msg = block_error_msg
                 continue
 
-            if not any(local_block_ids_by_group):
+            if not any(local_block_ids_by_group_pair.values()):
                 continue
 
-            local_block_ids_by_group = self._logical_to_kernel_block_ids(
-                local_block_ids_by_group
-            )
-            remote_block_ids_by_group = self._logical_to_kernel_block_ids(
-                remote_block_ids_by_group
-            )
+            dcp_attention_plans: dict[
+                tuple[int, int],
+                tuple[list[tuple[int, int]], list[tuple[int, int]]],
+            ] = {}
+            if uses_dcp:
+                for local_group_index, remote_group_index in group_pairs:
+                    group_spec = group_specs[local_group_index]
+                    if isinstance(group_spec.kv_cache_spec, MambaSpec):
+                        continue
+                    try:
+                        group_pair = (local_group_index, remote_group_index)
+                        dcp_attention_plans[group_pair] = (
+                            _build_hybrid_dcp_attention_token_plan(
+                                producer_block_ids=local_block_ids_by_group_pair[
+                                    group_pair
+                                ],
+                                consumer_block_ids=remote_block_ids_by_group_pair[
+                                    group_pair
+                                ],
+                                block_size=self.block_size,
+                                consumer_physical_blocks_per_logical_kv_block=(
+                                    agent_meta.remote_physical_blocks_per_logical_kv_block
+                                ),
+                                consumer_dcp_rank=(
+                                    agent_meta.remote_tp_rank
+                                    % agent_meta.remote_dcp_size
+                                ),
+                                consumer_dcp_size=agent_meta.remote_dcp_size,
+                                consumer_num_computed_blocks=(
+                                    local_num_computed_blocks[remote_group_index]
+                                ),
+                                consumer_num_external_tokens=(
+                                    agent_meta.local_num_external_tokens.get(d_req_id)
+                                ),
+                            )
+                        )
+                    except ValueError as exc:
+                        block_error_msg = str(exc)
+                        logger.error("req %s: %s", d_req_id, block_error_msg)
+                        has_block_error = True
+                        break
+
+            if has_block_error:
+                err_reqs.append(d_req_id)
+                if err_msg is None:
+                    err_msg = block_error_msg
+                continue
 
             for local_region, remote_region in zip(local_regions, remote_regions):
-                assert local_region.group_index == remote_region.group_index, (
-                    "Aligned Mooncake transfer regions must belong to the same "
-                    "KV group."
+                group_pair = (
+                    local_region.group_index,
+                    remote_region.group_index,
                 )
-                group_index = local_region.group_index
-                assert group_index < len(local_block_ids_by_group), (
-                    "Transfer region references a missing KV group."
-                )
-                local_block_ids = local_block_ids_by_group[group_index]
-                remote_block_ids = remote_block_ids_by_group[group_index]
+                local_block_ids = local_block_ids_by_group_pair[group_pair]
+                remote_block_ids = remote_block_ids_by_group_pair[group_pair]
                 if not local_block_ids:
+                    continue
+
+                if self._mamba_region_needs_repack(local_region, remote_region):
+                    local_layout = local_region.mamba_layout
+                    remote_layout = remote_region.mamba_layout
+                    if local_layout is None or remote_layout is None:
+                        raise ValueError(
+                            "Mooncake cannot transfer a region classified as "
+                            "Mamba on only one side: "
+                            f"producer={local_region.layer_name}, "
+                            f"consumer={remote_region.layer_name}."
+                        )
+                    if mamba_staging is None:
+                        raise RuntimeError(
+                            "Mooncake asymmetric KDA transfer requires a staging "
+                            "buffer."
+                        )
+                    if len(local_block_ids) != len(remote_block_ids):
+                        raise ValueError(
+                            "Mooncake asymmetric KDA transfer requires matching "
+                            "state-block counts: "
+                            f"producer={len(local_block_ids)}, "
+                            f"consumer={len(remote_block_ids)}."
+                        )
+                    for local_block_id, remote_block_id in zip(
+                        local_block_ids, remote_block_ids
+                    ):
+                        page_end = mamba_staging_offset + remote_region.kv_block_len
+                        if page_end > mamba_staging.numel():
+                            raise RuntimeError(
+                                "Mooncake KDA staging capacity was underestimated: "
+                                f"required={page_end}, "
+                                f"allocated={mamba_staging.numel()}."
+                            )
+                        staging_page = mamba_staging[mamba_staging_offset:page_end]
+                        self._stage_mamba_page(
+                            staging_page=staging_page,
+                            layer_name=local_region.layer_name,
+                            local_block_id=local_block_id,
+                            local_layout=local_layout,
+                            remote_layout=remote_layout,
+                        )
+                        src_ptrs.append(staging_page.data_ptr())
+                        dst_ptrs.append(
+                            remote_region.base_addr
+                            + remote_block_id * remote_region.block_len
+                        )
+                        lengths.append(remote_region.kv_block_len)
+                        mamba_staging_offset = page_end
+                    continue
+
+                if group_pair in dcp_attention_plans:
+                    producer_locations, consumer_locations = dcp_attention_plans[
+                        group_pair
+                    ]
+                    if local_region.kv_block_len % self.block_size != 0:
+                        raise ValueError(
+                            "Producer attention page is not token-addressable: "
+                            f"page_bytes={local_region.kv_block_len}, "
+                            f"block_size={self.block_size}."
+                        )
+                    if remote_region.kv_block_len % self.block_size != 0:
+                        raise ValueError(
+                            "Consumer attention page is not token-addressable: "
+                            f"page_bytes={remote_region.kv_block_len}, "
+                            f"block_size={self.block_size}."
+                        )
+                    local_token_len = local_region.kv_block_len // self.block_size
+                    remote_token_len = remote_region.kv_block_len // self.block_size
+                    if local_token_len != remote_token_len:
+                        raise ValueError(
+                            "Mooncake native-DCP token scatter requires matching "
+                            "producer/consumer token widths: "
+                            f"producer={local_token_len}, "
+                            f"consumer={remote_token_len}."
+                        )
+                    for (local_block_id, local_token_offset), (
+                        remote_block_id,
+                        remote_token_offset,
+                    ) in zip(producer_locations, consumer_locations):
+                        src_ptrs.append(
+                            local_region.base_addr
+                            + local_block_id * local_region.block_len
+                            + local_token_offset * local_token_len
+                        )
+                        dst_ptrs.append(
+                            remote_region.base_addr
+                            + remote_block_id * remote_region.block_len
+                            + remote_token_offset * remote_token_len
+                        )
+                        lengths.append(local_token_len)
                     continue
 
                 # Group by indices within this region's KV-cache group only.
@@ -1589,7 +2319,7 @@ class MooncakeConnectorWorker:
             logger.debug(
                 "Sending kv_caches for request %s (%d blocks) to %s",
                 d_req_id,
-                sum(len(group) for group in local_block_ids_by_group),
+                sum(len(group) for group in local_block_ids_by_group_pair.values()),
                 remote_session,
             )
 
@@ -1646,6 +2376,7 @@ class MooncakeConnectorWorker:
         self.registered_layer_names = []
         self.registered_layer_indices = []
         self.registered_group_indices = []
+        self.registered_mamba_layouts = []
 
         for layer_name, cache in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
@@ -1670,29 +2401,73 @@ class MooncakeConnectorWorker:
             else:
                 region_caches = [cache]
 
+            mamba_layout: MambaRegionLayout | None = None
+            if isinstance(layer_spec, MambaSpec):
+                if not layer_spec.shapes or len(layer_spec.shapes[0]) != 2:
+                    raise ValueError(
+                        "Mooncake K3 hybrid DCP requires a two-dimensional "
+                        f"convolution state, got {layer_spec.shapes[:1]} for "
+                        f"{layer_name}."
+                    )
+                state_sizes = tuple(
+                    prod(shape) * get_dtype_size(dtype)
+                    for shape, dtype in zip(layer_spec.shapes, layer_spec.dtypes)
+                )
+                conv_dim_first = is_conv_state_dim_first()
+                conv_shape = layer_spec.shapes[0]
+                conv_dim, conv_rows = (
+                    conv_shape if conv_dim_first else (conv_shape[1], conv_shape[0])
+                )
+                mamba_layout = MambaRegionLayout(
+                    state_sizes=state_sizes,
+                    conv_dim=conv_dim,
+                    conv_rows=conv_rows,
+                    conv_element_size=get_dtype_size(layer_spec.dtypes[0]),
+                    conv_dim_first=conv_dim_first,
+                )
+
             for region_cache in region_caches:
                 base_addr = region_cache.data_ptr()
-                block_len = region_cache.stride(0) * region_cache.element_size()
-                region_base_addresses.append(base_addr)
+                raw_block_stride = region_cache.stride(0) * region_cache.element_size()
 
-                if isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
-                    assert (
-                        layer_spec.page_size_bytes
-                        % self._physical_blocks_per_logical_kv_block
-                        == 0
-                    )
-                    kv_block_len = (
-                        layer_spec.page_size_bytes
-                        // self._physical_blocks_per_logical_kv_block
-                    )
+                # HMA can expose the same logical allocation through two
+                # different payload geometries when an attention backend needs
+                # a smaller kernel page than the scheduler page:
+                #
+                #   attention: [num_logical_blocks * ratio, page_bytes / ratio]
+                #   Mamba:     [num_logical_blocks,         page_bytes]
+                #
+                # Keep the tensor's real outer stride for address arithmetic:
+                # block-outer layouts can pack multiple layers between two
+                # pages of one layer.  Transfer length is independent of that
+                # stride.  Attention copies one physical kernel page, while a
+                # Mamba block carries one complete recurrent-state page.
+                if isinstance(layer_spec, MambaSpec):
+                    block_len = raw_block_stride
+                    kv_block_len = layer_spec.page_size_bytes
+                elif isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
+                    logical_page_len = layer_spec.page_size_bytes
+                    ratio = self._physical_blocks_per_logical_kv_block
+                    if logical_page_len % ratio != 0:
+                        raise ValueError(
+                            "Mooncake attention page size must be divisible by "
+                            "the logical-to-physical block ratio: "
+                            f"layer={layer_name}, page_bytes={logical_page_len}, "
+                            f"ratio={ratio}."
+                        )
+                    block_len = raw_block_stride
+                    kv_block_len = logical_page_len // ratio
                 else:
+                    block_len = raw_block_stride
                     kv_block_len = block_len
+
                 if kv_block_len > block_len:
                     raise RuntimeError(
                         "Mooncake transfer length exceeds physical block stride "
                         f"for {layer_name}: kv_block_len={kv_block_len}, "
                         f"block_len={block_len}."
                     )
+                region_base_addresses.append(base_addr)
                 self.block_len_per_layer.append(block_len)
                 self.kv_block_len_per_layer.append(kv_block_len)
                 self.registered_layer_names.append(layer_name)
@@ -1700,6 +2475,7 @@ class MooncakeConnectorWorker:
                 self.registered_group_indices.append(
                     self._layer_group_indices[layer_name]
                 )
+                self.registered_mamba_layouts.append(mamba_layout)
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
             if storage_addr not in seen_storage_ptrs:
@@ -1828,6 +2604,22 @@ class MooncakeConnectorWorker:
             registered_layer_names=self.registered_layer_names,
             registered_layer_indices=self.registered_layer_indices,
             registered_group_indices=self.registered_group_indices,
+            registered_mamba_layouts=self.registered_mamba_layouts,
+            remote_dcp_size=self.dcp_size,
+            remote_block_size=self.block_size,
+            remote_physical_blocks_per_logical_kv_block=(
+                self._physical_blocks_per_logical_kv_block
+            ),
+            remote_use_mla=self.use_mla,
+            remote_has_mamba=self.has_mamba,
+            local_num_computed_blocks={
+                req_id: pull_meta.local_num_computed_blocks
+                for req_id, pull_meta in pull_metas.items()
+            },
+            local_num_external_tokens={
+                req_id: pull_meta.local_num_external_tokens
+                for req_id, pull_meta in pull_metas.items()
+            },
         )
 
         encoded_data = self._encoder.encode(metadata)
@@ -1910,6 +2702,13 @@ class MooncakeConnectorWorker:
                         for tp_rank, tp_entry in dp_entry["worker_addr"].items()
                     }
                     self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
+                    self._dcp_size[remote_engine_id] = dp_entry.get("dcp_size", 1)
+                    self._remote_use_mla[remote_engine_id] = dp_entry.get(
+                        "use_mla", False
+                    )
+                    self._remote_has_mamba[remote_engine_id] = dp_entry.get(
+                        "has_mamba", False
+                    )
         except Exception as e:
             logger.error(
                 "Failed to connect to bootstrap server %s: %s",
@@ -1926,9 +2725,31 @@ class MooncakeConnectorWorker:
         remote_engine_id: EngineId,
         pull_metas: dict[ReqId, PullReqMeta],
     ):
-        remote_tp_ranks = self.transfer_topo.handshake_target_ranks(
-            self._tp_size[remote_engine_id]
-        )
+        remote_tp_size = self._tp_size[remote_engine_id]
+        remote_dcp_size = self._dcp_size.get(remote_engine_id, 1)
+        uses_dcp = self.dcp_size > 1 or remote_dcp_size > 1
+        if uses_dcp:
+            topology_err = _validate_hybrid_dcp_pd_topology(
+                producer_tp_size=remote_tp_size,
+                producer_dcp_size=remote_dcp_size,
+                producer_use_mla=self._remote_use_mla.get(remote_engine_id, False),
+                producer_has_mamba=self._remote_has_mamba.get(remote_engine_id, False),
+                consumer_tp_size=self.tp_size,
+                consumer_dcp_size=self.dcp_size,
+                consumer_use_mla=self.use_mla,
+                consumer_has_mamba=self.has_mamba,
+            )
+            if topology_err is not None:
+                logger.error(
+                    "Cannot receive Mooncake KV from engine %s: %s",
+                    remote_engine_id,
+                    topology_err,
+                )
+                self.xfer_stats.record_failed_recv()
+                return
+            remote_tp_ranks = [self.tp_rank]
+        else:
+            remote_tp_ranks = self.transfer_topo.handshake_target_ranks(remote_tp_size)
         worker_addrs: list[str] = []
         selected_remote_pp: dict[int, list[int]] = {}
         for remote_tp_rank in remote_tp_ranks:
@@ -2040,12 +2861,15 @@ class MooncakeConnectorWorker:
         layer_names: list[str],
         layer_indices: list[int],
         group_indices: list[int] | None = None,
+        mamba_layouts: list[MambaRegionLayout | None] | None = None,
     ) -> list[TransferRegion]:
         if not group_indices:
             group_indices = [
                 self._layer_group_indices.get(layer_name, 0)
                 for layer_name in layer_names
             ]
+        if not mamba_layouts:
+            mamba_layouts = None
         return _expand_transfer_regions(
             base_addrs=base_addrs,
             block_lens=block_lens,
@@ -2053,6 +2877,7 @@ class MooncakeConnectorWorker:
             layer_names=layer_names,
             layer_indices=layer_indices,
             group_indices=group_indices,
+            mamba_layouts=mamba_layouts,
         )
 
     def _get_sender_transfer_plan(

@@ -2746,11 +2746,17 @@ class VllmConfig:
     def adjust_dcp_kv_cache_interleave_size(
         self, kv_cache_config: "KVCacheConfig"
     ) -> None:
-        """Normalize DCP interleave size against the resolved block_size for PD.
+        """Normalize NIXL DCP interleave against the resolved block size.
 
         Called by each worker (via ensure_kv_transfer_initialized), once it knows its
-        own final block_size via kv_cache_config.
+        own final block_size via kv_cache_config.  NIXL's current DCP mapping is
+        block-interleaved.  Other connectors can implement token-interleaved DCP and
+        must retain the interleave selected by their attention backend.
         """
+        if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
+            "NixlConnector"
+        ):
+            return
         dcp_size = self.parallel_config.decode_context_parallel_size
         if dcp_size <= 1:
             return

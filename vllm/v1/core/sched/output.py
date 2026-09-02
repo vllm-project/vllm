@@ -44,6 +44,7 @@ class NewRequestData:
     lora_request: LoRARequest | None
     prompt_embeds: "torch.Tensor | None" = None
     prompt_is_token_ids: list[bool] | None = None
+    disable_speculative_decoding: bool = False
 
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
@@ -74,6 +75,7 @@ class NewRequestData:
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
+            disable_speculative_decoding=request.disable_speculative_decoding,
         )
 
     @property

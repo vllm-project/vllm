@@ -306,6 +306,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             num_prefill_lookahead=num_prefill_lookahead,
         )
+        # CPU-side per-slot guard for external prefixes whose drafter context
+        # state was not transferred. It is consulted only around proposal, not
+        # on the target-model forward path.
+        self.spec_decode_disabled = np.zeros(self.max_num_reqs, dtype=np.bool_)
         self.adaptive_verification: AdaptiveVerificationManager | None = None
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -544,6 +548,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        self.model_state.initialize_kv_cache(kv_cache_config)
 
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:
@@ -984,6 +989,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
             return False
+        self.spec_decode_disabled[req_idx] = False
         if self.pooling_runner is not None:
             self.pooling_runner.remove_request(req_idx)
         if self.pp_handler is not None:
@@ -1042,6 +1048,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
             )
             req_index = self.req_states.req_id_to_index[req_id]
+            self.spec_decode_disabled[req_index] = (
+                new_req_data.disable_speculative_decoding
+            )
             if self.adaptive_verification is not None:
                 self.adaptive_verification.add_request(req_index)
 
@@ -1945,7 +1954,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
-        if self.speculator is not None:
+        all_speculation_disabled = self.speculator is not None and bool(
+            self.spec_decode_disabled[input_batch.idx_mapping_np].all()
+        )
+        if self.speculator is not None and not all_speculation_disabled:
             assert self.sampler is not None
             # Let the target override the hidden state fed to the drafter
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
@@ -1976,6 +1988,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
                 )
+        elif all_speculation_disabled:
+            logger.warning_once(
+                "Skipping speculative proposal for a batch whose requests all "
+                "lack externally transferred drafter context state."
+            )
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does

@@ -39,15 +39,14 @@ _TEMPORAL_TILES = 16
 @triton.jit(do_not_specialize=["num_requests"])
 def get_aligned_state_indices_multi_group_kernel(
     block_table_ptrs_ptr,
-    seq_lens_ptr,
+    running_state_indices_ptr,
+    idx_mapping_ptr,
     state_indices_ptr,
     block_table_stride_req: tl.int64,
-    seq_lens_stride: tl.constexpr,
     state_indices_stride_0: tl.constexpr,
     state_indices_stride_1: tl.constexpr,
     state_indices_stride_2: tl.constexpr,
     num_requests,
-    CACHE_BLOCK_SIZE: tl.constexpr,
     NUM_GROUPS: tl.constexpr,
     BLOCK_GROUPS: tl.constexpr,
     NUM_STATE_SLOTS: tl.constexpr,
@@ -57,12 +56,17 @@ def get_aligned_state_indices_multi_group_kernel(
     rows = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
     valid_row = rows < num_requests
 
-    seq_lens = tl.load(
-        seq_lens_ptr + rows * seq_lens_stride,
+    req_indices = tl.load(
+        idx_mapping_ptr + rows,
         mask=valid_row,
-        other=1,
+        other=0,
     )
-    first_state_slot = tl.maximum((seq_lens - 1) // CACHE_BLOCK_SIZE, 0)
+    first_state_slot = tl.load(
+        running_state_indices_ptr + req_indices,
+        mask=valid_row,
+        other=0,
+    )
+    first_state_slot = tl.maximum(first_state_slot, 0)
 
     # load multiple block table for each group
     groups = tl.arange(0, BLOCK_GROUPS)
@@ -542,7 +546,14 @@ def preprocess_mamba_align_fused_kernel(
     query_start = tl.load(query_start_loc_ptr + offsets, mask=mask, other=0)
     query_end = tl.load(query_start_loc_ptr + offsets + 1, mask=mask, other=0)
     computed_after = num_computed + query_end - query_start
-    new_state_idx = (computed_after + MAMBA_BLOCK_SIZE - 1) // MAMBA_BLOCK_SIZE - 1
+    logical_state_idx = (num_computed + MAMBA_BLOCK_SIZE - 1) // MAMBA_BLOCK_SIZE - 1
+    new_logical_state_idx = (
+        computed_after + MAMBA_BLOCK_SIZE - 1
+    ) // MAMBA_BLOCK_SIZE - 1
+    # The worker table is append-only and can omit logical null-prefix slots
+    # (notably after an external KV load). Advance from its physical running
+    # column by the number of logical Mamba boundaries crossed this step.
+    new_state_idx = state_idx + new_logical_state_idx - logical_state_idx
     tl.store(state_idx_ptr + req_indices, new_state_idx, mask=mask)
     should_reset = (state_idx >= 0) & (state_idx != new_state_idx)
     tl.store(num_accepted_tokens_ptr + req_indices, 1, mask=mask & should_reset)
@@ -1094,13 +1105,15 @@ class MambaSpecDecodeGPUContext:
 
     def compute_aligned_state_indices(
         self,
-        seq_lens: torch.Tensor,
+        running_state_indices: torch.Tensor,
+        idx_mapping: torch.Tensor,
         num_reqs: int,
     ) -> torch.Tensor:
         """compute every Mamba group's aligned physical state IDs in one launch."""
         assert self.is_initialized
-        assert seq_lens.is_cuda
-        assert 0 <= num_reqs <= seq_lens.shape[0]
+        assert running_state_indices.is_cuda
+        assert idx_mapping.is_cuda
+        assert 0 <= num_reqs <= idx_mapping.shape[0]
         assert self.aligned_state_indices is not None
         assert num_reqs <= self.aligned_state_indices.shape[1]
         if num_reqs == 0:
@@ -1111,15 +1124,14 @@ class MambaSpecDecodeGPUContext:
         grid = (triton.cdiv(num_reqs, block_rows),)
         get_aligned_state_indices_multi_group_kernel[grid](
             self.block_table_ptrs,
-            seq_lens,
+            running_state_indices,
+            idx_mapping,
             self.aligned_state_indices,
             self.block_table_stride_req,
-            seq_lens.stride(0),
             self.aligned_state_indices.stride(0),
             self.aligned_state_indices.stride(1),
             self.aligned_state_indices.stride(2),
             num_reqs,
-            CACHE_BLOCK_SIZE=self.block_size,
             NUM_GROUPS=self.num_groups,
             BLOCK_GROUPS=triton.next_power_of_2(self.num_groups),
             NUM_STATE_SLOTS=num_state_slots,
