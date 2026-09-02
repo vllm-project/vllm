@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn as nn
@@ -46,6 +46,12 @@ if TYPE_CHECKING:
 
 class DeepseekV32Indexer(nn.Module):
     indexer_cache_cls = DeepseekV32IndexerCache
+    indexer_op_cls = SparseAttnIndexer
+
+    @staticmethod
+    def get_indexer_op_kwargs(vllm_config: VllmConfig) -> dict[str, Any]:
+        del vllm_config
+        return {}
 
     def __init__(
         self,
@@ -103,7 +109,7 @@ class DeepseekV32Indexer(nn.Module):
         )
 
         self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
-        self.indexer_op = SparseAttnIndexer(
+        self.indexer_op = type(self).indexer_op_cls(
             self.k_cache,
             self.quant_block_size,
             self.scale_fmt,
@@ -112,6 +118,48 @@ class DeepseekV32Indexer(nn.Module):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
+            **type(self).get_indexer_op_kwargs(vllm_config),
+        )
+
+    def run_indexer(
+        self,
+        hidden_states: torch.Tensor,
+        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        k: torch.Tensor | None,
+        weights: torch.Tensor,
+        *,
+        use_pcp: bool,
+        dense_mha_metadata_layer_name: str,
+        dcp_rank: int,
+        dcp_world_size: int,
+        cp_kv_cache_interleave_size: int,
+    ) -> torch.Tensor:
+        if not isinstance(q_quant, torch.Tensor):
+            q_values, q_scale = q_quant
+        else:
+            q_values, q_scale = q_quant, None
+        return sparse_attn_indexer(
+            hidden_states,
+            self.k_cache.prefix,
+            self.k_cache.kv_cache,
+            q_values,
+            q_scale,
+            k,
+            weights,
+            self.quant_block_size,
+            self.scale_fmt,
+            self.topk_tokens,
+            self.head_dim,
+            self.max_model_len,
+            self.max_total_seq_len,
+            self.topk_indices_buffer,
+            skip_k_cache_insert=not use_pcp,
+            use_pcp=use_pcp,
+            dense_mha_metadata_layer_name=dense_mha_metadata_layer_name,
+            dcp_rank=dcp_rank,
+            dcp_world_size=dcp_world_size,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+            skip_topk_buffer_clear=True,
         )
 
 
@@ -428,22 +476,11 @@ class DeepseekV32Attention(MLAAttention):
             assert index_weights_out is not None
             if self.use_pcp:
                 assert index_k is not None
-            sparse_attn_indexer(
+            self.indexer.run_indexer(
                 q_c,
-                self.indexer.k_cache.prefix,
-                self.indexer.k_cache.kv_cache,
                 index_q_fp8,
-                None,
                 index_k,
                 index_weights_out,
-                self.indexer.quant_block_size,
-                self.indexer.scale_fmt,
-                self.indexer.topk_tokens,
-                self.indexer.head_dim,
-                self.indexer.max_model_len,
-                self.indexer.max_total_seq_len,
-                self.topk_indices_buffer,
-                skip_k_cache_insert=not self.use_pcp,
                 use_pcp=self.use_pcp,
                 dense_mha_metadata_layer_name=self._dense_mha_metadata_layer_name,
                 dcp_rank=(
@@ -457,7 +494,6 @@ class DeepseekV32Attention(MLAAttention):
                 cp_kv_cache_interleave_size=(
                     self._vllm_config.parallel_config.cp_kv_cache_interleave_size
                 ),
-                skip_topk_buffer_clear=True,
             )
 
         attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(
