@@ -181,20 +181,16 @@ impl AppState {
     /// Returns error if the engine was started without LoRA support.
     pub async fn load_lora(
         &self,
-        lora_name: String,
-        lora_path: String,
+        module: LoraModulePath,
         load_inplace: bool,
-        is_3d_lora_weight: bool,
     ) -> Result<LoraRequest, LoadLoraError> {
         self.ensure_lora_enabled()?;
         self.lora_manager
             .load_lora(
                 self.engine_core_client(),
                 &self.served_model_names,
-                lora_name,
-                lora_path,
+                module,
                 load_inplace,
-                is_3d_lora_weight,
             )
             .await
     }

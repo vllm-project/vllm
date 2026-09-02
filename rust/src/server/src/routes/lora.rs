@@ -8,6 +8,7 @@ use serde::Deserialize;
 use thiserror_ext::AsReport;
 use validator::Validate;
 
+use crate::config::LoraModulePath;
 use crate::error::ApiError;
 use crate::lora::{LoadLoraError, LoraPathAccessError, UnloadLoraError};
 use crate::routes::openai::utils::types::Normalizable;
@@ -81,13 +82,14 @@ pub async fn load_lora_adapter(
     ValidatedJson(request): ValidatedJson<LoadLoraAdapterRequest>,
 ) -> Result<String, ApiError> {
     let lora_name = request.lora_name;
+    let module = LoraModulePath {
+        name: lora_name.clone(),
+        path: request.lora_path,
+        base_model_name: None,
+        is_3d_lora_weight: request.is_3d_lora_weight,
+    };
     state
-        .load_lora(
-            lora_name.clone(),
-            request.lora_path,
-            request.load_inplace,
-            request.is_3d_lora_weight,
-        )
+        .load_lora(module, request.load_inplace)
         .await
         .map_err(load_lora_api_error)?;
 

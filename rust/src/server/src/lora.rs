@@ -188,24 +188,16 @@ impl LoraManager {
         &self,
         engine_core_client: &EngineCoreClient,
         base_model_names: &[String],
-        lora_name: String,
-        lora_path: String,
+        mut module: LoraModulePath,
         load_inplace: bool,
-        is_3d_lora_weight: bool,
     ) -> Result<LoraRequest, LoadLoraError> {
         let allowed_prefixes = runtime_lora_allowed_path_prefixes();
-        let lora_path = validate_lora_path_access(&lora_path, allowed_prefixes.as_deref())?
-            .unwrap_or(lora_path);
-        self.register(
-            engine_core_client,
-            base_model_names,
-            lora_name,
-            lora_path,
-            load_inplace,
-            is_3d_lora_weight,
-            None,
-        )
-        .await
+        if let Some(canonical_path) =
+            validate_lora_path_access(&module.path, allowed_prefixes.as_deref())?
+        {
+            module.path = canonical_path;
+        }
+        self.register(engine_core_client, base_model_names, module, load_inplace).await
     }
 
     /// Load an operator-configured adapter (`--lora-modules`). Unlike the
@@ -217,28 +209,22 @@ impl LoraManager {
         base_model_names: &[String],
         module: &LoraModulePath,
     ) -> Result<LoraRequest, LoadLoraError> {
-        self.register(
-            engine_core_client,
-            base_model_names,
-            module.name.clone(),
-            module.path.clone(),
-            false,
-            module.is_3d_lora_weight,
-            module.base_model_name.clone(),
-        )
-        .await
+        self.register(engine_core_client, base_model_names, module.clone(), false).await
     }
 
     async fn register(
         &self,
         engine_core_client: &EngineCoreClient,
         base_model_names: &[String],
-        lora_name: String,
-        lora_path: String,
+        module: LoraModulePath,
         load_inplace: bool,
-        is_3d_lora_weight: bool,
-        base_model_name: Option<String>,
     ) -> Result<LoraRequest, LoadLoraError> {
+        let LoraModulePath {
+            name: lora_name,
+            path: lora_path,
+            base_model_name,
+            is_3d_lora_weight,
+        } = module;
         let _guard = self.update_lock.lock().await;
         if base_model_names.iter().any(|name| name == &lora_name) {
             return Err(LoadLoraError::BaseModelName { lora_name });
