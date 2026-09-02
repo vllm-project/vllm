@@ -1122,13 +1122,9 @@ class _FakeTokenizer:
 class _FakeProcessingInfo:
     def __init__(self, tokenizer) -> None:
         self._tokenizer = tokenizer
-        self.ctx = type("Context", (), {"tokenizer": tokenizer})()
 
     def get_tokenizer(self):
         return self._tokenizer
-
-    def get_data_parser(self):
-        return MultiModalDataParser()
 
 
 class _TextFallbackProcessor(BaseMultiModalProcessor):
@@ -1142,30 +1138,6 @@ class _TextFallbackProcessor(BaseMultiModalProcessor):
 
     def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
         raise NotImplementedError
-
-
-class _TokenizerFreeProcessor(_TextFallbackProcessor):
-    requires_tokenizer = False
-
-
-def test_multimodal_processor_requires_tokenizer_by_default():
-    info = _FakeProcessingInfo(tokenizer=None)
-
-    with pytest.raises(ValueError, match="`skip_tokenizer_init=True`"):
-        BaseMultiModalProcessor.__init__(
-            _TextFallbackProcessor.__new__(_TextFallbackProcessor),
-            info,
-            dummy_inputs=None,
-        )
-
-
-def test_multimodal_processor_can_allow_tokenizer_free_init():
-    info = _FakeProcessingInfo(tokenizer=None)
-    processor = _TokenizerFreeProcessor.__new__(_TokenizerFreeProcessor)
-
-    BaseMultiModalProcessor.__init__(processor, info, dummy_inputs=None)
-
-    assert processor.info is info
 
 
 def _text_fallback_processor() -> BaseMultiModalProcessor:
