@@ -18,10 +18,21 @@ from tests.quantization.utils import (
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
-from vllm.config.quantization import resolve_quantization_config
+from vllm.config import ModelConfig
+from vllm.config.quantization import (
+    QuantizationConfigArgs,
+    resolve_quantization_config,
+)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    LinearBase,
+    UnquantizedLinearMethod,
+)
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
@@ -49,6 +60,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_tp_weight_quant,
     weight_amax,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.base_loader import log_online_quantization
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.models.granitemoe import (
     GraniteMoeModel,
@@ -154,12 +169,23 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
         ),
+        # quantization='online' with per-layer target patterns
+        (
+            "online",
+            {
+                "targets": {
+                    r"re:.*self_attn\.o_proj": "fp8_per_block",
+                    r"re:.*block_sparse_moe\.experts": "fp8_per_tensor",
+                }
+            },
+            Fp8PerBlockOnlineLinearMethod,
+            Fp8PerTensorOnlineMoEMethod,
+        ),
         # ignore with direct layer name
         (
             "fp8_per_tensor",
-            # qkv_proj is fused from q_proj/k_proj/v_proj, so currently the
-            # ignore regex must match the unfused shard names
-            # TODO(future PR): also make 're:.*qkv_proj.*' work
+            # qkv_proj is fused from q_proj/k_proj/v_proj. The shard regex
+            # remains supported alongside direct fused-name regexes.
             {"ignore": ["model.layers.1.self_attn.o_proj", "re:.*[qkv]_proj"]},
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
@@ -170,6 +196,15 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
             Mxfp4OnlineLinearMethod,
             Mxfp4OnlineMoEMethod,
         ),
+    ],
+    ids=[
+        "fp8_per_tensor",
+        "fp8_per_block",
+        "fp8_per_channel",
+        "per_layer_kind_overrides",
+        "targets",
+        "ignore",
+        "mxfp4",
     ],
 )
 @pytest.mark.parametrize(
@@ -266,6 +301,12 @@ def test_online_quantization(
                 layer.self_attn.qkv_proj.quant_method, UnquantizedLinearMethod
             )
 
+    if isinstance(online_quant_args, dict) and "targets" in online_quant_args:
+        for layer in model.model.layers:
+            assert isinstance(
+                layer.self_attn.qkv_proj.quant_method, UnquantizedLinearMethod
+            )
+
     input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE)
     positions = torch.arange(input_ids.numel(), device=DEVICE)
     with set_forward_context(None, vllm_config, num_tokens=input_ids.numel()):
@@ -319,6 +360,158 @@ def test_online_quantization_loads_real_weights(vllm_runner, monkeypatch) -> Non
         llm.apply_model(check_model)
         outputs = llm.generate_greedy(["Hello my name is"], max_tokens=1)
         assert outputs
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+@pytest.mark.parametrize(
+    "targets,prefix,expected_method_cls,unmatched_prefix,expected_metadata",
+    [
+        (
+            {r"re:.*self_attn\.o_proj": "fp8_per_block"},
+            "model.layers.0.self_attn.o_proj",
+            Fp8PerBlockOnlineLinearMethod,
+            "model.layers.0.self_attn.qkv_proj",
+            ("targets", "fp8_per_block", r"re:.*self_attn\.o_proj"),
+        ),
+        (
+            {r"re:.*qkv_proj.*": "fp8_per_tensor"},
+            "model.layers.0.self_attn.qkv_proj",
+            Fp8PerTensorOnlineLinearMethod,
+            "model.layers.0.self_attn.o_proj",
+            ("targets", "fp8_per_tensor", r"re:.*qkv_proj.*"),
+        ),
+        (
+            {r"re:.*[qkv]_proj": "fp8_per_tensor"},
+            "model.layers.0.self_attn.qkv_proj",
+            Fp8PerTensorOnlineLinearMethod,
+            "model.layers.0.self_attn.o_proj",
+            ("targets", "fp8_per_tensor", r"re:.*[qkv]_proj"),
+        ),
+    ],
+    ids=["linear_regex", "direct_fused_regex", "legacy_fused_regex"],
+)
+def test_online_quantization_targets(
+    default_vllm_config,
+    dist_init,
+    targets: dict[str, str],
+    prefix: str,
+    expected_method_cls,
+    unmatched_prefix: str,
+    expected_metadata: tuple[str, str, str],
+) -> None:
+    """Target patterns select the real online linear methods."""
+    default_vllm_config.model_config = ModelConfig()
+    config = OnlineQuantizationConfig(QuantizationConfigArgs(targets=targets))
+    config.packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+    layer = ColumnParallelLinear(
+        input_size=1,
+        output_size=1,
+        bias=False,
+        disable_tp=True,
+    )
+
+    method = config.get_quant_method(layer, prefix)
+    assert isinstance(method, expected_method_cls)
+    assert config.quantized_layers == {prefix: expected_metadata}
+
+    unmatched_method = config.get_quant_method(layer, unmatched_prefix)
+    assert isinstance(unmatched_method, UnquantizedLinearMethod)
+    assert config.quantized_layers == {prefix: expected_metadata}
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_online_quantization_records_global_config(
+    default_vllm_config, dist_init
+) -> None:
+    default_vllm_config.model_config = ModelConfig()
+    config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_block"))
+    prefix = "model.layers.0.self_attn.o_proj"
+    layer = ColumnParallelLinear(
+        input_size=1,
+        output_size=1,
+        bias=False,
+        disable_tp=True,
+    )
+
+    method = config.get_quant_method(layer, prefix)
+
+    assert isinstance(method, Fp8PerBlockOnlineLinearMethod)
+    assert config.quantized_layers == {
+        prefix: ("linear", str(config.args.linear), None)
+    }
+
+
+def test_online_quantization_targets_ignore_collision() -> None:
+    """A targets/ignore collision is reported when the layer is dispatched."""
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(
+            targets={"model.layers.0.self_attn.o_proj": "fp8_per_tensor"},
+            ignore=["model.layers.0.self_attn.o_proj"],
+        )
+    )
+    with pytest.raises(ValueError, match="matches both quantization_config.ignore"):
+        config._dispatch_target(
+            "model.layers.0.self_attn.o_proj", Mock(spec=LinearBase)
+        )
+
+
+def test_online_quantization_targets_reject_unsupported_layer() -> None:
+    """A targets match on a non-linear, non-MoE layer is rejected."""
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"lm_head": "fp8_per_tensor"})
+    )
+    lm_head = VocabParallelEmbedding(
+        num_embeddings=1,
+        embedding_dim=1,
+        disable_tp=True,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Layer lm_head was matched by quantization_config.targets "
+            r"\(lm_head\), but online quantization is not supported for "
+            "VocabParallelEmbedding."
+        ),
+    ):
+        config.get_quant_method(lm_head, "lm_head")
+
+
+def test_log_online_quantization(default_vllm_config, monkeypatch) -> None:
+    config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_tensor"))
+    config.quantized_layers = {
+        "model.layers.0.mlp.down_proj": ("linear", "fp8_per_tensor", None),
+        "model.layers.1.mlp.down_proj": ("linear", "fp8_per_tensor", None),
+        "model.layers.0.self_attn.qkv_proj": (
+            "targets",
+            "mxfp4",
+            r"re:.*qkv_proj.*",
+        ),
+    }
+    default_vllm_config.quant_config = config
+
+    logged_messages: list[str] = []
+
+    def record_info(message: str, *args: object) -> None:
+        logged_messages.append(message % args)
+
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.base_loader.logger.info", record_info
+    )
+    log_online_quantization(default_vllm_config)
+
+    assert logged_messages == [
+        "Quantized 3 layers of types: mlp.down_proj: 2 (from linear: "
+        "fp8_per_tensor); self_attn.qkv_proj: 1 (from targets: "
+        "re:.*qkv_proj.*, mxfp4)"
+    ]
 
 
 @pytest.mark.skipif(
