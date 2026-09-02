@@ -88,11 +88,6 @@ class ObservabilityConfig:
     This includes number of context/generation requests and tokens
     and the elapsed cpu time for the iteration."""
 
-    enable_prometheus_iteration_metrics: bool = False
-    """Enable phase-aware Prometheus histograms for request and token counts in
-    each engine iteration. This adds per-iteration scheduler statistics
-    collection and requires log stats to be enabled."""
-
     collect_iteration_details: bool = Field(default=False, init=False)
     """Collect iteration details requested by stat loggers.
 

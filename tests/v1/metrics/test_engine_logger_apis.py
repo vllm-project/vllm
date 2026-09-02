@@ -34,17 +34,12 @@ class InvalidRequirementsStatLogger(DummyStatLogger):
         return object()
 
 
-def make_vllm_config(*, enable_prometheus_iteration_metrics=False):
-    return SimpleNamespace(
-        observability_config=SimpleNamespace(
-            enable_prometheus_iteration_metrics=enable_prometheus_iteration_metrics,
-        )
-    )
+def make_vllm_config():
+    return SimpleNamespace()
 
 
 def make_prometheus_iteration_logger():
     stat_logger = object.__new__(PrometheusStatLogger)
-    stat_logger.iteration_metrics_enabled = True
     request_histograms = {
         phase: {0: Mock()}
         for phase in (ITERATION_PHASE_PREFILL, ITERATION_PHASE_DECODE)
@@ -137,13 +132,10 @@ def test_get_stat_logger_requirements_rejects_invalid_result():
         )
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_prometheus_requests_iteration_details_only_when_enabled(enabled):
-    requirements = PrometheusStatLogger.get_requirements(
-        make_vllm_config(enable_prometheus_iteration_metrics=enabled)
-    )
+def test_prometheus_requests_iteration_details():
+    requirements = PrometheusStatLogger.get_requirements(make_vllm_config())
 
-    assert requirements.iteration_details is enabled
+    assert requirements.iteration_details
 
 
 def test_prometheus_records_phase_aware_iteration_distributions():
@@ -182,13 +174,6 @@ def test_prometheus_skips_non_model_iterations(details):
 
     for histogram in (*request_histograms.values(), *token_histograms.values()):
         histogram[0].observe.assert_not_called()
-
-
-def test_prometheus_disabled_path_does_not_access_iteration_details():
-    stat_logger = object.__new__(PrometheusStatLogger)
-    stat_logger.iteration_metrics_enabled = False
-
-    stat_logger._record_iteration_metrics(SchedulerStats(), 0)
 
 
 def test_iteration_collection_does_not_enable_iteration_logging(monkeypatch):

@@ -487,11 +487,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
     @classmethod
     def get_requirements(cls, vllm_config: VllmConfig) -> StatLoggerRequirements:
-        return StatLoggerRequirements(
-            iteration_details=(
-                vllm_config.observability_config.enable_prometheus_iteration_metrics
-            )
-        )
+        return StatLoggerRequirements(iteration_details=True)
 
     def __init__(
         self, vllm_config: VllmConfig, engine_indexes: list[int] | None = None
@@ -509,10 +505,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.kv_cache_metrics_enabled = (
             vllm_config.observability_config.kv_cache_metrics
         )
-        self.iteration_metrics_enabled = (
-            vllm_config.observability_config.enable_prometheus_iteration_metrics
-        )
-
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
@@ -808,53 +800,48 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_iteration_tokens, per_engine_labelvalues
         )
 
-        if self.iteration_metrics_enabled:
-            phases = [ITERATION_PHASE_PREFILL, ITERATION_PHASE_DECODE]
-            histogram_iteration_requests = self._histogram_cls(
-                name="vllm:iteration_requests",
-                documentation=(
-                    "Histogram of request counts in each engine iteration, "
-                    "split by prefill and decode phase."
+        phases = [ITERATION_PHASE_PREFILL, ITERATION_PHASE_DECODE]
+        histogram_iteration_requests = self._histogram_cls(
+            name="vllm:iteration_requests",
+            documentation=(
+                "Histogram of request counts in each engine iteration, "
+                "split by prefill and decode phase."
+            ),
+            buckets=[
+                0,
+                *build_1_2_5_buckets(vllm_config.scheduler_config.max_num_seqs),
+            ],
+            labelnames=labelnames + ["phase"],
+        )
+        histogram_iteration_tokens_by_phase = self._histogram_cls(
+            name="vllm:iteration_tokens_by_phase",
+            documentation=(
+                "Histogram of scheduled token counts in each engine iteration, "
+                "split by prefill and decode phase."
+            ),
+            buckets=[
+                0,
+                *build_1_2_5_buckets(
+                    vllm_config.scheduler_config.max_num_batched_tokens
                 ),
-                buckets=[
-                    0,
-                    *build_1_2_5_buckets(vllm_config.scheduler_config.max_num_seqs),
-                ],
-                labelnames=labelnames + ["phase"],
+            ],
+            labelnames=labelnames + ["phase"],
+        )
+        self.histogram_iteration_requests: dict[str, dict[int, Histogram]] = {}
+        self.histogram_iteration_tokens_by_phase: dict[str, dict[int, Histogram]] = {}
+        for phase in phases:
+            per_engine_phase_labelvalues = {
+                idx: labelvalues + [phase]
+                for idx, labelvalues in per_engine_labelvalues.items()
+            }
+            self.histogram_iteration_requests[phase] = create_metric_per_engine(
+                histogram_iteration_requests,
+                per_engine_phase_labelvalues,
             )
-            histogram_iteration_tokens_by_phase = self._histogram_cls(
-                name="vllm:iteration_tokens_by_phase",
-                documentation=(
-                    "Histogram of scheduled token counts in each engine iteration, "
-                    "split by prefill and decode phase."
-                ),
-                buckets=[
-                    0,
-                    *build_1_2_5_buckets(
-                        vllm_config.scheduler_config.max_num_batched_tokens
-                    ),
-                ],
-                labelnames=labelnames + ["phase"],
+            self.histogram_iteration_tokens_by_phase[phase] = create_metric_per_engine(
+                histogram_iteration_tokens_by_phase,
+                per_engine_phase_labelvalues,
             )
-            self.histogram_iteration_requests: dict[str, dict[int, Histogram]] = {}
-            self.histogram_iteration_tokens_by_phase: dict[
-                str, dict[int, Histogram]
-            ] = {}
-            for phase in phases:
-                per_engine_phase_labelvalues = {
-                    idx: labelvalues + [phase]
-                    for idx, labelvalues in per_engine_labelvalues.items()
-                }
-                self.histogram_iteration_requests[phase] = create_metric_per_engine(
-                    histogram_iteration_requests,
-                    per_engine_phase_labelvalues,
-                )
-                self.histogram_iteration_tokens_by_phase[phase] = (
-                    create_metric_per_engine(
-                        histogram_iteration_tokens_by_phase,
-                        per_engine_phase_labelvalues,
-                    )
-                )
 
         histogram_max_num_generation_tokens_request = self._histogram_cls(
             name="vllm:request_max_num_generation_tokens",
@@ -1358,8 +1345,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     def _record_iteration_metrics(
         self, scheduler_stats: SchedulerStats, engine_idx: int
     ) -> None:
-        if not self.iteration_metrics_enabled:
-            return
         details = scheduler_stats.iteration_details
         if details is None or details.is_dummy:
             return
