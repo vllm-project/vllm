@@ -3,15 +3,25 @@
 import subprocess
 import tempfile
 import time
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
 import requests
 import urllib3
 
+from vllm.benchmarks.serve import main_async
+
 from ..utils import RemoteOpenAIServer
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+
+
+@pytest.mark.parametrize("max_concurrency", [0, -1])
+@pytest.mark.asyncio
+async def test_bench_serve_rejects_non_positive_concurrency(max_concurrency):
+    with pytest.raises(ValueError, match="--max-concurrency must be greater than 0"):
+        await main_async(Namespace(max_concurrency=max_concurrency))
 
 
 def generate_self_signed_cert(cert_dir: Path) -> tuple[Path, Path]:
