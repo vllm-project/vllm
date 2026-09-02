@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test the functionality of the Transformers modeling backend."""
 
+import ast
 import contextlib
 import os
 import tempfile
@@ -688,3 +689,18 @@ def test_attention_scale_is_the_argument_not_the_attribute():
     fuser = AttentionFuser.match(None, attention)
     assert fuser is not None
     assert fuser.scale(attention) == 1.0 != attention.scaling
+
+
+def test_attention_scale_rejects_unresolvable_expression():
+    """Unresolvable declared scales must not silently use the Llama default."""
+
+    class Attention(nn.Module):
+        head_dim = 16
+
+    fuser = AttentionFuser(
+        source_cls="Attention",
+        scale_expr=ast.parse("self.head_dim**-0.5 * self.factor", mode="eval").body,
+    )
+
+    with pytest.raises(ValueError, match="Cannot resolve attention scaling expression"):
+        fuser.scale(Attention())

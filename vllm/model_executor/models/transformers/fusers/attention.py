@@ -120,4 +120,10 @@ class AttentionFuser(BaseFuser):
         if self.scale_expr is None:
             return None
         scale = _resolve(self.scale_expr, module)
-        return float(scale) if isinstance(scale, (int, float)) else None
+        if not isinstance(scale, (int, float)) or isinstance(scale, bool):
+            expression = ast.unparse(self.scale_expr)
+            raise ValueError(
+                f"Cannot resolve attention scaling expression {expression!r} in "
+                f"{type(module).__name__}."
+            )
+        return float(scale)
