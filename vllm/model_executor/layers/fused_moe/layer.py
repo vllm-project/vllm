@@ -6,7 +6,6 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -74,30 +73,19 @@ def determine_expert_counts(
     num_experts: int,
     num_redundant_experts: int,
     n_shared_experts: int | None,
-    is_act_and_mul: bool,
+    fuse_shared_experts: bool,
 ) -> tuple[int, int, int]:
     global_num_experts = num_experts + num_redundant_experts
     logical_num_experts = num_experts
-    # Shared-expert fusion: append the shared expert(s) as routed-expert slots
-    # so they run in the same grouped GEMM. Gated by
-    # VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: either the native aiter fused-MoE
-    # path (env + master switch, via is_fusion_moe_shared_experts_enabled) or the
-    # backend-neutral router-append path (env alone, independent of the master
-    # switch; e.g. the MM3 triton/flydsl mxfp8 MoE). Gated activations only.
-    fuse_shared_enabled = (
-        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        or envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-    ) and is_act_and_mul
 
     num_fused_shared_experts = (
-        n_shared_experts if n_shared_experts is not None and fuse_shared_enabled else 0
+        n_shared_experts if n_shared_experts is not None and fuse_shared_experts else 0
     )
 
     return global_num_experts, logical_num_experts, num_fused_shared_experts
 
 
-# TODO: rename this
-def FusedMoE(
+def FusedMoEFactory(
     num_experts: int,  # Global number of experts
     top_k: int,
     hidden_size: int,
@@ -120,6 +108,8 @@ def FusedMoE(
     swiglu_limit: float | None = None,
     swiglu_alpha: float | None = None,
     swiglu_beta: float | None = None,
+    activation_situ_beta: float | None = None,
+    activation_situ_linear_beta: float | None = None,
     e_score_correction_bias: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     activation: str = "silu",
@@ -129,7 +119,9 @@ def FusedMoE(
     is_sequence_parallel: bool = False,
     reduce_results: bool = True,
     ckpt_names: tuple[str, str, str] = ("gate_proj", "down_proj", "up_proj"),
+    is_fused_checkpoint_transposed: bool = False,
     n_shared_experts: int | None = None,
+    fuse_shared_experts: bool = False,
     router_logits_dtype: torch.dtype | None = None,
     gate: torch.nn.Module | None = None,
     shared_experts: torch.nn.Module | None = None,
@@ -178,6 +170,8 @@ def FusedMoE(
         scoring_func: Scoring function for routing ("softmax" or others)
         routed_scaling_factor: Scaling factor applied to topk_weights or output
         swiglu_limit: SwiGLU activation limit
+        activation_situ_beta: SituGLU activation beta
+        activation_situ_linear_beta: SituGLU linear beta
         e_score_correction_bias: Expert score correction bias tensor
         apply_router_weight_on_input: Whether to apply router weights on input
         activation: Activation function name ("silu", "gelu", etc.)
@@ -190,8 +184,11 @@ def FusedMoE(
             the late-AR path.
         ckpt_names: Checkpoint parameter name tuple (gate_proj, down_proj,
             up_proj) used for weight loading
+        is_fused_checkpoint_transposed: Whether fused checkpoint weights and
+            block scales use transposed storage.
         n_shared_experts: Number of shared experts to fuse into the routed
             grouped GEMM (ROCm; requires aiter FSE or the router-append path)
+        fuse_shared_experts: Whether to enable shared-expert fusion.
         router_logits_dtype: Data type for router logits buffers
         gate: Pre-configured gate module
         shared_experts: Pre-configured shared experts module
@@ -238,7 +235,7 @@ def FusedMoE(
             num_experts,
             num_redundant_experts,
             n_shared_experts,
-            is_act_and_mul,
+            fuse_shared_experts,
         )
     )
 
@@ -352,6 +349,8 @@ def FusedMoE(
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
+        activation_situ_beta=activation_situ_beta,
+        activation_situ_linear_beta=activation_situ_linear_beta,
         max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
         skip_final_all_reduce=skip_final_all_reduce,
     )
@@ -373,6 +372,7 @@ def FusedMoE(
         ckpt_gate_proj_name=ckpt_names[0],
         ckpt_down_proj_name=ckpt_names[1],
         ckpt_up_proj_name=ckpt_names[2],
+        is_fused_checkpoint_transposed=is_fused_checkpoint_transposed,
         # Extra params that are needed by quant_methods, pass along for now
         # Prefer getting these from other sources, e.g. moe_config or
         # router object

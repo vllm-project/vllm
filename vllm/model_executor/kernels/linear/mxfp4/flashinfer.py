@@ -7,6 +7,9 @@ from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     swizzle_mxfp4_scales,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutedsl
 
@@ -28,6 +31,8 @@ class FlashInferMxFp4LinearKernel(MxFp4LinearKernel):
 
     @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        if config.activation_quant_key != kMxfp4Dynamic:
+            return False, "only supports MXFP4 dynamic activation"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

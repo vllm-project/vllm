@@ -121,6 +121,13 @@ For further details on profiling vLLM, please refer to [this page](../../contrib
 
 ## Scale-Out APIs
 
+Scale-out APIs are disabled by default on `vllm serve`. The environment
+variable accepts only `0` or `1`; set `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` to
+register the endpoints below. The
+dedicated `vllm launch render` and `vllm serve --tokens-only` modes are explicit
+opt-ins and enable their required endpoints when the variable is unset; an
+explicit value of `0` is rejected for those modes.
+
 ### Tokens IN <> Tokens OUT APIs
 
 - `/inference/v1/generate` - Generate completions
@@ -179,6 +186,8 @@ For further details on Weight Transfer, please refer to [this page](../../traini
 - `/start_weight_update` - Prepares the inference engine for a weight update.
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/finish_weight_update` - Finalizes the weight update
+- `/update_weight_version` - Set the weight version without updating model weights
+- `/weight_info` - Get the latest committed weight version
 - `/get_world_size` - Get distributed world size
 
 ### Collective RPC

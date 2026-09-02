@@ -231,9 +231,6 @@ class PytHooks:
         super().__init__()
         self.module_to_name_map = {}
 
-    def _process_layer_params(self, module_obj):
-        return process_layer_params(module_obj)
-
     def module_fwd_hook(self, module_obj, in_tensor, out_tensor):
         """Callback function that ends the NVTX marker.
         Records the module name and tensor information.

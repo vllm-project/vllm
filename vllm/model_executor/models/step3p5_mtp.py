@@ -32,11 +32,18 @@ class SharedHead(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.norm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
+        # Give the head its prefix so the quant config's exclude_modules matcher
+        # can skip it; without one it defaults to "" and never matches, so a
+        # checkpoint-excluded (BF16) MTP head gets quantized -> load crash.
         self.head = ParallelLMHead(
-            config.vocab_size, config.hidden_size, quant_config=quant_config
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.head",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -55,7 +62,9 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
         self.enorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.hnorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
-        self.shared_head = SharedHead(config=config, quant_config=quant_config)
+        self.shared_head = SharedHead(
+            config=config, quant_config=quant_config, prefix=f"{prefix}.shared_head"
+        )
         self.mtp_block = Step3p5DecoderLayer(
             vllm_config,
             prefix=f"{prefix}.mtp_block",

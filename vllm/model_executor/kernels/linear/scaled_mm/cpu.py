@@ -5,7 +5,6 @@
 import torch
 
 from vllm import _custom_ops as ops
-from vllm import envs
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
@@ -44,7 +43,6 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         N, K = weight.size()
         if (
             current_platform.get_cpu_architecture() == CpuArchEnum.X86
-            and envs.VLLM_CPU_SGL_KERNEL
             and self.config.input_symmetric
             and check_cpu_sgl_kernel(N, K, dtype)
         ):

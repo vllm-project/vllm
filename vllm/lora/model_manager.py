@@ -201,8 +201,8 @@ class LoRAModelManager:
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
 
         # First, determine if the model supports tower connector LoRA.
-        self.supports_tower_connector_lora = self.supports_mm and hasattr(
-            self.model, "get_num_mm_encoder_tokens"
+        self.supports_tower_connector_lora = (
+            self.supports_mm and self.model.supports_tower_connector_lora
         )
 
         # Then, handle the case where the feature is disabled in the config.
@@ -247,8 +247,17 @@ class LoRAModelManager:
 
         mm_budget = MultiModalBudget(vllm_config, mm_registry)
         limit_per_prompt = max(mm_budget.mm_max_items_per_prompt.values())
-        num_encoder_tokens = self.model.get_num_mm_encoder_tokens(
-            mm_budget.get_encoder_budget()
+        max_lora_tokens = mm_budget.get_encoder_budget()
+        lora_token_counts_by_modality = [
+            self.model.get_mm_lora_token_counts(
+                modality=modality,
+                mm_kwargs=None,
+                num_mm_embeds=max_lora_tokens,
+            )
+            for modality in mm_budget.mm_max_toks_per_item
+        ]
+        num_encoder_tokens = max(
+            tower_tokens for tower_tokens, _ in lora_token_counts_by_modality
         )
 
         # Tower wrappers
@@ -263,10 +272,15 @@ class LoRAModelManager:
 
         # Use wrapper for connector if present.
         if self.mm_mapping.connector:
-            if hasattr(self.model, "get_num_mm_connector_tokens"):
-                connector_tokens = self.model.get_num_mm_connector_tokens(
-                    num_encoder_tokens
-                )
+            connector_tokens = max(
+                (
+                    connector_tokens
+                    for _, connector_tokens in lora_token_counts_by_modality
+                    if connector_tokens is not None
+                ),
+                default=None,
+            )
+            if connector_tokens is not None:
                 connector_punica_wrapper = get_punica_wrapper(
                     connector_tokens,
                     max_batches=self.max_num_seqs * limit_per_prompt,
@@ -387,6 +401,8 @@ class LoRAModelManager:
         self._registered_adapters.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_adapters.clear()
+        self._last_mapping = None
+        self._last_slot_layout = None
 
     def _create_lora_modules(self):
         def _parent_module(module_name: str) -> str:
@@ -402,7 +418,16 @@ class LoRAModelManager:
             if isinstance(module, PPMissingLayer):
                 continue
 
-            if not self._match_target_modules(module_name):
+            target_modules = self.lora_config.target_modules
+            is_configured_target = target_modules is not None and is_in_target_modules(
+                module_name,
+                target_modules,
+                self.packed_modules_mapping,
+            )
+            if (
+                not self._match_target_modules(module_name, module)
+                and not is_configured_target
+            ):
                 continue
 
             punica_wrapper = self._get_punica_wrapper(module_name)
@@ -549,7 +574,7 @@ class LoRAModelManager:
         model = LoRAModel(lora_id, rank, {})
         for module_name, module in self.model.named_modules():
             if (
-                not self._match_target_modules(module_name)
+                not self._match_target_modules(module_name, module)
                 or not isinstance(module, BaseLayerWithLoRA)
                 or self._get_punica_wrapper(module_name) is None
             ):
@@ -685,7 +710,7 @@ class LoRAModelManager:
             )
         return adjusted_rank
 
-    def _match_target_modules(self, module_name: str) -> bool:
+    def _match_target_modules(self, module_name: str, module: nn.Module) -> bool:
         """Check if a module should have LoRA applied.
 
         This method first checks if the module is in vLLM's supported LoRA
@@ -695,11 +720,16 @@ class LoRAModelManager:
         Args:
             module_name: Full dot-separated module name (e.g.,
                 "model.layers.0.self_attn.o_proj")
+            module: Runtime module associated with ``module_name``.
 
         Returns:
             True if LoRA should be applied to this module, False otherwise.
         """
-        if not is_supported_lora_module(module_name, self.supported_lora_modules):
+        if not is_supported_lora_module(
+            module_name,
+            module,
+            self.supported_lora_modules,
+        ):
             return False
         return is_in_target_modules(
             module_name,
@@ -739,7 +769,7 @@ class LoRAModelManager:
 
     def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
         for module_name, new_module_names in self.packed_modules.items():
-            # For 2D FusedMoE modules with EP, narrow the per-expert
+            # For 2D RoutedExperts modules with EP, narrow the per-expert
             # sub-module list to this rank's owned experts so pack_moe
             # produces a tensor sized to local_num_experts directly.
             packed_module_names = new_module_names
@@ -1096,7 +1126,7 @@ class LoRAModelManager:
 
     def _build_moe_ep_load_spec(self) -> MoEEPLoadSpec | None:
         """
-        Per-rank slicing metadata for 2D FusedMoE LoRA modules.
+        Per-rank slicing metadata for 2D RoutedEXperts LoRA modules.
         """
         if not self._use_ep or not self._is_moe:
             return None

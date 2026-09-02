@@ -5,6 +5,7 @@ import ipaddress
 import os
 import socket
 import sys
+import tempfile
 import warnings
 from collections.abc import (
     Iterator,
@@ -131,6 +132,21 @@ def get_distributed_init_method(ip: str, port: int) -> str:
     return get_tcp_uri(ip, port)
 
 
+def get_file_store_init_method() -> str:
+    return f"file://{tempfile.gettempdir()}/vllm_dist_{uuid4().hex}"
+
+
+def aiter_requires_tcp_store() -> bool:
+    """AITER custom all-reduce requires a pure-TCP default store (its IPC
+    metadata exchange asserts on ``TCPStore``); the file:// rendezvous yields a
+    ``FileStore`` and trips that assertion. Prefer the TCP rendezvous
+    (pre-#50999) for ROCm + AITER custom AR until AITER accepts FileStore.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    return rocm_aiter_ops.is_custom_all_reduce_enabled()
+
+
 def get_tcp_uri(ip: str, port: int) -> str:
     if is_valid_ipv6_address(ip):
         return f"tcp://[{ip}]:{port}"
@@ -147,6 +163,14 @@ def get_open_zmq_inproc_path() -> str:
     return f"inproc://{uuid4()}"
 
 
+def _get_reserved_port_range() -> range:
+    """Ports reserved for the data parallel master process (empty if unset)."""
+    if "VLLM_DP_MASTER_PORT" not in os.environ:
+        return range(0)
+    dp_master_port = envs.VLLM_DP_MASTER_PORT
+    return range(dp_master_port, dp_master_port + 10)
+
+
 def get_open_port() -> int:
     """
     Get an open port for the vLLM process to listen on.
@@ -156,14 +180,11 @@ def get_open_port() -> int:
     Right now we reserve 10 ports for the data parallel master
     process. Currently it uses 2 ports.
     """
-    if "VLLM_DP_MASTER_PORT" in os.environ:
-        dp_master_port = envs.VLLM_DP_MASTER_PORT
-        reserved_port_range = range(dp_master_port, dp_master_port + 10)
-        while True:
-            candidate_port = _get_open_port()
-            if candidate_port not in reserved_port_range:
-                return candidate_port
-    return _get_open_port()
+    reserved_port_range = _get_reserved_port_range()
+    port = _get_open_port()
+    if port in reserved_port_range:
+        port = _get_open_port(start_port=reserved_port_range.stop, max_attempts=1000)
+    return port
 
 
 def get_open_ports_list(count: int = 5) -> list[int]:
@@ -174,9 +195,14 @@ def get_open_ports_list(count: int = 5) -> list[int]:
     """
     ports_set = set[int]()
     if envs.VLLM_PORT is not None:
+        reserved_port_range = _get_reserved_port_range()
         next_port = envs.VLLM_PORT
         for _ in range(count):
             port = _get_open_port(start_port=next_port, max_attempts=1000)
+            if port in reserved_port_range:
+                port = _get_open_port(
+                    start_port=reserved_port_range.stop, max_attempts=1000
+                )
             ports_set.add(port)
             next_port = port + 1
         return list(ports_set)

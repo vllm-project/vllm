@@ -42,7 +42,7 @@ class TestNonFiniteRepetitionPenalty:
         ids=["nan", "inf", "-inf", "math.nan", "math.inf"],
     )
     def test_non_finite_repetition_penalty_rejected(self, value: float):
-        with pytest.raises(ValueError, match="repetition_penalty"):
+        with pytest.raises(VLLMValidationError, match="repetition_penalty"):
             SamplingParams(repetition_penalty=value)
 
     def test_finite_repetition_penalty_accepted(self):

@@ -103,13 +103,15 @@ def _cpu_gdn_attention_nonspec(
     assert state_indices_tensor is not None
     assert query_start_loc is not None
 
-    is_amx = torch.cpu._is_amx_tile_supported()
+    # C++ conv (conv.cpp) uses VDPBF16PS, not AMX tiles, so it runs on any
+    # AVX-512BF16 CPU; weight is VNNI-packed on this same predicate at load time.
+    use_cpp_conv = torch.cpu._is_avx512_bf16_supported()
 
     conv_state = layer.kv_cache[0]
-    if is_amx:
-        # AMX causal conv requires [num_allocated_slots, kernel - 1, conv_dim].
+    if use_cpp_conv:
+        # C++ conv requires [num_allocated_slots, kernel - 1, conv_dim] (SD).
         if is_conv_state_dim_first():
-            raise RuntimeError("AMX GDN attention requires `SD` conv_state layout.")
+            raise RuntimeError("C++ CPU GDN attention requires `SD` conv_state layout.")
         conv_state = conv_state.transpose(1, 2)
     else:
         if not is_conv_state_dim_first():
@@ -138,7 +140,7 @@ def _cpu_gdn_attention_nonspec(
         decode_b = b[:num_decode_tokens]
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
-        if is_amx:
+        if use_cpp_conv:
             decode_mixed_qkv = ops.causal_conv1d_update_cpu(
                 x=decode_mixed_qkv,
                 conv_states=conv_state,
@@ -207,7 +209,7 @@ def _cpu_gdn_attention_nonspec(
             num_decodes : num_decodes + num_prefills
         ]
 
-        if is_amx:
+        if use_cpp_conv:
             prefill_mixed_qkv = ops.causal_conv1d_fwd_cpu(
                 x=prefill_mixed_qkv.transpose(0, 1),
                 weight=layer.conv1d.weight,
@@ -236,22 +238,24 @@ def _cpu_gdn_attention_nonspec(
             A_log=layer.A_log, a=prefill_a, b=prefill_b, dt_bias=layer.dt_bias
         )
 
-        initial_state = ssm_state[prefill_state_indices]
-        initial_state[~prefill_has_initial_state, ...] = 0
-        attn_out, last_recurrent_state = ops.chunk_gated_delta_rule_cpu(
+        # zero pool slots for sequences without a prior state; the kernel
+        # gathers/mutates ssm_state in place via prefill_state_indices, so no
+        # separate scatter-back is needed after the call.
+        no_initial_state = prefill_state_indices[~prefill_has_initial_state]
+        if no_initial_state.numel() > 0:
+            ssm_state[no_initial_state] = 0
+        attn_out, _ = ops.chunk_gated_delta_rule_cpu(
             query=query,
             key=key,
             value=value,
             g=g,
             beta=beta,
-            initial_state=initial_state,
+            initial_state=ssm_state,
             output_final_state=True,
             cu_seqlens=prefill_query_start_loc,
             head_first=False,
             use_qk_l2norm_in_kernel=True,
-        )
-        ssm_state[prefill_state_indices] = last_recurrent_state.to(
-            ssm_state.dtype, copy=False
+            initial_state_indices=prefill_state_indices,
         )
         core_attn_out[prefill_token_start:prefill_token_end] = attn_out.squeeze(0)
 
@@ -616,22 +620,24 @@ def _spec_aware_nonspec(
         g, beta = ops.fused_gdn_gating_cpu(
             A_log=layer.A_log, a=prefill_a, b=prefill_b, dt_bias=layer.dt_bias
         )
-        initial_state = ssm_state[prefill_state_indices]
-        initial_state[~prefill_has_initial_state, ...] = 0
-        attn_out, last_recurrent_state = ops.chunk_gated_delta_rule_cpu(
+        # zero pool slots for sequences without a prior state; the kernel
+        # gathers/mutates ssm_state in place via prefill_state_indices, so no
+        # separate scatter-back is needed after the call.
+        no_initial_state = prefill_state_indices[~prefill_has_initial_state]
+        if no_initial_state.numel() > 0:
+            ssm_state[no_initial_state] = 0
+        attn_out, _ = ops.chunk_gated_delta_rule_cpu(
             query=query,
             key=key,
             value=value,
             g=g,
             beta=beta,
-            initial_state=initial_state,
+            initial_state=ssm_state,
             output_final_state=True,
             cu_seqlens=prefill_query_start_loc,
             head_first=False,
             use_qk_l2norm_in_kernel=True,
-        )
-        ssm_state[prefill_state_indices] = last_recurrent_state.to(
-            ssm_state.dtype, copy=False
+            initial_state_indices=prefill_state_indices,
         )
         core_attn_out[prefill_token_start:prefill_token_end] = attn_out.squeeze(0)
 
@@ -690,22 +696,24 @@ def _spec_aware_nonspec_subset(
     g, beta = ops.fused_gdn_gating_cpu(
         A_log=layer.A_log, a=a, b=b, dt_bias=layer.dt_bias
     )
-    initial_state = ssm_state[prefill_state_indices]
-    initial_state[~has_initial_state, ...] = 0
-    attn_out, last_recurrent_state = ops.chunk_gated_delta_rule_cpu(
+    # zero pool slots for sequences without a prior state; the kernel
+    # gathers/mutates ssm_state in place via prefill_state_indices, so no
+    # separate scatter-back is needed after the call.
+    no_initial_state = prefill_state_indices[~has_initial_state]
+    if no_initial_state.numel() > 0:
+        ssm_state[no_initial_state] = 0
+    attn_out, _ = ops.chunk_gated_delta_rule_cpu(
         query=query,
         key=key,
         value=value,
         g=g,
         beta=beta,
-        initial_state=initial_state,
+        initial_state=ssm_state,
         output_final_state=True,
         cu_seqlens=prefill_qsl,
         head_first=False,
         use_qk_l2norm_in_kernel=True,
-    )
-    ssm_state[prefill_state_indices] = last_recurrent_state.to(
-        ssm_state.dtype, copy=False
+        initial_state_indices=prefill_state_indices,
     )
     return attn_out.squeeze(0)
 

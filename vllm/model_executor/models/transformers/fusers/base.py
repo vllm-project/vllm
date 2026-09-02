@@ -57,26 +57,71 @@ class BaseFuser(ABC):
         return {}
 
 
-@dataclass
-class StackedFuser(BaseFuser):
-    """A fuser that merges sibling projections into one stacked linear and
-    rewrites the forward to call it.
+def fused_head_size(module: nn.Module, vllm_config: "VllmConfig") -> int:
+    """The head size of `module`, which head counts are derived from.
 
-    `match` and `update_forward` analyse the class once; `fuse` builds the merged
-    submodule and binds the compiled forward on an instance in place, so it keeps
-    its class and any attribute the fusion does not consume.
+    Prefer the module's own `head_dim`, which Transformers sets per instance:
+    the model-wide value is the largest head size across layers, so on a
+    heterogeneous checkpoint it would divide out the wrong number of heads, and
+    it is the text head size, so it does not describe a vision tower at all.
     """
+    return getattr(module, "head_dim", None) or vllm_config.model_config.get_head_size()
 
-    merged_name: ClassVar[str]
-    """Attribute name of the merged module created by `update_attrs`."""
-    merged_cls: ClassVar[str]
-    """Name of the vLLM class the merged projection becomes (for logging)."""
+
+def local_output_sizes(merged_name: str) -> str:
+    """Source for the per-rank widths of the merged linear `self.<merged_name>`."""
+    merged = f"self.{merged_name}"
+    return f"[s // {merged}.tp_size for s in {merged}.output_sizes]"
+
+
+@dataclass
+class RewriteFuser(BaseFuser):
+    """A fuser that rewrites the module's forward and rebinds it.
+
+    `match` and `update_forward` analyse the class once; `fuse` swaps the
+    submodules and binds the compiled forward on an instance in place, so it
+    keeps its class and any attribute the fusion does not consume.
+    """
 
     source_cls: str
     """Class of the HF module the fused projections belonged to (for logging)."""
 
     fused_forward: Callable = field(init=False, repr=False)
     """The compiled rewritten forward, set by `update_forward`."""
+
+    @abstractmethod
+    def update_forward(self, module: nn.Module) -> None:
+        """Rewrite and compile `type(module)`'s forward source.
+
+        Raises if the source does not admit the rewrite (fusion is then skipped).
+        """
+
+    @abstractmethod
+    def update_attrs(
+        self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
+    ) -> None:
+        """Replace `module`'s submodules with their vLLM equivalents."""
+
+    def fuse(
+        self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
+    ) -> nn.Module:
+        """Fuse an already-validated `module` in place (see `Fusers.__getitem__`).
+
+        Builds the merged submodule and binds the compiled forward."""
+        self.update_attrs(module, prefix, vllm_config)
+        module.forward = types.MethodType(self.fused_forward, module)
+        return module
+
+
+@dataclass
+class StackedFuser(RewriteFuser):
+    """A fuser that merges sibling projections into one stacked linear and
+    rewrites the forward to call it."""
+
+    merged_name: ClassVar[str]
+    """Attribute name of the merged module created by `update_attrs`."""
+    merged_cls: ClassVar[str]
+    """Name of the vLLM class the merged projection becomes (for logging)."""
 
     def info(self, name: str) -> str:
         sources = " + ".join(shard for shard, _ in self.shards)
@@ -108,26 +153,3 @@ class StackedFuser(BaseFuser):
         """`{merged_name: [projection names]}` so quantization can unpack the
         fused layer into its per-shard configs."""
         return {self.merged_name: [name for name, _ in self.shards]}
-
-    @abstractmethod
-    def update_forward(self, module: nn.Module) -> None:
-        """Rewrite and compile `type(module)`'s forward source.
-
-        Raises if the source does not admit the rewrite (fusion is then skipped).
-        """
-
-    @abstractmethod
-    def update_attrs(
-        self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
-    ) -> None:
-        """Replace `module`'s submodules with the merged module."""
-
-    def fuse(
-        self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
-    ) -> nn.Module:
-        """Fuse an already-validated `module` in place (see `Fusers.__getitem__`).
-
-        Builds the merged submodule and binds the compiled forward."""
-        self.update_attrs(module, prefix, vllm_config)
-        module.forward = types.MethodType(self.fused_forward, module)
-        return module

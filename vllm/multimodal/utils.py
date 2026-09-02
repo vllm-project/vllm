@@ -5,24 +5,24 @@ import bisect
 import mimetypes
 from collections import defaultdict
 from collections.abc import Generator, Sequence
+from dataclasses import replace
 from itertools import groupby
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
-from typing_extensions import deprecated
 
 from vllm.inputs import MultiModalPlaceholders
 from vllm.utils.import_utils import LazyLoader
 
-from .hasher import MultiModalHasher
 from .inputs import (
     BatchedTensorInputs,
     MultiModalFeatureSpec,
     MultiModalFieldElem,
     MultiModalKwargsItem,
     MultiModalSharedField,
+    nested_tensors_equal,
 )
 from .media import (
     AudioMediaIO,
@@ -57,7 +57,7 @@ def encode_audio_url(
 ) -> str:
     """Encode audio as a data URL."""
     audio_b64 = encode_audio_base64(audio, sampling_rate, format=format)
-    mimetype = mimetypes.types_map.get("." + format.lower(), "audio")
+    mimetype = mimetypes.types_map.get("." + format.lower(), f"audio/{format.lower()}")
     return f"data:{mimetype};base64,{audio_b64}"
 
 
@@ -90,7 +90,7 @@ def encode_image_url(
     Pass `image_mode=None` to keep the original image mode.
     """
     image_b64 = encode_image_base64(image, image_mode=image_mode, format=format)
-    mimetype = mimetypes.types_map.get("." + format.lower(), "image")
+    mimetype = mimetypes.types_map.get("." + format.lower(), f"image/{format.lower()}")
     return f"data:{mimetype};base64,{image_b64}"
 
 
@@ -114,7 +114,9 @@ def encode_video_url(
     if format.lower() == "jpeg":
         mimetype = "video/jpeg"
     else:
-        mimetype = mimetypes.types_map.get("." + format.lower(), "video")
+        mimetype = mimetypes.types_map.get(
+            "." + format.lower(), f"video/{format.lower()}"
+        )
 
     return f"data:{mimetype};base64,{video_b64}"
 
@@ -165,11 +167,28 @@ def argsort_mm_positions(
     return [(modality, idx) for modality, idx, _ in sorted_flat_items]
 
 
-def _get_group_hash(elem: MultiModalFieldElem):
-    if not isinstance(elem.field, MultiModalSharedField):
-        return None
+def _can_batch_mm_items(
+    left: MultiModalKwargsItem,
+    right: MultiModalKwargsItem,
+) -> bool:
+    if left.keys() != right.keys():
+        return False
 
-    return MultiModalHasher.hash_kwargs(data=elem.data)
+    for key, left_elem in left.items():
+        right_elem = right[key]
+        left_field, right_field = left_elem.field, right_elem.field
+        is_shared_field = isinstance(left_field, MultiModalSharedField) and isinstance(
+            right_field, MultiModalSharedField
+        )
+        if (type(left_field) is not type(right_field)) or (
+            is_shared_field
+            and not nested_tensors_equal(
+                left_elem.data, right_elem.data, check_dtype=True
+            )
+        ):
+            return False
+
+    return True
 
 
 def _batch_mm_items(
@@ -191,6 +210,37 @@ def _batch_mm_items(
         )
         for key, elems in elems.items()
     }
+
+
+def strip_covered_mm_data(
+    mm_features: list[MultiModalFeatureSpec],
+    num_computed_tokens: int,
+    uses_mrope: bool = False,
+    uses_xdrope: bool = False,
+) -> list[MultiModalFeatureSpec]:
+    """Drop the tensor data of mm items whose placeholder span is fully inside
+    a prefix-cache-covered region: no encoder run can be scheduled for them,
+    so the workers never consume the payload fields. M-RoPE and XD-RoPE models
+    are the exception: the worker computes positions for the whole prompt from
+    the CPU-side metadata fields (e.g. grid dims), so those are kept. The
+    scheduler-side ``Request`` keeps the full features."""
+    if not mm_features or num_computed_tokens == 0:
+        return mm_features
+
+    def maybe_strip(f: MultiModalFeatureSpec) -> MultiModalFeatureSpec:
+        if f.data is None or (
+            f.mm_position.offset + f.mm_position.length > num_computed_tokens
+        ):
+            return f
+
+        data = None
+        if uses_mrope or uses_xdrope:
+            data = MultiModalKwargsItem(
+                {k: elem for k, elem in f.data.items() if elem.field.keep_on_cpu}
+            )
+        return replace(f, data=data)
+
+    return [maybe_strip(f) for f in mm_features]
 
 
 def group_and_batch_mm_items(
@@ -217,26 +267,21 @@ def group_and_batch_mm_items(
         - `kwargs` is a dictionary of keyword arguments to pass to the model;
         - `num_items` is the corresponding number of items.
     """
-    group_ids = [
-        tuple(
-            (key, _get_group_hash(elem))
-            for key, elem in sorted(item.items(), key=lambda kv: kv[0])
-        )
-        for item in items
-    ]
-    group_sizes = [sum(1 for _ in group) for _, group in groupby(group_ids)]
-
     start_idx = 0
-    for group_size in group_sizes:
+    for end_idx in range(1, len(items) + 1):
+        if end_idx < len(items) and _can_batch_mm_items(
+            items[end_idx - 1], items[end_idx]
+        ):
+            continue
+
         group_data = _batch_mm_items(
-            items[start_idx : start_idx + group_size],
+            items[start_idx:end_idx],
             device=device,
             pin_memory=pin_memory,
         )
 
-        yield group_size, group_data
-
-        start_idx += group_size
+        yield end_idx - start_idx, group_data
+        start_idx = end_idx
 
     assert start_idx == len(items)
 
@@ -278,19 +323,6 @@ def group_and_batch_mm_kwargs(
             pin_memory=pin_memory,
         ):
             yield modality, num_items, mm_kwargs_batch
-
-
-@deprecated(
-    "`group_mm_kwargs_by_modality` has been renamed to `group_and_batch_mm_kwargs`. "
-    "The old name will be removed in v0.19."
-)
-def group_mm_kwargs_by_modality(
-    mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
-    *,
-    device: torch.types.Device = None,
-    pin_memory: bool = False,
-) -> Generator[tuple[str, int, BatchedTensorInputs], None, None]:
-    return group_and_batch_mm_kwargs(mm_kwargs, device=device, pin_memory=pin_memory)
 
 
 def fetch_audio(

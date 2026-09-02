@@ -29,6 +29,9 @@ class MediaWithBytes(Generic[_T]):
 
     media: _T
     original_bytes: bytes = field(repr=False)
+    io_config: dict[str, Any] | None = None
+    """Decode settings that altered the media relative to `original_bytes`
+    (e.g. `image_mode` conversion), so they participate in cache hashing."""
 
     def __array__(self, *args, **kwargs) -> np.ndarray:
         """Allow np.array(obj) to return np.array(obj.media)."""
@@ -75,6 +78,10 @@ class MediaIO(ABC, Generic[_T]):
         if runtime_kwargs:
             merged.update(runtime_kwargs)
         return merged
+
+    def get_max_bytes(self) -> int | None:
+        """Return the maximum encoded payload size accepted by this media IO."""
+        return None
 
     @abstractmethod
     def load_bytes(self, data: bytes) -> _T:

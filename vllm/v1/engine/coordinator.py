@@ -358,8 +358,10 @@ class DPCoordinatorProc:
                                 # is handled by all the engines.
                                 engine_to_exclude = None
 
-                            engines_running = True
-                            wave_state_changed = True
+                            # engines_running is only set from the engines'
+                            # own notifications; a paused engine discards
+                            # START_DP_WAVE, so sending it is not evidence
+                            # that the engines are running.
                             self._send_start_wave(
                                 publish_back, current_wave, engine_to_exclude
                             )
@@ -376,6 +378,9 @@ class DPCoordinatorProc:
                     eng_index = outputs.engine_index
                     scheduler_stats = outputs.scheduler_stats
                     if scheduler_stats:
+                        # Elastic EP stats may arrive while the engine list changes.
+                        if eng_index >= len(self.engines):
+                            continue
                         # 1. Updated request load stats - update our local
                         # state with these.
                         stats = self.engines[eng_index].request_counts
