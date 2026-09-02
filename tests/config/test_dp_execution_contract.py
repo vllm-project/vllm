@@ -91,9 +91,13 @@ def test_speculator_dp_pipeline_requires_speculative_decoding():
         VllmConfig._verify_dp_execution_contract(config)
 
 
-def test_speculator_dp_pipeline_accepts_autoregressive_speculator():
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_speculator_dp_pipeline_accepts_autoregressive_speculator(
+    async_scheduling: bool,
+):
     config = _config()
     config.parallel_config.enable_speculator_dp_sync_pipeline = True
+    config.scheduler_config.async_scheduling = async_scheduling
     config.speculative_config = SimpleNamespace(
         method="mtp",
         use_eagle=lambda: True,
