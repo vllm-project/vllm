@@ -216,6 +216,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
+    VLLM_FLASHINFER_MOE_FUSED_FINALIZE: bool = True
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -1742,6 +1743,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
             for v in os.environ["VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS"].split(",")
             if v.strip()
         ]
+    ),
+    # Use the fused finalize epilogue of the FlashInfer CUTLASS fused-MoE kernel.
+    # The fused epilogue reduces the top-k expert outputs with atomics and is not
+    # deterministic: identical requests can produce different logits. Set to 0
+    # for a bit-reproducible (slightly slower) unfused finalize.
+    "VLLM_FLASHINFER_MOE_FUSED_FINALIZE": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_MOE_FUSED_FINALIZE", "1"))
     ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
