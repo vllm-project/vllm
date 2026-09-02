@@ -31,10 +31,13 @@ from xgrammar.structural_tag import (
     TriggeredTagsFormat,
 )
 
+from vllm.logger import init_logger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+
+logger = init_logger(__name__)
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -110,9 +113,15 @@ class ToolStrictLevel(enum.IntEnum):
 def _tool_strict_level() -> ToolStrictLevel:
     from vllm import envs
 
+    raw = str(envs.VLLM_TOOL_STRICT_LEVEL).strip().lower()
     try:
-        return ToolStrictLevel(envs.VLLM_TOOL_STRICT_LEVEL)
-    except ValueError:
+        return ToolStrictLevel[raw.upper()]
+    except KeyError:
+        logger.warning_once(
+            "Unknown VLLM_TOOL_STRICT_LEVEL %r; expected one of %s. Using 'off'.",
+            raw,
+            ", ".join(level.name.lower() for level in ToolStrictLevel),
+        )
         return ToolStrictLevel.OFF
 
 

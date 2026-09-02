@@ -491,7 +491,11 @@ def test_unified_parser_get_structural_tag_disables_reasoning(
         tool_choice="auto",
     )
     parser = TestParser(MagicMock(), tools=sample_tools_strict)
-    parser.reasoning_parser = MagicMock(adjust_request=lambda request: request)
+    # A non-thinking request: the tag must be built without the reasoning span.
+    parser.reasoning_parser = MagicMock(
+        adjust_request=lambda request: request,
+        emits_reasoning_span=False,
+    )
 
     parser.adjust_request(request)
 
@@ -707,7 +711,7 @@ def test_tool_strict_level_function_constrains_auto_without_strict(
 ):
     """FUNCTION lifts the auto + non-strict gate without touching schemas."""
     monkeypatch.setattr(
-        envs, "VLLM_TOOL_STRICT_LEVEL", int(ToolStrictLevel.FUNCTION), raising=False
+        envs, "VLLM_TOOL_STRICT_LEVEL", "function", raising=False
     )
     tag = get_model_structural_tag(
         model=model,
@@ -723,7 +727,7 @@ def test_tool_strict_level_off_is_the_default(
     sample_tools: list[ChatCompletionToolsParam],
 ):
     """Default behaviour is unchanged: auto + non-strict still gets no tag."""
-    assert envs.VLLM_TOOL_STRICT_LEVEL == int(ToolStrictLevel.OFF)
+    assert envs.VLLM_TOOL_STRICT_LEVEL == ToolStrictLevel.OFF.name.lower()
     assert (
         get_model_structural_tag(
             model="deepseek_v4",
