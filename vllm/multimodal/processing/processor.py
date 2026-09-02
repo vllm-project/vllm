@@ -1033,6 +1033,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     Not to be confused with `transformers.ProcessorMixin`.
     """
 
+    requires_tokenizer = True
+
     def __init__(
         self,
         info: _I,
@@ -1041,6 +1043,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
         super().__init__()
+
+        if self.requires_tokenizer and info.ctx.tokenizer is None:
+            raise ValueError(
+                f"{type(self).__name__} requires a tokenizer and cannot be "
+                "initialized when `skip_tokenizer_init=True`. Disable "
+                "`--skip-tokenizer-init`."
+            )
 
         self.info = info
         self.dummy_inputs = dummy_inputs

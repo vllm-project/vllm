@@ -1,33 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import Mock
-
 import pytest
 import torch
 from packaging.version import Version
 from PIL import Image
 from transformers import __version__ as TRANSFORMERS_VERSION
 
-from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLProcessingInfo
-from vllm.model_executor.models.qwen2_vl import Qwen2VLProcessingInfo
 from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
-from vllm.multimodal.processing import InputProcessingContext
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
-
-
-@pytest.mark.parametrize("info_cls", [Qwen2VLProcessingInfo, Qwen2_5_VLProcessingInfo])
-def test_hf_processor_requires_tokenizer(info_cls) -> None:
-    ctx = InputProcessingContext(model_config=Mock(), tokenizer=None)
-    info = info_cls(ctx)
-
-    with pytest.raises(ValueError, match="`skip_tokenizer_init=True`"):
-        info.get_hf_processor()
 
 
 def test_jina_vl_processing_order() -> None:
