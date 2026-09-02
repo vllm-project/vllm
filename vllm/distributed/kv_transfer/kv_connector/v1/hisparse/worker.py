@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -50,6 +51,15 @@ class _DMADescriptors(NamedTuple):
     sizes_np: np.ndarray
 
 
+@dataclass
+class _ExactMirrorMapping:
+    stream: torch.Stream
+    event: torch.Event
+    slots: torch.Tensor
+    candidates: tuple[SparseKVRowMirror, ...] = ()
+    num_tokens: int = 0
+
+
 def _allocate_dma_descriptors(size: int) -> _DMADescriptors:
     src, dst, sizes = (torch.empty(size, dtype=torch.int64) for _ in range(3))
     return _DMADescriptors(
@@ -88,72 +98,45 @@ def _select_exact_row_mirrors(
     source_slots: np.ndarray,
 ) -> tuple[SparseKVRowMirror, ...]:
     """Select and coalesce GPU-written rows from a scheduler-owned envelope."""
-    if source_slots.ndim != 1:
-        raise ValueError("HiSparse slot mapping must be a 1D array.")
     source_slots = source_slots[source_slots >= 0]
     if source_slots.size == 0:
         return ()
     if not candidates:
         raise RuntimeError("HiSparse GPU slots have no scheduler mapping envelope.")
-    num_sources = len(candidates[0].source_starts)
-    if num_sources == 0 or any(
-        len(mirror.source_starts) != num_sources for mirror in candidates
-    ):
-        raise ValueError("HiSparse row-mirror source counts are inconsistent.")
-
-    candidate_sources = np.concatenate(
-        [
-            np.asarray(mirror.source_starts, dtype=np.int64)[:, None]
-            + np.arange(mirror.num_rows, dtype=np.int64)
-            for mirror in candidates
-        ],
-        axis=1,
+    starts = np.asarray([mirror.source_starts for mirror in candidates], dtype=np.int64)
+    counts = np.fromiter((mirror.num_rows for mirror in candidates), dtype=np.int64)
+    destinations = np.fromiter(
+        [mirror.destination_start for mirror in candidates], dtype=np.int64
     )
-    candidate_destinations = np.concatenate(
-        [
-            np.arange(
-                mirror.destination_start,
-                mirror.destination_start + mirror.num_rows,
-                dtype=np.int64,
-            )
-            for mirror in candidates
-        ]
-    )
-    candidate_ids = np.concatenate(
-        [
-            np.full(mirror.num_rows, index, dtype=np.int64)
-            for index, mirror in enumerate(candidates)
-        ]
-    )
-    order = np.argsort(candidate_sources[0])
-    sorted_sources = candidate_sources[0, order]
-    matches = np.searchsorted(sorted_sources, source_slots)
-    in_envelope = matches < sorted_sources.size
-    safe_matches = np.minimum(matches, sorted_sources.size - 1)
-    in_envelope &= sorted_sources[safe_matches] == source_slots
-    if not np.all(in_envelope):
-        missing = source_slots[~in_envelope]
+    order = np.argsort(starts[:, 0])
+    matches = np.searchsorted(starts[order, 0], source_slots, side="right") - 1
+    candidate_ids = order[np.maximum(matches, 0)]
+    offsets = source_slots - starts[candidate_ids, 0]
+    invalid = (matches < 0) | (offsets >= counts[candidate_ids])
+    if np.any(invalid):
         raise RuntimeError(
             "HiSparse GPU slot mapping falls outside the scheduler envelope: "
-            f"{missing[:8].tolist()}."
+            f"{source_slots[invalid][:8].tolist()}."
         )
-    destinations = candidate_destinations[order[safe_matches]]
-    exact_sources = candidate_sources[:, order[safe_matches]]
-    exact_candidate_ids = candidate_ids[order[safe_matches]]
-
-    consecutive = destinations[1:] == destinations[:-1] + 1
-    consecutive &= np.all(exact_sources[:, 1:] == exact_sources[:, :-1] + 1, axis=0)
-    consecutive &= exact_candidate_ids[1:] == exact_candidate_ids[:-1]
-    boundaries = np.flatnonzero(~consecutive) + 1
-    starts = np.concatenate((np.array([0]), boundaries))
-    ends = np.concatenate((boundaries, np.array([destinations.size])))
+    sources = starts[candidate_ids] + offsets[:, None]
+    destinations = destinations[candidate_ids] + offsets
+    boundaries = (
+        np.flatnonzero(
+            (candidate_ids[1:] != candidate_ids[:-1])
+            | (np.diff(destinations) != 1)
+            | np.any(np.diff(sources, axis=0) != 1, axis=1)
+        )
+        + 1
+    )
+    run_starts = np.concatenate(([0], boundaries))
+    run_ends = np.concatenate((boundaries, [destinations.size]))
     return tuple(
         SparseKVRowMirror(
-            source_starts=tuple(int(value) for value in exact_sources[:, start]),
+            source_starts=tuple(int(value) for value in sources[start]),
             destination_start=int(destinations[start]),
             num_rows=int(end - start),
         )
-        for start, end in zip(starts, ends, strict=True)
+        for start, end in zip(run_starts, run_ends, strict=True)
     )
 
 
@@ -284,11 +267,17 @@ class HiSparseConnectorWorker:
         self.dma_stream = (
             torch.cuda.Stream(device=device) if self.is_host_writer else None
         )
-        self.mapping_copy_stream = (
-            torch.cuda.Stream(device=device)
-            if self.is_host_writer and self.exact_row_mirrors
-            else None
-        )
+        self._exact_mapping = None
+        if self.is_host_writer and self.exact_row_mirrors:
+            self._exact_mapping = _ExactMirrorMapping(
+                stream=torch.Stream(device=device),
+                event=torch.Event(),
+                slots=torch.empty(
+                    self.vllm_config.scheduler_config.max_num_batched_tokens,
+                    dtype=torch.int64,
+                    pin_memory=True,
+                ),
+            )
         self._dma_free_descriptors: list[_DMADescriptors] = []
         self._pending_dma_descriptors: deque[tuple[torch.Event, _DMADescriptors]] = (
             deque()
@@ -296,35 +285,19 @@ class HiSparseConnectorWorker:
         self._dma_submitted = False
         self._per_layer_mirrored: set[int] = set()
         self._submitted_mirror_layers: set[int] = set()
-        self._target_mirror_layers: set[int] = set()
         self._layer_ready_events = tuple(torch.Event() for _ in cache_handles)
         self._forward_ready_event = torch.Event()
         self._set_row_mirrors(())
-        self._candidate_row_mirrors: tuple[SparseKVRowMirror, ...] = ()
-        self._mapping_copy_event = (
-            torch.cuda.Event(blocking=True)
-            if self.is_host_writer and self.exact_row_mirrors
-            else None
+        self._resident_group_id = next(
+            (
+                group_id
+                for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups)
+                if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+            ),
+            None,
         )
-        self._mapping_pending = False
-        self._mapping_num_tokens = 0
-        resident_group_ids = tuple(
-            group_id
-            for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups)
-            if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
-        )
-        if not resident_group_ids:
+        if self._resident_group_id is None:
             raise RuntimeError("HiSparse found no resident slot-mapping groups.")
-        self._resident_group_id = resident_group_ids[0]
-        self._mapping_slots_cpu = (
-            torch.empty(
-                self.vllm_config.scheduler_config.max_num_batched_tokens,
-                dtype=torch.int64,
-                pin_memory=True,
-            )
-            if self.is_host_writer and self.exact_row_mirrors
-            else None
-        )
         self.host_write_events = _create_hisparse_host_events(
             shared_host_region, is_host_writer, device
         )
@@ -416,30 +389,19 @@ class HiSparseConnectorWorker:
         request_ids: list[str] | None = None,
     ) -> None:
         previous_host_write_event = self.host_write_event
-        host_write_events = getattr(self, "host_write_events", None)
-        if host_write_events is not None:
-            self.host_write_event = host_write_events[self._next_host_write_event]
-            self._next_host_write_event ^= 1
+        self.host_write_event = self.host_write_events[self._next_host_write_event]
+        self._next_host_write_event ^= 1
         current_stream().wait_event(previous_host_write_event)
         self._release_completed_dma_descriptors()
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
-        self._candidate_row_mirrors = mirrors
+        if self._exact_mapping is not None:
+            self._exact_mapping.candidates = mirrors
         self._set_row_mirrors(mirrors)
         self._row_mirrors_from_resident = metadata.row_mirrors_from_resident
         self._dma_submitted = False
-        self._per_layer_mirrored.clear()
-        self._submitted_mirror_layers.clear()
-        self._target_mirror_layers.clear()
+        self._clear_forward_mirror_state()
         for handle in self.cache_handles:
-            handle.decode_batch = False
-            handle.all_context_pages_resident = getattr(
-                metadata, "all_context_pages_resident", False
-            )
-            handle.host_mirror_required = False
-            handle.num_actual_tokens = 0
-            handle.num_decode_tokens = 0
-            handle.req_id_per_token = None
-            handle.submit_layer_mirror = None
+            handle.all_context_pages_resident = metadata.all_context_pages_resident
             handle.mirror_from_resident = (
                 self.exact_row_mirrors or metadata.row_mirrors_from_resident
             )
@@ -457,7 +419,11 @@ class HiSparseConnectorWorker:
             self._enqueue_pre_forward_transfers(pre_forward_transfers)
         else:
             self._post_forward_transfers.clear()
-        if self.is_host_writer and self._row_mirror_num_rows:
+        if (
+            not self.exact_row_mirrors
+            and self.is_host_writer
+            and self._row_mirror_num_rows
+        ):
             for handle, callback in zip(
                 self.cache_handles, self._layer_mirror_callbacks
             ):
@@ -466,67 +432,75 @@ class HiSparseConnectorWorker:
         if request_state_indices is not None:
             self.set_request_state_indices(request_state_indices)
 
+    def _clear_forward_mirror_state(self) -> None:
+        self._per_layer_mirrored.clear()
+        self._submitted_mirror_layers.clear()
+        for handle in self.cache_handles:
+            handle.decode_batch = False
+            handle.host_mirror_required = False
+            handle.num_actual_tokens = 0
+            handle.num_decode_tokens = 0
+            handle.req_id_per_token = None
+            handle.submit_layer_mirror = None
+
     def stage_row_mirror_mapping(
         self, slot_mappings: torch.Tensor, num_tokens: int
     ) -> None:
         if not self.is_host_writer or not self.exact_row_mirrors:
             return
-        if self._mapping_pending:
+        state = self._exact_mapping
+        assert state is not None
+        if state.num_tokens:
             raise RuntimeError("HiSparse row mapping was staged twice without use.")
         if slot_mappings.ndim != 2:
             raise ValueError("HiSparse requires grouped slot mappings.")
         if self._resident_group_id >= slot_mappings.shape[0]:
             raise ValueError("HiSparse resident slot-mapping group is missing.")
-        slots_cpu = self._mapping_slots_cpu
-        copy_stream = self.mapping_copy_stream
-        copy_event = self._mapping_copy_event
-        assert (
-            slots_cpu is not None and copy_stream is not None and copy_event is not None
-        )
-        if num_tokens > slots_cpu.shape[0]:
+        if num_tokens > state.slots.shape[0]:
             raise ValueError(
                 "HiSparse row mapping exceeds max_num_batched_tokens: "
-                f"{num_tokens} > {slots_cpu.shape[0]}."
+                f"{num_tokens} > {state.slots.shape[0]}."
             )
         main_stream = current_stream()
-        copy_stream.wait_stream(main_stream)
-        with torch.cuda.stream(copy_stream):
-            slots_cpu[:num_tokens].copy_(
+        state.stream.wait_stream(main_stream)
+        with torch.cuda.stream(state.stream):
+            state.slots[:num_tokens].copy_(
                 slot_mappings[self._resident_group_id, :num_tokens],
                 non_blocking=True,
             )
-            copy_event.record(copy_stream)
-        self._mapping_num_tokens = num_tokens
-        self._mapping_pending = True
-        for layer_index, (handle, callback) in enumerate(
-            zip(self.cache_handles, self._layer_mirror_callbacks, strict=True)
+            state.event.record(state.stream)
+        state.num_tokens = num_tokens
+        for handle, callback in zip(
+            self.cache_handles, self._layer_mirror_callbacks, strict=True
         ):
-            if layer_index not in self._submitted_mirror_layers:
-                handle.submit_layer_mirror = callback
+            handle.submit_layer_mirror = callback
 
-    def _resolve_staged_row_mirrors(self) -> None:
-        if not self._mapping_pending:
-            return
-        copy_event = self._mapping_copy_event
-        slots_cpu = self._mapping_slots_cpu
-        assert copy_event is not None and slots_cpu is not None
-        if not copy_event.query():
-            copy_event.synchronize()
+    def _resolve_staged_row_mirrors(self) -> bool:
+        state = self._exact_mapping
+        if state is None or not state.num_tokens:
+            return True
+        if not state.event.query():
+            return False
         self._set_row_mirrors(
             _select_exact_row_mirrors(
-                self._candidate_row_mirrors,
-                slots_cpu[: self._mapping_num_tokens].numpy(),
+                state.candidates,
+                state.slots[: state.num_tokens].numpy(),
             )
         )
         self._row_mirrors_from_resident = True
-        self._mapping_pending = False
+        state.num_tokens = 0
+        return True
+
+    def _require_staged_row_mirrors(self) -> None:
+        if not self._resolve_staged_row_mirrors():
+            raise RuntimeError("HiSparse slot mapping copy outlived the model forward.")
 
     def _copy_host_blocks(
         self,
         host_block_copies: Sequence[KVCacheBlockCopy],
         previous_host_write_event: torch.Event,
     ) -> None:
-        if getattr(self, "shared_host_region", None) is not None and host_block_copies:
+        if self.shared_host_region is not None and host_block_copies:
             if get_tensor_model_parallel_rank() == 0:
                 copy_kv_cache_blocks_inplace(
                     self.host_caches,
@@ -565,37 +539,17 @@ class HiSparseConnectorWorker:
 
     def finish_step(self) -> None:
         if self.exact_row_mirrors:
-            self._resolve_staged_row_mirrors()
-            draft_layers = tuple(
-                index
-                for index, handle in enumerate(self.cache_handles)
-                if handle.host_mirror_required
-                and handle.num_actual_tokens
-                and index not in self._target_mirror_layers
-            )
-            pending_layers = tuple(
-                index
-                for index in draft_layers
-                if index not in self._submitted_mirror_layers
-            )
-            self._invalidate_layer_writes(draft_layers, all_tokens=True)
-            self._enqueue_row_dma(pending_layers)
-            self._submitted_mirror_layers.update(pending_layers)
-            transfers = self._post_forward_transfers
-            self._post_forward_transfers = []
-            if self.cache_handles[0].runtime.eager_host_mirror:
-                self._record_transfer_completion(transfers)
-            else:
-                self._enqueue_transfers(transfers)
+            self._require_staged_row_mirrors()
+            self._enqueue_host_mirror()
+            self._clear_forward_mirror_state()
+            self._enqueue_post_forward_transfers()
         if self.is_host_writer and self._dma_submitted:
             current_stream().wait_event(self.host_write_event)
             self._dma_submitted = False
         self._release_completed_dma_descriptors()
 
     def _release_completed_dma_descriptors(self) -> None:
-        pending = getattr(self, "_pending_dma_descriptors", None)
-        if pending is None:
-            return
+        pending = self._pending_dma_descriptors
         while pending and pending[0][0].query():
             _, descriptors = pending.popleft()
             self._dma_free_descriptors.append(descriptors)
@@ -658,7 +612,7 @@ class HiSparseConnectorWorker:
 
     def _require_row_mirrors(self, num_rows: int) -> tuple[SparseKVRowMirror, ...]:
         mirror_rows = self._row_mirror_num_rows
-        from_resident = getattr(self, "_row_mirrors_from_resident", False)
+        from_resident = self._row_mirrors_from_resident
         if mirror_rows < num_rows or (not from_resident and mirror_rows != num_rows):
             raise RuntimeError(
                 "HiSparse DMA metadata does not match the forward: "
@@ -682,9 +636,7 @@ class HiSparseConnectorWorker:
         destination_starts = self._row_mirror_destination_starts
         row_counts = self._row_mirror_counts
         decode_batch = self.cache_handles[layer_indices[0]].decode_batch
-        from_resident = decode_batch or getattr(
-            self, "_row_mirrors_from_resident", False
-        )
+        from_resident = decode_batch or self._row_mirrors_from_resident
         staging_starts = np.cumsum(row_counts, dtype=np.int64) - row_counts
         for descriptor_offset, layer_index in enumerate(layer_indices):
             cache = self.cache_handles[layer_index]
@@ -750,7 +702,10 @@ class HiSparseConnectorWorker:
         if layer_index in self._per_layer_mirrored:
             raise RuntimeError(f"HiSparse layer {layer_index} mirrored twice.")
         if self.exact_row_mirrors:
-            self._resolve_staged_row_mirrors()
+            if not self._resolve_staged_row_mirrors():
+                for cache in self.cache_handles:
+                    cache.submit_layer_mirror = None
+                return
         else:
             self._require_row_mirrors(handle.num_actual_tokens)
         self._per_layer_mirrored.add(layer_index)
@@ -788,6 +743,14 @@ class HiSparseConnectorWorker:
     def _enqueue_pre_forward_transfers(
         self, transfers: list[SparseKVPageTransfer]
     ) -> None:
+        if self.cache_handles[0].runtime.eager_host_mirror:
+            self._record_transfer_completion(transfers)
+        else:
+            self._enqueue_transfers(transfers)
+
+    def _enqueue_post_forward_transfers(self) -> None:
+        transfers = self._post_forward_transfers
+        self._post_forward_transfers = []
         if self.cache_handles[0].runtime.eager_host_mirror:
             self._record_transfer_completion(transfers)
         else:
@@ -912,9 +875,7 @@ class HiSparseConnectorWorker:
         )
         if num_rows == 0:
             return
-        if self.exact_row_mirrors:
-            self._resolve_staged_row_mirrors()
-        else:
+        if not self.exact_row_mirrors:
             self._require_row_mirrors(num_rows)
         if self.is_host_writer:
             expected_layers = set(active_layer_indices)
@@ -925,10 +886,9 @@ class HiSparseConnectorWorker:
                         f"expected {sorted(expected_layers)}, got "
                         f"{sorted(self._per_layer_mirrored)}."
                     )
-                submitted_layers = getattr(
-                    self, "_submitted_mirror_layers", expected_layers
+                pending_layers = tuple(
+                    sorted(expected_layers - self._submitted_mirror_layers)
                 )
-                pending_layers = tuple(sorted(expected_layers - submitted_layers))
                 if pending_layers:
                     self._enqueue_row_dma(
                         pending_layers,
@@ -937,30 +897,19 @@ class HiSparseConnectorWorker:
                     self._submitted_mirror_layers.update(pending_layers)
             else:
                 self._enqueue_row_dma(active_layer_indices, ready_event=ready_event)
-                self._submitted_mirror_layers.update(active_layer_indices)
-        if self.exact_row_mirrors:
-            self._submitted_mirror_layers.update(active_layer_indices)
-        self._invalidate_layer_writes(active_layer_indices)
-
-    def _invalidate_layer_writes(
-        self, layer_indices: Sequence[int], *, all_tokens: bool = False
-    ) -> None:
-        for layer_index in layer_indices:
-            handle = self.cache_handles[layer_index]
-            if not handle.runtime.is_group_leader:
-                continue
-            num_written_tokens = min(
-                handle.num_actual_tokens if all_tokens else handle.num_decode_tokens,
-                handle.num_actual_tokens,
-            )
-            if num_written_tokens == 0:
-                continue
-            assert handle.mirror_slot_mapping is not None
-            assert handle.req_id_per_token is not None
-            handle.runtime.invalidate_written_slots(
-                handle.mirror_slot_mapping[:num_written_tokens],
-                handle.req_id_per_token[:num_written_tokens],
-            )
+        num_written_tokens = (
+            num_rows
+            if self.exact_row_mirrors
+            else min(cache.num_decode_tokens, num_rows)
+        )
+        if num_written_tokens:
+            assert cache.req_id_per_token is not None
+            for handle in active_handles:
+                if handle.runtime.is_group_leader:
+                    handle.runtime.invalidate_written_slots(
+                        dst_slots[:num_written_tokens],
+                        cache.req_id_per_token[:num_written_tokens],
+                    )
 
     def finish_forward(self) -> None:
         compute_stream = current_stream()
@@ -968,16 +917,12 @@ class HiSparseConnectorWorker:
         for handle in self.cache_handles:
             handle.submit_layer_mirror = None
         if self.exact_row_mirrors:
-            self._resolve_staged_row_mirrors()
+            self._require_staged_row_mirrors()
         self._enqueue_host_mirror(self._forward_ready_event)
-        self._target_mirror_layers.update(self._submitted_mirror_layers)
-        if not self.exact_row_mirrors:
-            transfers = self._post_forward_transfers
-            self._post_forward_transfers = []
-            if self.cache_handles[0].runtime.eager_host_mirror:
-                self._record_transfer_completion(transfers)
-            else:
-                self._enqueue_transfers(transfers)
+        if self.exact_row_mirrors:
+            self._clear_forward_mirror_state()
+        else:
+            self._enqueue_post_forward_transfers()
         if self.is_host_writer and not self._dma_submitted:
             self.host_write_event.record(compute_stream)
 
@@ -996,11 +941,10 @@ class HiSparseConnectorWorker:
     def shutdown(self) -> None:
         if not self._initialized:
             return
-        if self.mapping_copy_stream is not None:
-            self.mapping_copy_stream.synchronize()
-        dma_stream = getattr(self, "dma_stream", None)
-        if dma_stream is not None:
-            dma_stream.synchronize()
+        if self._exact_mapping is not None:
+            self._exact_mapping.stream.synchronize()
+        if self.dma_stream is not None:
+            self.dma_stream.synchronize()
         release_pinned_state(
             [cache.runtime for cache in self.cache_handles], self.pinned_host_pools
         )

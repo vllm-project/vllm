@@ -944,7 +944,7 @@ class HiSparseCacheHandle:
         if (
             self.submit_layer_mirror is not None
             and not self.decode_batch
-            and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
+            and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
         ):
             self.submit_layer_mirror()
 

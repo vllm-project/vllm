@@ -12,13 +12,14 @@ import torch
 
 import vllm.v1.attention.backends.mla.index_group as index_group_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
-from vllm.config import KVTransferConfig
+from vllm.config import CUDAGraphMode, KVTransferConfig
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
     worker as hisparse_worker_module,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
+    _ExactMirrorMapping,
     _flatten_row_mirrors,
     _select_exact_row_mirrors,
 )
@@ -31,7 +32,15 @@ from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker = object.__new__(HiSparseConnectorWorker)
     worker.exact_row_mirrors = False
-    worker.mapping_copy_stream = None
+    worker._exact_mapping = None
+    worker._row_mirrors_from_resident = False
+    worker._pending_dma_descriptors = deque()
+    worker._dma_free_descriptors = []
+    worker.host_write_events = (MagicMock(), MagicMock())
+    worker.host_write_event = worker.host_write_events[1]
+    worker._next_host_write_event = 0
+    worker.dma_stream = None
+    worker.shared_host_region = None
     return worker
 
 
@@ -79,11 +88,11 @@ def test_hisparse_stages_reference_slots_on_copy_stream(monkeypatch):
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
     worker.exact_row_mirrors = True
-    worker._mapping_pending = False
     worker._resident_group_id = 1
-    worker._mapping_slots_cpu = torch.empty(4, dtype=torch.int64)
-    worker.mapping_copy_stream = MagicMock()
-    worker._mapping_copy_event = MagicMock()
+    state = _ExactMirrorMapping(
+        MagicMock(), MagicMock(), torch.empty(4, dtype=torch.int64)
+    )
+    worker._exact_mapping = state
     worker.cache_handles = []
     worker._layer_mirror_callbacks = ()
     worker._submitted_mirror_layers = set()
@@ -95,12 +104,33 @@ def test_hisparse_stages_reference_slots_on_copy_stream(monkeypatch):
         torch.tensor([[1, 2, 3], [7, 8, 9]], dtype=torch.int64), 3
     )
 
-    torch.testing.assert_close(worker._mapping_slots_cpu[:3], torch.tensor([7, 8, 9]))
-    worker.mapping_copy_stream.wait_stream.assert_called_once_with(main_stream)
-    worker._mapping_copy_event.record.assert_called_once_with(
-        worker.mapping_copy_stream
+    torch.testing.assert_close(state.slots[:3], torch.tensor([7, 8, 9]))
+    state.stream.wait_stream.assert_called_once_with(main_stream)
+    state.event.record.assert_called_once_with(state.stream)
+    assert state.num_tokens == 3
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_calls"),
+    [(CUDAGraphMode.PIECEWISE, 1), (CUDAGraphMode.FULL, 0)],
+)
+def test_hisparse_submits_layer_mirror_at_replayed_attention_boundary(
+    monkeypatch, mode, expected_calls
+):
+    """Piecewise replay must pipeline DMA; FULL replay uses the batch fallback."""
+    handle = object.__new__(hisparse_runtime_module.HiSparseCacheHandle)
+    handle.dummy_batch = False
+    handle.decode_batch = False
+    handle.submit_layer_mirror = MagicMock()
+    monkeypatch.setattr(
+        hisparse_runtime_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(cudagraph_runtime_mode=mode),
     )
-    assert worker._mapping_pending
+
+    handle.finish_kv_update()
+
+    assert handle.submit_layer_mirror.call_count == expected_calls
 
 
 def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
@@ -410,7 +440,6 @@ def test_hisparse_finish_forward_mirrors_all_layers_once(monkeypatch):
     worker._dma_submitted = False
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
-    worker._target_mirror_layers = set()
     worker._post_forward_transfers = []
     worker._enqueue_row_dma = MagicMock()
     worker.host_write_event = MagicMock()
@@ -479,7 +508,6 @@ def test_hisparse_lazy_mirror_copies_post_forward_page(monkeypatch):
     worker._record_transfer_completion = MagicMock()
     worker._dma_submitted = True
     worker._submitted_mirror_layers = set()
-    worker._target_mirror_layers = set()
     monkeypatch.setattr(hisparse_worker_module, "current_stream", MagicMock())
 
     worker.finish_forward()
@@ -740,7 +768,6 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
     worker.cache_handles = []
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
-    worker._target_mirror_layers = set()
     worker._layer_mirror_callbacks = ()
     stream = MagicMock()
     monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
@@ -751,6 +778,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             command=None,
             source_block_ids=[],
             row_mirrors={},
+            all_context_pages_resident=True,
             row_mirrors_from_resident=False,
         ),
         None,
@@ -761,6 +789,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             command=None,
             source_block_ids=[],
             row_mirrors={},
+            all_context_pages_resident=True,
             row_mirrors_from_resident=False,
         ),
         None,
@@ -818,7 +847,6 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
     worker.cache_handles = [handle]
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
-    worker._target_mirror_layers = set()
     worker._layer_mirror_callbacks = (MagicMock(),)
     worker._post_forward_transfers = []
     worker._pending_invalid_block_ids = []
@@ -832,6 +860,7 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
             command=None,
             source_block_ids=[],
             row_mirrors={},
+            all_context_pages_resident=True,
             row_mirrors_from_resident=False,
         ),
         None,
