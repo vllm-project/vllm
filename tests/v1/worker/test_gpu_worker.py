@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
+from vllm.v1.worker.utils import request_memory
 
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
@@ -152,3 +154,51 @@ def test_profiling_fallback_declines_off_rocm(rocm):
     result = _profile_result(consumed=-RELEASED_BY_OTHERS)
 
     assert maybe_rocm_profiling_fallback(result) is None
+
+
+# request_memory (vllm/v1/worker/utils.py) clamping behaviour when
+# a GPU is shared with another process.
+
+
+def _mem_snapshot(*, total, free):
+    return SimpleNamespace(
+        total_memory=total,
+        free_memory=free,
+        device_="cuda:0",
+    )
+
+
+def _cache_config(util=0.9):
+    return SimpleNamespace(gpu_memory_utilization=util)
+
+
+class TestRequestMemory:
+    def test_clamps_to_free_memory_when_shared(self):
+        """When another process occupies part of the GPU, the budget should be
+        clamped to the actually-free memory instead of crashing."""
+        total = 96 * GiB_bytes
+        free = 80 * GiB_bytes  # 16 GiB used by another process
+        result = request_memory(
+            _mem_snapshot(total=total, free=free), _cache_config(util=0.92)
+        )
+        assert result == free
+
+    def test_normal_case_uses_full_budget(self):
+        """When free memory exceeds the budget, the full budget is returned."""
+        total = 96 * GiB_bytes
+        free = 94 * GiB_bytes
+        result = request_memory(
+            _mem_snapshot(total=total, free=free), _cache_config(util=0.9)
+        )
+        expected = math.ceil(total * 0.9)
+        assert result == expected
+        assert result < free
+
+    def test_exact_boundary(self):
+        """When free == budget, no clamping occurs."""
+        total = 100 * GiB_bytes
+        budget = math.ceil(total * 0.8)
+        result = request_memory(
+            _mem_snapshot(total=total, free=budget), _cache_config(util=0.8)
+        )
+        assert result == budget
