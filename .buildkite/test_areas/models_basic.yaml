@@ -26,7 +26,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Basic Models (Extra Initialization) Shard %N"
   device: h200_35gb
   key: basic-models-tests-extra-initialization
-  timeout_in_minutes: 100
+  timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/model_executor/models/
   - tests/models/test_initialization.py
@@ -36,7 +36,7 @@ steps:
     # subset of supported models (the complement of the small subset in the above
     # test.) Also run if model initialization test file is modified
     - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  parallelism: 4
+  parallelism: 14
 
 - label: ":nvidia: (H200 MIG 35GB) Basic Models (Other)"
   device: h200_35gb
