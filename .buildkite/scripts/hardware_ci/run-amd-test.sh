@@ -645,7 +645,7 @@ is_multi_node() {
   fi
   # Fallback: detect the bracket syntax structurally
   # Pattern: [...] && [...] (per-node command arrays)
-  if [[ "$cmds" =~ \[.*\].*\&\&.*\[.*\] ]]; then
+  if [[ "$cmds" == *'] && ['* ]]; then
     return 0
   fi
   return 1
