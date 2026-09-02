@@ -15,6 +15,7 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import current_stream
 
 from .xpu_communicator import XpuCommunicator
 
@@ -139,11 +140,23 @@ class XpuP2pCommunicator(XpuCommunicator):
         ok = False
         try:
             self._ext = self._load_ext()
-            # All copies are enqueued on the queue behind the current
-            # stream, so they order correctly against torch ops as long as
-            # the worker stays on this stream (vLLM XPU uses the default
-            # stream). Captured once: tensors move, the stream does not.
-            self._ext.init(torch.xpu.current_stream().sycl_queue)
+            # All copies are enqueued on the queue behind vLLM's cached
+            # current stream, so they order correctly against torch ops as
+            # long as the worker stays on this stream (vLLM XPU uses the
+            # default stream). On XPU that cache is written once, at the
+            # first current_stream() call on this thread, and never
+            # updated (torch.xpu.set_stream is not patched), so pin it here
+            # and refuse to start if it already disagrees with torch.
+            cached, actual = current_stream(), torch.xpu.current_stream()
+            if cached.sycl_queue != actual.sycl_queue:
+                raise RuntimeError(
+                    "vLLM's cached current stream (stream_id="
+                    f"{cached.stream_id}) is not the current XPU stream "
+                    f"(stream_id={actual.stream_id}); something populated "
+                    "the cache inside a stream context before the "
+                    "communicator was built"
+                )
+            self._ext.init(cached.sycl_queue)
             # Fixed device buffers make the IPC handle exchange a one-time
             # cost; activations are staged into them per call, one slot per
             # sequence parity.

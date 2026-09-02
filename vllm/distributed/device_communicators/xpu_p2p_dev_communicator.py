@@ -8,6 +8,7 @@ import torch
 from torch.distributed import ProcessGroup
 
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import current_stream
 
 from .xpu_p2p_communicator import XpuP2pCommunicator
 
@@ -117,7 +118,7 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
         ok = False
         try:
             self._dev_ext = self._load_dev_ext()
-            self._dev_ext.init(torch.xpu.current_stream().sycl_queue)
+            self._dev_ext.init(current_stream().sycl_queue)
             # Same offsets on both ranks, so the peer's slots and flags are
             # visible at the same offsets of the mapped peer buffer. Flags
             # and counters are monotonic sequence numbers and must start
@@ -229,8 +230,12 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
         # Every argument is a function of the tensor alone; the sequence
         # number and slot parity come from a device-side counter, so a
         # launch recorded into an XPU graph stays correct on replay.
+        # vLLM's cached current_stream() is the queue its graph capture
+        # records on (cuda_graph.py passes it explicitly), and it costs a
+        # TLS read where torch.xpu.current_stream() builds a Stream object
+        # per call (1.5us, a fifth of this collective).
         self._dev_ext.launch(
-            torch.xpu.current_stream().sycl_queue,
+            current_stream().sycl_queue,
             self._DTYPE_CODE[input_.dtype],
             output.data_ptr(),
             input_.data_ptr(),
@@ -260,7 +265,7 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
         if nbytes:
             nwg, chunk = self._launch_cfg(nbytes, vec=16)
             self._dev_ext.launch_ag(
-                torch.xpu.current_stream().sycl_queue,
+                current_stream().sycl_queue,
                 output.data_ptr(),
                 input_.data_ptr(),
                 self._ag_slots,
