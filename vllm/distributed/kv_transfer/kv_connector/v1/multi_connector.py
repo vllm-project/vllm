@@ -135,6 +135,13 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     - Save to all connectors.
     """
 
+    @property
+    def requires_block_zeroing_before_async_load(self) -> bool:
+        return any(
+            connector.requires_block_zeroing_before_async_load
+            for connector in self._connectors
+        )
+
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """

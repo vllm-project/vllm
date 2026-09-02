@@ -22,6 +22,9 @@ class RegisterWorkerPayload(BaseModel):
     tp_rank: int
     pp_rank: int
     addr: WorkerAddr
+    dcp_size: int = 1
+    use_mla: bool = False
+    has_mamba: bool = False
 
 
 @dataclass
@@ -29,6 +32,9 @@ class EngineEntry:
     engine_id: EngineId
     # {tp_rank: {pp_rank: worker_addr}}
     worker_addr: dict[int, dict[int, WorkerAddr]]
+    dcp_size: int = 1
+    use_mla: bool = False
+    has_mamba: bool = False
 
 
 class MooncakeBootstrapServer:
@@ -83,6 +89,9 @@ class MooncakeBootstrapServer:
             self.workers[payload.dp_rank] = EngineEntry(
                 engine_id=payload.engine_id,
                 worker_addr={},
+                dcp_size=payload.dcp_size,
+                use_mla=payload.use_mla,
+                has_mamba=payload.has_mamba,
             )
 
         dp_entry = self.workers[payload.dp_rank]
@@ -92,6 +101,21 @@ class MooncakeBootstrapServer:
                 detail=(
                     f"Engine ID mismatch for dp_rank={payload.dp_rank}: "
                     f"expected {dp_entry.engine_id}, got {payload.engine_id}"
+                ),
+            )
+        if (
+            dp_entry.dcp_size != payload.dcp_size
+            or dp_entry.use_mla != payload.use_mla
+            or dp_entry.has_mamba != payload.has_mamba
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Worker topology mismatch for dp_rank={payload.dp_rank}: "
+                    f"expected dcp/use_mla/has_mamba="
+                    f"{dp_entry.dcp_size}/{dp_entry.use_mla}/"
+                    f"{dp_entry.has_mamba}, got {payload.dcp_size}/"
+                    f"{payload.use_mla}/{payload.has_mamba}"
                 ),
             )
         if payload.tp_rank not in dp_entry.worker_addr:
@@ -112,11 +136,15 @@ class MooncakeBootstrapServer:
 
         tp_entry[payload.pp_rank] = payload.addr
         logger.debug(
-            "Registered worker: engine_id=%s, dp_rank=%d, tp_rank=%d, pp_rank=%d at %s",
+            "Registered worker: engine_id=%s, dp_rank=%d, tp_rank=%d, "
+            "pp_rank=%d, dcp_size=%d, use_mla=%s, has_mamba=%s at %s",
             payload.engine_id,
             payload.dp_rank,
             payload.tp_rank,
             payload.pp_rank,
+            payload.dcp_size,
+            payload.use_mla,
+            payload.has_mamba,
             payload.addr,
         )
 

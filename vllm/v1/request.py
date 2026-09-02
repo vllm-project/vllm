@@ -179,6 +179,10 @@ class Request:
         self.last_sched_seq = 0
 
         self.spec_token_ids: list[int] = []
+        # Some external KV providers transfer only the target-model cache. A
+        # hidden-state-based drafter cannot safely speculate from such a prefix
+        # until its own context cache has been bootstrapped.
+        self.disable_speculative_decoding = False
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
 

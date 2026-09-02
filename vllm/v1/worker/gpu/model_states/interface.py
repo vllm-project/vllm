@@ -135,6 +135,10 @@ class ModelState(ABC):
         """
         return AttentionCGSupport.ALWAYS, None
 
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """Initialize state derived from the finalized KV-cache layout."""
+        return None
+
     def preprocess_state(
         self,
         input_batch: InputBatch,

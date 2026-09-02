@@ -26,6 +26,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
+    _build_hybrid_dcp_attention_token_plan,
+    _validate_hybrid_dcp_pd_topology,
     get_mooncake_bootstrap_addr,
     should_launch_bootstrap_server,
 )
@@ -38,6 +40,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    MambaSpec,
 )
 from vllm.v1.request import RequestStatus
 
@@ -98,6 +101,7 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
             base_addr=0x1000,
             block_len=256,
             kv_block_len=128,
+            group_index=0,
         ),
         TransferRegion(
             layer_name="model.layers.1.self_attn",
@@ -105,6 +109,7 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
             base_addr=0x1100,
             block_len=256,
             kv_block_len=128,
+            group_index=0,
         ),
     ]
     remote_regions = [
@@ -114,6 +119,7 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
             base_addr=0xA000,
             block_len=256,
             kv_block_len=128,
+            group_index=3,
         ),
         TransferRegion(
             layer_name="model.layers.1.self_attn",
@@ -121,6 +127,7 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
             base_addr=0xB000,
             block_len=256,
             kv_block_len=128,
+            group_index=3,
         ),
         TransferRegion(
             layer_name="model.layers.1.self_attn",
@@ -128,6 +135,7 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
             base_addr=0xB100,
             block_len=256,
             kv_block_len=128,
+            group_index=3,
         ),
     ]
 
@@ -138,6 +146,242 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
     assert err is None
     assert [r.base_addr for r in aligned_local] == [0x1000, 0x1100]
     assert [r.base_addr for r in aligned_remote] == [0xB000, 0xB100]
+    assert [r.group_index for r in aligned_local] == [0, 0]
+    assert [r.group_index for r in aligned_remote] == [3, 3]
+
+
+def test_validate_hybrid_dcp_pd_topology_accepts_k3_layout():
+    assert (
+        _validate_hybrid_dcp_pd_topology(
+            producer_tp_size=8,
+            producer_dcp_size=1,
+            producer_use_mla=True,
+            producer_has_mamba=True,
+            consumer_tp_size=8,
+            consumer_dcp_size=8,
+            consumer_use_mla=True,
+            consumer_has_mamba=True,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"consumer_tp_size": 16}, "matching P/D TP sizes"),
+        ({"producer_dcp_size": 2}, "DCP=1 on the producer"),
+        ({"consumer_dcp_size": 4}, "span its full TP group"),
+        ({"consumer_has_mamba": False}, "hybrid MLA+Mamba"),
+    ],
+)
+def test_validate_hybrid_dcp_pd_topology_rejects_unimplemented_layouts(
+    overrides: dict[str, int | bool], expected: str
+):
+    topology = dict(
+        producer_tp_size=8,
+        producer_dcp_size=1,
+        producer_use_mla=True,
+        producer_has_mamba=True,
+        consumer_tp_size=8,
+        consumer_dcp_size=8,
+        consumer_use_mla=True,
+        consumer_has_mamba=True,
+    )
+    topology.update(overrides)
+
+    error = _validate_hybrid_dcp_pd_topology(**topology)
+
+    assert error is not None
+    assert expected in error
+
+
+def test_build_hybrid_dcp_attention_token_plan_accounts_for_local_prefix():
+    producer_ids = list(range(100, 106))
+
+    producer_locations, consumer_locations = _build_hybrid_dcp_attention_token_plan(
+        producer_block_ids=producer_ids,
+        consumer_block_ids=[200, 201],
+        block_size=4,
+        consumer_physical_blocks_per_logical_kv_block=1,
+        consumer_dcp_rank=1,
+        consumer_dcp_size=2,
+        consumer_num_computed_blocks=1,
+    )
+
+    # One cached virtual page skips producer pages 100 and 101. Rank 1 then
+    # owns every second token and writes a dense local DCP page sequence.
+    assert producer_locations == [
+        (102, 1),
+        (102, 3),
+        (103, 1),
+        (103, 3),
+        (104, 1),
+        (104, 3),
+        (105, 1),
+        (105, 3),
+    ]
+    assert consumer_locations == [
+        (200, 0),
+        (200, 1),
+        (200, 2),
+        (200, 3),
+        (201, 0),
+        (201, 1),
+        (201, 2),
+        (201, 3),
+    ]
+
+
+def test_build_hybrid_dcp_attention_token_plan_rejects_short_producer():
+    with pytest.raises(ValueError, match="do not cover"):
+        _build_hybrid_dcp_attention_token_plan(
+            producer_block_ids=[100, 101],
+            consumer_block_ids=[200, 201],
+            block_size=4,
+            consumer_physical_blocks_per_logical_kv_block=1,
+            consumer_dcp_rank=1,
+            consumer_dcp_size=2,
+            consumer_num_computed_blocks=1,
+        )
+
+
+def _make_hybrid_test_kv_cache_config() -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["model.layers.0.self_attn"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=64,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["model.layers.1.kda"],
+                MambaSpec(
+                    block_size=16,
+                    shapes=((8, 8),),
+                    dtypes=(torch.float16,),
+                ),
+            ),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_transfer_params_slices_attention_but_not_mamba_for_dcp():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+    worker.tp_rank = 3
+    worker.tp_size = 8
+    worker.dcp_size = 1
+    worker.block_size = 16
+    worker.kv_cache_config = _make_hybrid_test_kv_cache_config()
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.transfer_topo = SimpleNamespace(local_replicates_kv_cache=True)
+
+    attention_block_len = 256
+    mamba_block_len = 512
+    local_regions = [
+        TransferRegion(
+            layer_name="model.layers.0.self_attn",
+            layer_index=0,
+            base_addr=0x1000,
+            block_len=attention_block_len,
+            kv_block_len=attention_block_len,
+            group_index=0,
+        ),
+        TransferRegion(
+            layer_name="model.layers.1.kda",
+            layer_index=1,
+            base_addr=0x3000,
+            block_len=mamba_block_len,
+            kv_block_len=mamba_block_len,
+            group_index=1,
+        ),
+    ]
+    remote_regions = [
+        TransferRegion(
+            layer_name="model.layers.0.self_attn",
+            layer_index=0,
+            base_addr=0x2000,
+            block_len=attention_block_len,
+            kv_block_len=attention_block_len,
+            group_index=3,
+        ),
+        TransferRegion(
+            layer_name="model.layers.1.kda",
+            layer_index=1,
+            base_addr=0x4000,
+            block_len=mamba_block_len,
+            kv_block_len=mamba_block_len,
+            group_index=4,
+        ),
+    ]
+    transfer_id = "hybrid-dcp"
+    send_meta = SendBlockMeta(
+        p_req_id="p-req",
+        transfer_id=transfer_id,
+        local_block_ids=[list(range(10, 26)), [30]],
+        ready=asyncio.Event(),
+    )
+    xfer_meta = MooncakeXferMetadata(
+        remote_hostname="consumer-host",
+        remote_port=54321,
+        remote_tp_size=8,
+        remote_tp_rank=3,
+        # DSpark owns groups 0..2; target attention and recurrent state are
+        # groups 3 and 4 on D but groups 0 and 1 on P.
+        req_blocks={"d-req": (transfer_id, [[], [], [], [40, 41], [50]])},
+        kv_caches_base_addr=[0x2000, 0x4000],
+        block_lens=[attention_block_len, mamba_block_len],
+        kv_block_lens=[attention_block_len, mamba_block_len],
+        remote_dcp_size=8,
+        local_num_computed_blocks={"d-req": (0, 0, 0, 0, 0)},
+    )
+
+    (
+        src_ptrs,
+        dst_ptrs,
+        lengths,
+        err_reqs,
+        err_msg,
+    ) = await worker._build_transfer_params(
+        ready_reqs=[("d-req", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=local_regions,
+        remote_regions=remote_regions,
+    )
+
+    # DCP rank 3 receives every eighth attention token into dense local pages;
+    # recurrent state remains one whole page on the matching TP rank.
+    token_len = attention_block_len // worker.block_size
+    assert len(src_ptrs) == 33
+    assert src_ptrs[:2] == [
+        0x1000 + 10 * attention_block_len + 3 * token_len,
+        0x1000 + 10 * attention_block_len + 11 * token_len,
+    ]
+    assert dst_ptrs[:2] == [
+        0x2000 + 40 * attention_block_len,
+        0x2000 + 40 * attention_block_len + token_len,
+    ]
+    assert src_ptrs[-2:] == [
+        0x1000 + 25 * attention_block_len + 11 * token_len,
+        0x3000 + 30 * mamba_block_len,
+    ]
+    assert dst_ptrs[-2:] == [
+        0x2000 + 41 * attention_block_len + 15 * token_len,
+        0x4000 + 50 * mamba_block_len,
+    ]
+    assert lengths == [token_len] * 32 + [mamba_block_len]
+    assert err_reqs == []
+    assert err_msg is None
 
 
 @pytest.mark.asyncio
@@ -150,6 +394,7 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
     worker.is_kv_producer = True
     worker.tp_rank = 0
     worker.tp_size = 1
+    worker.dcp_size = 1
     worker.kv_cache_config = _make_test_kv_cache_config()
     worker._physical_blocks_per_logical_kv_block = 1
     worker.transfer_topo = SimpleNamespace(local_replicates_kv_cache=False)
@@ -476,6 +721,9 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
         "tp_rank": 0,
         "pp_rank": 0,
         "addr": "tcp://1.1.1.1:1111",
+        "dcp_size": 1,
+        "use_mla": True,
+        "has_mamba": True,
     }
     async with httpx.AsyncClient() as client:
         response = await client.post(f"{base_url}/register", json=payload1)
@@ -488,6 +736,9 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
         "tp_rank": 0,
         "pp_rank": 1,
         "addr": "tcp://2.2.2.2:2222",
+        "dcp_size": 1,
+        "use_mla": True,
+        "has_mamba": True,
     }
     async with httpx.AsyncClient() as client:
         response = await client.post(f"{base_url}/register", json=payload2)
@@ -501,6 +752,9 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
         data = response.json()
         assert "0" in data
         assert data["0"]["engine_id"] == "eng-1"
+        assert data["0"]["dcp_size"] == 1
+        assert data["0"]["use_mla"] is True
+        assert data["0"]["has_mamba"] is True
         assert data["0"]["worker_addr"]["0"]["0"] == "tcp://1.1.1.1:1111"
         assert data["0"]["worker_addr"]["0"]["1"] == "tcp://2.2.2.2:2222"
 

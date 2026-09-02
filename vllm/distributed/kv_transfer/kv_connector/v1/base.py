@@ -194,6 +194,17 @@ class KVConnectorBase_V1(ABC):
         """
         return self._kv_transfer_config.is_kv_producer
 
+    @property
+    def requires_block_zeroing_before_async_load(self) -> bool:
+        """Whether new blocks must be zeroed before an async cache load.
+
+        Most connectors overwrite every byte that can be consumed and can
+        safely skip normal new-block zeroing. A connector that loads partial
+        physical pages should return True so untouched bytes cannot retain
+        state from an earlier request.
+        """
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
