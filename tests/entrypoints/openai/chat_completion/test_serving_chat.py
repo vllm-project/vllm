@@ -539,6 +539,8 @@ class MockModelConfig:
     trust_remote_code = False
     tokenizer_mode = "auto"
     max_model_len = 100
+    revision = None
+    code_revision = None
     tokenizer_revision = None
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
