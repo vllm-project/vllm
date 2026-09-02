@@ -119,7 +119,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             else:
                 assert self.topk_indices_buffer is not None
                 top_k = self.topk_indices_buffer.shape[-1]
-            combined_topk = round_up(top_k + self.window_size, 128)
+            combined_topk = round_up(
+                top_k + self.window_size + self.max_image_tokens, 128
+            )
             current_workspace_manager().get_simultaneous(
                 ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
                 ((self.max_num_batched_tokens, combined_topk), torch.int32),
@@ -311,7 +313,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
-        combined_topk = round_up(top_k + self.window_size, 128)
+        combined_topk = round_up(top_k + self.window_size + self.max_image_tokens, 128)
         for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
             workspace = workspace_manager.get_simultaneous(
@@ -369,6 +371,21 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 chunk_M,
                 chunk_N,
                 out=(combined_indices_out, combined_lens_out),
+                left_visible=(
+                    swa_metadata.prefill_left_visible[
+                        num_decode_tokens + query_start : num_decode_tokens + query_end
+                    ]
+                    if swa_metadata.prefill_left_visible is not None
+                    else None
+                ),
+                right_visible=(
+                    swa_metadata.prefill_right_visible[
+                        num_decode_tokens + query_start : num_decode_tokens + query_end
+                    ]
+                    if swa_metadata.prefill_right_visible is not None
+                    else None
+                ),
+                max_image_tokens=self.max_image_tokens,
             )
             flash_mla_sparse_fwd(
                 q=q[query_start:query_end],
