@@ -1508,7 +1508,7 @@ def cutlass_w4a8_moe_mm(
     c_strides: torch.Tensor,
     group_scale_strides: torch.Tensor,
     maybe_schedule: str | None = None,
-):
+) -> None:
     """
     Executes the CUTLASS-based fused-MoE grouped matrix multiplication for the
     W4A8 quantization scheme. Uses group-wise quantization (INT4 -> FP8)
@@ -2065,7 +2065,7 @@ def scaled_int8_quant(
         symmetric: Whether to use symmetric quantization (scale only, azp ignored).
 
     Returns:
-      tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] : Output int8 tensor, scales, and optionally azp.
+        Output int8 tensor, scales, and optionally azp.
     """
     if current_platform.is_xpu():
         # XPU has no _C int8 quant op; use the torch.compile reference.
@@ -2501,6 +2501,8 @@ def topk_hash_softplus_sqrt(
     input_tokens: torch.Tensor | None = None,
     hash_indices_table: torch.Tensor | None = None,
     is_padding: torch.Tensor | None = None,
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 0,
 ) -> None:
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
@@ -2513,6 +2515,8 @@ def topk_hash_softplus_sqrt(
         input_tokens,
         hash_indices_table,
         is_padding,
+        bias_vl,
+        image_sentinel_lo,
     )
 
 
@@ -3860,7 +3864,7 @@ def onednn_scaled_int8_quant(
     scale: torch.Tensor | None = None,
     azp: torch.Tensor | None = None,
     symmetric: bool = True,
-):
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """
     Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
 
@@ -3873,7 +3877,7 @@ def onednn_scaled_int8_quant(
         symmetric: Whether to use symmetric quantization (scale only, azp ignored).
 
     Returns:
-      tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] : Output int8 tensor, scales, and optionally azp.
+        Output int8 tensor, scales, and optionally azp.
     """
     output = torch.empty_like(input, dtype=torch.int8)
     token_num = input.numel() // input.shape[-1]
