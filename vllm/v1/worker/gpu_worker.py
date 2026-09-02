@@ -72,7 +72,6 @@ from vllm.utils.mem_utils import (
     format_gib,
     limit_torch_allocator_to_budget,
     memory_profiling,
-    unified_memory_allocator_ceiling_bytes,
 )
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
@@ -514,8 +513,8 @@ class Worker(WorkerBase):
         """Run the profiling forward pass, turning an integrated-GPU OOM into a
         clear, actionable error instead of a host wedge.
 
-        On unified-memory GPUs the torch allocator is capped to a host-safety
-        ceiling before profiling, so an over-large profiling transient raises
+        On unified-memory GPUs the torch allocator is capped to the memory
+        budget before profiling, so an over-large profiling transient raises
         ``torch.OutOfMemoryError`` here rather than exhausting the shared pool.
         """
         try:
@@ -527,11 +526,12 @@ class Worker(WorkerBase):
                 raise
             raise torch.OutOfMemoryError(
                 "Ran out of memory during startup profiling on an integrated "
-                "(unified-memory) GPU. The profiling batch exceeded the "
-                "host-safety memory ceiling that is enforced up front so "
-                "profiling cannot wedge the host. Reduce max_num_batched_tokens, "
-                "max_num_seqs, max_model_len, or gpu_memory_utilization and "
-                "retry."
+                "(unified-memory) GPU. The profiling batch exceeded the memory "
+                "budget (gpu_memory_utilization, capped to the memory available "
+                "to the process), which is enforced up front so profiling "
+                "cannot wedge the host. Reduce max_num_batched_tokens, "
+                "max_num_seqs or max_model_len, or raise gpu_memory_utilization "
+                "if the host has the headroom, and retry."
             ) from e
 
     @torch.inference_mode()
@@ -549,18 +549,19 @@ class Worker(WorkerBase):
         """
         maybe_apply_startup_plan(self)
 
-        # On integrated (unified-memory) GPUs, cap the torch allocator to a
-        # host-safety ceiling before profiling. Otherwise the profiling
-        # transient can exhaust the pool shared with the OS and hard-wedge the
-        # host instead of failing cleanly (issue #46307). The ceiling sits above
-        # the KV budget, so it only stops a runaway transient. No-op on discrete
-        # GPUs.
+        # On integrated (unified-memory) GPUs, cap the torch allocator to the
+        # memory budget before profiling. `self.requested_memory` is
+        # `util * total`, capped by `cap_unified_memory_budget` to the memory
+        # actually available minus a host reserve, so on a busy host the cap
+        # tracks what is available rather than the pool size. Without it the
+        # profiling transient can exhaust the pool shared with the OS and
+        # hard-wedge the host instead of failing cleanly (issue #46307).
+        # Weights, the profiling transient and the KV cache are all sized to fit
+        # inside this budget, so the cap only stops a transient that would have
+        # failed the budget check anyway. No-op on discrete GPUs.
         limit_torch_allocator_to_budget(
             self.device,
-            unified_memory_allocator_ceiling_bytes(
-                self.init_snapshot.total_memory,
-                self.cache_config.gpu_memory_utilization,
-            ),
+            self.requested_memory,
             self.init_snapshot.total_memory,
         )
 

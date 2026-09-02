@@ -104,31 +104,6 @@ def unified_memory_host_reserve_bytes(total_memory: int) -> int:
     return max(absolute_floor, proportional_floor)
 
 
-def unified_memory_allocator_ceiling_bytes(
-    total_memory: int, gpu_memory_utilization: float
-) -> int:
-    """Hard host-safety ceiling for torch allocations on integrated GPUs.
-
-    Leaves the OS the larger of the host reserve and the ``(1 - util)`` slice of
-    the pool, so a runaway profiling transient is stopped before it can wedge
-    the host. This sits at or above the KV-cache budget from
-    ``cap_unified_memory_budget`` (which is bounded by *available* memory), so
-    normal allocations are not clipped -- only catastrophic over-allocation.
-
-    Args:
-        total_memory: Total size of the unified memory pool, in bytes.
-        gpu_memory_utilization: The configured utilization fraction.
-
-    Returns:
-        The maximum bytes the process may allocate on the device.
-    """
-    reserve = max(
-        unified_memory_host_reserve_bytes(total_memory),
-        int((1.0 - gpu_memory_utilization) * total_memory),
-    )
-    return max(total_memory - reserve, 0)
-
-
 def cap_unified_memory_budget(
     device: torch.types.Device,
     requested_memory: int,
@@ -186,8 +161,10 @@ def limit_torch_allocator_to_budget(
     Bounds torch allocations to ``budget_memory / total_memory`` of the pool so
     a startup profiling transient that would exceed the budget raises a clean
     ``torch.OutOfMemoryError`` instead of physically exhausting the shared pool
-    and wedging the host. A no-op on discrete GPUs, where an over-allocation
-    already fails cleanly against a separate VRAM pool.
+    and wedging the host. Pass the budget from ``cap_unified_memory_budget`` so
+    the cap follows the memory actually available (not the pool size) on a
+    busy host. A no-op on discrete GPUs, where an over-allocation already fails
+    cleanly against a separate VRAM pool.
 
     Args:
         device: The device to cap.
