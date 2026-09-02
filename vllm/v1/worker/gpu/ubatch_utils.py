@@ -80,7 +80,7 @@ def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSl
     ]
 
 
-def slice_input_batch(
+def _slice_input_batch(
     input_batch: InputBatch,
     ubatch_slice: UBatchSlice,
     query_start_loc_buf: torch.Tensor,
@@ -336,7 +336,7 @@ class UBatchRunner:
         slot_mappings_by_layer = []
         is_padding = []
         for i, ubatch_slice in enumerate(ubatch_slices):
-            ubatch = slice_input_batch(
+            ubatch = _slice_input_batch(
                 input_batch,
                 ubatch_slice,
                 self.ubatch_query_start_loc[i],

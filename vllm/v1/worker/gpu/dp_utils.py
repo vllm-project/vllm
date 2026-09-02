@@ -253,8 +253,6 @@ def dispatch_cg_and_sync_dp(
         )
 
     if dp_size == 1:
-        # Microbatching needs the DP handshake to agree on it, so it is only
-        # available with more than one DP rank (as in the V1 runner).
         return batch_desc, None
 
     if dp_sync is not None:

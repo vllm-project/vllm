@@ -31,7 +31,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
     create_ubatch_slices,
-    slice_input_batch,
+    _slice_input_batch,
     slice_model_inputs,
 )
 from vllm.v1.worker.ubatch_utils import (
@@ -156,7 +156,7 @@ def test_slicing_matches_v1_split_attn_metadata(batch_name: str):
     input_batch = _make_input_batch(query_lens, seq_lens, buffers)
 
     for i, (ubatch_slice, v1_ubatch) in enumerate(zip(ubatch_slices, v1_ubatches)):
-        v2_ubatch = slice_input_batch(input_batch, ubatch_slice, *ubatch_buffers[i])
+        v2_ubatch = _slice_input_batch(input_batch, ubatch_slice, *ubatch_buffers[i])
 
         assert v2_ubatch.num_reqs == v1_ubatch.num_reqs
         assert v2_ubatch.num_tokens == v1_ubatch.num_actual_tokens
@@ -191,12 +191,12 @@ def test_microbatches_do_not_share_buffers():
     ubatch_buffers = _make_ubatch_buffers()
     input_batch = _make_input_batch(query_lens, seq_lens, buffers)
 
-    first = slice_input_batch(input_batch, ubatch_slices[0], *ubatch_buffers[0])
+    first = _slice_input_batch(input_batch, ubatch_slices[0], *ubatch_buffers[0])
     first_query_start_loc = first.query_start_loc.clone()
     first_seq_lens = first.seq_lens.clone()
 
     # Slicing the second microbatch must not disturb the first.
-    slice_input_batch(input_batch, ubatch_slices[1], *ubatch_buffers[1])
+    _slice_input_batch(input_batch, ubatch_slices[1], *ubatch_buffers[1])
 
     torch.testing.assert_close(first.query_start_loc, first_query_start_loc)
     torch.testing.assert_close(first.seq_lens, first_seq_lens)
@@ -217,7 +217,7 @@ def test_trailing_microbatch_absorbs_cudagraph_padding():
     )
     ubatch_slices_padded = create_ubatch_slices(input_batch, num_ubatches=2)
 
-    last = slice_input_batch(
+    last = _slice_input_batch(
         input_batch, ubatch_slices_padded[-1], *_make_ubatch_buffers()[1]
     )
 
@@ -253,7 +253,7 @@ def test_dummy_batch_can_be_microbatched():
 
     ubatch_buffers = _make_ubatch_buffers()
     ubatches = [
-        slice_input_batch(input_batch, ubatch_slice, *ubatch_buffers[i])
+        _slice_input_batch(input_batch, ubatch_slice, *ubatch_buffers[i])
         for i, ubatch_slice in enumerate(ubatch_slices_padded)
     ]
 
@@ -369,8 +369,8 @@ def test_all_padding_microbatch_has_no_work_to_do():
     ubatch_slices_padded = create_ubatch_slices(input_batch, num_ubatches=2)
     ubatch_buffers = _make_ubatch_buffers()
 
-    first = slice_input_batch(input_batch, ubatch_slices_padded[0], *ubatch_buffers[0])
-    last = slice_input_batch(input_batch, ubatch_slices_padded[1], *ubatch_buffers[1])
+    first = _slice_input_batch(input_batch, ubatch_slices_padded[0], *ubatch_buffers[0])
+    last = _slice_input_batch(input_batch, ubatch_slices_padded[1], *ubatch_buffers[1])
 
     # The first microbatch keeps every real request; the second gets none.
     assert first.num_reqs == 6
