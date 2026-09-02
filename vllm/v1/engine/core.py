@@ -235,6 +235,7 @@ class EngineCore:
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
+        self._worker_call_issued_in_step = False
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
@@ -594,6 +595,18 @@ class EngineCore:
         Overridden by the DP engine core; never throttles otherwise."""
         return False
 
+    def _attach_dp_execution_contract_epoch(
+        self, scheduler_output: SchedulerOutput
+    ) -> None:
+        if not getattr(self, "cached_dp_execution_contract_enabled", False):
+            return
+        scheduler_output.dp_execution_contract_epoch = getattr(
+            self, "_dp_execution_contract_epoch", None
+        )
+        scheduler_output.dp_execution_contract_refresh = getattr(
+            self, "_dp_execution_contract_refresh", False
+        )
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -606,6 +619,8 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        self._attach_dp_execution_contract_epoch(scheduler_output)
+        self._worker_call_issued_in_step = True
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -664,7 +679,9 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            self._attach_dp_execution_contract_epoch(scheduler_output)
             with self.log_error_detail(scheduler_output):
+                self._worker_call_issued_in_step = True
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
@@ -944,8 +961,15 @@ class EngineCore:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
-    def execute_dummy_batch(self):
-        self.model_executor.execute_dummy_batch()
+    def execute_dummy_batch(
+        self,
+        dp_execution_contract_refresh: bool = False,
+        dp_execution_contract_epoch: int | None = None,
+    ):
+        self.model_executor.execute_dummy_batch(
+            dp_execution_contract_refresh,
+            dp_execution_contract_epoch,
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
@@ -1465,11 +1489,13 @@ class EngineCoreProc(EngineCore):
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
 
-    def _process_engine_step(self) -> bool:
+    def _process_engine_step(self) -> tuple[bool, bool]:
         """Called only when there are unfinished local requests."""
 
         # Step the engine core.
+        self._worker_call_issued_in_step = False
         outputs, model_executed = self.step_fn()
+        worker_call_issued = self._worker_call_issued_in_step
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)
@@ -1482,7 +1508,7 @@ class EngineCoreProc(EngineCore):
         if not model_executed and self.scheduler.has_requests():
             time.sleep(0.001)
 
-        return model_executed
+        return model_executed, worker_call_issued
 
     def _notify_idle_state_callbacks(self) -> None:
         while self._idle_state_callbacks:
@@ -2021,6 +2047,15 @@ class DPEngineCoreProc(EngineCoreProc):
 
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
+        self.dp_execution_contract_enabled = (
+            vllm_config.parallel_config.enable_dp_execution_contract
+        )
+        self.cached_dp_execution_contract_enabled = (
+            vllm_config.parallel_config.enable_cached_dp_execution_contract
+        )
+        self.dp_execution_contract_refresh_interval = (
+            scheduler_config.prefill_schedule_interval
+        )
 
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
@@ -2184,6 +2219,22 @@ class DPEngineCoreProc(EngineCoreProc):
             and self.step_counter % self.prefill_schedule_interval != 0
         )
 
+    def _scheduler_owns_target_generation(self, worker_call_issued: bool) -> bool:
+        """Whether this step issued this rank's target worker call.
+
+        This is tracked at the worker launch rather than inferred from live
+        tokens or result retirement, which differ under async scheduling.
+        """
+        return self.dp_execution_contract_enabled and worker_call_issued
+
+    def _get_dp_execution_contract_epoch(self) -> tuple[bool, int | None]:
+        if not self.cached_dp_execution_contract_enabled:
+            return False, None
+        interval = self.dp_execution_contract_refresh_interval
+        refresh = self.step_counter % interval == 0
+        epoch = (self.current_wave << 32) | (self.step_counter // interval)
+        return refresh, epoch
+
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
@@ -2208,7 +2259,18 @@ class DPEngineCoreProc(EngineCoreProc):
                 elif not state.commit_requested and state.is_ready_for_switch():
                     self.process_input_queue_block = True
 
-            executed = self._process_engine_step()
+            (
+                dp_execution_contract_refresh,
+                dp_execution_contract_epoch,
+            ) = self._get_dp_execution_contract_epoch()
+            self._dp_execution_contract_refresh = dp_execution_contract_refresh
+            self._dp_execution_contract_epoch = dp_execution_contract_epoch
+
+            # A scheduler-owned worker call participates in this rank's target
+            # execution generation even when it schedules zero local tokens.
+            # Track the launch itself so async result retirement cannot cause a
+            # second dummy worker RPC for the same generation.
+            executed, worker_call_issued = self._process_engine_step()
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
@@ -2217,11 +2279,20 @@ class DPEngineCoreProc(EngineCoreProc):
                     # All engines are idle.
                     continue
 
-                # Execute a dummy pass when no ready requests ran, unless the
-                # engine is sleeping.
-                elif not self.model_executor.is_sleeping:
+                scheduler_owns_generation = self._scheduler_owns_target_generation(
+                    worker_call_issued
+                )
+                # A rank without a scheduler-owned worker call must still issue
+                # exactly one dummy call while a peer rank may be active.
+                if (
+                    not scheduler_owns_generation
+                    and not self.model_executor.is_sleeping
+                ):
                     with self.capture_iteration_details(None) as iteration_details:
-                        self.execute_dummy_batch()
+                        self.execute_dummy_batch(
+                            dp_execution_contract_refresh,
+                            dp_execution_contract_epoch,
+                        )
                     if iteration_details is not None and not self.has_coordinator:
                         stats = self._make_iteration_details_stats(iteration_details)
                         self.output_queue.put_nowait(

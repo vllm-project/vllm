@@ -385,6 +385,21 @@ def test_schedule_prefills_gating(has_running: bool):
     assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
 
 
+def test_cached_contract_defers_prefill_on_otherwise_idle_rank():
+    scheduler = create_scheduler(max_num_seqs=16, max_num_batched_tokens=8192)
+    scheduler.cached_dp_execution_contract_enabled = True
+    (request,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(request)
+
+    throttled = scheduler.schedule(throttle_prefills=True)
+
+    assert throttled.total_num_scheduled_tokens == 0
+    assert request.status == RequestStatus.WAITING
+
+    refresh = scheduler.schedule(throttle_prefills=False)
+    assert refresh.num_scheduled_tokens["new0"] == 8
+
+
 def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
     """Drive a remote-KV request `r2` to the resume point (async load complete)
     while another request `r1` is already decoding, so the step is throttle-
@@ -445,6 +460,47 @@ def test_throttle_prefills_excludes_fully_transferred_remote_kv():
     output = scheduler.schedule(throttle_prefills=True)
     assert "r2" in output.num_scheduled_tokens
     assert "r1" in output.num_scheduled_tokens
+
+
+def test_cached_contract_defers_remote_kv_final_prompt_tail():
+    block_size = 16
+    num_prompt = block_size * 2
+    scheduler = _setup_remote_kv_resume(num_prompt, matched_tokens=num_prompt)
+    scheduler.cached_dp_execution_contract_enabled = True
+
+    output = scheduler.schedule(throttle_prefills=True)
+
+    assert "r2" not in output.num_scheduled_tokens
+    assert "r1" in output.num_scheduled_tokens
+
+
+def test_cached_contract_defers_local_prefix_cache_final_prompt_tail():
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    scheduler = create_scheduler(enable_prefix_caching=True, block_size=16)
+    scheduler.cached_dp_execution_contract_enabled = True
+    first, second = create_requests(
+        num_requests=2,
+        num_tokens=32,
+        max_tokens=20,
+        same_prompt=True,
+        block_size=16,
+        req_ids=["first", "second"],
+    )
+
+    scheduler.add_request(first)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output([first], token_id=1000),
+    )
+    assert first in scheduler.running
+
+    scheduler.add_request(second)
+    throttled = scheduler.schedule(throttle_prefills=True)
+
+    assert "second" not in throttled.num_scheduled_tokens
+    assert "first" in throttled.num_scheduled_tokens
 
 
 def test_throttle_prefills_defers_remote_kv_resume_with_local_prefill():

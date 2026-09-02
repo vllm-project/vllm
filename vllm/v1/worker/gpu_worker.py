@@ -1265,9 +1265,22 @@ class Worker(WorkerBase):
                     # Recreate it so the next profile_prefix is honored.
                     self.profiler = None
 
-    def execute_dummy_batch(self) -> None:
+    def execute_dummy_batch(
+        self,
+        dp_execution_contract_refresh: bool = False,
+        dp_execution_contract_epoch: int | None = None,
+    ) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        if getattr(self.model_runner, "dp_execution_contract_enabled", False):
+            self.model_runner._dummy_run(
+                num_tokens,
+                uniform_decode=True,
+                dp_idle=True,
+                dp_execution_contract_refresh=dp_execution_contract_refresh,
+                dp_execution_contract_epoch=dp_execution_contract_epoch,
+            )
+        else:
+            self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
