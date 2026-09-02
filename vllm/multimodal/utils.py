@@ -230,9 +230,10 @@ def strip_covered_mm_data(
     def maybe_strip(f: MultiModalFeatureSpec) -> MultiModalFeatureSpec:
         if (
             f.data is None
-            # SHM items already contain only an address. Workers must receive it
-            # to balance the sender's reference count before the item is evicted.
-            or set(f.data) == {"address", "monotonic_id"}
+            # SHM address items must reach the worker so it can acknowledge
+            # the sender's reference count before the item is evicted. This
+            # mirrors how the SHM receiver identifies them ("address" in item).
+            or "address" in f.data
             or (f.mm_position.offset + f.mm_position.length > num_computed_tokens)
         ):
             return f
