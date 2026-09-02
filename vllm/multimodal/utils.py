@@ -221,15 +221,19 @@ def strip_covered_mm_data(
     """Drop the tensor data of mm items whose placeholder span is fully inside
     a prefix-cache-covered region: no encoder run can be scheduled for them,
     so the workers never consume the payload fields. M-RoPE and XD-RoPE models
-    are the exception: the worker computes positions for the whole prompt from
-    the CPU-side metadata fields (e.g. grid dims), so those are kept. The
+    keep CPU-side metadata fields used to compute positions. SHM address items
+    are also kept so workers can balance the sender's reference count. The
     scheduler-side ``Request`` keeps the full features."""
     if not mm_features or num_computed_tokens == 0:
         return mm_features
 
     def maybe_strip(f: MultiModalFeatureSpec) -> MultiModalFeatureSpec:
-        if f.data is None or (
-            f.mm_position.offset + f.mm_position.length > num_computed_tokens
+        if (
+            f.data is None
+            # SHM items already contain only an address. Workers must receive it
+            # to balance the sender's reference count before the item is evicted.
+            or set(f.data) == {"address", "monotonic_id"}
+            or (f.mm_position.offset + f.mm_position.length > num_computed_tokens)
         ):
             return f
 
