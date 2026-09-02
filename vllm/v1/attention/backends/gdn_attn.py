@@ -92,10 +92,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.vllm_config = vllm_config
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
-        self.kv_cache_spec = kv_cache_spec
         from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
             _resolve_gdn_prefill_backend,
         )
@@ -239,6 +238,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 or num_decode_draft_tokens_cpu[spec_sequence_masks_cpu].sum().item()
                 == 0
             ):
+                num_spec_decodes = 0
                 spec_sequence_masks = None
                 spec_sequence_masks_cpu = None
             else:

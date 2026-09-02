@@ -35,6 +35,7 @@ from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
     IterationStats,
     LoRARequestStates,
+    RequestSpecDecodeMetrics,
     RequestStateStats,
     SchedulerStats,
 )
@@ -175,6 +176,9 @@ class RequestState:
         self.queue = queue
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
+        # Per-sequence spec-decode accumulator; arrives once (on finish) via
+        # EngineCoreOutput, then attached to this sequence's CompletionOutput.
+        self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -407,7 +411,11 @@ class RequestState:
         # Prepare logprobs, based on delta mode
         logprobs = self.logprobs_processor.logprobs
         if delta and logprobs:
-            logprobs = logprobs[-len(token_ids) :]
+            num_new_tokens = len(token_ids)
+            # Avoid [-0:], which returns the full accumulated history when a
+            # delta contains no new token IDs. [:0] preserves the concrete
+            # list or FlatLogprobs representation while returning no entries.
+            logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
 
         sampling_mask = None
         if finished and self.sampling_mask_chunks:
@@ -429,6 +437,7 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+            spec_decode_metrics=self.spec_decode_metrics if finished else None,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
@@ -457,6 +466,20 @@ class OutputProcessor:
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
+
+    def has_request(self, request_id: str) -> bool:
+        return request_id in self.request_states
+
+    def get_num_queued_tokens(self) -> int:
+        """Total prompt tokens of requests currently in the prefill phase.
+
+        Uses ``prompt_len`` rather than remaining prefill work because the
+        scheduler's ``num_computed_tokens`` is not propagated to the API
+        server until prefill completes.  See ``SchedulerConfig`` docs.
+        """
+        return sum(
+            req.prompt_len for req in self.request_states.values() if req.is_prefilling
+        )
 
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
@@ -657,6 +680,9 @@ class OutputProcessor:
                         engine_core_output.prefill_stats.num_cache_creation_tokens
                     )
                 req_state.is_prefilling = False
+
+            if engine_core_output.spec_decode_metrics is not None:
+                req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None

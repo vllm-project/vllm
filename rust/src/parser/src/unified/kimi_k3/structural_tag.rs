@@ -12,8 +12,8 @@ use xgrammar_structural_tag::format::{Format, JsonSchemaFormat, StructuralTag, T
 use xgrammar_structural_tag::tool::{BuilderToolChoice, FunctionToolParam, function_parameters};
 
 use super::{
-    ARG_CLOSE, CALL_CLOSE, END_OF_MSG, JSON_CLOSE, JSON_OPEN, MESSAGE_CLOSE, OPEN, RESPONSE_CLOSE,
-    RESPONSE_OPEN, SEP, THINK_CLOSE, TOOLS_CLOSE, TOOLS_OPEN,
+    ARG_CLOSE, CALL_CLOSE, CLOSE, END_OF_MSG, JSON_CLOSE, JSON_OPEN, MESSAGE_CLOSE, OPEN,
+    RESPONSE_CLOSE, RESPONSE_OPEN, SEP, THINK_CLOSE, TOOLS_CLOSE, TOOLS_OPEN,
 };
 
 pub(super) static KIMI_K3_STRUCTURAL_TAG_BUILDER: KimiK3StructuralTagBuilder =
@@ -64,7 +64,9 @@ fn response_prefix(reasoning: bool) -> Vec<Format> {
     }
     elements.push(Format::tag(
         "",
-        Format::any_text_excluding(&[RESPONSE_CLOSE, TOOLS_OPEN, MESSAGE_CLOSE, END_OF_MSG]),
+        // Keep marker-looking prefixes out of response text so the grammar
+        // must resolve them through a valid channel boundary.
+        Format::any_text_excluding(&[OPEN, CLOSE, END_OF_MSG]),
         RESPONSE_CLOSE,
     ));
     elements
@@ -384,7 +386,7 @@ mod tests {
         )
         .unwrap();
 
-        expect![[r##"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|open|>response<|sep|>"}},{"type":"tag","begin":"","content":{"type":"any_text","excludes":["<|close|>response<|sep|>","<|open|>tools<|sep|>","<|close|>message<|sep|>","<|end_of_msg|>"]},"end":"<|close|>response<|sep|>"},{"type":"tag","begin":"<|open|>tools<|sep|>","content":{"type":"tags_with_separator","tags":[{"begin":"<|open|>call tool=\"get_weather\" index=\"","content":{"type":"sequence","elements":[{"type":"regex","pattern":"[1-9][0-9]*"},{"type":"const_string","value":"\"<|sep|>"},{"type":"or","elements":[{"type":"plus","content":{"type":"or","elements":[{"type":"tag","begin":"<|open|>argument key=\"unit\" type=\"string\"<|sep|>","content":{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},"end":"<|close|>argument<|sep|>"},{"type":"tag","begin":"<|open|>argument key=\"place\" type=\"object\"<|sep|>","content":{"type":"json_schema","json_schema":{"$ref":"#/$defs/place","type":"object","$defs":{"place":{"type":"object","properties":{"city":{"type":"string"}}}}},"style":"json","any_order":false,"max_whitespace_cnt":null},"end":"<|close|>argument<|sep|>"}]}},{"type":"tag","begin":"<|open|>json type=\"object\"<|sep|>","content":{"type":"json_schema","json_schema":{"$defs":{"place":{"type":"object","properties":{"city":{"type":"string"}}}},"type":"object","properties":{"unit":{"type":"string","enum":["celsius","fahrenheit"]},"place":{"$ref":"#/$defs/place","type":"object"}},"required":["place"]},"style":"json","any_order":false,"max_whitespace_cnt":null},"end":"<|close|>json<|sep|>"}]}]},"end":"<|close|>call<|sep|>"}],"separator":"","at_least_one":true,"stop_after_first":false},"end":"<|close|>tools<|sep|>"},{"type":"optional","content":{"type":"const_string","value":"<|close|>message<|sep|>"}}]}}"##]].assert_eq(&tag.to_json_string().unwrap());
+        expect![[r##"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"optional","content":{"type":"const_string","value":"<|open|>response<|sep|>"}},{"type":"tag","begin":"","content":{"type":"any_text","excludes":["<|open|>","<|close|>","<|end_of_msg|>"]},"end":"<|close|>response<|sep|>"},{"type":"tag","begin":"<|open|>tools<|sep|>","content":{"type":"tags_with_separator","tags":[{"begin":"<|open|>call tool=\"get_weather\" index=\"","content":{"type":"sequence","elements":[{"type":"regex","pattern":"[1-9][0-9]*"},{"type":"const_string","value":"\"<|sep|>"},{"type":"or","elements":[{"type":"plus","content":{"type":"or","elements":[{"type":"tag","begin":"<|open|>argument key=\"unit\" type=\"string\"<|sep|>","content":{"type":"or","elements":[{"type":"const_string","value":"celsius"},{"type":"const_string","value":"fahrenheit"}]},"end":"<|close|>argument<|sep|>"},{"type":"tag","begin":"<|open|>argument key=\"place\" type=\"object\"<|sep|>","content":{"type":"json_schema","json_schema":{"$ref":"#/$defs/place","type":"object","$defs":{"place":{"type":"object","properties":{"city":{"type":"string"}}}}},"style":"json","any_order":false,"max_whitespace_cnt":null},"end":"<|close|>argument<|sep|>"}]}},{"type":"tag","begin":"<|open|>json type=\"object\"<|sep|>","content":{"type":"json_schema","json_schema":{"$defs":{"place":{"type":"object","properties":{"city":{"type":"string"}}}},"type":"object","properties":{"unit":{"type":"string","enum":["celsius","fahrenheit"]},"place":{"$ref":"#/$defs/place","type":"object"}},"required":["place"]},"style":"json","any_order":false,"max_whitespace_cnt":null},"end":"<|close|>json<|sep|>"}]}]},"end":"<|close|>call<|sep|>"}],"separator":"","at_least_one":true,"stop_after_first":false},"end":"<|close|>tools<|sep|>"},{"type":"optional","content":{"type":"const_string","value":"<|close|>message<|sep|>"}}]}}"##]].assert_eq(&tag.to_json_string().unwrap());
     }
 
     #[test]

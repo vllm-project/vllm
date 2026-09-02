@@ -353,6 +353,57 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 k_cache_prefix=self.prefix,
             )
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.v1.attention.backends.mla.sparse_swa import (
+                _COMPUTE_PREFILL_METADATA_KERNEL,
+                _COMPUTE_SWA_INDICES_AND_LENS_KERNEL,
+            )
+
+            _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
+            _COMPUTE_SWA_INDICES_AND_LENS_KERNEL.register_warmup(
+                window_size=self.window_size,
+                block_size=self.swa_cache_layer.block_size,
+            )
+
+            if self.compress_ratio > 1:
+                from vllm.v1.attention.backends.mla.compressor_utils import (
+                    _COMPRESSED_SLOT_MAPPING_KERNEL,
+                )
+
+                _COMPRESSED_SLOT_MAPPING_KERNEL.register_warmup()
+
+            if self.indexer is not None:
+                from vllm.v1.attention.backends.mla.indexer import (
+                    _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+                    _PREPARE_UNIFORM_DECODE_KERNEL,
+                )
+
+                _PREPARE_UNIFORM_DECODE_KERNEL.register_warmup()
+                _BUILD_PREFILL_CHUNK_METADATA_KERNEL.register_warmup()
+
+            spec_config = vllm_config.speculative_config
+            if spec_config is not None and spec_config.use_dspark():
+                from vllm.v1.attention.backends.mla.sparse_swa import (
+                    _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL,
+                )
+
+                _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL.register_warmup(
+                    window_size=self.window_size,
+                    num_speculative_tokens=spec_config.num_speculative_tokens,
+                    block_size=self.swa_cache_layer.block_size,
+                )
+
+            if self.backend_cls.get_name() in (
+                "FLASHMLA_SPARSE_DSV4",
+                "ROCM_FLASHMLA_SPARSE_DSV4",
+                "XPU_V4_MLA_SPARSE",
+            ):
+                from vllm.models.deepseek_v4.common.ops.cache_utils import (
+                    _COMBINE_TOPK_SWA_INDICES_KERNEL,
+                )
+
+                _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -373,19 +424,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         qr_kv, kv_score, indexer_kv_score, indexer_weights = (
             self._run_parallel_input_projections(hidden_states)
         )
-        qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
-        qr, kv = fused_q_kv_rmsnorm(
-            qr,
-            kv,
-            self.q_norm.weight.data,
-            self.kv_norm.weight.data,
-            self.eps,
-        )
+        qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
         self._prepare_and_attn_fn(
             hidden_states,
             qr,
             kv,
+            qr_scale,
             kv_score,
             indexer_kv_score,
             indexer_weights,
@@ -397,12 +442,32 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
         return self._o_proj(o, positions)
 
+    def _split_qkv_and_norm(
+        self, qr_kv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """Split the fused q-lora / kv projection and RMSNorm both halves.
+
+        ``qr_scale`` is None on the shared path. The ROCm subclass returns
+        a pre-quantized fp8 ``qr`` together with its per-1x128 fp32 scales,
+        which the downstream wq_b projections consume directly.
+        """
+        qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+        qr, kv = fused_q_kv_rmsnorm(
+            qr,
+            kv,
+            self.q_norm.weight.data,
+            self.kv_norm.weight.data,
+            self.eps,
+        )
+        return qr, None, kv
+
     @eager_break_during_capture
     def _prepare_and_attn_eager(
         self,
         hidden_states: torch.Tensor,
         qr: torch.Tensor,
         kv: torch.Tensor,
+        qr_scale: torch.Tensor | None,
         kv_score: torch.Tensor,
         indexer_kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
@@ -418,6 +483,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             hidden_states,
             qr,
             kv,
+            qr_scale,
             kv_score,
             indexer_kv_score,
             indexer_weights,
@@ -430,6 +496,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         hidden_states: torch.Tensor,
         qr: torch.Tensor,
         kv: torch.Tensor,
+        qr_scale: torch.Tensor | None,
         kv_score: torch.Tensor,
         indexer_kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
@@ -446,7 +513,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         aux_streams = self.aux_stream_list
 
         def project_query_and_cache_kv() -> torch.Tensor:
-            q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+            q = self._wq_b_proj(qr, qr_scale).view(
+                -1, self.n_local_heads, self.head_dim
+            )
             return self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
         index_q: torch.Tensor | None = None
@@ -468,6 +537,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                         indexer_weights,
                         positions,
                         self.indexer_rotary_emb,
+                        qr_scale,
                     ),
                     lambda: compressor(kv_score, positions, self.rotary_emb),
                 ],
@@ -506,6 +576,24 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # MergedColumnParallelLinear returns (output, bias); bias is None.
         qr_kv, _ = self.fused_wqa_wkv(hidden_states)
         return qr_kv
+
+    def _wq_b_proj(
+        self, qr: torch.Tensor, qr_scale: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Project the q-lora input to the query heads.
+
+        ``qr_scale`` is only set by the ROCm fused path, where ``qr`` is
+        already fp8-quantized with per-1x128 scales and must bypass the
+        linear's internal re-quantization (apply_weights would quantize
+        the fp8 input again).
+        """
+        if qr_scale is None:
+            return self.wq_b(qr)
+        from vllm.models.deepseek_v4.amd.rocm import (
+            apply_pre_quantized_block_scaled_mm,
+        )
+
+        return apply_pre_quantized_block_scaled_mm(self.wq_b, qr, qr_scale)
 
     def _run_parallel_input_projections(
         self, hidden_states: torch.Tensor
@@ -653,7 +741,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # per-tensor fp8 writes a separately-allocated fp8 q and quantizes the
         # KV row.
         block_size = swa_metadata.block_size
-        swa_kv_cache_3d = swa_kv_cache.view(-1, block_size, self.head_dim)
+        assert swa_kv_cache.shape[1:] == (block_size, self.head_dim)
+        swa_kv_cache_3d = swa_kv_cache
         if cache_dtype == torch.bfloat16:
             torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
                 q,
@@ -684,6 +773,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         return q_fp8
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.backend_cls
 
@@ -701,7 +794,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
-            compress_ratio=self.compress_ratio,
+            tokens_per_state=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
             alignment=576 if uses_fp8_ds_mla_layout else 512,
             model_version="deepseek_v4",
@@ -733,16 +826,20 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # head_dim already carries the fp8 scale padding
-        # compress_ratio=1 for V3.2, >1 for DeepseekV4; both use the same cache layout.
+        # tokens_per_state=1 for V3.2, >1 for DeepseekV4; same cache layout.
         uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
-            compress_ratio=self.compress_ratio,
+            tokens_per_state=self.compress_ratio,
             # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
             alignment=576 if uses_fp8_ds_mla_layout else 512,
         )
@@ -854,6 +951,7 @@ class DeepseekV4Indexer(nn.Module):
             self.topk_indices_buffer,
             skip_k_cache_insert=True,
             use_fp4_cache=self.use_fp4_kv,
+            compress_ratio=self.compress_ratio,
         )
 
         # None on ROCm — maybe_execute_in_parallel falls back to sequential.
@@ -871,6 +969,7 @@ class DeepseekV4Indexer(nn.Module):
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
         rotary_emb: nn.Module,
+        qr_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         compressor = self.compressor
 
@@ -901,8 +1000,7 @@ class DeepseekV4Indexer(nn.Module):
                 return None, None, None
 
         def wq_b_and_q_quant():
-            # ReplicatedLinear returns (output, bias); bias is None.
-            q, _ = self.wq_b(qr)
+            q = self._wq_b_proj(qr, qr_scale)
             q = q.view(-1, self.n_head, self.head_dim)
             return fused_indexer_q_rope_quant(
                 positions,
@@ -928,3 +1026,22 @@ class DeepseekV4Indexer(nn.Module):
         else:
             q, q_scale = q_quant, None
         return q, q_scale, weights
+
+    def _wq_b_proj(
+        self, qr: torch.Tensor, qr_scale: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Project the q-lora input to the indexer query heads.
+
+        Same bypass as ``DeepseekV4Attention._wq_b_proj``: on ROCm the fused
+        norm path hands over pre-quantized fp8 ``qr`` with per-1x128 scales,
+        so the linear's internal re-quantization must be skipped.
+        """
+        if qr_scale is None:
+            # ReplicatedLinear returns (output, bias); bias is None.
+            q, _ = self.wq_b(qr)
+            return q
+        from vllm.models.deepseek_v4.amd.rocm import (
+            apply_pre_quantized_block_scaled_mm,
+        )
+
+        return apply_pre_quantized_block_scaled_mm(self.wq_b, qr, qr_scale)

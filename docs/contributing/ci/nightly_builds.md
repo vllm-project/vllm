@@ -134,9 +134,9 @@ When installing vLLM with `VLLM_USE_PRECOMPILED=1`, the `setup.py` script:
 
 1. **Determines wheel location** via `precompiled_wheel_utils.determine_wheel_url()`:
     - Env var `VLLM_PRECOMPILED_WHEEL_LOCATION` (user-specified URL/path) always takes precedence and skips all other steps.
-    - Determines the variant from `VLLM_MAIN_CUDA_VERSION` (can be overridden with env var `VLLM_PRECOMPILED_WHEEL_VARIANT`); the default variant will also be tried as a fallback.
+    - For CUDA, uses `VLLM_PRECOMPILED_WHEEL_VARIANT` when specified. Otherwise, an explicitly set `VLLM_MAIN_CUDA_VERSION` selects the variant; if unset, the CUDA version is detected from PyTorch or nvidia-smi, with the default `VLLM_MAIN_CUDA_VERSION` used if detection fails.
     - Determines the _base commit_ (explained later) of this branch (can be overridden with env var `VLLM_PRECOMPILED_WHEEL_COMMIT`).
-2. **Fetches metadata** from `https://wheels.vllm.ai/{commit}/vllm/metadata.json` (for the default variant) or `https://wheels.vllm.ai/{commit}/{variant}/vllm/metadata.json` (for a specific variant).
+2. **For CUDA, fetches metadata** for the selected variant from `https://wheels.vllm.ai/{commit}/{variant}/vllm/metadata.json`.
 3. **Selects compatible wheel** based on:
     - Package name (`vllm`)
     - Platform tag (architecture match)

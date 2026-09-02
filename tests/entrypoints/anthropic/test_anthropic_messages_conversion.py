@@ -3,7 +3,7 @@
 """Unit tests for Anthropic-to-OpenAI request conversion.
 
 Tests the image source handling and tool_result content parsing in
-AnthropicServingMessages._convert_anthropic_to_openai_request().
+AnthropicServingMessages.to_chat_completion_request().
 
 Also covers extended-thinking edge cases such as ``redacted_thinking``
 blocks echoed back by Anthropic clients, and streaming conversion in
@@ -32,6 +32,11 @@ from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
     _build_anthropic_usage,
 )
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
@@ -39,19 +44,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
-    PromptTokenUsageInfo,
-    UsageInfo,
-)
+from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
 from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
 from vllm.exceptions import VLLMValidationError
 
-_convert = AnthropicServingMessages._convert_anthropic_to_openai_request
+_convert = AnthropicServingMessages.to_chat_completion_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
 
 
@@ -179,6 +178,56 @@ class TestImageContentBlocks:
         assert parts[1] == {
             "type": "image_url",
             "image_url": {"url": "https://example.com/cat.png"},
+        }
+
+
+# ======================================================================
+# vllm_xargs pass-through
+# ======================================================================
+
+
+class TestVllmXargs:
+    def test_vllm_xargs_passed_through(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            vllm_xargs={
+                "kv_cache_report_mode": "full",
+                "existing_extension": 7,
+            },
+        )
+
+        result = _convert(request)
+
+        assert result.vllm_xargs == {
+            "kv_cache_report_mode": "full",
+            "existing_extension": 7,
+        }
+
+    def test_vllm_xargs_reaches_sampling_params_with_kv_transfer(self):
+        kv_transfer_params = {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+        }
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            vllm_xargs={
+                "kv_cache_report_mode": "full",
+                "existing_extension": "kept",
+            },
+            kv_transfer_params=kv_transfer_params,
+        )
+
+        converted = _convert(request)
+        sampling_params = converted.to_sampling_params(
+            max_tokens=converted.max_completion_tokens or 0,
+            default_sampling_params={},
+        )
+
+        assert converted.kv_transfer_params == kv_transfer_params
+        assert sampling_params.extra_args == {
+            "kv_cache_report_mode": "full",
+            "existing_extension": "kept",
+            "kv_transfer_params": kv_transfer_params,
         }
 
 
