@@ -50,7 +50,10 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E
     QuarkW8A8Int8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
-from vllm.model_executor.layers.quantization.quark.utils import QuarkQTensorHint
+from vllm.model_executor.layers.quantization.quark.utils import (
+    QuarkQTensorHint,
+    should_ignore_layer,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4,
 )
@@ -1017,32 +1020,32 @@ def test_quark_int8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_
         assert torch.isfinite(logits).all()
 
 
-def test_quark_int8_w8a8_moe(monkeypatch, dist_init, workspace_init):
+@pytest.mark.parametrize("tp", [1])
+def test_quark_int8_w8a8_moe(vllm_runner, tp):
     """Test W8A8 INT8 MoE quantization with a tiny Qwen3 MoE model."""
     model_path = "amd/tiny-qwen3-moe-w8a8-int8"
-    model, vllm_config = load_model_without_vllm_runner(
+    with vllm_runner(
         model_path,
-        model_config_kwargs={"hf_overrides": {"num_hidden_layers": 3}},
-    )
+        enforce_eager=True,
+        tensor_parallel_size=tp,
+        gpu_memory_utilization=0.1,
+    ) as llm:
 
-    layer = model.model.layers[0]
-    moe = layer.mlp.experts
-    assert isinstance(moe._quant_method, QuarkW8A8Int8MoEMethod), (
-        f"Expected QuarkW8A8Int8MoEMethod, got {type(moe._quant_method)}"
-    )
-    qkv_proj = layer.self_attn.qkv_proj
-    assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
+        def check_model(model):
+            layer = model.model.layers[0]
+            # MoE experts should use QuarkW8A8Int8MoEMethod
+            moe = layer.mlp.experts
+            assert isinstance(moe._quant_method, QuarkW8A8Int8MoEMethod), (
+                f"Expected QuarkW8A8Int8MoEMethod, got {type(moe._quant_method)}"
+            )
+            # Non-MoE linear layers should use QuarkW8A8Int8
+            qkv_proj = layer.self_attn.qkv_proj
+            assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
 
-    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
-    input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
-    positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
-    with (
-        set_current_vllm_config(vllm_config),
-        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
-    ):
-        hidden_states = model(input_ids, positions, None)
-        logits = model.compute_logits(hidden_states)
-    assert torch.isfinite(logits).all()
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello", max_tokens=4)
+        assert output
 
 
 @pytest.mark.skipif(
@@ -1292,6 +1295,23 @@ FUSED_MAPPING = {
     "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     "gate_up_proj": ["gate_proj", "up_proj"],
 }
+
+
+def test_quark_should_ignore_layer_checks_children():
+    assert should_ignore_layer(
+        "model.layers.78.mlp.experts",
+        ["model.layers.78.mlp.experts.0.down_proj"],
+        check_children=True,
+    )
+
+
+def test_quark_should_ignore_layer_rejects_partial_fused_matches():
+    with pytest.raises(ValueError, match="different quantization schemes"):
+        should_ignore_layer(
+            "model.layers.0.self_attn.qkv_proj",
+            ["model.layers.0.self_attn.q_proj"],
+            FUSED_MAPPING,
+        )
 
 
 def test_fused_name_listed_directly_is_skipped():

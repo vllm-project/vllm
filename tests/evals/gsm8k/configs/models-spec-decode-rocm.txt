@@ -1,0 +1,2 @@
+Kimi-K3-pruned75-DSpark-AITER-TP4.yaml
+DeepSeek-V4-Flash-DSpark-AITER-TEP4.yaml
