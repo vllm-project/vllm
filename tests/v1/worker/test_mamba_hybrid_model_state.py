@@ -22,6 +22,7 @@ def test_postprocess_state_scalar_with_int32_mapping(
     num_sampled: int, expected_value: int
 ) -> None:
     state = object.__new__(MambaHybridModelState)
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=1)
     state.num_accepted_tokens_gpu = torch.full(
         (4,), 9, dtype=torch.int32, device="cuda"
     )
@@ -36,6 +37,28 @@ def test_postprocess_state_scalar_with_int32_mapping(
         [expected_value, 9, expected_value, 9], dtype=torch.int32, device="cuda"
     )
     torch.testing.assert_close(state.num_accepted_tokens_gpu, expected)
+
+
+def test_postprocess_state_skips_without_speculative_decoding() -> None:
+    state = object.__new__(MambaHybridModelState)
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
+    state.num_accepted_tokens_gpu = torch.full((2,), 9, dtype=torch.int32)
+    state._align_mode = True
+    state.recoverssm = Mock()
+    state._mamba_ctx = Mock()
+
+    state.postprocess_state(
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([2, 3], dtype=torch.int32),
+        torch.tensor([8, 9], dtype=torch.int32),
+    )
+
+    torch.testing.assert_close(
+        state.num_accepted_tokens_gpu,
+        torch.full((2,), 9, dtype=torch.int32),
+    )
+    state.recoverssm.commit_step.assert_not_called()
+    state._mamba_ctx.run_fused_postprocess_align.assert_not_called()
 
 
 def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
@@ -67,6 +90,7 @@ def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias() -> None:
     state = object.__new__(MambaHybridModelState)
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=1)
     state._align_mode = True
     state._mamba_ctx = None
     state._mamba_state_idx_gpu = torch.full((5,), -1, dtype=torch.int32, device="cuda")

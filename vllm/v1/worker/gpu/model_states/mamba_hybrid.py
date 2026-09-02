@@ -340,6 +340,9 @@ class MambaHybridModelState(DefaultModelState):
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
     ) -> None:
+        if self.vllm_config.num_speculative_tokens == 0:
+            return
+
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
         num_reqs = idx_mapping.shape[0]
