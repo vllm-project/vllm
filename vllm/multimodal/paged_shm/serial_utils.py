@@ -10,7 +10,7 @@ that can be stored in shared memory blocks, and to decode them back.
 The serialization format uses a separate metadata chunk prepended to the data chunks.
 The overall layout in shared memory is:
 
-    Chunks:   [ Meta ]   [   Data 0   ]         [ Data 1  ...]
+    Chunks:   [ Meta ]   [   Data 0   ]        [ Data 1  ...]
     Blocks:   +----------+----------+----------+----------+ ...
               Block 0    Block 1    Block 2    Block 3
 

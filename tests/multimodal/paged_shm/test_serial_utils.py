@@ -152,7 +152,7 @@ class TestEncode:
 
         # Parse 10-byte header: magic (2), size (4), count (4)
         magic = meta[:2]
-        assert magic == MAGIC, f"Invalid magic: {magic}"
+        assert magic == MAGIC, f"Invalid magic: {magic.decode()}"
         meta_size = struct.unpack("<I", meta[2:6])[0]
         total_chunks = struct.unpack("<I", meta[6:10])[0]
         assert total_chunks == len(chunks)
