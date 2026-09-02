@@ -529,6 +529,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+        # Pre-allocated constant; avoids CPU→CUDA copy during CUDA graph capture.
+        self.register_buffer(
+            "_cu_seqlens_01",
+            torch.tensor([0, 1], dtype=torch.int32),
+            persistent=False,
+        )
+
     def _fused_gdn_decode_unsupported_reason(
         self, vllm_config: VllmConfig
     ) -> str | None:
@@ -1572,9 +1579,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         v=value_decode[:, _i : _i + 1],
                         initial_state=ssm_state,
                         inplace_final_state=True,
-                        cu_seqlens=torch.tensor(
-                            [0, 1], dtype=torch.int32, device=device_sd
-                        ),
+                        cu_seqlens=self._cu_seqlens_01,
                         ssm_state_indices=_si_sd,
                         use_qk_l2norm_in_kernel=True,
                     )
@@ -1689,9 +1694,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         v=value_non_spec[:, _i : _i + 1],
                         initial_state=ssm_state,
                         inplace_final_state=True,
-                        cu_seqlens=torch.tensor(
-                            [0, 1], dtype=torch.int32, device=device
-                        ),
+                        cu_seqlens=self._cu_seqlens_01,
                         ssm_state_indices=_si_dec,
                         use_qk_l2norm_in_kernel=True,
                     )
