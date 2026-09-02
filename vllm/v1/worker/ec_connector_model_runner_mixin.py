@@ -13,7 +13,11 @@ import torch
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
 from vllm.logger import init_logger
-from vllm.v1.outputs import ECConnectorOutput
+from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
+    ECConnectorOutput,
+    ModelRunnerOutput,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -74,5 +78,19 @@ class ECConnectorModelRunnerMixin:
             output.finished_sending, output.finished_recving = (
                 ec_connector.get_finished(scheduler_output.finished_req_ids)
             )
+            output.ec_connector_worker_meta = ec_connector.build_connector_worker_meta()
 
             ec_connector.clear_connector_metadata()
+
+    @staticmethod
+    def ec_connector_no_forward(
+        scheduler_output: "SchedulerOutput",
+        encoder_cache: dict[str, torch.Tensor],
+        output: ModelRunnerOutput = EMPTY_MODEL_RUNNER_OUTPUT,
+    ) -> ModelRunnerOutput:
+        """Poll EC transfers when a scheduler step has no model forward."""
+        with ECConnectorModelRunnerMixin.maybe_get_ec_connector_output(
+            scheduler_output, encoder_cache
+        ) as ec_connector_output:
+            pass
+        return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
