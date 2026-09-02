@@ -21,9 +21,41 @@ from vllm.model_executor.determinism.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,
     _get_tuned_matmul_arch_family,
 )
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    trace_triton_kernel_specialization_args,
+)
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def _record_tuned_matmul_warmup(
+    monkeypatch,
+    table,
+    *,
+    stride_am=2048,
+    stride_bn=2048,
+):
+    calls = []
+
+    class RecordingKernel:
+        def warmup(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    monkeypatch.setattr(
+        batch_invariant_module,
+        "matmul_kernel_persistent_compiled",
+        RecordingKernel(),
+    )
+    monkeypatch.setattr(batch_invariant_module, "num_compute_units", lambda _: 1)
+    monkeypatch.setattr(config_module, "_TUNED_MATMUL_CONFIGS_FOR_DEVICE", table)
+    monkeypatch.setattr(config_module, "_TUNED_MATMUL_CONFIGS_RESOLVED", True)
+    monkeypatch.setattr(batch_invariant_module, "_WARMED_TUNED_MATMUL_CONFIGS", set())
+
+    batch_invariant_module._warmup_tuned_matmul_configs(
+        current_platform.current_device(), stride_am, 1, 1, stride_bn, False
+    )
+    return calls
 
 
 @skip_unsupported
@@ -58,7 +90,9 @@ def test_compiled_addmm_selects_tuned_config_from_runtime_m(monkeypatch):
             return launch
 
     monkeypatch.setattr(
-        batch_invariant_module, "matmul_kernel_persistent", RecordingKernel()
+        batch_invariant_module,
+        "matmul_kernel_persistent_compiled",
+        RecordingKernel(),
     )
     monkeypatch.setattr(batch_invariant_module, "num_compute_units", lambda _: 1)
     monkeypatch.setattr(
@@ -169,43 +203,48 @@ def test_compiled_matmul_runtime_m_dispatch_is_correct(monkeypatch):
         torch._dynamo.reset()
 
 
-def test_tuned_matmul_warmup_covers_all_table_shapes(monkeypatch):
-    calls = []
-
-    class RecordingKernel:
-        def warmup(self, *args, **kwargs):
-            calls.append((args, kwargs))
-
-    monkeypatch.setattr(
-        batch_invariant_module, "matmul_kernel_persistent", RecordingKernel()
+def test_compiled_kernel_does_not_change_eager_m_specialization():
+    eager_args = trace_triton_kernel_specialization_args(
+        batch_invariant_module.matmul_kernel_persistent
     )
-    monkeypatch.setattr(batch_invariant_module, "num_compute_units", lambda _: 1)
-    monkeypatch.setattr(
-        config_module,
-        "_TUNED_MATMUL_CONFIGS_FOR_DEVICE",
+    compiled_kernel = batch_invariant_module.matmul_kernel_persistent_compiled
+
+    assert "M" in eager_args
+    assert "M" not in trace_triton_kernel_specialization_args(compiled_kernel)
+
+
+def test_tuned_matmul_warmup_covers_all_table_configs(monkeypatch):
+    calls = _record_tuned_matmul_warmup(
+        monkeypatch,
         _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS["ada"],
     )
-    monkeypatch.setattr(config_module, "_TUNED_MATMUL_CONFIGS_RESOLVED", True)
-    monkeypatch.setattr(batch_invariant_module, "_WARMED_TUNED_MATMUL_CONFIGS", set())
 
-    batch_invariant_module._warmup_tuned_matmul_configs(
-        current_platform.current_device(), 2048, 1, 1, 2048, False
-    )
-
-    def contains(runtime_m, block_m, block_n, num_warps, num_stages):
-        return any(
-            args[4] == runtime_m
-            and kwargs["BLOCK_SIZE_M"] == block_m
-            and kwargs["BLOCK_SIZE_N"] == block_n
-            and kwargs["num_warps"] == num_warps
-            and kwargs["num_stages"] == num_stages
-            for args, kwargs in calls
+    expected_configs = {
+        (
+            bucket.block_m,
+            bucket.block_n,
+            shape_config.block_k,
+            8,
+            bucket.num_warps,
+            bucket.num_stages,
         )
+        for shape_config in _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS["ada"].values()
+        for _, bucket in shape_config.m_buckets
+    }
+    warmed_configs = {
+        (
+            kwargs["BLOCK_SIZE_M"],
+            kwargs["BLOCK_SIZE_N"],
+            kwargs["BLOCK_SIZE_K"],
+            kwargs["GROUP_SIZE_M"],
+            kwargs["num_warps"],
+            kwargs["num_stages"],
+        )
+        for _, kwargs in calls
+    }
 
-    assert contains(2, 16, 128, 8, 2)
-    assert contains(16, 128, 64, 8, 4)
-    assert contains(1, 16, 32, 8, 5)
-    assert contains(2, 16, 64, 4, 4)
+    assert warmed_configs == expected_configs
+    assert {args[4] for args, _ in calls} == {2}
     assert any(kwargs["C_LARGE"] for _, kwargs in calls if kwargs["BLOCK_SIZE_N"] == 64)
     assert {args[9:11] for args, _ in calls} == {(1, 16)}
     assert {kwargs["HAS_BIAS"] for _, kwargs in calls} == {False}

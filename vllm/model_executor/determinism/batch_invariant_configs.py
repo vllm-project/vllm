@@ -295,27 +295,25 @@ def resolve_tuned_matmul_configs() -> None:
     _TUNED_MATMUL_CONFIGS_RESOLVED = True
 
 
-def _get_tuned_matmul_shape_config(
-    N: int,
-    K: int,
-    dtype: torch.dtype,
-) -> _MatmulShapeConfig | None:
-    if not _TUNED_MATMUL_CONFIGS_RESOLVED:
-        resolve_tuned_matmul_configs()
-    if dtype != torch.bfloat16:
-        return None
-    device_configs = _TUNED_MATMUL_CONFIGS_FOR_DEVICE
-    if device_configs is None:
-        return None
-    return device_configs.get((N, K))
-
-
 def _get_tuned_matmul_configs_for_device() -> (
     dict[tuple[int, int], _MatmulShapeConfig] | None
 ):
     if not _TUNED_MATMUL_CONFIGS_RESOLVED:
         resolve_tuned_matmul_configs()
     return _TUNED_MATMUL_CONFIGS_FOR_DEVICE
+
+
+def _get_tuned_matmul_shape_config(
+    N: int,
+    K: int,
+    dtype: torch.dtype,
+) -> _MatmulShapeConfig | None:
+    if dtype != torch.bfloat16:
+        return None
+    device_configs = _get_tuned_matmul_configs_for_device()
+    if device_configs is None:
+        return None
+    return device_configs.get((N, K))
 
 
 def _get_matmul_config(

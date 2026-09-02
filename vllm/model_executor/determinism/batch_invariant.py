@@ -279,6 +279,13 @@ def matmul_descriptor_persistent(
     return c
 
 
+matmul_kernel_persistent_compiled = triton.jit(
+    matmul_kernel_persistent.fn,
+    launch_metadata=_matmul_launch_metadata,
+    do_not_specialize=["M"],
+)
+
+
 _WARMED_TUNED_MATMUL_CONFIGS: set[tuple[int, ...]] = set()
 
 
@@ -291,7 +298,7 @@ def _warmup_tuned_matmul_configs(
     has_bias: bool,
 ) -> None:
     device_configs = _get_tuned_matmul_configs_for_device()
-    warmup = getattr(matmul_kernel_persistent, "warmup", None)
+    warmup = getattr(matmul_kernel_persistent_compiled, "warmup", None)
     if device_configs is None or warmup is None:
         return
 
@@ -308,7 +315,7 @@ def _warmup_tuned_matmul_configs(
     stride_bn = triton_scalar_specialization_rep(stride_bn)
     cache_key = (
         id(device_configs),
-        id(matmul_kernel_persistent),
+        id(matmul_kernel_persistent_compiled),
         device_index,
         num_sms,
         stride_am,
@@ -324,12 +331,14 @@ def _warmup_tuned_matmul_configs(
     warmed_specializations = set()
 
     def warm_shape(m: int, N: int, K: int, config: dict[str, int]) -> None:
-        runtime_m = triton_scalar_specialization_rep(m)
+        # M selects the tile in the runtime custom op, but the kernel itself
+        # must accept every M value for that tile. Keep its i32 warmup value
+        # generic so Triton does not compile M=1/divisible-by-16 variants.
+        runtime_m = 2
         a_large = m * K > 2**31
         b_large = K * N > 2**31
         c_large = m * N > 2**31
         specialization = (
-            runtime_m,
             config["BLOCK_SIZE_M"],
             config["BLOCK_SIZE_N"],
             config["BLOCK_SIZE_K"],
@@ -367,28 +376,26 @@ def _warmup_tuned_matmul_configs(
             grid=(1,),
         )
 
-    # Warm all table entries because output projections can run outside the
-    # backbone profiling graph.
+    # Warm all table entries so later compiled calls can select any tuned
+    # shape/M bucket after the JIT monitor starts. M itself is not a Triton
+    # specialization.
     for (N, K), shape_config in device_configs.items():
         min_m = 1
         for max_m, _ in shape_config.m_buckets:
             config = _get_matmul_config(max_m, N, K, torch.bfloat16, default)
-            for m in range(min_m, max_m + 1):
-                warm_shape(m, N, K, config)
+            warm_shape(min_m, N, K, config)
             min_m = max_m + 1
 
-        # Values above the last bucket reuse its tile. Warm the two scalar
-        # specialization classes for every reachable A_LARGE/C_LARGE state.
-        # Sampling 16 values after each transition is sufficient to include
-        # both a multiple of 16 and a non-multiple.
+        # Values above the last bucket reuse its tile. Warm each large-index
+        # state reachable by the current table shapes.
         tail_starts = {
             min_m,
             max(min_m, 2**31 // K + 1),
             max(min_m, 2**31 // N + 1),
         }
         max_runtime_m = torch.iinfo(torch.int32).max
-        for start in tail_starts:
-            for m in range(start, min(start + 16, max_runtime_m + 1)):
+        for m in tail_starts:
+            if m <= max_runtime_m:
                 warm_shape(m, N, K, config)
     _WARMED_TUNED_MATMUL_CONFIGS.add(cache_key)
 
@@ -397,6 +404,7 @@ def _matmul_persistent_impl(
     a: torch.Tensor,
     b: torch.Tensor,
     bias: torch.Tensor | None = None,
+    kernel: Any = matmul_kernel_persistent,
 ) -> torch.Tensor:
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
@@ -447,7 +455,7 @@ def _matmul_persistent_impl(
             "num_warps": 8,
         },
     }
-    matmul_kernel_persistent[grid](
+    kernel[grid](
         a,
         b,
         c,  #
@@ -484,7 +492,7 @@ def _matmul_persistent_compiled(
         b.stride(1),
         bias is not None,
     )
-    return _matmul_persistent_impl(a, b, bias)
+    return _matmul_persistent_impl(a, b, bias, kernel=matmul_kernel_persistent_compiled)
 
 
 def _matmul_persistent_fake(
