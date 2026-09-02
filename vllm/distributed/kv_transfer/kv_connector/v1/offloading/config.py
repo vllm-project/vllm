@@ -12,6 +12,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    iter_layer_specs,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -168,12 +169,16 @@ def build_offloading_config(
                 total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
             ) and spec.num_kv_heads == max(1, total_kv_heads // tp_size)
 
+        # UniformTypeKVCacheSpecs groups (e.g. MLA plus its DSA indexer) hold
+        # one spec per layer; certify per layer, as the mapping derivation does.
+        layer_specs = [
+            spec
+            for group in kv_cache_config.kv_cache_groups
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        ]
         is_parallelism_agnostic = (
-            len(kv_cache_config.kv_cache_groups) > 0
-            and all(
-                spec_certifiable(group.kv_cache_spec)
-                for group in kv_cache_config.kv_cache_groups
-            )
+            len(layer_specs) > 0
+            and all(spec_certifiable(spec) for spec in layer_specs)
             and parallel_config.decode_context_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
             and parallel_config.world_size == tp_size
