@@ -497,6 +497,10 @@ class EngineArgs:
     data_parallel_multi_port_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_dp_execution_contract: bool = ParallelConfig.enable_dp_execution_contract
+    enable_speculator_dp_sync_pipeline: bool = (
+        ParallelConfig.enable_speculator_dp_sync_pipeline
+    )
     enable_batch_sharded_sampling: bool | None = (
         ParallelConfig.enable_batch_sharded_sampling
     )
@@ -1166,6 +1170,14 @@ class EngineArgs:
             "--enable-expert-parallel",
             "-ep",
             **parallel_kwargs["enable_expert_parallel"],
+        )
+        parallel_group.add_argument(
+            "--enable-dp-execution-contract",
+            **parallel_kwargs["enable_dp_execution_contract"],
+        )
+        parallel_group.add_argument(
+            "--enable-speculator-dp-sync-pipeline",
+            **parallel_kwargs["enable_speculator_dp_sync_pipeline"],
         )
         parallel_group.add_argument(
             "--enable-batch-sharded-sampling",
@@ -2302,6 +2314,10 @@ class EngineArgs:
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_dp_execution_contract=self.enable_dp_execution_contract,
+            enable_speculator_dp_sync_pipeline=(
+                self.enable_speculator_dp_sync_pipeline
+            ),
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
