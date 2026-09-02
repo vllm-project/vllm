@@ -52,6 +52,8 @@ description: Write or review Triton kernels for vLLM, with practical guidance fo
   large offsets.
 - Choose accumulation and intermediate dtypes explicitly. Test numerically
   difficult inputs, not only random, well-scaled tensors.
+- Use `$kernel-microbenchmark` for benchmark construction, measurement, and
+  interpretation.
 - Benchmark a sweep of `num_tokens` covering decode and representative prefill
   workloads. Include relevant head counts and dimensions when they affect the
   launch shape, and do not select an implementation or tuning heuristic from a
