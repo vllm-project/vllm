@@ -805,6 +805,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "CohereCompassForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/North-Micro-Vision-Instruct",
+        min_transformers_version="5.16.0",
     ),
     "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Nano",
