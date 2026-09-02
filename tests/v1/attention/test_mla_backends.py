@@ -139,8 +139,11 @@ def test_dcp_chunked_context_accepts_non_virtual_block_aligned_prefix():
     assert [chunk.num_local_context_tokens for chunk in metadata.chunks] == [17, 24]
 
 
-# Remove sm100 backends from the list if not using sm100
-if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
+# Remove sm100 backends from the list if not using sm100. These backends
+# declare supports_compute_capability as major == 10, so gate on the
+# capability family rather than ">= 10": consumer Blackwell (sm_120/sm_121)
+# is major 12 but has no trtllm-gen / CUTLASS MLA runner.
+if not torch.cuda.is_available() or not current_platform.is_device_capability_family(100):
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.CUTLASS_MLA)
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHINFER_MLA)
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.TOKENSPEED_MLA)
