@@ -202,8 +202,11 @@ def test_online_quantization(
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
         rocm_aiter_ops.refresh_env_variables()
 
-    if current_platform.is_xpu() and quant_scheme == "fp8_per_block":
-        pytest.skip("Skip test for online fp8_per_block on XPU platform.")
+    if current_platform.is_xpu() and quant_scheme in (
+        "fp8_per_block",
+        "fp8_per_channel",
+    ):
+        pytest.skip(f"Skip test for online {quant_scheme} on XPU platform.")
 
     model_name = "ibm-granite/granite-3.0-1b-a400m-base"
     model, vllm_config = load_model_without_vllm_runner(

@@ -13,9 +13,6 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
-from vllm.distributed.device_communicators.flashinfer_pcie_ipc_all_reduce import (
-    warmup_flashinfer_pcie_ipc_allreduce,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
@@ -200,7 +197,14 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     # Allocate the exact decode-sized workspace, autotune cache misses, and
     # resolve every CUDA Graph bucket before capture begins.
-    warmup_flashinfer_pcie_ipc_allreduce(worker)
+    # Lazy import: flashinfer_pcie_ipc_all_reduce imports flashinfer.comm,
+    # which initializes CUDA at import time and must not run at module scope.
+    if envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC:
+        from vllm.distributed.device_communicators import (
+            flashinfer_pcie_ipc_all_reduce,
+        )
+
+        flashinfer_pcie_ipc_all_reduce.warmup_flashinfer_pcie_ipc_allreduce(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
