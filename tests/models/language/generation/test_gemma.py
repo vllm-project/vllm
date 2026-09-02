@@ -55,9 +55,8 @@ def test_checkpoint_lm_head_can_override_tied_config(monkeypatch) -> None:
 
 @pytest.mark.cpu_test
 def test_gemma4_kv_shared_k_norm_marked_loaded_when_absent() -> None:
-    """Fine-tuned Gemma 4 E2B/E4B checkpoints omit k_norm on KV-shared
-    layers (transformers' save_pretrained prunes the unused tensor);
-    load_weights must report those weights as loaded anyway."""
+    """Fine-tuned checkpoints omit k_norm on KV-shared layers; it must
+    still count as loaded."""
 
     class StubModel(torch.nn.Module):
         def __init__(self):
@@ -80,8 +79,7 @@ def test_gemma4_kv_shared_k_norm_marked_loaded_when_absent() -> None:
 
 @pytest.mark.cpu_test
 def test_gemma3n_kv_shared_k_norm_marked_loaded_when_absent() -> None:
-    """Same pruning as Gemma 4: transformers omits k_norm on Gemma 3n
-    KV-shared layers, so load_weights must report it as loaded anyway."""
+    """Gemma 3n has the same KV-shared k_norm pruning as Gemma 4."""
 
     class StubModel(torch.nn.Module):
         def __init__(self):
@@ -90,7 +88,7 @@ def test_gemma3n_kv_shared_k_norm_marked_loaded_when_absent() -> None:
             self.start_layer = 0
             self.end_layer = 4
             self.layers = [
-                SimpleNamespace(self_attn=SimpleNamespace(is_kv_shared=(i >= 2)))
+                SimpleNamespace(self_attn=SimpleNamespace(is_kv_shared_layer=(i >= 2)))
                 for i in range(4)
             ]
 

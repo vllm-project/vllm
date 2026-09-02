@@ -53,6 +53,7 @@ from .utils import (
     WeightsMapper,
     extract_layer_index,
     make_layers,
+    mark_kv_shared_k_norms_loaded,
     maybe_prefix,
 )
 
@@ -349,10 +350,10 @@ class Gemma3nAttention(nn.Module):
         first_kv_shared_layer_idx = (
             config.num_hidden_layers - config.num_kv_shared_layers
         )
-        self.is_kv_shared = layer_idx >= first_kv_shared_layer_idx
+        self.is_kv_shared_layer = layer_idx >= first_kv_shared_layer_idx
 
         kv_sharing_target_layer_name = None
-        if self.is_kv_shared:
+        if self.is_kv_shared_layer:
             # Last full attention layer is 1 before sharing
             # Last sliding attention layer is 2 before sharing
             offset = 2 if self.sliding_window is not None else 1
@@ -1069,15 +1070,9 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        # KV-shared layers (the last `num_kv_shared_layers`) reuse K/V from
-        # earlier layers, so transformers doesn't create their k_proj/v_proj/
-        # k_norm and save_pretrained omits them from fine-tuned checkpoints
-        # (original Google checkpoints ship redundant copies). k_norm is the
-        # only standalone parameter among them; mark it loaded so the
-        # missing-weights check doesn't reject such checkpoints.
-        for i in range(self.start_layer, self.end_layer):
-            if getattr(self.layers[i].self_attn, "is_kv_shared", False):
-                loaded_params.add(f"layers.{i}.self_attn.k_norm.weight")
+        mark_kv_shared_k_norms_loaded(
+            loaded_params, self.layers, self.start_layer, self.end_layer
+        )
         return loaded_params
 
 

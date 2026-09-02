@@ -80,6 +80,7 @@ from .utils import (
     extract_layer_index,
     is_pp_missing_parameter,
     make_layers,
+    mark_kv_shared_k_norms_loaded,
     maybe_prefix,
 )
 
@@ -1512,15 +1513,9 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
-        # KV-shared layers (the last `num_kv_shared_layers` in Gemma 4
-        # E2B/E4B) never run k_norm in forward, and transformers'
-        # save_pretrained prunes the unused tensor from fine-tuned
-        # checkpoints. Mark those k_norm weights as loaded so the
-        # missing-weights check doesn't reject such checkpoints.
-        for i in range(self.start_layer, self.end_layer):
-            if getattr(self.layers[i].self_attn, "is_kv_shared_layer", False):
-                loaded_params.add(f"layers.{i}.self_attn.k_norm.weight")
-
+        mark_kv_shared_k_norms_loaded(
+            loaded_params, self.layers, self.start_layer, self.end_layer
+        )
         return loaded_params
 
 
