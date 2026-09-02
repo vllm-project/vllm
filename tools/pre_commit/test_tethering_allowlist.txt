@@ -83,3 +83,7 @@ tests/test_zen_cpu_platform_detection.py
 
 # tests/platforms/ - CPU-only unit test in a dir no job targets.
 tests/platforms/test_cpu.py
+
+# tests/tools/ - covered at commit time by the `validate-config` pre-commit
+# hook; no test_areas job runs it.
+tests/tools/test_config_validator.py

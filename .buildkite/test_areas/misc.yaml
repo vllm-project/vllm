@@ -378,9 +378,7 @@ steps:
   - tests/reasoning
   - tools/pre_commit/check_test_tethering.py
   - tools/pre_commit/test_tethering_allowlist.txt
-  - tools/pre_commit/validate_config.py
   - tests/tools/test_check_test_tethering.py
-  - tests/tools/test_config_validator.py
   - tests/tool_parsers
   - tests/tokenizers_
   - tests/parser
@@ -403,7 +401,6 @@ steps:
   - pytest -v -s transformers_utils
   - pytest -v -s config
   - pytest -v -s tools/test_check_test_tethering.py
-  - pytest -v -s tools/test_config_validator.py
 
 - label: ":nvidia: (A100) Batch Invariance"
   key: batch-invariance-a100
