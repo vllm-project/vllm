@@ -18,16 +18,18 @@
 
 import os
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
+from functools import cached_property
 from itertools import chain
 from operator import attrgetter
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import regex as re
 import torch
 import transformers
 from packaging.version import Version
 from torch import nn
-from transformers import AutoModel
+from transformers import AutoModel, PretrainedConfig
 from transformers.conversion_mapping import (
     WeightRenaming,
     get_model_conversion_mapping,
@@ -85,6 +87,12 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class PreTrainedModelClasses(NamedTuple):
+    decoder: type["PreTrainedModel"]
+    encoders: dict[str, type["PreTrainedModel"]]
+    """Modality -> encoder class, for each modality that has one."""
+
+
 class Base(
     nn.Module,
     VllmModel,
@@ -114,10 +122,6 @@ class Base(
         self.tp_group = get_tp_group()
 
         # Attrs for weight loading (see self.load_weights)
-        self.skip_prefixes: list[str] = []
-        """Skip loading weights whose qualname starts with these prefixes."""
-        self.skip_substrs: list[str] = []
-        """Skip loading weights whose qualname contains these substrings."""
         self.ignore_unexpected_prefixes: list[str] = []
         """Ignore unexpected weights whose qualname starts with these prefixes."""
         self.ignore_unexpected_suffixes: list[str] = []
@@ -147,14 +151,13 @@ class Base(
                 )
 
         self._patch_config()
-        from_config_kwargs = dict(
-            config=self.config,
-            dtype=self.model_config.dtype,
-            trust_remote_code=self.model_config.trust_remote_code,
-        )
-        self._decorate_for_torch_compile(**from_config_kwargs)
+        self._decorate_for_torch_compile()
         # Init on "meta" to delay allocating GPU tensors
-        with init_on_device_without_buffers("meta"):
+        with (
+            self._mark_model_components(vllm_config),
+            init_on_device_without_buffers("meta"),
+        ):
+            from_config_kwargs = self._from_config_kwargs
             self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
 
         # Create weight name to module qualname mapper
@@ -165,13 +168,6 @@ class Base(
         self.recursive_replace()
         # Create attention instances for KV cache allocation
         self.attention_instances = self.create_attention_instances()
-
-        # Input embeddings
-        input_embeddings = self.model.get_input_embeddings()
-        if not isinstance(input_embeddings, PPMissingLayer):
-            self.model.set_input_embeddings(
-                replace_embedding_class(input_embeddings, self.quant_config)
-            )
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -196,22 +192,47 @@ class Base(
         self.text_config._attn_implementation = "vllm"
         self.config.dtype = torch.get_default_dtype()
 
-    def _get_decoder_cls(self, **kwargs: dict) -> type["PreTrainedModel"]:
+    @contextmanager
+    def _mark_model_components(self, vllm_config: "VllmConfig"):
+        """Mark language model and tower submodules as `self.model` is created.
+
+        Nothing to do in `Base`, `MultiModalMixin` will override."""
+        yield
+
+    @cached_property
+    def _from_config_kwargs(self) -> dict[str, Any]:
+        """The kwargs used to create `self.model`."""
+        return dict(
+            config=self.config,
+            dtype=self.model_config.dtype,
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
+
+    def _find_encoder_classes(
+        self, model: "PreTrainedModel"
+    ) -> dict[str, type["PreTrainedModel"]]:
+        """Find the encoder class of each modality `model` has one for.
+
+        Text models have none. Multi-modal ones override this.
         """
-        Get the decoder class from the model.
+        return {}
 
-        Args:
-            kwargs: The kwargs to create the model.
+    @cached_property
+    def _pre_trained_model_classes(self) -> PreTrainedModelClasses:
+        """The decoder class and the encoder class of each modality that has one.
 
-        Returns:
-            The decoder class.
+        Both come from a single throwaway model, since building one is not cheap.
         """
         with torch.device("meta"):
-            model: PreTrainedModel = AutoModel.from_config(**kwargs)
-        decoder_cls = type(model.get_decoder())
-        logger.debug("Identified decoder class as: %s", decoder_cls)
+            model: PreTrainedModel = AutoModel.from_config(**self._from_config_kwargs)
+        model_classes = PreTrainedModelClasses(
+            decoder=type(model.get_decoder()),
+            encoders=self._find_encoder_classes(model),
+        )
         del model
-        return decoder_cls
+
+        logger.debug("Identified model classes as: %s", model_classes)
+        return model_classes
 
     def _decorate_cls_for_torch_compile(
         self,
@@ -246,17 +267,11 @@ class Base(
             is_encoder=is_encoder,
         )(cls)
 
-    def _decorate_for_torch_compile(self, **kwargs: dict):
-        """
-        Decorate the model's decoder class to indicate to vLLM that it supports torch
-        compile if `can_enable_torch_compile` is True.
-
-        Args:
-            kwargs: The kwargs to create the model, which are needed to get the decoder
-                class.
-        """
+    def _decorate_for_torch_compile(self):
+        """Decorate the model's decoder class to indicate to vLLM that it
+        supports torch compile if `can_enable_torch_compile` is True."""
         self._decorate_cls_for_torch_compile(
-            cls=self._get_decoder_cls(**kwargs),
+            cls=self._pre_trained_model_classes.decoder,
             # Applied to a PreTrainedModel so the batch dimension will exist
             dynamic_arg_dims=dict[str, int](
                 input_ids=1,  # shape: [1, seq_len]
@@ -401,6 +416,31 @@ class Base(
                 # attrsetter in case the module is nested (e.g. "text_model.norm")
                 attrsetter(name)(module, PPMissingLayer())
 
+    def _vocab_embedding_ids(self) -> set[int]:
+        """ids of the `nn.Embedding`s in `self.model` which hold a vocab table."""
+
+        def vocab_sizes(config: PretrainedConfig):
+            for key, value in vars(config).items():
+                if isinstance(value, PretrainedConfig):
+                    yield from vocab_sizes(value)
+                elif "vocab_size" in key and isinstance(value, int):
+                    yield value
+
+        sizes = set(vocab_sizes(self.config))
+        # `get_input_embeddings` may return a module which composes the `nn.Embedding`,
+        # or a `PPMissingLayer` if the embeddings are not on this pipeline stage
+        ids = {
+            id(module)
+            for module in self.model.get_input_embeddings().modules()
+            if isinstance(module, nn.Embedding)
+        }
+        ids.update(
+            id(module)
+            for module in self.model.modules()
+            if isinstance(module, nn.Embedding) and module.num_embeddings in sizes
+        )
+        return ids
+
     def recursive_replace(self):
         """Recursively replace modules in the model as needed.
 
@@ -410,6 +450,7 @@ class Base(
         - Attention QKV projections with a fused `QKVParallelLinear` + split
         - `nn.Linear` with vLLM's tensor parallel linear classes
         - `nn.Conv2d` / `nn.Conv3d` with vLLM's `Conv2d` / `Conv3d`
+        - Vocab `nn.Embedding`s with vLLM's `VocabParallelEmbedding`
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
         """
         tp_plan = self.model.tp_plan or {}
@@ -431,6 +472,8 @@ class Base(
         tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
         # Detect fusable patterns once per module class (cached, so this is cheap)
         fusers = Fusers(self.model, self.vllm_config)
+
+        vocab_embedding_ids = self._vocab_embedding_ids()
 
         def register_fusion(fuser: BaseFuser, prefix: str):
             """Register a fused layer's mappings just before it is built."""
@@ -481,6 +524,10 @@ class Base(
                     )
                 elif isinstance(child_module, (nn.Conv2d, nn.Conv3d)):
                     new_module = replace_conv_class(child_module)
+                elif id(child_module) in vocab_embedding_ids:
+                    new_module = replace_embedding_class(
+                        child_module, self.quant_config, prefix=qual_name
+                    )
                 elif (fuser := fusers[child_module]) is not None:
                     register_fusion(fuser, qual_name)
                     new_module = fuser.fuse(child_module, qual_name, self.vllm_config)
@@ -522,9 +569,6 @@ class Base(
                 if qk_head_dim := qk_nope_head_dim + qk_rope_head_dim:
                     self.model_config.model_arch_config.head_size = qk_head_dim
 
-        num_heads = self.model_config.get_num_attention_heads(self.parallel_config)
-        head_size = self.model_config.get_head_size()
-        num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
 
         pp_rank = self.pp_group.rank_in_group
@@ -532,11 +576,22 @@ class Base(
         start, end = get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
 
         for i in range(start, end):
+            # `[i]` is the whole-model config unless the checkpoint is
+            # heterogeneous, in which case it is this layer's own geometry.
+            arch_config = self.model_config.model_arch_config[i]
+            num_heads = self.model_config.get_num_attention_heads(
+                self.parallel_config, arch_config
+            )
+            head_size = arch_config.head_size
+            # Default to Llama scale, maybe updated in vllm_attention_forward
+            scale = head_size**-0.5
+            num_kv_heads = self.model_config.get_num_kv_heads(
+                self.parallel_config, arch_config
+            )
+
             kwargs = dict(
                 num_heads=num_heads,
-                # NOTE: We use Llama scale as default, if it's set by
-                # Transformers, it's updated in vllm_attention_forward
-                scale=head_size**-0.5,
+                scale=scale,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
                 prefix=f"{i}.attn",
@@ -697,8 +752,6 @@ class Base(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=self.skip_prefixes,
-            skip_substrs=self.skip_substrs,
             ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
             ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
         )

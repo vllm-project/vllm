@@ -25,14 +25,13 @@ from openai.types.responses.tool import (
 )
 
 import vllm.envs as envs
-from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
-    ErrorResponse,
     RequestResponseMetadata,
 )
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseCreatedEvent,
@@ -49,6 +48,7 @@ from vllm.entrypoints.openai.responses.serving import (
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
 )
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser.harmony import Segment
@@ -359,6 +359,10 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
 
         def get_vocab(self):
             return self._vocab
+
+        def decode(self, token_ids):
+            id_to_token = {v: k for k, v in self._vocab.items()}
+            return "".join(id_to_token.get(token_id, "x") for token_id in token_ids)
 
     # Force non-harmony, SimpleContext path
     monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)

@@ -18,11 +18,14 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.rope import get_rope_state
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
+from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 
 class DefaultModelState(ModelState):
+    supports_prompt_embeds = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -31,6 +34,18 @@ class DefaultModelState(ModelState):
         device: torch.device,
     ):
         super().__init__(vllm_config, model, encoder_cache, device)
+
+        self.prompt_embeds_state: PromptEmbedsState | None = None
+        if self.model_config.enable_prompt_embeds:
+            self.prompt_embeds_state = PromptEmbedsState(
+                self.max_num_reqs, self.inputs_embeds_size, self.dtype, self.device
+            )
+            if not self.supports_mm_inputs:
+                # Persistent buffer analogous to encoder_runner.inputs_embeds.
+                embeds_buffer_size = (self.max_num_tokens, self.inputs_embeds_size)
+                self.inputs_embeds = torch.zeros(
+                    embeds_buffer_size, dtype=self.dtype, device=self.device
+                )
 
         self.rope_state = get_rope_state(
             self.model_config,
@@ -49,42 +64,69 @@ class DefaultModelState(ModelState):
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.rope_state is not None:
             assert new_req_data.prefill_token_ids is not None
+            # `prompt_embeds` is a passthrough modality with no grid info, but
+            # M-RoPE assumes per-feature grids. Filter it out.
+            mm_features = [
+                f for f in new_req_data.mm_features if f.modality != "prompt_embeds"
+            ]
             self.rope_state.init_prefill_positions(
                 req_index,
                 self.model,
                 new_req_data.prefill_token_ids,
-                mm_features=new_req_data.mm_features,
+                mm_features=mm_features,
             )
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.add_request(req_index, new_req_data)
+
+    def remove_request(self, req_id: str) -> None:
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.remove_request(req_id)
 
     def apply_staged_writes(self) -> None:
         if self.rope_state is not None:
             self.rope_state.apply_staged_writes()
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.apply_staged_writes()
 
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
         """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
-        return self.encoder_runner.inputs_embeds[:num_tokens]
+        if self.supports_mm_inputs:
+            return self.encoder_runner.inputs_embeds[:num_tokens]
+        return self.inputs_embeds[:num_tokens]
 
-    def get_mm_embeddings(
+    def prepare_inputs_embeds(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
     ) -> torch.Tensor:
-        self.execute_mm_encoder(scheduled_encoder_inputs)
-
-        mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
-        if self.mm_pruner is not None and mm_embeds:
-            # EVS: recompute mrope positions for pruned media.
-            mm_embeds = self.mm_pruner.recompute(mm_embeds, input_batch, req_states)
-            # We must flush the staged rope updates for prepare_inputs() to pick up.
-            self.apply_staged_writes()
-
         # Use unpadded input_ids to match is_mm_embed size (num_tokens).
         # input_batch.input_ids may be padded for CUDA graphs.
         input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
-        inputs_embeds = self.encoder_runner.get_inputs_embeds(
-            input_ids_unpadded, mm_embeds, is_mm_embed
-        )
+
+        if self.supports_mm_inputs:
+            self.execute_mm_encoder(scheduled_encoder_inputs)
+
+            mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
+            if self.mm_pruner is not None and mm_embeds:
+                # EVS: recompute mrope positions for pruned media.
+                mm_embeds = self.mm_pruner.recompute(mm_embeds, input_batch, req_states)
+                # We must flush the staged rope updates for prepare_inputs() to pick up.
+                self.apply_staged_writes()
+
+            inputs_embeds = self.encoder_runner.get_inputs_embeds(
+                input_ids_unpadded, mm_embeds, is_mm_embed
+            )
+        else:
+            input_embeddings = self.model.embed_input_ids(input_ids_unpadded)
+            self.inputs_embeds[: input_embeddings.shape[0]] = input_embeddings
+            inputs_embeds = self.inputs_embeds
+
+        if self.prompt_embeds_state is not None:
+            self.prompt_embeds_state.apply(
+                input_batch, req_states.num_computed_tokens.gpu, inputs_embeds
+            )
+
         return inputs_embeds[: input_batch.num_tokens_after_padding]
 
     def gather_mm_embeddings(
@@ -115,9 +157,8 @@ class DefaultModelState(ModelState):
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
-        if self.supports_mm_inputs:
-            inputs_embeds = self.encoder_runner.inputs_embeds[:num_tokens]
-            model_inputs["inputs_embeds"] = inputs_embeds
+        if self.supports_mm_inputs or self.prompt_embeds_state is not None:
+            model_inputs["inputs_embeds"] = self.dummy_inputs_embeds(num_tokens)
         if self.rope_state is not None:
             model_inputs["positions"] = self.rope_state.get_positions(num_tokens)
         return model_inputs
@@ -144,7 +185,9 @@ class DefaultModelState(ModelState):
             input_batch.query_start_loc_np[: num_reqs + 1]
         )
         query_start_loc_gpu = input_batch.query_start_loc[: num_reqs + 1]
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        max_query_len = input_batch.max_query_len
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
         if for_capture:
             # Capture with worst-case max_seq_len so the graph is valid at any replay.

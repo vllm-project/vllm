@@ -20,6 +20,10 @@ from tests.entrypoints.openai.utils import (
 from tests.utils import RemoteOpenAIServer
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import MultiModalConfig
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    RequestResponseMetadata,
+)
 from vllm.entrypoints.generate.base.serving import build_per_request_timing_metrics
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -28,11 +32,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import (
     OpenAIServingChat,
     _get_mm_token_counts,
+    _make_completion_tokens_details,
     _make_prompt_tokens_details,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.models.serving import (
     BaseModelPath,
@@ -40,7 +41,8 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
-from vllm.exceptions import VLLMValidationError
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.exceptions import QueueOverflowError, VLLMValidationError
 from vllm.inputs import TokensPrompt
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -537,6 +539,8 @@ class MockModelConfig:
     trust_remote_code = False
     tokenizer_mode = "auto"
     max_model_len = 100
+    revision = None
+    code_revision = None
     tokenizer_revision = None
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
@@ -626,6 +630,7 @@ def _build_minimal_metrics_serving_chat(
     serving.response_role = "assistant"
     serving.parser_cls = None
     serving.enable_auto_tools = False
+    serving._include_reasoning_tokens_details = False
     serving.enable_prompt_tokens_details = False
     serving.enable_log_outputs = False
     serving.enable_log_deltas = False
@@ -664,6 +669,13 @@ async def _single_request_output(
     request_output: RequestOutput,
 ) -> AsyncIterator[RequestOutput]:
     yield request_output
+
+
+async def _stream_request_outputs(
+    *request_outputs: RequestOutput,
+) -> AsyncIterator[RequestOutput]:
+    for request_output in request_outputs:
+        yield request_output
 
 
 async def _collect_metrics_stream_chunks(
@@ -724,6 +736,7 @@ async def test_chat_per_request_metrics_follow_server_flag():
         request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
     )
     assert disabled_response.metrics is None
+    assert disabled_response.usage.completion_tokens_details is None
 
     enabled_serving = _build_minimal_metrics_serving_chat(
         enable_per_request_metrics=True
@@ -781,12 +794,64 @@ async def test_chat_streaming_metrics_ride_on_usage_chunk():
     assert usage_chunks[-1]["metrics"]["time_to_first_token_ms"] == pytest.approx(500.0)
 
 
+@pytest.mark.asyncio
+async def test_streaming_reasoning_usage_counts_across_deltas():
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving._include_reasoning_tokens_details = True
+    serving.model_config = None
+
+    parser = MagicMock()
+    parser.parse_delta.side_effect = [
+        DeltaMessage(reasoning="reasoning"),
+        DeltaMessage(content="answer"),
+    ]
+    parser.count_reasoning_tokens.side_effect = lambda token_ids: sum(
+        token_id == 20 for token_id in token_ids
+    )
+    serving.parser_cls = MagicMock(return_value=parser)
+
+    first = _make_metrics_request_output(metrics=None, token_ids=(10, 20))
+    first.outputs[0].text = "<think>reasoning"
+    first.outputs[0].finish_reason = None
+    second = _make_metrics_request_output(metrics=None, token_ids=(11, 30))
+    second.outputs[0].text = "</think>answer"
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+    chunks: list[dict[str, Any]] = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _stream_request_outputs(first, second),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    ):
+        payload = line.removeprefix("data: ").strip()
+        if payload != "[DONE]":
+            chunks.append(json.loads(payload))
+
+    usage_chunks = [chunk for chunk in chunks if chunk.get("usage")]
+    assert usage_chunks[-1]["usage"]["completion_tokens_details"] == {
+        "reasoning_tokens": 1
+    }
+
+
 @dataclass
 class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
     input_processor: MagicMock = field(default_factory=MagicMock)
     renderer: MagicMock = field(default_factory=MagicMock)
     errored: bool = False
+
+    def check_admission(self, n: int = 1, request_id: str | None = None) -> None:
+        pass
 
 
 async def _async_serving_chat_init():
@@ -810,6 +875,7 @@ async def _async_serving_chat_init():
 def test_async_serving_chat_init():
     serving_completion = asyncio.run(_async_serving_chat_init())
     assert serving_completion.chat_template == CHAT_TEMPLATE
+    assert serving_completion._include_reasoning_tokens_details is False
 
 
 def test_mm_prompt_tokens_details():
@@ -850,6 +916,10 @@ def test_mm_prompt_tokens_details():
     assert details.multimodal_tokens == {"image": 600, "video": 1200}
 
 
+def test_completion_tokens_details():
+    assert _make_completion_tokens_details(7).reasoning_tokens == 7
+
+
 @pytest.mark.asyncio
 async def test_serving_chat_returns_correct_model_name():
     mock_engine = MagicMock(spec=AsyncLLM)
@@ -877,6 +947,35 @@ async def test_serving_chat_returns_correct_model_name():
     # Test that full name is returned when no model is specified
     req = ChatCompletionRequest(messages=messages)
     assert await serving_chat.create_chat_completion(req) == MODEL_NAME
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_admission_rejection_escapes_before_response_starts(stream):
+    """Overload rejections must propagate out of create_chat_completion.
+
+    For streaming this is the only chance to return a real HTTP status: once
+    StreamingResponse is constructed the 200 has already been sent and the
+    rejection would degrade into an in-band SSE error chunk.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    mock_engine.check_admission.side_effect = QueueOverflowError()
+
+    serving_chat = _build_serving_chat(mock_engine)
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+        stream=stream,
+    )
+
+    with pytest.raises(QueueOverflowError):
+        await serving_chat.create_chat_completion(req)
+
+    mock_engine.generate.assert_not_called()
 
 
 @pytest.mark.asyncio

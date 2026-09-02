@@ -12,16 +12,14 @@ from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.gpu.cudagraph_utils import (
-    get_uniform_token_count,
-)
-from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 logger = init_logger(__name__)
 
@@ -152,7 +150,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -190,12 +188,10 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
 
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
-        uniform_token_count = get_uniform_token_count(
-            num_reqs,
-            num_tokens,
-            max_query_len,
+        uniform_token_count = get_uniform_decode_token_count(
+            num_reqs, num_tokens, max_query_len, input_batch.has_prefill
         )
-        batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
+        batch_desc, batch_sync = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
             input_batch.num_tokens_after_padding,
@@ -203,6 +199,10 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+            dp_sync=dp_sync,
+        )
+        num_tokens_across_dp = (
+            batch_sync.num_tokens_across_dp if batch_sync is not None else None
         )
 
         # Rebuild the slot mappings and attention metadata.
@@ -379,7 +379,11 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
-        sample_positions = self.input_buffers.positions[last_token_indices]
+        positions = self.input_buffers.positions[last_token_indices]
+        # The output hidden state at position P (= positions) and the token id
+        # at P+1 are used to draft the token at P+2. Sampling keys a draw by the
+        # position before the sampled token, so the net adjustment is +1.
+        sample_src_positions = positions + 1
         idx_mapping = self.idx_mapping[:num_reqs]
 
         # Cache the trailing token's ids, hidden states (and embeddings for
@@ -417,7 +421,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             sample_hidden_states = last_hidden_states[last_token_indices]
             draft_tokens = self.sample_draft(
                 sample_hidden_states,
-                sample_positions,
+                sample_src_positions,
                 idx_mapping,
                 self.temperature,
                 self.seeds,
@@ -448,7 +452,8 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                     idx_mapping,
                     num_reqs,
                 )
-                sample_positions += 1
+                # Advance the draft sampling key.
+                sample_src_positions += 1
 
 
 @triton.jit

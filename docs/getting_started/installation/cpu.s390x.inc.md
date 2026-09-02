@@ -3,7 +3,7 @@
 
 vLLM has experimental support for s390x architecture on IBM Z platform. For now, users must build from source to natively run on IBM Z platform.
 
-Currently, the CPU implementation for s390x architecture supports FP32, BF16 and FP16.
+Currently, the CPU implementation for s390x architecture supports FP32, BF16 and FP16, as well as AWQ and GPTQ 4-bit quantization and compressed-tensors INT8 W8A8.
 
 --8<-- [end:installation]
 --8<-- [start:requirements]

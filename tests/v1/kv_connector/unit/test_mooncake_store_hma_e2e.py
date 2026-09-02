@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker as mooncake_store_worker,
 )
@@ -35,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
 class _DictStore:
@@ -160,8 +162,18 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     cfg = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[
-            KVCacheTensor(size=8192, shared_by=["L0"]),
-            KVCacheTensor(size=8192, shared_by=["L1"]),
+            KVCacheTensor(
+                size=4 * full.page_size_bytes,
+                layers=["L0"],
+                layer_stride=4 * full.page_size_bytes,
+                block_stride=full.page_size_bytes,
+            ),
+            KVCacheTensor(
+                size=4 * swa.page_size_bytes,
+                layers=["L1"],
+                layer_stride=4 * swa.page_size_bytes,
+                block_stride=swa.page_size_bytes,
+            ),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(["L0"], full),
@@ -178,9 +190,11 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
 
     # Register kv_caches using mocked thread classes so register_kv_caches
     # doesn't try to start real background threads (which set ready_event).
+    raw_full = torch.zeros(4 * full.page_size_bytes, dtype=torch.int8)
+    raw_swa = torch.zeros(4 * swa.page_size_bytes, dtype=torch.int8)
     kv_caches = {
-        "L0": torch.zeros(2, 4, 8, 8, 64),
-        "L1": torch.zeros(2, 4, 8, 8, 64),
+        "L0": dense_kv_cache_views(raw_full, full, 4, 1, KVCacheLayout.LBNHC)[0],
+        "L1": dense_kv_cache_views(raw_swa, swa, 4, 1, KVCacheLayout.LBNHC)[0],
     }
 
     def _fake_thread_init(*args, **kwargs):
@@ -222,28 +236,29 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     )
 
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
+    # 1-based: block 0 is the reserved null block and the save skips it.
     save_req = ReqMeta(
         req_id="r0",
         token_len_chunk=64,
-        block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
+        # Block 0 is reserved as NULL_BLOCK_ID by the production block pool.
+        block_ids=([1, 2, 3, 4], [1, 2, 3, 4]),
         block_hashes=hs,
         can_save=True,
+        store_job_id=1,
     )
-    send_thread.add_stored_request("r0")
-    # Put the request in the queue so task_done() doesn't underflow.
-    send_thread.request_queue.put(save_req)
-    req = send_thread.request_queue.get()
-    send_thread._handle_request(req)
+    # add_request also queues the job, so task_done() doesn't underflow.
+    send_thread.add_request(save_req)
+    send_thread._handle_request(send_thread.request_queue.get())
 
     # Point worker.store at the dict store (the worker constructor captured
     # the MagicMock; replace with the real dict store for lookup).
     worker.store = store
 
     # Both groups stored all 4 blocks -> full hit.
-    assert worker.lookup(num_tokens=65, block_hashes=hs) == 64
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 64
     # Exact-multiple prompt: the full hit is re-derived one block lower,
     # where both groups' stored blocks still cover the SWA window.
-    assert worker.lookup(num_tokens=64, block_hashes=hs) == 48
+    assert worker.lookup(num_tokens=64, block_hashes=hs).hit_length == 48
 
     # Evict SWA's first two blocks (outside its window of 32 tokens = 2 blocks).
     swa_keys_outside_window = [
@@ -256,12 +271,12 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
 
     # SWA window=32 -> only last 2 blocks must be present in SWA group.
     # Full has all 4. Coordinator should still return 64.
-    assert worker.lookup(num_tokens=65, block_hashes=hs) == 64
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 64
     # Exact-multiple prompt after eviction: the boundary one block lower
     # needs SWA block 1, which is gone — no usable stored boundary remains
     # (the pre-fix arithmetic clamp would have returned 48 and livelocked
     # on load failure -> recompute -> same lookup).
-    assert worker.lookup(num_tokens=64, block_hashes=hs) == 0
+    assert worker.lookup(num_tokens=64, block_hashes=hs).hit_length == 0
 
 
 def test_recv_skips_swa_blocks_before_window():
@@ -427,10 +442,10 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=20,
-        partial_tail_offloads=[(1, mamba_cow_block, 12)],
+        boundary_state_offloads=[(1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_partial_tail(req)
+    send._maybe_offload_boundary_states(req)
 
     # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
     partial_hash = hs[2]
@@ -498,16 +513,16 @@ def test_offload_syncs_event_before_put():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
-        partial_tail_offloads=[(1, 7, 12)],
+        store_job_id=1,
+        boundary_state_offloads=[(1, 7, 12)],
     )
     req.current_event = event
-    send.add_stored_request("r1")
 
-    send.request_queue.put(req)
+    send.add_request(req)
     send._handle_request(send.request_queue.get())
     assert send.request_queue.qsize() == 0
     assert store._data
-    assert send.stored_requests["r1"] == 0
+    assert send.stored_requests["r1"] == set()
     event.synchronize.assert_called_once()
 
 
@@ -575,10 +590,10 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
-        partial_tail_offloads=[(1, mamba_cow_block, 12)],
+        boundary_state_offloads=[(1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_partial_tail(req)
+    send._maybe_offload_boundary_states(req)
 
     # FA (block 4): full blocks ending at 4, 8 and 12, keyed by their normal
     # block-end hashes; mamba (block 16): the partial boundary block under

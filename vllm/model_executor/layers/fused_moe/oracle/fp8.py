@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from enum import Enum
 from typing import Any
 
@@ -268,6 +269,39 @@ def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
     )
 
 
+def refine_fp8_moe_block_shape(
+    config: FusedMoEConfig,
+    weight_block_size: list[int],
+) -> list[int] | None:
+    """
+    Compute a refined block shape for block-quantized FP8 MoE weights whose
+    checkpoint blocks cannot be sharded exactly across TP ranks.
+
+    TP shards the intermediate dim of the expert weights, so a per-shard size
+    that is not a multiple of the checkpoint's block size makes the
+    checkpoint's block scales impossible to shard exactly. When a finer block
+    size (>= 32) divides both the checkpoint blocks and all involved dims,
+    the weight scales can be refined to that granularity at load time (a
+    lossless upsampling, since the refined block divides the checkpoint
+    block). Only Triton-based kernels can consume the refined block shape:
+    they take it as a runtime argument, while the other backends require the
+    native 128x128 blocks. The refined shape is encoded in the QuantKey used
+    for backend selection, so backends that only support 128x128 blocks are
+    rejected by the oracle automatically.
+
+    Returns the refined [block_n, block_k] shape, or None if no refinement
+    is needed or possible.
+    """
+    block_n, block_k = weight_block_size
+    ispp = config.intermediate_size_per_partition
+    if ispp % block_n == 0 and (config.tp_size == 1 or ispp % block_k == 0):
+        return None
+    refine = math.gcd(block_n, block_k, ispp, config.hidden_dim)
+    if refine < 32:
+        return None
+    return [refine, refine]
+
+
 def select_fp8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
@@ -369,13 +403,6 @@ def select_fp8_moe_backend(
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format
             )
-
-    # Handle explicit MARLIN FP8 configuration.
-    if envs.VLLM_TEST_FORCE_FP8_MARLIN:
-        backend = Fp8MoeBackend.MARLIN
-        return _return_or_raise(
-            backend, config, weight_key, activation_key, activation_format
-        )
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
@@ -619,7 +646,12 @@ def make_fp8_moe_quant_config(
         )
 
         assert isinstance(layer, RoutedExperts)
-        return get_humming_moe_quant_config(layer)
+        return get_humming_moe_quant_config(
+            layer,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+        )
 
     # Flashinfer CUTLASS or HPC per-tensor uses single dq scale
     # (alpha = w_scale * a_scale) and inverse a2 scale.
@@ -628,6 +660,17 @@ def make_fp8_moe_quant_config(
         and block_shape is None
     ):
         assert a1_scale is not None and a2_scale is not None
+        g1_alphas = w1_scale * a1_scale
+        g2_alphas = w2_scale * a2_scale
+        if layer is not None:
+            layer.register_parameter(
+                "g1_alphas", torch.nn.Parameter(g1_alphas, requires_grad=False)
+            )
+            layer.register_parameter(
+                "g2_alphas", torch.nn.Parameter(g2_alphas, requires_grad=False)
+            )
+            g1_alphas = layer.g1_alphas
+            g2_alphas = layer.g2_alphas
         return fp8_w8a8_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
@@ -637,8 +680,8 @@ def make_fp8_moe_quant_config(
             a2_scale=a2_scale,
             a1_gscale=(1.0 / a1_scale),
             a2_gscale=(1.0 / a2_scale),
-            g1_alphas=(w1_scale * a1_scale).squeeze(),
-            g2_alphas=(w2_scale * a2_scale).squeeze(),
+            g1_alphas=g1_alphas,
+            g2_alphas=g2_alphas,
             gemm1_clamp_limit=swiglu_limit,
         )
     # MXFP8 (block [1, 32]) dispatches to the mxfp8 activation quant. Scales are
@@ -683,7 +726,6 @@ def make_fp8_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    layer: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -697,11 +739,6 @@ def make_fp8_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
-    extra_kwargs = {}
-    if fp8_backend == Fp8MoeBackend.HUMMING:
-        assert layer is not None
-        extra_kwargs = {"layer": layer}
-
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
@@ -711,13 +748,11 @@ def make_fp8_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
-            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            **extra_kwargs,
         )
 
     kernel = mk.FusedMoEKernel(

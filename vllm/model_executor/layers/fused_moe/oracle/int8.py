@@ -73,9 +73,10 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             ArmCPUExpertsInt8,
             CPUExpertsInt8,
+            ZenCPUExpertsInt8,
         )
 
-        return [ArmCPUExpertsInt8, CPUExpertsInt8]
+        return [ZenCPUExpertsInt8, ArmCPUExpertsInt8, CPUExpertsInt8]
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
 
@@ -195,7 +196,12 @@ def make_int8_moe_quant_config(
         )
 
         assert isinstance(layer, RoutedExperts)
-        return get_humming_moe_quant_config(layer)
+        return get_humming_moe_quant_config(
+            layer,
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
+            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+        )
 
     if scales_absent and not per_act_token_quant:
         return int8_w8a16_moe_quant_config(
@@ -251,9 +257,9 @@ def convert_to_int8_moe_kernel_format(
         )
 
         assert layer is not None
-        # Humming reads canonical CT scales (w*_weight_scale) from the layer.
-        # Online int8 produces per-channel (E, N) w*_scale; expose them as the
-        # (E, N, 1) w*_weight_scale humming's loader expects.
+        # The Humming conversion expects canonical CT scale parameter names.
+        # Online int8 produces per-channel (E, N) w*_scale; expose them as
+        # (E, N, 1) w*_weight_scale tensors before conversion.
         for sub in ("w13", "w2"):
             if hasattr(layer, f"{sub}_weight_scale"):
                 continue
@@ -279,7 +285,6 @@ def make_int8_moe_kernel(
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    layer: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -293,11 +298,6 @@ def make_int8_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
-    extra_kwargs = {}
-    if int8_backend == Int8MoeBackend.HUMMING:
-        assert layer is not None
-        extra_kwargs = {"layer": layer}
-
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
@@ -307,13 +307,11 @@ def make_int8_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
-            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            **extra_kwargs,
         )
 
     kernel = mk.FusedMoEKernel(

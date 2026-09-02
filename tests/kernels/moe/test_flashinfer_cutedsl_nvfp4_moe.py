@@ -193,7 +193,22 @@ def test_flashinfer_cutedsl_fp4_moe(
             hidden_states, score, topk, renormalize=False
         )
 
-        fake_layer = SimpleNamespace(activation=activation)
+        activation = MoEActivation.RELU2_NO_MUL
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=activation,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=dtype,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=next_power_of_2(m),
+        )
+        fake_layer = SimpleNamespace(activation=activation, moe_config=moe_config)
         a1_scale = torch.ones(1, device="cuda", dtype=torch.float32)
         a2_scale = torch.ones(1, device="cuda", dtype=torch.float32)
         (
@@ -229,20 +244,6 @@ def test_flashinfer_cutedsl_fp4_moe(
             gemm1_alpha=alpha,
             gemm1_beta=beta,
             gemm1_clamp_limit=limit,
-        )
-        moe_config = FusedMoEConfig(
-            num_experts=e,
-            experts_per_token=topk,
-            hidden_dim=k,
-            intermediate_size=n,
-            num_local_experts=e,
-            num_logical_experts=e,
-            activation=activation,
-            device="cuda",
-            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-            in_dtype=dtype,
-            routing_method=RoutingMethodType.TopK,
-            max_num_tokens=next_power_of_2(m),
         )
 
         cutedsl_experts = mk.FusedMoEKernel(
