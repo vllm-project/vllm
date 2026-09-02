@@ -251,7 +251,6 @@ _DEPRECATED_ENV_VARS: dict[str, str] = {
     "VLLM_MORIIO_QP_PER_TRANSFER": "qp_per_transfer",
     "VLLM_MORIIO_POST_BATCH_SIZE": "post_batch_size",
     "VLLM_MORIIO_NUM_WORKERS": "num_workers",
-    "VLLM_MORIIO_TRANSFER_TIMEOUT_S": "recv_abort_timeout",
 }
 
 
@@ -351,10 +350,18 @@ class MoRIIOConfig:
             "kv_connector_extra_config.defer_timeout",
             extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT),
         )
+        legacy_recv_abort_timeout = os.environ.get("VLLM_MORIIO_TRANSFER_TIMEOUT_S")
+        if legacy_recv_abort_timeout is not None:
+            logger.warning_once(
+                "The environment variable VLLM_MORIIO_TRANSFER_TIMEOUT_S is "
+                "deprecated. Set 'recv_abort_timeout' inside "
+                "kv_transfer_config.kv_connector_extra_config instead."
+            )
         recv_abort_timeout = _positive_finite_timeout(
             "kv_connector_extra_config.recv_abort_timeout",
             extra_config.get(
-                "recv_abort_timeout", MoRIIOConstants.DEFAULT_RECV_ABORT_TIMEOUT
+                "recv_abort_timeout",
+                legacy_recv_abort_timeout or MoRIIOConstants.DEFAULT_RECV_ABORT_TIMEOUT,
             ),
         )
 
@@ -606,9 +613,12 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_handshake_port=int(remote_handshake_port),
             remote_notify_port=int(remote_notify_port),
             # Remote peer TP degree (used as remote_tp_size downstream). The
-            # proxy advertises it under "remote_tp_size"; #46332 read "tp_size"
-            # which is absent on WRITE producer requests -> defaulted to 1 ->
-            # rank collapse. Read the right key; 0 == unknown (== homogeneous).
+            # decode side must know the prefiller's TP degree to map producer
+            # ranks onto the correct decode rank (and vice versa). The old plain
+            # "tp_size" key (#46332) is absent on WRITE producer requests and
+            # defaulted to 1, collapsing every producer rank onto decode rank 0
+            # and corrupting the transfer; prefer "remote_tp_size". 0 == unknown
+            # (treated as homogeneous downstream).
             tp_size=int(
                 kv_transfer_params.get("remote_tp_size")
                 or kv_transfer_params.get("tp_size")

@@ -36,9 +36,8 @@ class LayerTransferGeometry(NamedTuple):
 class MambaTransferGeometry(NamedTuple):
     """Geometry of a hybrid (mamba/KDA) layer's recurrent state.
 
-    A KDA layer's cache is a ``(conv_state, ssm_state)`` tuple; each is a
-    slot-strided view whose slot stride (``stride(0)``) is larger than the
-    per-slot element count, so a slot's bytes live at
+    A KDA layer's packed page is exposed as ``conv_state`` and ``ssm_state``
+    views. Each is slot-strided, so a slot's bytes live at
     ``slot * slot_stride * element_size`` and span ``slot_bytes``. The two
     tensors are registered as two separate MoRIIO regions per layer.
     """
@@ -58,11 +57,13 @@ def get_mamba_transfer_geometry(
 ) -> MambaTransferGeometry:
     """Derive the slot-strided geometry of a KDA layer's conv + ssm state.
 
-    ``conv``/``ssm`` are the two tensors of the layer's ``(conv, ssm)`` cache
-    tuple. Slot byte offset is ``slot * slot_stride * element_size`` and each
+    ``conv``/``ssm`` are zero-copy views over the layer's packed page. Slot byte
+    offset is ``slot * slot_stride * element_size`` and each
     slot spans ``subtensor[0].numel() * element_size`` bytes; the whole tensor
     is registered as one region (``*_region_len`` bytes).
     """
+    if conv.ndim == 0 or ssm.ndim == 0 or conv.shape[0] == 0 or ssm.shape[0] == 0:
+        raise ValueError("KDA conv/ssm caches must contain at least one slot")
     if conv.shape[0] != ssm.shape[0]:
         raise ValueError(
             f"KDA conv/ssm slot count mismatch: {conv.shape[0]} != {ssm.shape[0]}"
@@ -97,11 +98,9 @@ def get_mamba_transfer_geometry(
         # may exceed the per-slot element count, so numel() would under-size the
         # region and truncate the highest-slot transfers. shape[0]*stride(0)
         # covers every byte a ``slot * slot_stride * elem`` offset can address.
-        # Cap at the bytes remaining from each view's storage offset so a
-        # shared conv+ssm page buffer (dev19253 packed layout: ssm sits at
-        # a non-zero intra-buffer offset) is not registered past the buffer
-        # end; for separate buffers (offset 0, full storage) it is the same
-        # slot-strided extent as before.
+        # Cap at the bytes remaining from each view's storage offset. A packed
+        # conv+ssm page places ssm at a non-zero intra-buffer offset,
+        # so do not register past the end of the shared backing allocation.
         conv_region_len=min(
             conv.shape[0] * conv.stride(0) * conv.element_size(),
             conv_available_bytes,
@@ -182,13 +181,8 @@ def get_layer_transfer_geometry(
     kv_cache: torch.Tensor,
     layer_to_spec: Mapping[str, KVCacheSpec],
     remote_num_blocks: int | None = None,
-) -> LayerTransferGeometry | MambaTransferGeometry:
+) -> LayerTransferGeometry:
     spec = layer_to_spec[layer_name]
-    if isinstance(spec, MambaSpec):
-        # Hybrid/KDA layer: cache is a ``(conv, ssm)`` tuple, which has no
-        # ``.shape``; handle it before touching the attention-only shape logic.
-        conv, ssm = kda_conv_ssm(kv_cache, spec)
-        return get_mamba_transfer_geometry(conv, ssm)
     shape = kv_cache.shape
     stride = kv_cache.stride()
     element_size = kv_cache.element_size()
@@ -328,57 +322,39 @@ def get_layer_transfer_geometry(
 
 
 def kda_conv_ssm(
-    kv_cache: "torch.Tensor | tuple | list",
-    spec: "KVCacheSpec | None" = None,
-) -> "tuple[torch.Tensor, torch.Tensor]":
-    """Return (conv_state, ssm_state) for a KDA/Mamba layer, version-robustly.
-
-    Two vLLM kv-cache layouts are supported:
-      * legacy k3-release (e.g. dev19033): ``kv_cache`` is a ``(conv, ssm)``
-        tuple/list of separate slot-strided tensors -> returned as-is (``spec``
-        unused, so callers on this path may pass ``None``).
-      * dev19253+: ``kv_cache`` is a single ``[num_blocks, 1, 1, page_bytes]``
-        int8 page view holding both states packed per block. Slice the conv
-        and ssm byte sub-ranges and reinterpret per ``spec.shapes``/``dtypes``,
-        mirroring ``MambaBase.bind_kv_cache`` so the returned views are
-        byte-identical to what the model reads/writes: slot stride == page
-        bytes, per-slot span == that state's bytes, conv/ssm sharing one
-        backing buffer (handled by the connector's single-region + ssm
-        intra-buffer offset path). Byte-exact for homogeneous P/D attn-TP.
-
-    NOTE: the packed page interleaves conv+ssm per block, so the hetero-TP
-    conv sub-projection split cannot be expressed by slicing this layout
-    alone; hetero-TP GDN remains a documented follow-up (as with the legacy
-    layout's whole-item transfer).
-    """
-    if isinstance(kv_cache, (tuple, list)):
-        if len(kv_cache) != 2:
-            raise ValueError(
-                f"Expected a 2-tuple (conv, ssm) KDA kv-cache, got len={len(kv_cache)}"
-            )
-        return kv_cache[0], kv_cache[1]
-    if not isinstance(spec, MambaSpec):
-        raise ValueError(
-            "kda_conv_ssm needs the MambaSpec to unpack a packed page tensor"
-        )
+    kv_cache: torch.Tensor,
+    spec: MambaSpec,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return zero-copy conv and SSM views over a packed two-state page."""
     from math import prod
 
     from vllm.utils.torch_utils import get_dtype_size
 
-    shapes = list(spec.shapes)
-    dtypes = list(spec.dtypes)
-    if len(dtypes) == 1 and len(shapes) > 1:
-        dtypes = dtypes * len(shapes)
-    pages = kv_cache.reshape(kv_cache.shape[0], -1)  # [num_blocks, page_bytes]
+    if len(spec.shapes) != 2 or len(spec.dtypes) != 2:
+        raise ValueError(
+            "MoRIIO KDA transfer requires exactly two states (conv and SSM)"
+        )
+    if kv_cache.element_size() != 1:
+        raise ValueError("MoRIIO KDA packed cache must use a byte-sized dtype")
+    if kv_cache.ndim != 4 or kv_cache.shape[1:3] != (1, 1) or kv_cache.stride(3) != 1:
+        raise ValueError(
+            "MoRIIO KDA packed cache must have shape [B, 1, 1, C] with "
+            "a contiguous byte dimension"
+        )
+    # Mirror MambaBase.bind_kv_cache: blocks may be strided within a shared
+    # multi-layer allocation, while every individual byte page is contiguous.
+    pages = kv_cache.squeeze(dim=(1, 2))
     states: list[torch.Tensor] = []
     offset = 0
-    for shp, dt in zip(shapes, dtypes):
+    for shp, dt in zip(spec.shapes, spec.dtypes, strict=True):
         nbytes = prod(shp) * get_dtype_size(dt)
+        if offset + nbytes > pages.shape[1]:
+            raise ValueError(
+                "MoRIIO KDA state layout exceeds the packed cache page size"
+            )
         state = pages[:, offset : offset + nbytes].view(dt)
         states.append(state.view(-1, *shp))
         offset += nbytes
-    if len(states) < 2:
-        raise ValueError(f"KDA page unpack expected >=2 states, got {len(states)}")
     return states[0], states[1]
 
 
@@ -556,9 +532,8 @@ def build_mamba_offset_template(
         # Heterogeneous-TP recurrent-state transfer needs the remote page's
         # slot stride (which differs from the local page) and, for
         # P_TP > D_TP, a multi-rank gather of conv/ssm slices. Both are
-        # follow-ups (see docs/design/moriio_kda_transfer.md). The mamba path
-        # bypasses the attention KV-head validator, so fail loudly here
-        # instead of silently transferring wrong bytes.
+        # follow-ups. The mamba path bypasses the attention KV-head validator,
+        # so fail loudly here instead of silently transferring wrong bytes.
         raise NotImplementedError(
             "heterogeneous-TP mamba/KDA transfer is not supported yet "
             f"(tp_ratio={tp_ratio}); use equal prefill/decode TP for "
@@ -591,10 +566,10 @@ def apply_mamba_offset_template(
     Conv sub-projection entries (all slots) come first, followed by one ssm
     entry per slot.
     """
-    if len(local_slots) > len(remote_slots):
+    if len(local_slots) != len(remote_slots):
         raise ValueError(
-            "local_slots longer than remote_slots: "
-            f"{len(local_slots)} > {len(remote_slots)}"
+            "local and remote mamba slot counts must match: "
+            f"{len(local_slots)} != {len(remote_slots)}"
         )
     invalid_local = next(
         (slot for slot in local_slots if not 0 <= slot < template.num_slots), None
@@ -603,6 +578,9 @@ def apply_mamba_offset_template(
         raise ValueError(
             f"local mamba slot {invalid_local} is outside [0, {template.num_slots})"
         )
+    invalid_remote = next((slot for slot in remote_slots if slot < 0), None)
+    if invalid_remote is not None:
+        raise ValueError(f"remote mamba slot {invalid_remote} must be non-negative")
     # The peer's KDA slot count is not part of MoRIIOAgentMetadata yet. Do not
     # compare remote slot IDs against the local pool size: two otherwise
     # compatible engines may reserve different numbers of slots.
