@@ -1298,3 +1298,69 @@ def test_inductor_asserts_user_override(monkeypatch):
     assert config.inductor_compile_config.get("size_asserts") is True
     if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
         assert config.inductor_compile_config.get("alignment_asserts") is False
+
+
+@pytest.mark.parametrize(
+    ("max_cudagraph_capture_size", "expected_max", "widest_is_captured"),
+    [
+        # The widest uniform decode batch (6 requests * 7 tokens) fits the
+        # explicit bound exactly, but sits off the 8-token grid. It must be
+        # captured, and the explicit maximum must survive instead of being
+        # truncated to the last grid entry (40).
+        (42, 42, True),
+        # Room above the widest batch: still captured, maximum unchanged.
+        (48, 48, True),
+        # Explicit bound below the widest batch: it is correctly left out and
+        # the maximum still snaps to the largest captured size.
+        (40, 40, False),
+    ],
+)
+def test_explicit_max_cudagraph_capture_size_covers_uniform_decode(
+    max_cudagraph_capture_size, expected_max, widest_is_captured
+):
+    """An explicit scalar maximum with an inferred capture list must still
+    cover schedulable uniform decode shapes within that bound. Previously the
+    uniform decode sizes were only appended when the maximum was derived here,
+    so `max_cudagraph_capture_size=42` produced a list ending at 40, the
+    maximum was truncated to 40, and the 42-token decode step ran eager.
+    """
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        max_cudagraph_capture_size=max_cudagraph_capture_size,
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=6,
+        num_speculative_tokens=6,
+        max_num_batched_tokens=8192,
+        compilation_config=compilation_config,
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    widest_uniform_decode = 6 * 7
+    sizes = compilation_config.cudagraph_capture_sizes
+    assert compilation_config.max_cudagraph_capture_size == expected_max
+    assert sizes[-1] == expected_max
+    assert (widest_uniform_decode in sizes) is widest_is_captured
+    assert all(size <= max_cudagraph_capture_size for size in sizes)
+
+
+def test_explicit_cudagraph_capture_sizes_are_left_as_configured():
+    """An explicit capture list is never extended with uniform decode sizes,
+    even when speculation makes a wider uniform batch schedulable.
+    """
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        cudagraph_capture_sizes=[8, 16],
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=6,
+        num_speculative_tokens=6,
+        max_num_batched_tokens=8192,
+        compilation_config=compilation_config,
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    assert compilation_config.cudagraph_capture_sizes == [8, 16]
+    assert compilation_config.max_cudagraph_capture_size == 16
