@@ -2347,16 +2347,14 @@ class NixlBaseConnectorWorker:
 
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
-        reported_before = set[str]()
+        already_failed = set[str]()
         for req_id in done_recving:
             # clean up metadata for completed requests
-            meta = self._recving_metadata.pop(req_id, None)
-            if meta is None:
-                # A failed transfer reaches here once per handle: the handles of
-                # one request do not all fail in the same poll, and each failure
-                # queues the request id again. The first pass popped the
-                # metadata and reported the request, so this is a repeat.
-                reported_before.add(req_id)
+            if (meta := self._recving_metadata.pop(req_id, None)) is None:
+                # (multi-read) A failed transfer reaches here once per handle: the
+                # handles of one request do not all fail in the same
+                # `_pop_done_transfers` poll, and each failure queues it again.
+                already_failed.add(req_id)
                 continue
 
             # Skip KV sync and post-processing for failed requests
@@ -2403,10 +2401,7 @@ class NixlBaseConnectorWorker:
                 block_ids_for_heterogeneous_attn_post_process.append(
                     meta.local_physical_block_ids[0]
                 )
-
-        # The scheduler acted on these ids the first time they were reported and
-        # asserts on a finished recv for a request no longer waiting for KVs.
-        done_recving -= reported_before
+        done_recving -= already_failed
 
         for (
             block_size_ratio,
