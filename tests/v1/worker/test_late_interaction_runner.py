@@ -402,3 +402,56 @@ def test_mrv2_pooling_runner_no_projection_without_docs_in_batch():
     assert calls["project_batch"] == 0, (
         "query-only batch must not trigger full-batch projection"
     )
+
+
+# ---------------------------------------------------------------------------
+# Autotune config pruning (review: estimate must use d_pad; budget must come
+# from the active device; no rejected-config fallback).
+# ---------------------------------------------------------------------------
+def _prune(monkeypatch, budget: int, named_args: dict):
+    from vllm.v1.pool.flash_maxsim import _common
+
+    monkeypatch.setattr(_common, "_smem_budget", lambda: budget)
+    return _common._prune_configs(_common._get_configs(), named_args)
+
+
+def _est(cfg, d_pad: int) -> int:
+    bq, bd = cfg.kwargs["BLOCK_Q"], cfg.kwargs["BLOCK_D"]
+    return (bq * d_pad + bd * d_pad) * 2 + bq * bd * 4
+
+
+def test_prune_configs_uses_padded_dim(monkeypatch):
+    """d=513 pads to 1024: every surviving config must fit the budget at
+    d_pad=1024, not at the un-padded d (which would admit ~2x-oversized
+    tiles)."""
+    budget = 166_912  # A100 opt-in
+    survivors = _prune(monkeypatch, budget, {"Lq": 1024, "d": 513, "d_pad": 1024})
+    assert survivors, "some config must survive at d_pad=1024 on A100"
+    assert all(_est(c, 1024) <= budget for c in survivors)
+    # Sanity: at least one config that fits at d=513 does NOT fit at
+    # d_pad=1024 — the exact class of config the old estimate leaked.
+    from vllm.v1.pool.flash_maxsim import _common
+
+    leaked = [
+        c for c in _common._get_configs() if _est(c, 1024) > budget >= _est(c, 513)
+    ]
+    assert leaked, "test shape no longer discriminates d vs d_pad"
+    assert all(c not in survivors for c in leaked)
+
+
+def test_prune_configs_no_rejected_fallback(monkeypatch):
+    """When nothing fits, the fallback must be the single smallest-footprint
+    config — never a slice of rejected configs."""
+    survivors = _prune(monkeypatch, 10_000, {"Lq": 1024, "d_pad": 1024})
+    assert len(survivors) == 1
+    from vllm.v1.pool.flash_maxsim import _common
+
+    smallest = min(_common._get_configs(), key=lambda c: _est(c, 1024))
+    assert survivors[0].kwargs == smallest.kwargs
+
+
+def test_prune_configs_respects_lq(monkeypatch):
+    """Small-Lq shapes must not retain oversized BLOCK_Q configs."""
+    survivors = _prune(monkeypatch, 232_448, {"Lq": 16, "d_pad": 128})
+    assert survivors
+    assert all(c.kwargs["BLOCK_Q"] <= 32 for c in survivors)
