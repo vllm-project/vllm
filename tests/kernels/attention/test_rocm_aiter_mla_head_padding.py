@@ -355,3 +355,391 @@ def test_h12_aiter_mla_decode_matches_reference():
         atol=1e-2,
         rtol=1e-2,
     )
+
+
+# ---------------------------------------------------------------------------
+# Native-shape padding (VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE).
+#
+# AITER's ``natively_supported`` is a disjunction over
+# (arch, q fp8?, kv fp8?, num_heads, max_seqlen_qo), and a native verdict from
+# the metadata planner still has to be backed by a shipped asm kernel, so these
+# tests drive the real probes with verbatim copies of what AITER v0.1.21.post1
+# ships. That keeps them runnable off ROCm and makes them fail if the literal
+# matching in _aiter_mla_shape_is_native drifts.
+# ---------------------------------------------------------------------------
+
+# csrc/kernels/mla/metadata/v1_2_device.cuh, the ``natively_supported``
+# initializer only -- the AITER_CHECK allowlist below it in the real file is
+# deliberately excluded, since matching against it is the mistake the probe's
+# slicing exists to prevent.
+_AITER_0_1_21_PREDICATE = """
+    const bool natively_supported =
+        (num_heads == 16) ||
+        ((arch_id == "gfx942" || arch_id == "gfx950") && (num_heads == 64) &&
+         q_is_fp8 && kv_is_fp8 && (max_seqlen_qo == 1)) ||
+        ((arch_id == "gfx950") && !q_is_fp8 && !kv_is_fp8) ||
+        ((arch_id == "gfx942") && (num_heads == 128) && q_is_fp8 && kv_is_fp8) ||
+        ((arch_id == "gfx950") && q_is_fp8 && kv_is_fp8 &&
+         ((num_heads == 32) || (num_heads == 64) || (num_heads == 128))) ||
+        ((arch_id == "gfx950") && q_is_fp8 && kv_is_fp8 && (num_heads == 96) &&
+         (max_seqlen_qo <= 6)) ||
+        hk_mtp_experimental
+"""
+
+# csrc/kernels/mla/reduce.cu MLA_REDUCE_ROUTER, HEAD_DIM 512 instantiations.
+_AITER_REDUCER_HEADS = frozenset({8, 16, 24, 32, 48, 64, 80, 96, 112, 128})
+
+# hsa/gfx942/mla/mla_asm.csv, the fp8/fp8 decode rows, as
+# (qType, kvType, Gqa, ps, qSeqLen, lse). Note gqa=128 ships at lse=0 only
+# while gqa=64 ships both -- that asymmetry is the whole point of the probe.
+_AITER_GFX942_KERNELS = frozenset(
+    ("fp8", "fp8", *row)
+    for row in (
+        (16, 1, 1, 0),
+        (16, 1, 2, 0),
+        (16, 1, 4, 0),
+        (16, 0, 1, 0),
+        (16, 0, 2, 0),
+        (16, 0, 4, 0),
+        (64, 1, 1, 0),
+        (64, 1, 1, 1),
+        (128, 1, 0, 0),
+        (128, 0, 0, 0),
+        (8, 0, 1, 0),
+        (1, 1, 0, 0),
+    )
+)
+
+
+@pytest.fixture
+def aiter_0_1_21(monkeypatch):
+    """Point the native-shape probes at a known AITER revision."""
+    stripped = "".join(_AITER_0_1_21_PREDICATE.split())
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_predicate_source", lambda: stripped
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_reducer_head_counts", lambda: _AITER_REDUCER_HEADS
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla,
+        "_aiter_mla_asm_decode_kernels",
+        lambda arch: _AITER_GFX942_KERNELS if arch == "gfx942" else frozenset(),
+    )
+
+
+def _resolve(
+    num_heads, *, gfx942=False, gfx950=True, q_fp8, kv_fp8, max_qo_lens, needs_lse=False
+):
+    return AiterMLAHelper.resolve_padded_mla_num_heads(
+        num_heads,
+        gfx942=gfx942,
+        gfx950=gfx950,
+        q_fp8=q_fp8,
+        kv_fp8=kv_fp8,
+        max_qo_lens=max_qo_lens,
+        needs_lse=needs_lse,
+    )
+
+
+def test_head_padding_env_default_is_off(monkeypatch):
+    monkeypatch.delenv("VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE", raising=False)
+    import vllm.envs as envs
+
+    assert envs.VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE == "off"
+
+
+@pytest.mark.parametrize("num_heads", list(range(1, 257)))
+def test_off_is_bit_identical_to_the_unpadded_rule(monkeypatch, num_heads):
+    """The default must not move a single head count.
+
+    This is the whole safety argument for the knob, so assert it over the
+    entire reachable range rather than at a handful of sample points. H24 is
+    disabled by the autouse fixture, so the expected rule is a plain ceil.
+    """
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE", "off")
+    expected = -(-num_heads // 16) * 16
+    assert AiterMLAHelper.get_actual_mla_num_heads(num_heads) == expected
+    for gfx942, gfx950 in ((True, False), (False, True), (False, False)):
+        for fp8 in (True, False):
+            assert (
+                _resolve(
+                    num_heads,
+                    gfx942=gfx942,
+                    gfx950=gfx950,
+                    q_fp8=fp8,
+                    kv_fp8=fp8,
+                    max_qo_lens=(1, 2),
+                )
+                == expected
+            )
+
+
+# (gfx942, gfx950, q_fp8, kv_fp8, max_qo_lens, needs_lse, num_heads, expected)
+#
+# The interesting rows, per slice:
+#   gfx950 fp8 qo=1   -- 48 -> 64 is the one reachable win (Kimi-K3 TP8+DCP4);
+#                        96 stays put, AITER v0.1.21 having made it native, and
+#                        padding it to 128 measured a 6.7% regression;
+#                        80 -> 96 rather than 128, 96 being both native and
+#                        cheaper (231.7 us vs 247.2 us measured).
+#   gfx950 fp8 qo<=8  -- 96 loses its qo <= 6 clause at some reachable qlen, so
+#                        the run-level constant has to clear it: 80 and 96 go
+#                        to 128.
+#   gfx950 bf16       -- the blanket bf16 clause makes everything native, so
+#                        every row is the identity. This is the default
+#                        --kv-cache-dtype auto configuration; a pad here would
+#                        be pure loss.
+#   gfx942 fp8 qo=1   -- 32 -> 64 (the fold a fixed {16,32,64,128} tile table
+#                        misses, 32 not being native on gfx942).
+#   gfx942 fp8 + LSE  -- a DCP rank. gqa=128 ships lse=0 only, so 80/96/112 may
+#                        not pad at all; gqa=64 ships both, so 32/48 still can.
+#   gfx942 fp8 qo<=4  -- 64 loses its qo == 1 clause, so 48 must NOT go to 64
+#                        (that would swap a 3x fold for a 4x one) and 32's only
+#                        target is 128, declined by the 2x cost cap.
+#   gfx942 bf16       -- only 16 is native; padding could only raise the fold
+#                        factor, so everything is the identity.
+#   neither arch      -- no clause may fire on an arch AITER does not name.
+NATIVE_PAD_CASES = [
+    (False, True, True, True, (1,), False, 16, 16),
+    (False, True, True, True, (1,), False, 32, 32),
+    (False, True, True, True, (1,), False, 48, 64),
+    (False, True, True, True, (1,), False, 64, 64),
+    (False, True, True, True, (1,), False, 80, 96),
+    (False, True, True, True, (1,), False, 96, 96),
+    (False, True, True, True, (1,), False, 112, 128),
+    (False, True, True, True, (1,), False, 120, 128),
+    (False, True, True, True, (1,), False, 128, 128),
+    (False, True, True, True, (1,), False, 144, 144),
+    (False, True, True, True, (1,), False, 256, 256),
+    (False, True, True, True, (1,), True, 48, 64),
+    (False, True, True, True, range(1, 5), True, 48, 64),
+    (False, True, True, True, range(1, 5), True, 96, 96),
+    (False, True, True, True, range(1, 9), True, 80, 128),
+    (False, True, True, True, range(1, 9), True, 96, 128),
+    (False, True, True, True, range(1, 9), True, 128, 128),
+    (False, True, False, False, (1,), False, 48, 48),
+    (False, True, False, False, (1,), False, 80, 80),
+    (False, True, False, False, (1,), False, 96, 96),
+    (False, True, False, False, (1,), False, 112, 112),
+    (False, True, False, False, range(1, 5), False, 48, 48),
+    (False, True, True, False, (1,), False, 48, 48),
+    (True, False, True, True, (1,), False, 16, 16),
+    (True, False, True, True, (1,), False, 32, 64),
+    (True, False, True, True, (1,), False, 48, 64),
+    (True, False, True, True, (1,), False, 64, 64),
+    (True, False, True, True, (1,), False, 80, 128),
+    (True, False, True, True, (1,), False, 96, 128),
+    (True, False, True, True, (1,), False, 112, 128),
+    (True, False, True, True, (1,), False, 128, 128),
+    (True, False, True, True, (1,), True, 32, 64),
+    (True, False, True, True, (1,), True, 48, 64),
+    (True, False, True, True, (1,), True, 80, 80),
+    (True, False, True, True, (1,), True, 96, 96),
+    (True, False, True, True, (1,), True, 112, 112),
+    (True, False, True, True, range(1, 5), False, 32, 32),
+    (True, False, True, True, range(1, 5), False, 48, 48),
+    (True, False, True, True, range(1, 5), False, 64, 128),
+    (True, False, True, True, range(1, 5), False, 128, 128),
+    (True, False, False, False, (1,), False, 48, 48),
+    (True, False, False, False, (1,), False, 80, 80),
+    (True, False, False, False, (1,), False, 96, 96),
+    (True, False, False, False, (1,), False, 112, 112),
+    (False, False, True, True, (1,), False, 32, 32),
+    (False, False, True, True, (1,), False, 48, 48),
+    (False, False, True, True, (1,), False, 96, 96),
+]
+
+
+@pytest.mark.parametrize(
+    "gfx942,gfx950,q_fp8,kv_fp8,max_qo_lens,needs_lse,num_heads,expected",
+    NATIVE_PAD_CASES,
+)
+def test_auto_pads_to_a_natively_supported_shape(
+    monkeypatch,
+    aiter_0_1_21,
+    gfx942,
+    gfx950,
+    q_fp8,
+    kv_fp8,
+    max_qo_lens,
+    needs_lse,
+    num_heads,
+    expected,
+):
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE", "auto")
+    assert (
+        _resolve(
+            num_heads,
+            gfx942=gfx942,
+            gfx950=gfx950,
+            q_fp8=q_fp8,
+            kv_fp8=kv_fp8,
+            max_qo_lens=max_qo_lens,
+            needs_lse=needs_lse,
+        )
+        == expected
+    )
+
+
+def test_auto_never_pads_96_on_a_native_96_aiter(monkeypatch, aiter_0_1_21):
+    """Regression guard for the AITER 0.1.19 -> 0.1.21 flip.
+
+    A static tile table padded 96 -> 128 here, which was a 6x win on 0.1.19 and
+    is a measured 6.7% loss on 0.1.21. Nothing but the probe stops that from
+    silently coming back on the next bump.
+    """
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE", "auto")
+    assert _resolve(96, q_fp8=True, kv_fp8=True, max_qo_lens=(1,)) == 96
+
+
+def test_auto_declines_a_target_without_an_lse_kernel(monkeypatch, aiter_0_1_21):
+    """gfx942 ships gqa=128 at lse=0 only, so a DCP rank cannot land there.
+
+    The metadata planner calls 128 native on gfx942 regardless, so a mirror
+    that stopped at the planner would pad here and take out the first decode
+    with "cannot find suitable kernel". gqa=64 ships both flags, so the same
+    rank may still pad 48 -> 64.
+    """
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE", "auto")
+    kw = dict(gfx942=True, gfx950=False, q_fp8=True, kv_fp8=True, max_qo_lens=(1,))
+    assert _resolve(112, needs_lse=False, **kw) == 128
+    assert _resolve(112, needs_lse=True, **kw) == 112
+    assert _resolve(48, needs_lse=True, **kw) == 64
+
+
+def test_auto_requires_every_reachable_qlen_to_be_native(monkeypatch, aiter_0_1_21):
+    """One run-level constant must not fold harder at some reachable qlen.
+
+    AITER's fold factor is num_heads/16 with no qlen term, so a target that is
+    native only at qlen 1 multiplies the KV traffic of every verify pass. On
+    gfx942 with fp8, 64 heads is native at qlen 1 alone: padding 32 -> 64 wins
+    a decode-only run and loses an MTP run.
+    """
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE", "auto")
+    kw = dict(gfx942=True, gfx950=False, q_fp8=True, kv_fp8=True)
+    assert _resolve(32, max_qo_lens=(1,), **kw) == 64
+    assert _resolve(32, max_qo_lens=(1, 2), **kw) == 32
+
+
+def test_force_ignores_the_cost_cap(monkeypatch, aiter_0_1_21):
+    # gfx942 + fp8 + 32 heads over qlens 1..4: the only target native at every
+    # one of them is 128, a 4x head inflation against a 2x fold. "auto"
+    # declines it; "force" takes it.
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE", "auto")
+    kw = dict(gfx942=True, gfx950=False, q_fp8=True, kv_fp8=True, max_qo_lens=(1, 4))
+    assert _resolve(32, **kw) == 32
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE", "force")
+    assert _resolve(32, **kw) == 128
+
+
+@pytest.mark.parametrize("mode", ["off", "auto", "force"])
+@pytest.mark.parametrize("num_heads", list(range(1, 257)))
+def test_resolved_count_is_always_a_legal_launch_shape(
+    monkeypatch, aiter_0_1_21, mode, num_heads
+):
+    """Never below the real count, always 16-aligned, never above AITER's cap.
+
+    The 16-alignment is a correctness guard rather than an optimization: AITER
+    folds only multiples of 16 and asserts on anything else, so no policy may
+    return an unaligned value. (Native H24 is the one sanctioned exception and
+    the autouse fixture disables it here.) Padding may only grow the count,
+    since the extra lanes are sliced back off the output.
+    """
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE", mode)
+    unpadded = -(-num_heads // 16) * 16
+    for gfx942, gfx950 in ((True, False), (False, True), (False, False)):
+        for fp8 in (True, False):
+            m = _resolve(
+                num_heads,
+                gfx942=gfx942,
+                gfx950=gfx950,
+                q_fp8=fp8,
+                kv_fp8=fp8,
+                max_qo_lens=(1, 4),
+            )
+            assert m >= unpadded
+            assert m % 16 == 0
+            assert m <= max(unpadded, AiterMLAHelper._AITER_MAX_PADDED_MLA_HEADS)
+
+
+@pytest.mark.parametrize("num_heads", [48, 80, 112])
+def test_pad_unpad_round_trip_at_the_resolved_count(
+    monkeypatch, aiter_0_1_21, num_heads
+):
+    """Padding to a native shape is exactly reversible for both o and lse."""
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE", "auto")
+    padded_heads = _resolve(num_heads, q_fp8=True, kv_fp8=True, max_qo_lens=(1,))
+    assert padded_heads > num_heads
+
+    tokens = 5
+    q = torch.randn(tokens, num_heads, QK_HEAD_DIM)
+    q_padded = AiterMLAHelper.get_mla_padded_q(num_heads, q, padded_heads)
+    assert q_padded.shape == (tokens, padded_heads, QK_HEAD_DIM)
+    torch.testing.assert_close(q_padded[:, :num_heads, :], q)
+
+    o = torch.randn(tokens, padded_heads, KV_LORA_RANK)
+    torch.testing.assert_close(
+        AiterMLAHelper.get_mla_unpadded_o(num_heads, o, padded_heads),
+        o[:, :num_heads, :],
+    )
+
+    lse = torch.randn(tokens, padded_heads)
+    torch.testing.assert_close(
+        AiterMLAHelper.get_mla_unpadded_lse(num_heads, lse, padded_heads),
+        lse[:, :num_heads],
+    )
+
+
+def test_unpad_uses_the_target_it_is_given():
+    """A resolved count threaded to one side only silently returns junk.
+
+    Pad and unpad each branch on ``m % num_heads == 0`` independently, so this
+    documents why the impl carries ``padded_num_heads`` on the metadata instead
+    of recomputing it.
+    """
+    tokens, num_heads = 3, 32
+    padded_heads = 64  # divides 32, so unpad takes a stride-2 slice
+    o = torch.arange(tokens * padded_heads * 4, dtype=torch.float32).reshape(
+        tokens, padded_heads, 4
+    )
+    torch.testing.assert_close(
+        AiterMLAHelper.get_mla_unpadded_o(num_heads, o, padded_heads), o[:, ::2, :]
+    )
+    # Without the target the helper falls back to the unpadded rule (32 == 32)
+    # and hands back the padded tensor whole.
+    assert AiterMLAHelper.get_mla_unpadded_o(num_heads, o).shape[1] == padded_heads
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_rocm() and is_aiter_found()),
+    reason="reads the installed AITER JIT sources",
+)
+def test_probe_matches_the_installed_aiter():
+    """Fail when AITER moves under the mirror, rather than going quietly inert.
+
+    Every clause is admitted by a literal match, so a re-spaced or reworded
+    predicate makes them all fall through, the resolver returns the unpadded
+    count, and the feature becomes a silent no-op for someone who opted in.
+    Assert the literals themselves, not just the outcome.
+    """
+    src = rocm_aiter_mla._aiter_mla_native_predicate_source()
+    assert src.startswith(rocm_aiter_mla._AITER_NATIVE_BLOCK_START)
+    # The AITER_CHECK allowlist sits immediately below the initializer and
+    # repeats most of its text; the slice must stop before it.
+    assert "AITER_CHECK" not in src
+    for literal in (
+        '(arch_id=="gfx950")&&!q_is_fp8&&!kv_is_fp8',
+        "((num_heads==32)||(num_heads==64)||(num_heads==128))",
+        "(num_heads==96)&&(max_seqlen_qo<=6)",
+        '(arch_id=="gfx942")&&(num_heads==128)',
+        '(arch_id=="gfx942"||arch_id=="gfx950")&&(num_heads==64)&&q_is_fp8',
+    ):
+        assert literal in src, f"AITER predicate no longer contains {literal!r}"
+    assert rocm_aiter_mla._aiter_mla_reducer_head_counts() == _AITER_REDUCER_HEADS
+    from vllm.platforms.rocm import on_gfx942
+
+    if on_gfx942():
+        installed = rocm_aiter_mla._aiter_mla_asm_decode_kernels("gfx942")
+        assert ("fp8", "fp8", 64, 1, 1, 1) in installed
+        assert ("fp8", "fp8", 128, 1, 0, 1) not in installed

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Final
@@ -140,6 +141,242 @@ def _aiter_mla_native_h24_supported() -> bool:
     return (
         _aiter_mla_native_h24_reducer_supported()
         and _aiter_mla_native_h24_metadata_supported()
+    )
+
+
+# ---------------------------------------------------------------------------
+# AITER native-shape mirror.
+#
+# AITER's MLA metadata planner folds a head count it does not natively support
+# down to 16 heads with ``qk_batch_ratio = num_heads / 16``, multiplying
+# num_batches by the same factor. Every sub-pass of that fold re-reads the
+# whole KV -- the batch index is divided by qk_batch_ratio and the KV cursor
+# only advances on sub-head 0 -- so a folded decode costs ``num_heads / 16``
+# passes over the cache. MLA decode is KV-bandwidth bound, which is why paying
+# a few zero query heads to land on a native shape is usually a large win.
+#
+# Whether a count is native is NOT a property of the count. It is a disjunction
+# over ``(arch_id, q_is_fp8, kv_is_fp8, num_heads, max_seqlen_qo)``
+# (``csrc/kernels/mla/metadata/v1_2_device.cuh``), and it has changed in every
+# AITER release vLLM has shipped -- v0.1.21 added ``gfx950 && fp8 && 96 heads
+# && max_seqlen_qo <= 6`` (ROCm/aiter#4964), which turned what used to be a 6x
+# fold into a native shape. A static tile table in vLLM is therefore correct
+# for at most one AITER revision, and going stale is *silent*: the AITER_CHECK
+# below the fold runs after the fold has already rewritten ``num_heads = 16``,
+# so it accepts every 16-aligned count and a wrong pad target costs throughput
+# with no error anywhere.
+#
+# So: probe the shipped JIT source for the distinguishing literal of each
+# clause -- the same idiom as ``_aiter_mla_native_h24_metadata_supported``
+# above -- and then evaluate the admitted clauses in Python against the live
+# arch, dtypes and query length.
+#
+# Every grep is scoped to the ``natively_supported`` initializer. The
+# AITER_CHECK allowlist immediately below it contains near-identical text, so
+# matching against the whole file reports clauses that are only in the check
+# and were never in the predicate.
+# ---------------------------------------------------------------------------
+
+_AITER_NATIVE_BLOCK_START: Final = "constboolnatively_supported="
+
+
+@functools.lru_cache(maxsize=1)
+def _aiter_mla_native_predicate_source() -> str:
+    """Whitespace-stripped text of AITER's ``natively_supported`` initializer.
+
+    Empty when the shipped source cannot be read. Callers then admit no
+    optional clause, which degrades to "nothing is native", which in turn
+    means no padding and the historical next-multiple-of-16 behavior. That is
+    always legal: any 16-aligned count folds cleanly.
+    """
+    try:
+        from aiter.jit.core import AITER_CSRC_DIR
+
+        path = Path(AITER_CSRC_DIR) / "kernels" / "mla" / "metadata" / "v1_2_device.cuh"
+        source = "".join(path.read_text(encoding="utf-8").split())
+    except (ImportError, OSError):
+        return ""
+    start = source.find(_AITER_NATIVE_BLOCK_START)
+    if start < 0:
+        return ""
+    end = source.find(";", start)
+    return source[start : end if end > start else len(source)]
+
+
+@functools.lru_cache(maxsize=1)
+def _aiter_mla_reducer_head_counts() -> frozenset[int]:
+    """Head counts AITER's MLA reducer instantiates at ``HEAD_DIM`` 512.
+
+    The reducer and the metadata planner dispatch independently -- the same
+    split that forced the two-probe H24 check above. It matters here because
+    the planner's blanket ``gfx950 && bf16`` clause claims *any* head count is
+    native while ``reduce.cu``'s router has no case above 128, so a pad target
+    has to satisfy both.
+    """
+    try:
+        from aiter.jit.core import AITER_CSRC_DIR
+
+        path = Path(AITER_CSRC_DIR) / "kernels" / "mla" / "reduce.cu"
+        source = "".join(path.read_text(encoding="utf-8").split())
+    except (ImportError, OSError):
+        return frozenset()
+    return frozenset(
+        n
+        for n in (8, 16, 24, 32, 48, 64, 80, 96, 112, 128)
+        if f"MLA_REDUCE_CASE_EF(NUM_HEAD,{n},HEAD_DIM,512," in source
+    )
+
+
+@functools.lru_cache(maxsize=4)
+def _aiter_mla_asm_decode_kernels(
+    arch: str,
+) -> frozenset[tuple[str, str, int, int, int, int]]:
+    """``(q dtype, kv dtype, gqa, ps, qseqlen, lse)`` of every shipped asm kernel.
+
+    A native verdict from the metadata planner does not imply
+    ``mla_decode_fwd`` can dispatch: ``asm_mla.cu`` looks the shape up in this
+    table and filters on the LSE flag exactly, so a missing row is ``cannot
+    find suitable kernel`` at the first decode. The table is per-arch and moves
+    between AITER revisions independently of the planner predicate --
+    v0.1.21.post1 ships gfx942 fp8 gqa=64 rows that AITER main has since
+    dropped -- so read it rather than assume it.
+
+    Empty when the table cannot be read, which makes every clause that consults
+    it decline.
+    """
+    try:
+        from aiter.jit.core import AITER_ASM_DIR
+
+        path = Path(AITER_ASM_DIR) / arch / "mla" / "mla_asm.csv"
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (ImportError, OSError):
+        return frozenset()
+    if not lines:
+        return frozenset()
+    # The column count differs by arch (gfx950 carries an extra cprr flag), so
+    # index by header name rather than by position.
+    header = [c.strip() for c in lines[0].split(",")]
+    try:
+        cols = [
+            header.index(c) for c in ("qType", "kvType", "Gqa", "ps", "qSeqLen", "lse")
+        ]
+    except ValueError:
+        return frozenset()
+    rows = set()
+    for line in lines[1:]:
+        fields = [f.strip() for f in line.split(",")]
+        if len(fields) <= max(cols):
+            continue
+        try:
+            ints = tuple(int(fields[c]) for c in cols[2:])
+        except ValueError:
+            continue
+        rows.add((fields[cols[0]], fields[cols[1]], *ints))
+    return frozenset(rows)
+
+
+def _aiter_mla_shape_is_native(
+    num_heads: int,
+    *,
+    gfx942: bool,
+    gfx950: bool,
+    q_fp8: bool,
+    kv_fp8: bool,
+    max_qo_len: int,
+    needs_lse: bool,
+) -> bool:
+    """Mirror of AITER's ``natively_supported`` for the *installed* AITER.
+
+    Each clause is admitted only when its literal is present in the shipped
+    predicate, so a clause AITER drops stops being claimed here with no vLLM
+    change, and a clause AITER adds is picked up the same way. A clause that
+    cannot be found degrades to "not native", i.e. keep the fold -- the safe
+    direction, since padding a shape AITER did not actually make native is
+    exactly what turns this feature into a regression.
+    """
+    src = _aiter_mla_native_predicate_source()
+    if not src:
+        return False
+    if num_heads not in _aiter_mla_reducer_head_counts():
+        return False
+
+    def has_asm_kernel(gqa: int, qseqlen: int) -> bool:
+        """Whether gfx942 ships an asm kernel for this exact shape.
+
+        Only asked on gfx942. All four config remaps in ``asm_mla.cu`` are
+        guarded on ``arch_id == "gfx950"``, so on gfx942 the requested gqa and
+        the ``config_gqa_ratio`` it is looked up under are the same number and
+        the table can be consulted directly. On gfx950 the remap folds every
+        persistent fp8 decode onto gqa 16 or 32, both of which ship LSE
+        variants, so there is nothing left to check.
+        """
+        return ("fp8", "fp8", gqa, 1, qseqlen, int(needs_lse)) in (
+            _aiter_mla_asm_decode_kernels("gfx942")
+        )
+
+    # (a) 16 heads: unconditional on every arch, dtype and qlen, in every
+    #     AITER this code has seen. It is the fold target, so it has to be.
+    if num_heads == 16:
+        return True
+
+    # (b) gfx950 with bf16 q AND bf16 kv: any head count, no qlen term. This
+    #     is the default --kv-cache-dtype auto configuration on MI355X, and it
+    #     means there is no fold to remove there and padding is pure cost.
+    if (
+        gfx950
+        and not q_fp8
+        and not kv_fp8
+        and '(arch_id=="gfx950")&&!q_is_fp8&&!kv_is_fp8' in src
+    ):
+        return True
+
+    if not (q_fp8 and kv_fp8):
+        # Every remaining clause requires both q and kv fp8. A mixed
+        # fp8-q/bf16-kv configuration matches nothing and always folds.
+        return False
+
+    # (c) gfx950 + fp8: 32/64/128 with no qlen constraint.
+    if (
+        gfx950
+        and num_heads in (32, 64, 128)
+        and "((num_heads==32)||(num_heads==64)||(num_heads==128))" in src
+    ):
+        return True
+
+    # (d) gfx950 + fp8 + 96 heads, gated on qlen <= 6 (ROCm/aiter#4964,
+    #     v0.1.21+). This is the clause that makes padding 96 -> 128 a
+    #     regression on a current AITER and a large win on an older one.
+    if (
+        gfx950
+        and num_heads == 96
+        and max_qo_len <= 6
+        and "(num_heads==96)&&(max_seqlen_qo<=6)" in src
+    ):
+        return True
+
+    # (e) gfx942 + fp8 + 128 heads. The predicate carries no qlen constraint,
+    #     but gfx942 ships gqa=128 only at lse=0, so a DCP rank -- which needs
+    #     the LSE for the cross-shard merge -- has no kernel to land on.
+    if (
+        gfx942
+        and num_heads == 128
+        and '(arch_id=="gfx942")&&(num_heads==128)' in src
+        # gqa 128 sets config_max_seqlen_q = 0 unconditionally (asm_mla.cu).
+        and has_asm_kernel(128, 0)
+    ):
+        return True
+
+    # (f) 64 heads + fp8 on either arch, qlen == 1 only. Redundant with (c) on
+    #     gfx950; on gfx942 it is the only route to a native 64, and only while
+    #     the gqa=64 rows are shipped -- AITER main has already dropped them.
+    #     The arch guard is matched too: a future AITER that narrows this
+    #     clause to one arch would otherwise keep matching a bare head-count
+    #     fragment and hand back a false positive on the other.
+    return (
+        num_heads == 64
+        and max_qo_len == 1
+        and '(arch_id=="gfx942"||arch_id=="gfx950")&&(num_heads==64)&&q_is_fp8' in src
+        and (gfx950 or (gfx942 and has_asm_kernel(64, 1)))
     )
 
 
@@ -310,6 +547,9 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     use_gluon_verify: bool = False
     # Whether persistent MLA metadata was computed
     has_persistent_metadata: bool = False
+    # Head count the asm decode is launched at, resolved once by the builder
+    # (AiterMLAHelper.resolve_padded_mla_num_heads).
+    padded_num_heads: int | None = None
 
 
 @dataclass
@@ -457,11 +697,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         # Decode kernels consume the DCP-gathered query heads.
         self._decode_num_heads = self.num_heads * self.dcp_world_size
-        # Keep metadata sizing consistent with the padded tensor shape passed
-        # to mla_decode_fwd, including native 24-head AITER builds.
-        self._num_attention_heads = AiterMLAHelper.get_actual_mla_num_heads(
-            self._decode_num_heads
-        )
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             kv_cache_dtype_str = "fp8"
@@ -483,6 +718,35 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # wrong split/reduce metadata for the gfx950 fp8 nhead=32 fold path.
         self._mla_q_dtype = q_dtype
         self._mla_kv_dtype = kv_dtype
+
+        # Head count the decode is actually launched at. Resolved here, below
+        # the dtype block, because whether a count is native to AITER depends
+        # on the q/kv dtypes and the arch, not only on the count -- see
+        # _aiter_mla_shape_is_native. It keeps metadata sizing consistent with
+        # the padded tensor shape passed to mla_decode_fwd, including native
+        # 24-head AITER builds.
+        #
+        # One value has to serve every query length this run can produce: it
+        # sizes persistent buffers and the decode output, so a value that
+        # changed between passes would break cudagraph capture. _build_decode
+        # accepts any 1 <= max_qo_len <= _mtp_decode_qlen, and nativeness is
+        # neither monotone nor a simple function of qlen, so hand the resolver
+        # the whole reachable range rather than its endpoints.
+        #
+        # needs_lse: a DCP rank asks aiter for the LSE the cross-shard merge
+        # needs, and the asm kernel table is indexed by that flag, so it
+        # narrows which padded shapes can dispatch at all.
+        from vllm.platforms.rocm import on_gfx942, on_gfx950
+
+        self._num_attention_heads = AiterMLAHelper.resolve_padded_mla_num_heads(
+            self._decode_num_heads,
+            gfx942=on_gfx942(),
+            gfx950=on_gfx950(),
+            q_fp8=q_dtype is dtypes.fp8,
+            kv_fp8=kv_dtype is dtypes.fp8,
+            max_qo_lens=range(1, max(1, self._mtp_decode_qlen) + 1),
+            needs_lse=self.dcp_world_size > 1,
+        )
         (
             (work_meta_data_size, work_meta_data_type),
             (work_indptr_size, work_indptr_type),
@@ -1125,6 +1389,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             use_gluon_verify=use_gluon_verify,
             attn_out_dtype=self.decode_attn_out_dtype,
             has_persistent_metadata=has_persistent_metadata,
+            padded_num_heads=self._num_attention_heads,
         )
 
         return attn_metadata
@@ -1215,6 +1480,9 @@ class AiterMLAHelper:
     that padding. Small divisors of 16 retain the existing repeat_interleave and
     strided-unpad behavior. Native and aligned counts pass through without
     copies.
+
+    ``VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE`` widens that rule for the decode
+    path: see ``resolve_padded_mla_num_heads``.
     """
 
     _AITER_MIN_MLA_HEADS: Final = 16
@@ -1223,6 +1491,21 @@ class AiterMLAHelper:
     # for. Above it only the non-persistent qseqlen=8 entry exists, and the
     # fold that reaches a persistent one is gfx950-only.
     _ASM_PADDED_MAX_PS_QLEN: Final = 4
+    # Cap on padded / aligned for the "auto" policy. Justification, measured
+    # on gfx950 with fp8 q + fp8 kv, bs=52, qlen=1, 16384 KV tokens/request:
+    # the native cost curve is 136.6 / 153.6 / 171.4 / 247.2 us at 16 / 32 /
+    # 64 / 128 heads -- 8x the heads for 1.81x the time, because the kernel is
+    # KV-bandwidth bound -- while each sub-pass of a fold costs roughly
+    # 0.7-0.85x of a whole 16-head pass. So every pad within 2x beats the fold
+    # it removes by a wide margin (48 -> 64 measured 2.04x, 80 -> 128 1.78x,
+    # 112 -> 128 2.66x). Above 2x the comparison gets close enough to need
+    # measurement this change does not have: the reachable case is gfx942 with
+    # fp8 at 32 heads and qlen > 1, whose only native target is 128 -- 4x the
+    # head work against a mere 2x fold -- so "auto" declines it and "force"
+    # takes it. Note the curve is calibrated at one operating point; at short
+    # KV the kernel moves toward compute-bound and the crossover shifts
+    # against padding.
+    _AITER_MAX_PAD_RATIO: Final = 2
     _AITER_UNSUPPORTED_HEADS: ClassVar[tuple[int, ...]] = ()
 
     @staticmethod
@@ -1262,7 +1545,122 @@ class AiterMLAHelper:
         )
 
     @staticmethod
-    def get_actual_mla_num_heads(num_heads: int) -> int:
+    def _head_padding_mode() -> str:
+        """``VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE``, normalized.
+
+        ``env_with_choices`` validates case-insensitively but returns the raw
+        string, so lower it here the way ``_aiter_mla_small_head_mode`` does
+        for the adjacent ASM_PADDING knob.
+        """
+        import vllm.envs as envs
+
+        return (envs.VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE or "off").lower()
+
+    @staticmethod
+    def resolve_padded_mla_num_heads(
+        num_heads: int,
+        *,
+        gfx942: bool,
+        gfx950: bool,
+        q_fp8: bool,
+        kv_fp8: bool,
+        max_qo_lens: Collection[int],
+        needs_lse: bool,
+    ) -> int:
+        """Head count the asm decode should actually be launched at.
+
+        Resolve this ONCE per run, in the builder's ``__init__`` and only after
+        the q/kv dtypes are known, then hand the result to every consumer. It
+        sizes the persistent metadata, the padded q, the ``o`` allocation and
+        the unpad; if two sites recompute it from different information they
+        disagree, and both ``get_mla_padded_q`` and ``_get_mla_unpadded_heads``
+        branch on ``m % num_heads == 0``, so a mismatch is silently wrong
+        values rather than an error.
+
+        ``max_qo_lens`` is every query length the run can produce, not one
+        value: ``max_seqlen_qo`` varies per ``build()`` call, while the head
+        count sizes persistent buffers and the decode output and so has to be a
+        per-run constant or cudagraph capture breaks. A target is accepted only
+        if it is native at *all* of them. Taking the largest per-qlen answer
+        instead would be wrong: AITER's fold factor is ``num_heads / 16`` with
+        no qlen term, so a target that is non-native at some reachable qlen
+        folds *harder* there than not padding at all -- e.g. gfx942 fp8 at 32
+        heads, where padding to 64 helps qlen 1 and doubles the KV traffic of
+        every qlen > 1 verify pass.
+        """
+        m = AiterMLAHelper._AITER_MIN_MLA_HEADS
+        # Start from the historical answer, not a bare ceil: it carries the
+        # native-H24 carve-out, and every consumer that calls
+        # get_actual_mla_num_heads without a resolved value has to agree with
+        # what this returns in "off" mode.
+        aligned = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+        mode = AiterMLAHelper._head_padding_mode()
+        if mode == "off":
+            return aligned
+
+        def native(count: int) -> bool:
+            return all(
+                _aiter_mla_shape_is_native(
+                    count,
+                    gfx942=gfx942,
+                    gfx950=gfx950,
+                    q_fp8=q_fp8,
+                    kv_fp8=kv_fp8,
+                    max_qo_len=qo,
+                    needs_lse=needs_lse,
+                )
+                for qo in max_qo_lens
+            )
+
+        if native(aligned):
+            return aligned
+
+        # Smallest native target at or above the aligned count. Nothing above
+        # _AITER_MAX_PADDED_MLA_HEADS: AITER's python dispatcher folds only
+        # ``nhead in range(32, 128 + 1, 16)`` and asserts otherwise, so a
+        # larger target would not run at all.
+        ratio_cap = (
+            float("inf") if mode == "force" else AiterMLAHelper._AITER_MAX_PAD_RATIO
+        )
+        for tile in range(
+            (aligned // m + 1) * m,
+            AiterMLAHelper._AITER_MAX_PADDED_MLA_HEADS + 1,
+            m,
+        ):
+            if tile > aligned * ratio_cap:
+                break
+            if native(tile):
+                return tile
+
+        if aligned > AiterMLAHelper._AITER_MAX_PADDED_MLA_HEADS:
+            logger.warning_once(
+                "ROCM_AITER_MLA: %d decode heads has no natively-supported "
+                "target at or below %d; leaving it unpadded.",
+                aligned,
+                AiterMLAHelper._AITER_MAX_PADDED_MLA_HEADS,
+            )
+        return aligned
+
+    @staticmethod
+    def get_actual_mla_num_heads(num_heads: int, *, resolved: int | None = None) -> int:
+        """Head count the asm decode is launched at.
+
+        ``resolved`` is the per-run constant from
+        ``resolve_padded_mla_num_heads`` -- pass it wherever the answer has to
+        match the buffers the builder sized in ``__init__``. Without it this is
+        the historical arch-blind rule: native H24 when the probe says so, else
+        the next multiple of 16. Do NOT make the no-``resolved`` path
+        context-sensitive: it is shared with the sparse backend (a different
+        kernel pair, qlen always 1) and with tests, neither of which should
+        inherit the dense decode's answer.
+
+        The 16-alignment itself is unconditional and must stay that way. It is
+        a correctness guard, not an optimization: AITER can only fold multiples
+        of 16, and an unaligned count such as 120 reaches a bare
+        ``assert False`` in ``aiter/mla.py``.
+        """
+        if resolved is not None:
+            return resolved
         if num_heads == 24 and _aiter_mla_native_h24_supported():
             return num_heads
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
@@ -1281,6 +1679,11 @@ class AiterMLAHelper:
         The PS metadata in ``_init_fp8_prefill_ps_buffers``/``build()`` must be
         sized with this same function, or the work/reduce maps describe a
         different head count than the kernel is handed.
+
+        For the same reason the native-shape padding
+        (``resolve_padded_mla_num_heads``) is decode-only. The PS prefill has
+        no ``qk_batch_ratio`` fold to remove, so widening its head count would
+        be pure extra work.
 
         This function itself has no upper bound; the ceiling comes from the
         ``is_valid_num_heads`` gate, which rejects counts above
@@ -1316,12 +1719,21 @@ class AiterMLAHelper:
         return q.repeat(1, reps, 1)[:, :m, :].contiguous()
 
     @staticmethod
-    def get_mla_unpadded_o(num_heads: int, o: torch.Tensor) -> torch.Tensor:
-        return AiterMLAHelper._get_mla_unpadded_heads(num_heads, o)
+    def get_mla_unpadded_o(
+        num_heads: int, o: torch.Tensor, target_heads: int | None = None
+    ) -> torch.Tensor:
+        return AiterMLAHelper._get_mla_unpadded_heads(num_heads, o, target_heads)
 
     @staticmethod
-    def _get_mla_unpadded_heads(num_heads: int, tensor: torch.Tensor) -> torch.Tensor:
-        m = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+    def _get_mla_unpadded_heads(
+        num_heads: int, tensor: torch.Tensor, target_heads: int | None = None
+    ) -> torch.Tensor:
+        # target_heads must be the same integer get_mla_padded_q was given.
+        m = (
+            target_heads
+            if target_heads is not None
+            else AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+        )
         if num_heads == m:
             return tensor
         if m % num_heads == 0:
@@ -1331,8 +1743,10 @@ class AiterMLAHelper:
         return tensor[:, :num_heads, ...]
 
     @staticmethod
-    def get_mla_unpadded_lse(num_heads: int, lse: torch.Tensor) -> torch.Tensor:
-        return AiterMLAHelper._get_mla_unpadded_heads(num_heads, lse)
+    def get_mla_unpadded_lse(
+        num_heads: int, lse: torch.Tensor, target_heads: int | None = None
+    ) -> torch.Tensor:
+        return AiterMLAHelper._get_mla_unpadded_heads(num_heads, lse, target_heads)
 
     @staticmethod
     def use_gluon_decode(num_heads: int, max_qo_len: int, kv_cache_dtype: str) -> bool:
@@ -1906,8 +2320,15 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             "ROCM_AITER_MLA decode expected the DCP-gathered query head count "
             f"{self._decode_num_heads}, got {q.shape[1]}"
         )
-        mla_padded_q = AiterMLAHelper.get_mla_padded_q(self._decode_num_heads, q)
-        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
+        # Resolved by the builder against the arch, the q/kv dtypes and the
+        # run's query lengths; recomputing it from num_heads alone would
+        # disagree with the persistent metadata whenever padding is on.
+        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(
+            self._decode_num_heads, resolved=decode.padded_num_heads
+        )
+        mla_padded_q = AiterMLAHelper.get_mla_padded_q(
+            self._decode_num_heads, q, mla_num_heads
+        )
         o = torch.empty(
             B,
             mla_num_heads,
@@ -1975,7 +2396,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 **mla_kwargs,
             )
 
-        output = AiterMLAHelper.get_mla_unpadded_o(self._decode_num_heads, o)
+        output = AiterMLAHelper.get_mla_unpadded_o(
+            self._decode_num_heads, o, mla_num_heads
+        )
         if lse is not None:
-            lse = AiterMLAHelper.get_mla_unpadded_lse(self._decode_num_heads, lse)
+            lse = AiterMLAHelper.get_mla_unpadded_lse(
+                self._decode_num_heads, lse, mla_num_heads
+            )
         return output, lse

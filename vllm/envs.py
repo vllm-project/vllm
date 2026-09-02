@@ -142,6 +142,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
+    VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE: Literal["auto", "off", "force"] = "off"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
@@ -1318,6 +1319,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_ROCM_AITER_MLA_ASM_PADDING",
         "auto",
         ["auto", "gluon", "asm"],
+        case_sensitive=False,
+    ),
+    # Pad the AITER MLA decode head count up to a shape AITER supports
+    # natively, instead of only to the next multiple of 16. AITER folds a
+    # non-native count down to 16 heads and every sub-pass of that fold
+    # re-reads the whole KV cache, so landing on a native shape can remove a
+    # multiple of the decode's memory traffic.
+    # "off" (default) keeps the next-multiple-of-16 behavior; "auto" pads only
+    # when the installed AITER reports the target native for this arch, KV
+    # dtype and query length, and the pad stays within
+    # AiterMLAHelper._AITER_MAX_PAD_RATIO; "force" ignores that cost cap.
+    "VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE": env_with_choices(
+        "VLLM_ROCM_AITER_MLA_PAD_TO_NATIVE_SHAPE",
+        "off",
+        ["auto", "off", "force"],
         case_sensitive=False,
     ),
     # Whether to use aiter mha ops.
