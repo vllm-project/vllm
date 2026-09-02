@@ -153,12 +153,14 @@ def _mla_spec(
     block_size: int = 16,
     head_size: int = 512,
     dtype: torch.dtype = torch.float32,
+    tokens_per_state: int = 1,
 ) -> MLAAttentionSpec:
     return MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=head_size,
         dtype=dtype,
+        tokens_per_state=tokens_per_state,
     )
 
 
@@ -670,6 +672,15 @@ def _groups(*specs: KVCacheSpec) -> list[KVCacheGroupSpec]:
     return [KVCacheGroupSpec([f"l{i}"], spec) for i, spec in enumerate(specs)]
 
 
+def _uniform_group(*specs: KVCacheSpec) -> KVCacheGroupSpec:
+    """GLM-5.2/DSv3.2-style wrapper: same-type layers whose specs differ."""
+    names = [f"l{i}" for i in range(len(specs))]
+    return KVCacheGroupSpec(
+        names,
+        UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=dict(zip(names, specs))),
+    )
+
+
 @pytest.mark.parametrize(
     "kv_cache_groups",
     [
@@ -695,6 +706,17 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
             False,
             id="mamba-hybrid",
         ),
+        pytest.param(
+            [_uniform_group(_mla_spec(head_size=576), _mla_spec(head_size=128))],
+            True,
+            id="uniform-mla-wrapper",
+        ),
+        pytest.param(
+            [_uniform_group(_mla_spec(head_size=576), _mla_spec(tokens_per_state=2))],
+            False,
+            id="uniform-uncertifiable-inner",
+        ),
+        pytest.param([], False, id="attention-free"),
     ],
 )
 def test_canonical_layout_gate(kv_cache_groups, certified):
