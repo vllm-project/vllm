@@ -8,6 +8,7 @@ from enum import Enum
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
+    ClassVar,
     Generic,
     NamedTuple,
     Protocol,
@@ -1033,7 +1034,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     Not to be confused with `transformers.ProcessorMixin`.
     """
 
-    requires_tokenizer = True
+    requires_tokenizer: ClassVar[bool] = True
 
     def __init__(
         self,
