@@ -77,14 +77,14 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
 # between runners gets per-runner entries (keyed by use_v2) instead of a
 # single shared value.
 _THRESHOLDS = {
-    "level1_freed_gib": 0.5,      # sleep(1) offloads weights (~1.2 GiB observed)
-    "level2_freed_gib": 1.5,      # sleep(2) discards weights + KV cache
-    "level0_freed_gib": 0.5,      # level 0 must NOT release more than this
+    "level1_freed_gib": 0.5,  # sleep(1) offloads weights (~1.2 GiB observed)
+    "level2_freed_gib": 1.5,  # sleep(2) discards weights + KV cache
+    "level0_freed_gib": 0.5,  # level 0 must NOT release more than this
     "wake_reallocated_gib": 0.4,  # full wake remaps weights
-    "leak_tolerance_gib": 0.05,   # max drift across 10 cycles
-    "full_roundtrip_s": 10.0,     # sleep(1) + full wake
-    "staged_roundtrip_s": 15.0,   # sleep(1) + staged wake (weights → kv_cache)
-    "five_cycles_s": 60.0,        # 5 full sleep/wake cycles
+    "leak_tolerance_gib": 0.05,  # max drift across 10 cycles
+    "full_roundtrip_s": 10.0,  # sleep(1) + full wake
+    "staged_roundtrip_s": 15.0,  # sleep(1) + staged wake (weights → kv_cache)
+    "five_cycles_s": 60.0,  # 5 full sleep/wake cycles
 }
 
 
@@ -122,9 +122,10 @@ def isolated_server_url(use_v2):
 @pytest.fixture
 def seeded_server_url(use_v2):
     """Fresh server with --seed 42 — deterministic staged-wake cycle test."""
-    with patch.dict(
-        os.environ, _runner_env(use_v2)
-    ), server(extra_args=["--seed", "42"]) as url:
+    with (
+        patch.dict(os.environ, _runner_env(use_v2)),
+        server(extra_args=["--seed", "42"]) as url,
+    ):
         yield url
 
 
@@ -572,9 +573,7 @@ class TestConcurrentRace:
         assert not hung, f"generate threads {hung} hung after race (deadlock?)"
         assert not sw.is_alive(), "sleep/wake thread hung after race (deadlock?)"
         assert not errors, f"unexpected exceptions during race: {errors}"
-        assert health(url) == 200, (
-            f"engine died after concurrent race; errors={errors}"
-        )
+        assert health(url) == 200, f"engine died after concurrent race; errors={errors}"
         # After the race the engine must be able to serve requests
         assert ok(gen(url)), "generate failed after concurrent race"
 
@@ -623,8 +622,8 @@ class TestMemoryLeakCycle:
 
         assert leak_gib < _THRESHOLDS["leak_tolerance_gib"], (
             f"GPU free memory shrank by {leak_gib:.3f} GiB over 8 post-warmup "
-            f"sleep/wake cycles (baseline={baseline/2**30:.2f} GiB, "
-            f"min={min_free/2**30:.2f} GiB) — "
+            f"sleep/wake cycles (baseline={baseline / 2**30:.2f} GiB, "
+            f"min={min_free / 2**30:.2f} GiB) — "
             "possible cumem handle leak or unmapped page accumulation"
         )
 
@@ -676,9 +675,7 @@ class TestAbortDuringParallelSampling:
         assert sleep(url, level=1, mode="abort") == 200
         t.join(timeout=15)
 
-        assert "err" not in result, (
-            f"background thread raised: {result.get('err')}"
-        )
+        assert "err" not in result, f"background thread raised: {result.get('err')}"
         assert health(url) == 200, "engine died after sampling_n=4 abort"
         assert wake(url) == 200
         # engine must recover and serve new requests
@@ -739,9 +736,7 @@ class TestLogprobsPrecision(_SharedServerTests):
 
         after = _get_logprobs()
         assert after is not None, "failed to get logprobs after sleep/wake"
-        assert len(after) == len(before), (
-            "logprobs length changed after sleep/wake"
-        )
+        assert len(after) == len(before), "logprobs length changed after sleep/wake"
 
         compared = 0
         for i, (b, a) in enumerate(zip(before, after)):
@@ -896,9 +891,7 @@ class TestStagedWakeCycles:
             assert health(url) == 200
 
             resp = gen(url)
-            assert resp and ok(resp), (
-                f"generate failed on staged-wake cycle {cycle}"
-            )
+            assert resp and ok(resp), f"generate failed on staged-wake cycle {cycle}"
             cycle_text = resp["choices"][0]["text"]
             assert cycle_text.strip(), (
                 f"empty output on staged-wake cycle {cycle} — "
