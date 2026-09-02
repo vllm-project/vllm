@@ -169,6 +169,7 @@ def _mp_race_construct_and_write(
     for the parent's cleanup signal before tearing down.  The wait gives the
     parent a window to read the raw mmap before the creator removes the file."""
     try:
+        region_module.is_local_first_rank = lambda: rank == 0
         region = SharedOffloadRegion(
             engine_id=engine_id,
             num_chunks=num_chunks,
@@ -198,6 +199,7 @@ def _mp_barrier_construct_and_hold(
     """Construct with a real cross-process barrier, write, then hold the
     mapping (no cleanup) until the parent SIGKILLs this process."""
     try:
+<<<<<<< HEAD
         populate_calls = 0
         get_populate_write_fn = region_module._get_populate_write_fn
 
@@ -207,6 +209,11 @@ def _mp_barrier_construct_and_hold(
             return get_populate_write_fn(mmap_obj)
 
         region_module._get_populate_write_fn = track_population
+=======
+        from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+        sor.is_local_first_rank = lambda: rank == 0
+>>>>>>> 3baa273b52 ([Bugfix][KV Offload] Cover barrier cleanup without creator)
         region = SharedOffloadRegion(
             engine_id=engine_id,
             num_chunks=2,
@@ -1034,7 +1041,7 @@ def test_backing_file_unlinked_after_barrier(iid):
     try:
         assert seen_at_barrier == [True], "file must exist during rendezvous"
         assert not os.path.exists(path), "name must be dropped after the barrier"
-        assert region._creator is False, "nothing left for cleanup() to unlink"
+        assert region._is_singleton_owner is False
         t = region.create_next_worker_view(PAGE_SIZE)
         t[:, :] = 7
         assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
@@ -1044,13 +1051,30 @@ def test_backing_file_unlinked_after_barrier(iid):
         _cleanup_file(path)
 
 
-def test_barrier_failure_unlinks_creator_and_raises(iid):
-    """A failed rendezvous must remove the creator's file and re-raise, not
+def test_barrier_failure_unlinks_local_owner_and_raises(iid):
+    """A failed rendezvous must remove the local owner's file and re-raise, not
     leave a stub that wedges the next start in _wait_for_file_size."""
     path = f"/dev/shm/vllm_offload_{iid}.mmap"
     with pytest.raises(RuntimeError, match="peer died"):
         _make_region(iid, barrier=MagicMock(side_effect=RuntimeError("peer died")))
     assert not os.path.exists(path)
+
+
+def test_ready_joiners_unlink_after_barrier(iid, monkeypatch):
+    """Local rank 0 must unlink a ready stale file without an initializer."""
+    monkeypatch.setattr(region_module, "is_local_first_rank", lambda: False)
+    initializer = _make_region(iid)
+    path = initializer.mmap_path
+    initializer.cleanup()
+    assert os.path.exists(path)
+
+    monkeypatch.setattr(region_module, "is_local_first_rank", lambda: True)
+    joiner = _make_region(iid, barrier=lambda: None)
+    try:
+        assert not os.path.exists(path)
+    finally:
+        joiner.cleanup()
+        _cleanup_file(path)
 
 
 @pytest.mark.parametrize("replicated", [False, True])
@@ -1089,7 +1113,7 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid, replicated):
 
     assert not os.path.exists(path), "SIGKILL must not leak the file"
     with _region(iid) as restarted:
-        assert restarted._creator is True, "restart must be able to create anew"
+        assert os.path.exists(restarted.mmap_path), "restart must create a new file"
 
 
 @pytest.mark.parametrize("failure_phase", ["shm", "memory", "population"])
@@ -1124,8 +1148,8 @@ def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch, failure_p
     assert seen_at_barrier == [False]
 
 
-def test_mmap_failure_unlinks_creator_before_releasing_peers(iid, monkeypatch):
-    """A creator that fails after sizing the file must drop it before arriving
+def test_mmap_failure_unlinks_initialized_file_before_releasing_peers(iid, monkeypatch):
+    """A failed initialization must drop its file before arriving
     at the barrier, so the next start does not land on a stale file."""
     path = f"/dev/shm/vllm_offload_{iid}.mmap"
     monkeypatch.setattr("mmap.mmap", MagicMock(side_effect=OSError("mmap")))
