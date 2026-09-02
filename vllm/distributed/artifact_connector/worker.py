@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from threading import Event
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -31,7 +32,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
@@ -45,6 +45,21 @@ class _WorkerRequestState:
     capture_cursor: int | None = None
     scheduled_cursor: int = 0
     emit_cursor: int = 0
+
+
+@dataclass
+class PendingArtifactOutput:
+    """Own one step's R3 snapshot until its asynchronous copy is consumed."""
+
+    connector: ArtifactWorkerConnector
+    token_starts: np.ndarray
+    query_start_loc: np.ndarray
+    routed_experts: torch.Tensor
+    finished: Event = field(default_factory=Event)
+
+    def complete(self) -> None:
+        self.connector._pending_output = None
+        self.finished.set()
 
 
 class ArtifactWorkerConnector:
@@ -69,6 +84,7 @@ class ArtifactWorkerConnector:
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
         self._step_metadata: ArtifactConnectorMetadata | None = None
+        self._pending_output: PendingArtifactOutput | None = None
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the artifact data plane.
         if not get_tp_group().is_first_rank:
@@ -105,24 +121,37 @@ class ArtifactWorkerConnector:
         request_ids: list[str],
         token_starts: np.ndarray,
         query_start_loc: np.ndarray,
-        num_sampled: torch.Tensor,
-        num_rejected: torch.Tensor,
-    ) -> dict[str, ArtifactRequestOutput] | None:
+    ) -> PendingArtifactOutput | None:
+        """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
         buffer = self._buffer
         if buffer is None or self._step_metadata is None:
             return None
-        store = self._store
-        assert store is not None
+        assert self._pending_output is None
 
         query_start_loc = query_start_loc[: len(request_ids) + 1]
-        # Freeze the packed batch before splitting it into request ranges.
         num_rows = int(query_start_loc[-1])
-        with gpu_sync_allowed():
-            routed_experts = (
-                self._capturer.snapshot_routing_data(num_rows).cpu().numpy()
-            )
-            num_sampled_np = num_sampled.cpu().numpy()
-            num_rejected_np = num_rejected.cpu().numpy()
+        pending_output = PendingArtifactOutput(
+            self,
+            token_starts,
+            query_start_loc,
+            self._capturer.snapshot_routing_data(num_rows),
+        )
+        self._pending_output = pending_output
+        return pending_output
+
+    def process_output(
+        self,
+        request_ids: list[str],
+        token_starts: np.ndarray,
+        query_start_loc: np.ndarray,
+        routed_experts: np.ndarray,
+        num_sampled: np.ndarray,
+        num_rejected: np.ndarray,
+    ) -> dict[str, ArtifactRequestOutput]:
+        """Commit one completed R3 snapshot and build request outputs."""
+        buffer = self._buffer
+        store = self._store
+        assert buffer is not None and store is not None
         block_size = buffer.block_size
 
         # Publish the whole batch before materializing any consumer output.
@@ -136,20 +165,22 @@ class ArtifactWorkerConnector:
             token_starts,
             query_start_loc[:-1],
             query_start_loc[1:],
-            num_sampled_np,
-            num_rejected_np,
+            num_sampled,
+            num_rejected,
             strict=True,
         ):
             request_num_tokens = end - start
-            if request_num_tokens <= 0:
-                raise RuntimeError("artifact request token count must be positive")
+            assert request_num_tokens > 0, (
+                "artifact request token count must be positive"
+            )
             state = self._requests[request_id]
 
             # Capture precedes speculative acceptance, so discard the rejected
             # suffix. Batch boundaries still span the full executed range.
             rejected = int(rejected)
-            if not 0 <= rejected <= request_num_tokens:
-                raise RuntimeError("artifact rejected-token count is invalid")
+            assert 0 <= rejected <= request_num_tokens, (
+                "artifact rejected-token count is invalid"
+            )
             rows = routed_experts[start : end - rejected]
 
             capture_start = token_start
@@ -157,12 +188,12 @@ class ArtifactWorkerConnector:
             if capture_cursor is None:
                 capture_cursor = capture_start
 
-            if capture_start < capture_cursor:
-                raise RuntimeError("artifact capture moved backwards")
+            assert capture_start >= capture_cursor, "artifact capture moved backwards"
             if capture_start > capture_cursor:
                 # Reattach after an optimistically scheduled suffix was rejected.
-                if capture_cursor >= state.scheduled_cursor:
-                    raise RuntimeError("artifact capture has an unbacked token gap")
+                assert capture_cursor < state.scheduled_cursor, (
+                    "artifact capture has an unbacked token gap"
+                )
                 capture_start = capture_cursor
 
             emit_start = state.emit_cursor
@@ -245,13 +276,18 @@ class ArtifactWorkerConnector:
                 buffer.release_block(rows)
 
     def begin_step(self, metadata: ArtifactConnectorMetadata | None) -> None:
+        """Apply one scheduler step's request and block-hash updates."""
+        if pending_output := self._pending_output:
+            pending_output.finished.wait()
         self._step_metadata = metadata
         if self._buffer is None or metadata is None:
             return
-        if metadata.requests.keys() & metadata.finished_requests:
-            raise RuntimeError("artifact request cannot run and finish in one step")
-        if metadata.generation < self._generation:
-            raise RuntimeError("artifact metadata generation moved backwards")
+        assert not metadata.requests.keys() & metadata.finished_requests, (
+            "artifact request cannot run and finish in one step"
+        )
+        assert metadata.generation >= self._generation, (
+            "artifact metadata generation moved backwards"
+        )
         release_keys: list[str] = []
         if metadata.generation > self._generation:
             release_keys.extend(
@@ -266,8 +302,9 @@ class ArtifactWorkerConnector:
             state = self._requests.setdefault(
                 request_id, _WorkerRequestState(emit_cursor=emit_start)
             )
-            if emit_start > state.emit_cursor:
-                raise RuntimeError("artifact Scheduler emit cursor moved ahead")
+            assert emit_start <= state.emit_cursor, (
+                "artifact Scheduler emit cursor moved ahead"
+            )
         block_batches: list[
             tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
         ] = []

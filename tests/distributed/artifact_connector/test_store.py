@@ -175,6 +175,7 @@ def _make_worker(
     )
     worker._requests = {}
     worker._generation = 0
+    worker._pending_output = None
     return worker
 
 
@@ -182,7 +183,7 @@ def test_worker_rejects_metadata_generation_rollback():
     worker = _make_worker(1)
     _begin_step(worker, _metadata(1, [], {}))
 
-    with pytest.raises(RuntimeError, match="generation moved backwards"):
+    with pytest.raises(AssertionError, match="generation moved backwards"):
         _begin_step(worker, _metadata(0, [], {}))
 
     worker.close()
@@ -197,7 +198,7 @@ def test_worker_rejects_run_and_finish_in_one_step():
         {"request": []},
     )
 
-    with pytest.raises(RuntimeError, match="cannot run and finish"):
+    with pytest.raises(AssertionError, match="cannot run and finish"):
         _begin_step(worker, metadata)
 
     worker.close()
@@ -209,7 +210,7 @@ def test_non_output_rank_skips_capture_snapshot():
     worker._buffer = None
     worker._capturer = Mock()
     worker._step_metadata = Mock()
-    assert worker.prepare_output([], np.array([]), np.array([]), Mock(), Mock()) is None
+    assert worker.prepare_output([], np.array([]), np.array([])) is None
     worker._capturer.snapshot_routing_data.assert_not_called()
 
 
@@ -219,8 +220,32 @@ def test_worker_skips_artifacts_for_internal_warmup_step():
 
     worker.begin_step(None)
 
-    assert worker.prepare_output([], np.array([]), np.array([]), Mock(), Mock()) is None
+    assert worker.prepare_output([], np.array([]), np.array([])) is None
     worker._capturer.snapshot_routing_data.assert_not_called()
+    worker.close()
+
+
+def test_worker_waits_for_previous_artifact_output_before_next_step():
+    worker = _make_worker(1)
+    finished = threading.Event()
+    worker._pending_output = SimpleNamespace(finished=finished)
+    entered = threading.Event()
+    returned = threading.Event()
+
+    def begin_step():
+        entered.set()
+        worker.begin_step(_metadata(0, [], {}).metadata)
+        returned.set()
+
+    thread = threading.Thread(target=begin_step)
+    thread.start()
+    assert entered.wait(1)
+    assert not returned.wait(0.05)
+    worker._pending_output = None
+    finished.set()
+    assert returned.wait(1)
+    thread.join()
+    assert worker._pending_output is None
     worker.close()
 
 
@@ -231,7 +256,7 @@ def test_worker_rejects_invalid_rejected_token_count():
         [_request_metadata("request", 0, 1, 0, [])],
         {},
     )
-    with pytest.raises(RuntimeError, match="rejected-token count is invalid"):
+    with pytest.raises(AssertionError, match="rejected-token count is invalid"):
         _process_output(
             worker,
             metadata,
@@ -270,13 +295,23 @@ def _process_output(
         query_start_loc = np.concatenate(
             (np.zeros(1, dtype=np.int32), np.cumsum(num_tokens, dtype=np.int32))
         )
-    return worker.prepare_output(
+    pending = worker.prepare_output(
         request_ids,
         np.asarray(token_starts),
         query_start_loc,
-        torch.from_numpy(num_sampled),
-        torch.from_numpy(num_rejected),
     )
+    assert pending is not None
+    try:
+        return worker.process_output(
+            request_ids,
+            pending.token_starts,
+            pending.query_start_loc,
+            pending.routed_experts.cpu().numpy(),
+            num_sampled,
+            num_rejected,
+        )
+    finally:
+        pending.complete()
 
 
 def test_worker_ignores_cudagraph_query_padding():
@@ -316,7 +351,7 @@ def test_worker_rejects_scheduler_emit_cursor_ahead():
         ),
     )
 
-    with pytest.raises(RuntimeError, match="Scheduler emit cursor moved ahead"):
+    with pytest.raises(AssertionError, match="Scheduler emit cursor moved ahead"):
         _begin_step(
             worker,
             _metadata(
@@ -345,7 +380,7 @@ def test_worker_rejects_mismatched_capture_profile(routing):
         {},
     )
 
-    with pytest.raises(RuntimeError, match="capture profile changed"):
+    with pytest.raises(AssertionError, match="capture profile changed"):
         _process_output(
             worker,
             metadata,
@@ -373,7 +408,7 @@ def test_logical_buffer_rejects_noncontiguous_capture(
         rows = np.asarray(initial_rows, dtype=np.uint8).reshape(-1, 1)
         assert buffer.capture("request", initial_start, rows) == []
 
-    with pytest.raises(RuntimeError, match="not contiguous"):
+    with pytest.raises(AssertionError, match="not contiguous"):
         buffer.capture(
             "request", invalid_start, np.array([[invalid_start]], dtype=np.uint8)
         )
@@ -540,7 +575,7 @@ def test_worker_rejects_unbacked_capture_gap():
         {},
     )
 
-    with pytest.raises(RuntimeError, match="unbacked token gap"):
+    with pytest.raises(AssertionError, match="unbacked token gap"):
         _process_output(
             worker,
             second,
@@ -628,7 +663,7 @@ def test_worker_rejects_overlapping_capture_rows():
         [_request_metadata("request", 2, 2, 0, [b"a" * 32])],
         {},
     )
-    with pytest.raises(RuntimeError, match="capture moved backwards"):
+    with pytest.raises(AssertionError, match="capture moved backwards"):
         _process_output(
             worker,
             second,
@@ -1558,7 +1593,7 @@ def test_scheduler_rejects_stale_output_without_artifacts():
         {request.request_id: request},
     )
 
-    with pytest.raises(RuntimeError, match="artifact worker output is missing"):
+    with pytest.raises(AssertionError, match="artifact worker output is missing"):
         connector.take_output(
             request,
             {},
@@ -1579,7 +1614,7 @@ def test_scheduler_rejects_missing_accepted_artifact_rows():
         )
     }
 
-    with pytest.raises(RuntimeError, match="invalid token range"):
+    with pytest.raises(AssertionError, match="invalid token range"):
         connector.take_output(request, output)
 
 
@@ -1598,7 +1633,9 @@ def test_scheduler_rejects_empty_artifact_output_when_request_is_finished():
         )
     }
 
-    with pytest.raises(RuntimeError, match="finished artifact output has no accepted"):
+    with pytest.raises(
+        AssertionError, match="finished artifact output has no accepted"
+    ):
         connector.take_output(request, output)
 
 

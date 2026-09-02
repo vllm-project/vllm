@@ -1905,17 +1905,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
-        if self.artifact_connector is not None:
-            # Finish R3 processing before this execute_model call returns.
-            model_runner_output.artifact_connector_output = (
-                self.artifact_connector.prepare_output(
-                    model_runner_output.req_ids,
-                    input_batch.num_computed_tokens_np,
-                    input_batch.query_start_loc_np,
-                    num_sampled,
-                    num_rejected,
-                )
+        pending_artifact_output = (
+            self.artifact_connector.prepare_output(
+                model_runner_output.req_ids,
+                input_batch.num_computed_tokens_np,
+                input_batch.query_start_loc_np,
             )
+            if self.artifact_connector is not None
+            else None
+        )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
@@ -1924,6 +1922,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
+            pending_artifact_output=pending_artifact_output,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None

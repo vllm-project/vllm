@@ -415,9 +415,7 @@ def test_artifact_worker_connector_binds_capture_on_non_output_rank(monkeypatch)
     )
     bind.assert_called_once_with(model, capturer)
     connector.begin_step(Mock())
-    assert (
-        connector.prepare_output([], np.array([]), np.array([]), Mock(), Mock()) is None
-    )
+    assert connector.prepare_output([], np.array([]), np.array([])) is None
     capturer.snapshot_routing_data.assert_not_called()
 
 
