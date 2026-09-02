@@ -11,6 +11,7 @@ from vllm.config import get_current_vllm_config
 from vllm.config.pooler import TokenPoolingType
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.pool.metadata import PoolingMetadata
 
 TokenPoolingMethodOutputItem: TypeAlias = torch.Tensor | None
@@ -131,7 +132,7 @@ class StepPool(AllPool):
 
                 if step_tag_id is not None:
                     idx_cpu = (token_id_cpu == step_tag_id).nonzero(as_tuple=True)[0]
-                    idx = idx_cpu.to(data.device, non_blocking=True)
+                    idx = async_tensor_h2d(idx_cpu, data.device)
                     data = data[idx]
 
                 pooled_data.append(data)
