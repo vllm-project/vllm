@@ -892,8 +892,17 @@ def check_enough_kv_cache_memory(
 
     # No need to check for available memory if the kv_cache_spec is empty
     if kv_cache_spec:
+        # Reserve the null block BlockPool permanently holds back, so the check
+        # plans against usable blocks, as in get_kv_cache_configs. Group a copy
+        # of the specs since grouping may unify them in-place.
+        groups = get_kv_cache_groups(vllm_config, dict(kv_cache_spec))
+        check_memory = (
+            available_memory - _pool_bytes_per_block(vllm_config, groups)
+            if groups
+            else available_memory
+        )
         _check_enough_kv_cache_memory(
-            available_memory,
+            check_memory,
             lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
             vllm_config.model_config.max_model_len,
             lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
@@ -2228,13 +2237,19 @@ def get_kv_cache_configs(
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
 
+    # Reserve the null block BlockPool permanently holds back, so auto-fit and
+    # the capacity check both plan against usable blocks. Allocation below
+    # still uses the full memory.
+    check_memory = [
+        avail_mem - _pool_bytes_per_block(vllm_config, groups) if groups else avail_mem
+        for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
+    ]
+
     if vllm_config.model_config.original_max_model_len == -1:
-        _auto_fit_max_model_len(
-            vllm_config, projected_groups_per_worker, available_memory
-        )
+        _auto_fit_max_model_len(vllm_config, projected_groups_per_worker, check_memory)
 
     # Check if the available memory is enough per worker.
-    for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
+    for groups, avail_mem in zip(projected_groups_per_worker, check_memory):
         if not groups:
             continue
         _check_enough_kv_cache_memory(

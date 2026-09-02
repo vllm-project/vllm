@@ -39,6 +39,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
+    fi_moe_largest_bucket,
     trtllm_moe_pack_topk_ids_weights,
 )
 from vllm.platforms import current_platform
@@ -549,6 +550,7 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
             routing_method_type=self.routing_method_type,
             do_finalize=do_finalize,
             output=output if do_finalize else None,
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
         if not do_finalize:
             # [gemm2_output, expert_weights, expanded_idx, gemm1_activation]

@@ -129,12 +129,36 @@ class UsageInfo(OpenAIBaseModel):
     completion_tokens_details: CompletionTokenUsageInfo | None = None
 
 
-class PerRequestTimingMetrics(OpenAIBaseModel):
+class SpeculativeDecodingMetrics(OpenAIBaseModel):
+    """Per-request speculative-decoding acceptance metrics.
+
+    Experimental, subject to change. Only populated for single-sequence requests
+    (`n == 1`); `null` for `n > 1`, mirroring the timing metrics.
+    """
+
+    mean_acceptance_length: float
+    draft_acceptance_rate: float
+    # Dense histogram: index j holds the number of verify steps that accepted
+    # exactly j draft tokens (length num_spec_tokens + 1). Excludes the
+    # always-accepted bonus token.
+    acceptance_histogram: list[int]
+    num_spec_steps: int
+    num_accepted_draft_tokens: int
+    num_draft_tokens: int
+    num_spec_tokens: int
+    # Ordered per-verify-step arrays; populated only at the `detailed` level.
+    per_step_accepted: list[int] | None = None
+    per_step_drafted: list[int] | None = None
+
+
+class PerRequestMetrics(OpenAIBaseModel):
     time_to_first_token_ms: float | None = None
     generation_time_ms: float | None = None
     queue_time_ms: float | None = None
     mean_itl_ms: float | None = None
     tokens_per_second: float | None = None
+    # Experimental, subject to change.
+    speculative_decoding: SpeculativeDecodingMetrics | None = None
 
 
 class RequestResponseMetadata(BaseModel):

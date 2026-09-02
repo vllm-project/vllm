@@ -17,6 +17,7 @@ from vllm.multimodal.cache import (
     MultiModalProcessorCacheInItem,
     MultiModalProcessorCacheItem,
     MultiModalProcessorCacheItemMetadata,
+    MultiModalProcessorOnlyCache,
     MultiModalProcessorSenderCache,
     MultiModalReceiverCache,
     ShmObjectStoreReceiverCache,
@@ -245,6 +246,34 @@ class _StubModelConfig:
 
     def get_multimodal_config(self) -> MultiModalConfig:
         return self._mm_config
+
+
+@pytest.mark.skip_global_cleanup
+def test_oversized_item_is_served_uncached():
+    """Items larger than the processor cache must not crash insert.
+
+    cachetools.LRUCache raises ValueError("value too large") when a single
+    item exceeds maxsize. Engine profiling uses a max-size dummy item, so this
+    used to abort EngineCore startup (vllm-project/vllm#52835). Skip the
+    insert and serve the item uncached instead.
+    """
+    # 1 KiB cache; a 4 KiB item cannot fit even if the cache is empty.
+    model_config = _StubModelConfig(mm_processor_cache_gb=1024 / GiB_bytes)
+    item = MultiModalKwargsItem.dummy(nbytes=4096)
+    small = MultiModalKwargsItem.dummy(nbytes=64)
+
+    p0_only = MultiModalProcessorOnlyCache(model_config)  # type: ignore[arg-type]
+    assert p0_only.get_and_update_item((item, []), "big")[0] is item
+    assert not p0_only.is_cached_item("big")
+    assert p0_only.get_and_update_item((small, []), "small")[0] is small
+    assert p0_only.is_cached_item("small")
+
+    p0 = MultiModalProcessorSenderCache(model_config)  # type: ignore[arg-type]
+    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    assert p0.get_and_update_item((item, []), "big")[0] is item
+    assert not p0.is_cached_item("big")
+    assert p1.get_and_update_item(item, "big") is item
+    assert "big" not in p1._cache
 
 
 def test_mm_cache_miss_raises_and_recovers():

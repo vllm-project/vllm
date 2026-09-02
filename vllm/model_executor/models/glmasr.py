@@ -755,7 +755,6 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
         prompt: str,
         mm_data: dict[str, object],
         mm_kwargs: Mapping[str, Any],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Normalize input: handle deprecated key and list conversion.
         if "audios" in mm_data:
@@ -782,7 +781,6 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
 
         # Postprocess: rename mask and add chunk counts
@@ -915,6 +913,10 @@ class GlmAsrForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsTranscription
 ):
     supported_languages = ISO639_1_SUPPORTED_LANGS
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"audio_tower.embed_positions": None}
+    )
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1083,9 +1085,8 @@ class GlmAsrForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["audio_tower.embed_positions"]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
     def _get_audio_token(cls, model_config: ModelConfig) -> str:

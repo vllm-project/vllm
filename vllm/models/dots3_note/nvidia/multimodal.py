@@ -141,6 +141,16 @@ class Dots3NoteForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             self.language_model.make_empty_intermediate_tensors
         )
 
+        orig_to_new_prefix = dict[str, None]()
+        if self.visual is None:
+            orig_to_new_prefix["visual."] = None
+        if self.audio_tower is None:
+            orig_to_new_prefix["audio_tower."] = None
+        if orig_to_new_prefix:
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix=orig_to_new_prefix
+            )
+
     def _process_image_input(
         self,
         pixel_values: torch.Tensor,
@@ -283,12 +293,7 @@ class Dots3NoteForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = []
-        if self.visual is None:
-            skip_prefixes.append("visual.")
-        if self.audio_tower is None:
-            skip_prefixes.append("audio_tower.")
-        return AutoWeightsLoader(self, skip_prefixes=skip_prefixes).load_weights(
+        return AutoWeightsLoader(self).load_weights(
             weights,
             mapper=self.hf_to_vllm_mapper,
         )

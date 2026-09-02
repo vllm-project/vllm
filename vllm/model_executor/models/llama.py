@@ -26,7 +26,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import ClassVar
 
 import torch
 from torch import nn
@@ -343,7 +342,7 @@ class LlamaDecoderLayer(nn.Module):
     },
 )
 class LlamaModel(nn.Module, EagleModelMixin):
-    hf_to_vllm_mapper: ClassVar[WeightsMapper] = WeightsMapper(
+    hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
             ".q_proj": (".qkv_proj", "q"),
@@ -534,10 +533,7 @@ class LlamaForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
 

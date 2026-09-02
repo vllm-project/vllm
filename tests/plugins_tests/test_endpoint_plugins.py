@@ -17,14 +17,14 @@ import pytest
 from fastapi import FastAPI
 from vllm_add_dummy_endpoint_plugin import DummyAdminEndpointPlugin
 
-from vllm.entrypoints.openai.api_server import (
-    _attach_endpoint_plugins,
-    _init_endpoint_plugins_state,
-    build_app,
-)
+from vllm.entrypoints.launchers.app import build_app
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.plugins import load_endpoint_plugins
-from vllm.plugins.endpoint_plugins.interface import EndpointPlugin
+from vllm.plugins.endpoint_plugins.interface import (
+    EndpointPlugin,
+    attach_endpoint_plugins,
+    init_endpoint_plugins_state,
+)
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -157,7 +157,7 @@ def test_attach_is_noop_when_nothing_discovered(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.delenv("VLLM_PLUGINS", raising=False)
 
     app = FastAPI()
-    _attach_endpoint_plugins(app, ("generate",))
+    attach_endpoint_plugins(app, ("generate",))
 
     assert app.state.endpoint_plugins == []
 
@@ -172,7 +172,7 @@ async def test_init_state_is_noop_without_phase_a(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("VLLM_PLUGINS", "dummy_admin_endpoint_plugin")
 
     state = State()
-    await _init_endpoint_plugins_state(_FakeEngineClient(), state, _build_args())
+    await init_endpoint_plugins_state(_FakeEngineClient(), state, _build_args())
 
     assert not hasattr(state, "dummy_engine_client")
 
@@ -196,7 +196,7 @@ async def test_render_server_attaches_endpoint_plugins_with_no_engine_client(
         for route in app.routes
     )
 
-    await _init_endpoint_plugins_state(None, app.state, args)
+    await init_endpoint_plugins_state(None, app.state, args)
 
     assert app.state.dummy_engine_client is None
 
@@ -223,7 +223,7 @@ async def test_endpoint_plugin_end_to_end(monkeypatch: pytest.MonkeyPatch):
     )
 
     fake_engine_client = _FakeEngineClient(rpc_result=["cfg-a", "cfg-b"])
-    await _init_endpoint_plugins_state(fake_engine_client, app.state, args)
+    await init_endpoint_plugins_state(fake_engine_client, app.state, args)
 
     assert app.state.dummy_engine_client is fake_engine_client
 

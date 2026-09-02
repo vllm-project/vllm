@@ -136,6 +136,25 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
     }'
 ```
 
+To also offload newly completed decode KV blocks, add the following extra
+configuration to the decoder's `MooncakeStoreConnector` entry. This currently
+requires the prefill and decode instances to use the same tensor-parallel size
+and compatible KV-cache topology.
+
+When decode processing starts, the consumer checks the block-aligned prompt
+prefix and fills any blocks missing from the Store. Subsequent saves append
+newly completed decode blocks. This keeps a complete, reusable prefix in the
+Store and also covers deployments where prompt KV is delivered directly by
+`MooncakeConnector` instead of through the Store.
+
+```json
+{
+    "kv_connector_extra_config": {
+        "save_decode_cache": true
+    }
+}
+```
+
 **Proxy:**
 
 A disaggregation proxy is required to route requests between prefiller and decoder nodes. The proxy assigns `do_remote_prefill=True` / `do_remote_decode=True` to coordinate P2P transfer via `MooncakeConnector`. Refer to the [MooncakeConnector usage guide](mooncake_connector_usage.md) for proxy setup details.
@@ -230,6 +249,10 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - `enable_cross_layers_blocks` (bool): Enable cross-layer block packing for reduced store operations. Default: `false`.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
+- `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
+
+Decode offloading uses the existing TP-rank key namespace. Cross-TP sharing is
+not yet supported.
 
 ## Notes
 

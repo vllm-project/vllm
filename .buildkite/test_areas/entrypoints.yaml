@@ -11,9 +11,11 @@ steps:
   - vllm/entrypoints
   - tests/entrypoints/unit_tests
   - tests/entrypoints/weight_transfer
+  - tests/entrypoints/launchers
   commands:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/weight_transfer
+  - pytest -v -s entrypoints/launchers
   mirror:
     amd:
       label: ":amd: (MI355) Entrypoints Unit"

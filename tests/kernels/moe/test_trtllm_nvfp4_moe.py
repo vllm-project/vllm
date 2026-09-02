@@ -23,7 +23,7 @@ from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.custom_op import CustomOp, op_registry
-from vllm.model_executor.layers.activation import SiluAndMulWithClamp
+from vllm.model_executor.layers.activation import SiluAndMulWithClamp, SituAndMul
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -63,6 +63,7 @@ MNK_FACTORS = [
 _SWIGLU_LIMIT = 0.1
 _LARGE_OUTPUT1_SCALE = 32768.0
 _CLAMP_OP_NAME = "test_silu_and_mul_with_clamp"
+_SITU_OP_NAME = "test_situ_and_mul"
 
 # Test-only fixed-limit clamp. ``custom_op_name`` makes the class itself
 # valid as an ``activation=`` argument to ``torch_moe`` (which only looks
@@ -78,12 +79,24 @@ if _CLAMP_OP_NAME not in op_registry:
             super().__init__(_SWIGLU_LIMIT, compile_native=compile_native)
 
 
+if _SITU_OP_NAME not in op_registry:
+
+    @CustomOp.register(_SITU_OP_NAME)
+    class _SituAndMulTest(SituAndMul):
+        custom_op_name = _SITU_OP_NAME
+
+        def __init__(self, *, compile_native: bool = True) -> None:
+            super().__init__(4.0, 25.0, compile_native=compile_native)
+
+
 SILU_WITH_CLAMP = op_registry[_CLAMP_OP_NAME]
+SITU = op_registry[_SITU_OP_NAME]
 
 
 ACTIVATION_CASES = [
     pytest.param(MoEActivation.SILU, MoEActivation.SILU, None, id="silu"),
     pytest.param(MoEActivation.SILU, SILU_WITH_CLAMP, _SWIGLU_LIMIT, id="silu_clamp"),
+    pytest.param(MoEActivation.SITU, SITU, None, id="situ"),
     pytest.param(
         MoEActivation.RELU2_NO_MUL,
         MoEActivation.RELU2_NO_MUL,
@@ -108,7 +121,7 @@ def test_trtllm_fp4_moe_no_graph(
     topk: int,
     dtype: torch.dtype,
     activation: MoEActivation,
-    torch_activation: MoEActivation | type[SiluAndMulWithClamp],
+    torch_activation: MoEActivation | type[SiluAndMulWithClamp] | type[SituAndMul],
     swiglu_limit: float | None,
     workspace_init,
 ):
@@ -173,6 +186,10 @@ def test_trtllm_fp4_moe_no_graph(
             in_dtype=dtype,
             routing_method=RoutingMethodType.TopK,
             max_num_tokens=next_power_of_2(m),
+            activation_situ_beta=4.0 if activation == MoEActivation.SITU else None,
+            activation_situ_linear_beta=(
+                25.0 if activation == MoEActivation.SITU else None
+            ),
         )
 
         trtllm_inner = TrtLlmNvFp4ExpertsModular(
@@ -191,6 +208,8 @@ def test_trtllm_fp4_moe_no_graph(
         fake_layer.w13_input_scale = torch.ones_like(quant_config.g1_alphas)
         fake_layer.w2_input_scale = torch.ones_like(quant_config.g2_alphas)
         trtllm_inner.process_weights_after_loading(fake_layer)
+        if activation == MoEActivation.SITU:
+            torch.testing.assert_close(trtllm_inner.g1_scale_c, quant_config.a2_gscale)
 
         trtllm_experts = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(

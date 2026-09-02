@@ -173,6 +173,36 @@ def test_lazy_modelinfo_package_hash_includes_submodules(tmp_path):
     assert first_hash != second_hash
 
 
+def test_lazy_modelinfo_package_attempts_cache_load(monkeypatch):
+    cached_model_info = object()
+    loaded_hashes = []
+
+    def fake_load_cache(self, module_hash):
+        loaded_hashes.append(module_hash)
+        return cached_model_info
+
+    monkeypatch.setattr(
+        _LazyRegisteredModel,
+        "_load_modelinfo_from_cache",
+        fake_load_cache,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.models.registry._run_in_subprocess",
+        lambda _: pytest.fail("Package-backed model should use the cache path"),
+    )
+
+    registered_model = _LazyRegisteredModel(
+        module_name="vllm.model_executor.models.transformers",
+        class_name="TransformersForCausalLM",
+    )
+
+    result = registered_model.inspect_model_cls()
+
+    assert result is cached_model_info
+    assert len(loaded_hashes) == 1
+    assert loaded_hashes[0]
+
+
 def test_hf_registry_coverage():
     untested_archs = (
         ModelRegistry.get_supported_archs() - HF_EXAMPLE_MODELS.get_supported_archs()

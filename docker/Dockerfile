@@ -38,7 +38,7 @@ ARG NCCL_VERSION=2.30.7
 # docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/pytorch/manylinux2_28-builder:cuda13.0
 
 # Build wheels against the same glibc floor as PyTorch's published wheels.
-ARG BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0
+ARG BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
 
@@ -243,20 +243,17 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 #################### RUST BUILD IMAGE ####################
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main wheel
-# build stage doesn't need the rust toolchain, protoc, or the rust source.
+# build stage doesn't need the rust toolchain or the rust source.
 # This stage reuses the Python environment from base and runs in parallel with
 # csrc-build/extensions-build.
 FROM base AS rust-build
 ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
 
-# Install native tools needed only for Rust/protoc builds.
-RUN dnf install -y --setopt=install_weak_deps=False make unzip \
+# Install native tools needed only for Rust builds.
+RUN dnf install -y --setopt=install_weak_deps=False make \
     && dnf clean all \
     && rm -rf /var/cache/dnf
-
-COPY tools/install_protoc.sh /tmp/install_protoc.sh
-RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
 WORKDIR /workspace
 

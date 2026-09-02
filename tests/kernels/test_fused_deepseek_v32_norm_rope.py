@@ -146,8 +146,8 @@ def assert_fp8(got: torch.Tensor, ref: torch.Tensor, msg: str):
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512, 4096])
 @pytest.mark.parametrize("index_interleave", [True, False])
-@pytest.mark.parametrize("mla_fp8", [False, True])
-def test_fused_norm_rope(num_tokens: int, index_interleave: bool, mla_fp8: bool):
+@pytest.mark.parametrize("mla_dtype", ["auto", "bfloat16", "fp8"])
+def test_fused_norm_rope(num_tokens: int, index_interleave: bool, mla_dtype: str):
     torch.manual_seed(0)
     dev = "cuda"
     max_pos = 8192
@@ -167,13 +167,12 @@ def test_fused_norm_rope(num_tokens: int, index_interleave: bool, mla_fp8: bool)
 
     bs = max_pos  # single block covering all tokens
     mla_dim = KV_LORA + ROPE_DIM
+    mla_fp8 = mla_dtype == "fp8"
     if mla_fp8:
         mla_cache = torch.zeros(1, bs, mla_dim, device=dev, dtype=torch.uint8)
-        mla_dtype = "fp8"
         mla_k_scale = torch.tensor([0.3], device=dev, dtype=torch.float32)
     else:
         mla_cache = torch.zeros(1, bs, mla_dim, device=dev, dtype=torch.bfloat16)
-        mla_dtype = "auto"
         mla_k_scale = None
     idx_row = INDEX_HEAD_DIM + INDEX_HEAD_DIM // 128 * 4  # 132
     idx_cache = torch.zeros(1, bs, idx_row, device=dev, dtype=torch.uint8)

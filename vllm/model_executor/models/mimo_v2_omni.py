@@ -917,7 +917,6 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo.
         Also remap 'audios' → 'audio' since MiMoOmniProcessor.__call__ uses
@@ -1000,7 +999,7 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
 
             mm_data = {**mm_data, "videos": converted}
 
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
 
     def _get_prompt_updates(
         self,
@@ -1189,6 +1188,7 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
             # mapping for original checkpoint
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
+            "audio_tokenizer.": None,
         }
     )
 
@@ -1490,6 +1490,6 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         audio_loaded: set[str] = set()
 
-        loader = AutoWeightsLoader(self, skip_prefixes=["audio_tokenizer."])
+        loader = AutoWeightsLoader(self)
         auto_loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         return audio_loaded | auto_loaded

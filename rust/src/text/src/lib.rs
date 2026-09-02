@@ -9,7 +9,9 @@
 
 use std::mem::take;
 
-pub use backend::{DynTextBackend, SamplingHints, SamplingLimits, TextBackend};
+pub use backend::{
+    DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
+};
 pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
 use futures::Stream;
 pub use lower::{

@@ -1,16 +1,13 @@
 ######################### RUST BUILD IMAGE #########################
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main image
-# doesn't need the rust toolchain or protoc. Runs in parallel with vllm-base.
+# doesn't need the rust toolchain. Runs in parallel with vllm-base.
 FROM ubuntu:22.04 AS rust-build
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential unzip python3 python3-pip \
+        ca-certificates curl git build-essential python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
-
-COPY tools/install_protoc.sh /tmp/install_protoc.sh
-RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
 WORKDIR /workspace
 
@@ -162,8 +159,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM vllm-base AS ucx-nixl-build
 
-ARG UCX_VERSION=v1.21.0-rc2
-ARG NIXL_VERSION=v1.2.0
+# Keep UCX_VERSION aligned with the UCX that NIXL itself builds against for this
+# NIXL_VERSION (nixl contrib/Dockerfile.manylinux: ARG UCX_REF), so XPU runs the
+# same UCX commit as the released nixl-cu* wheels rather than an untested pairing.
+ARG UCX_VERSION=v1.21.x
+ARG NIXL_VERSION=v1.3.2
 
 # Build-time only: compiler, autotools, and verbs dev headers
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
@@ -198,7 +198,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM vllm-base AS vllm-openai
 
-ARG NIXL_VERSION=v1.2.0
+# Must match the ucx-nixl-build stage above: ARG does not cross stages, so a stale
+# value here installs a meta package that disagrees with the wheel built there.
+ARG NIXL_VERSION=v1.3.2
 
 # Copy compiled UCX runtime libraries and the pre-built NIXL wheel.
 # No compiler or autotools are installed in this stage.

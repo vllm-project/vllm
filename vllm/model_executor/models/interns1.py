@@ -337,7 +337,6 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         videos = mm_data.pop("videos", [])
@@ -364,7 +363,6 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
                     prompt=hf_processor.image_token,
                     mm_data={"images": image},
                     mm_kwargs=mm_kwargs,
-                    tok_kwargs=tok_kwargs,
                 )
                 image_pixel_values.append(processed_outputs.pop("pixel_values"))
 
@@ -387,7 +385,6 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
                     prompt=hf_processor.video_token,
                     mm_data={"videos": video},
                     mm_kwargs=mm_kwargs,
-                    tok_kwargs=tok_kwargs,
                 )
                 video_pixel_values.append(processed_outputs.pop("pixel_values"))
 
@@ -406,7 +403,7 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
 
         prompt = re.sub("<image_placeholder>", hf_processor.image_token, prompt)
         prompt = re.sub("<video_placeholder>", hf_processor.video_token, prompt)
-        text_outputs = tokenizer(prompt, **tok_kwargs, return_tensors="pt")
+        text_outputs = tokenizer(prompt, return_tensors="pt")
 
         return BatchFeature({**text_outputs, **image_outputs, **video_outputs})
 

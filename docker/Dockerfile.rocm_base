@@ -1,5 +1,5 @@
 ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete
-ARG TRITON_BRANCH="532137f" # release/internal/3.7.x as of 08/07
+ARG TRITON_BRANCH="f0b55c0" # release/internal/3.7.x as of 08/18
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG PYTORCH_BRANCH="6bbd260" # release/2.12 as of 08/02
 ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
@@ -58,7 +58,7 @@ RUN apt-get update -y \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
+RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' 'pybind11<3.1.0' Cython
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)

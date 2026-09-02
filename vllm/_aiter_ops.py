@@ -3299,6 +3299,8 @@ class rocm_aiter_ops:
         hc_sinkhorn_eps: float,
         hc_post_mult_value: float,
         sinkhorn_repeat: int,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass for mHC pre block.
@@ -3313,6 +3315,8 @@ class rocm_aiter_ops:
             hc_sinkhorn_eps: sinkhorn epsilon
             hc_post_mult_value: post-mix multiplier value
             sinkhorn_repeat: number of sinkhorn iterations
+            norm_weight: optional RMSNorm weight fused into the pre kernel
+            norm_eps: epsilon for the fused RMSNorm when norm_weight is set
 
         Returns:
             post_mix: shape (..., hc_mult), dtype torch.float32
@@ -3380,6 +3384,8 @@ class rocm_aiter_ops:
                 hc_sinkhorn_eps,
                 hc_post_mult_value,
                 sinkhorn_repeat,
+                norm_weight,
+                norm_eps,
             )
         return (
             post_mix.view(*outer_shape, hc_mult, 1),
@@ -3464,6 +3470,96 @@ class rocm_aiter_ops:
             comb_res_mix.view(num_tokens, hc_mult, hc_mult),
         )
         return out.view_as(residual)
+
+    @staticmethod
+    def mhc_fused_post_pre(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post_layer_mix: torch.Tensor,
+        comb_res_mix: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fused mHC post + next mHC pre via AITER.
+
+        Returns residual_cur, post_mix, comb_mix, layer_input in vLLM order
+        (AITER returns post_mix, comb_mix, layer_input, next_residual).
+        """
+        from aiter.ops.mhc import mhc_fused_post_pre
+
+        assert x.dtype == torch.bfloat16
+        assert residual.dtype == torch.bfloat16
+        assert fn.dtype == torch.float32
+        assert hc_scale.dtype == torch.float32
+        assert hc_base.dtype == torch.float32
+
+        hc_mult = residual.shape[-2]
+        hidden_size = residual.shape[-1]
+        outer_shape = residual.shape[:-2]
+
+        residual_flat = residual.view(-1, hc_mult, hidden_size)
+        num_tokens = residual_flat.shape[0]
+        x_flat = x.view(num_tokens, hidden_size)
+        post_flat = post_layer_mix.view(num_tokens, hc_mult, 1)
+        comb_flat = comb_res_mix.view(num_tokens, hc_mult, hc_mult)
+
+        if num_tokens == 0:
+            return (
+                torch.empty_like(residual_flat).view_as(residual),
+                torch.empty(
+                    *outer_shape,
+                    hc_mult,
+                    1,
+                    dtype=torch.float32,
+                    device=residual.device,
+                ),
+                torch.empty(
+                    *outer_shape,
+                    hc_mult,
+                    hc_mult,
+                    dtype=torch.float32,
+                    device=residual.device,
+                ),
+                torch.empty(
+                    *outer_shape,
+                    hidden_size,
+                    dtype=torch.bfloat16,
+                    device=residual.device,
+                ),
+            )
+
+        with torch.device(residual_flat.device):
+            post_mix, comb_mix, layer_input, next_residual = mhc_fused_post_pre(
+                x_flat,
+                residual_flat,
+                post_flat,
+                comb_flat,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                norm_weight,
+                norm_eps,
+            )
+
+        return (
+            next_residual.view_as(residual),
+            post_mix.view(*outer_shape, hc_mult, 1),
+            comb_mix.view(*outer_shape, hc_mult, hc_mult),
+            layer_input.view(*outer_shape, hidden_size),
+        )
 
 
 rocm_aiter_ops.register_ops_once()

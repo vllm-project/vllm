@@ -403,7 +403,8 @@ class Ernie4_5_MoeModel(nn.Module):
             ".mlp.up_proj": (".mlp.gate_up_proj", 1),
             ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
             ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
-        }
+        },
+        orig_to_new_substr={"mtp": None},
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -497,11 +498,7 @@ class Ernie4_5_MoeModel(nn.Module):
             yield name, loaded_weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_substrs=["mtp"],
-            ignore_unexpected_suffixes=[".bias", "_bias"],
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(
             self._preprocess(weights), mapper=self.hf_to_vllm_mapper
         )
@@ -629,8 +626,5 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExpe
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

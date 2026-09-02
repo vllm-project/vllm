@@ -39,7 +39,6 @@ from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     construct_tool_dicts,
 )
-from vllm.entrypoints.serve.utils.constants import MCP_PREFIX
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
@@ -58,6 +57,7 @@ _TOOL_NAME_TO_TYPE_MAP = {
     "python": "code_interpreter",
     "container": "container",
 }
+MCP_PREFIX = "mcp_"
 
 
 def _map_tool_name_to_tool_type(tool_name: str) -> str:

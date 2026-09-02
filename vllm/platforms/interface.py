@@ -612,6 +612,7 @@ class Platform:
         For hybrid models, also aligns block_size with mamba page sizes.
         """
         from vllm.config.cache import CacheConfig
+        from vllm.config.vllm import set_current_vllm_config
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -626,9 +627,10 @@ class Platform:
 
         # Phase 1: Pick block size from backend (skip if user set --block-size)
         if not cache_config.user_specified_block_size:
-            preferred = backend_cls.get_preferred_block_size_for_config(
-                CacheConfig.DEFAULT_BLOCK_SIZE, vllm_config
-            )
+            with set_current_vllm_config(vllm_config):
+                preferred = backend_cls.get_preferred_block_size(
+                    CacheConfig.DEFAULT_BLOCK_SIZE
+                )
             if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
                 logger.info(
                     "Setting kv cache block size to %d for %s backend.",

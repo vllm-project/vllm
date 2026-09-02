@@ -210,14 +210,23 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             expert_x, expert_x_scale = recv_x, None
 
-        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-            recv_expert_num_tokens,
-            device=expert_x.device,
-        )
+        if recv_expert_num_tokens:
+            expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
+                recv_expert_num_tokens,
+                device=expert_x.device,
+            )
+        else:
+            # Decode/cudagraph path (do_cpu_sync=False) skips the CPU sync and
+            # leaves recv_expert_num_tokens empty. A present-but-empty
+            # ExpertTokensMetadata violates the decode-mode contract above
+            # (expert_tokens_meta must be None) and crashes DeepEP combine
+            # during profile_run when CUDA graphs are enabled.
+            expert_tokens_meta = None
 
         if recv_topk_idx is None:
             # do_expand=True (prefill mode): build topk_ids from
             # per-expert token counts.
+            assert expert_tokens_meta is not None
             total_tokens = sum(recv_expert_num_tokens)
             if total_tokens > 0:
                 recv_topk_idx = torch.repeat_interleave(

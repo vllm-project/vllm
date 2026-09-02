@@ -5,11 +5,13 @@
 
 mod combined;
 mod gemma4;
+mod hy_v3;
 mod inkling;
 mod kimi_k3;
 
 pub use combined::CombinedParser;
 pub use gemma4::Gemma4UnifiedParser;
+pub use hy_v3::HyV3UnifiedParser;
 pub use inkling::InklingUnifiedParser;
 pub use kimi_k3::{KimiK3StructuralTagBuilder, KimiK3UnifiedParser};
 use thiserror::Error;

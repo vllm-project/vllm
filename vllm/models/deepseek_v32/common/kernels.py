@@ -6,6 +6,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import is_quantized_kv_cache
 
 # Cache of tiny 1-element dummy tensors (per device, dtype) reused by the
 # has_indexer=False path so the indexer args don't allocate every call.
@@ -473,7 +474,7 @@ def fused_norm_rope(
 
     # --- MLA KV cache setup ---
     mla_cache_ds_mla = mla_kv_cache_dtype == "fp8_ds_mla"
-    mla_cache_fp8 = mla_kv_cache_dtype not in ("auto", "fp8_ds_mla")
+    mla_cache_fp8 = is_quantized_kv_cache(mla_kv_cache_dtype) and not mla_cache_ds_mla
     mla_num_tiles = 1
     mla_ds_scale_view = torch.empty(0, dtype=torch.float32, device=device)
     mla_ds_rope_view = torch.empty(0, dtype=torch.bfloat16, device=device)

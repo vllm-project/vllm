@@ -14,7 +14,6 @@ from vllm.inputs import (
     SingletonInput,
     split_enc_dec_input,
 )
-from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -24,6 +23,7 @@ from vllm.multimodal.utils import argsort_mm_positions
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -51,7 +51,6 @@ class InputProcessor:
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
-        self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
         self.generation_config_fields = model_config.try_get_generation_config()
 
@@ -67,12 +66,6 @@ class InputProcessor:
                 mm_budget.processor.info.skip_prompt_length_check
             )
             mm_budget.reset_cache()  # Not used anymore
-
-        self.input_preprocessor = InputPreprocessor(
-            vllm_config,
-            renderer=renderer,
-            mm_registry=mm_registry,
-        )
 
         # Raw-prompt preprocessing (tokenization and multimodal processing)
         # is blocking, so async callers should run it on the renderer's
@@ -128,6 +121,15 @@ class InputProcessor:
                     "not configured. Please set --reasoning-parser "
                     "and/or --reasoning-config to use thinking_token_budget."
                 )
+            if (
+                params.trace_decode_token_ids
+                and not self.model_config.enable_trace_replay
+            ):
+                raise VLLMValidationError(
+                    "trace_decode_token_ids is set but trace replay is not "
+                    "enabled. Start the engine with --enable-trace-replay "
+                    "to use it."
+                )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
@@ -155,6 +157,30 @@ class InputProcessor:
                 f"params must be either SamplingParams or PoolingParams, "
                 f"but got {type(params).__name__}"
             )
+
+    def _normalize_trace_replay_params(
+        self, sampling_params: SamplingParams, prompt_len: int
+    ) -> None:
+        """Apply trace replay's generation semantics to request-local params."""
+        trace_token_ids = sampling_params.trace_decode_token_ids
+        assert trace_token_ids
+        assert sampling_params.max_tokens is not None
+
+        max_trace_len = max(self.model_config.max_model_len - prompt_len, 1)
+        trace_token_ids = trace_token_ids[:max_trace_len]
+        sampling_params.trace_decode_token_ids = trace_token_ids
+
+        # Apply this after the generation config so its EOS token cannot stop
+        # replay before the trace is exhausted.
+        sampling_params.max_tokens = min(
+            len(trace_token_ids), sampling_params.max_tokens
+        )
+        sampling_params.min_tokens = 0
+        sampling_params.ignore_eos = True
+        sampling_params._eos_token_id = None
+        sampling_params.stop = []
+        sampling_params.stop_token_ids = []
+        sampling_params._all_stop_token_ids = set()
 
     def _validate_lora(self, lora_request: LoRARequest | None) -> None:
         if lora_request is None:
@@ -281,44 +307,45 @@ class InputProcessor:
             )
 
         if isinstance(prompt, dict) and "type" in prompt:
-            if tokenization_kwargs:
-                logger.warning_once(
-                    "Passing tokenization_kwargs to InputProcessor is deprecated "
-                    "and will be removed in v0.18. You should instead pass "
-                    "them to Renderer.render_cmpl() or Renderer.render_chat()."
-                )
-
             if arrival_time is None:
                 arrival_time = prompt.get("arrival_time", time.time())  # type: ignore[assignment]
 
-            processed_inputs: EngineInput = prompt  # type: ignore[assignment]
+            engine_input: EngineInput = prompt  # type: ignore[assignment]
         else:
             logger.warning_once(
                 "Passing raw prompts to InputProcessor is deprecated "
-                "and will be removed in v0.18. You should instead pass "
+                "and will be removed in the future. You should instead pass "
                 "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
             )
 
             if arrival_time is None:
                 arrival_time = time.time()
 
-            processed_inputs = self.input_preprocessor.preprocess(
-                prompt,
-                tokenization_kwargs=tokenization_kwargs,
+            renderer = self.renderer
+            model_config = self.model_config
+
+            parsed_prompt = parse_model_prompt(model_config, prompt)
+            tok_params = renderer.default_cmpl_tok_params.with_kwargs(
+                **(tokenization_kwargs or {})
             )
 
-        current_platform.validate_request(processed_inputs, params)
+            (engine_input,) = renderer.render_cmpl(
+                [parsed_prompt],
+                tok_params,
+            )
 
-        encoder_inputs, decoder_inputs = split_enc_dec_input(processed_inputs)
-        self._validate_model_inputs(encoder_inputs, decoder_inputs)
+        current_platform.validate_request(engine_input, params)
+
+        encoder_input, decoder_input = split_enc_dec_input(engine_input)
+        self._validate_model_inputs(encoder_input, decoder_input)
 
         # Mypy can be conservative for TypedDict unions; normalize access.
-        if decoder_inputs["type"] == "embeds":
-            prompt_embeds = decoder_inputs["prompt_embeds"]
-            prompt_token_ids = decoder_inputs.get("prompt_token_ids")
-            prompt_is_token_ids = decoder_inputs.get("is_token_ids")
+        if decoder_input["type"] == "embeds":
+            prompt_embeds = decoder_input["prompt_embeds"]
+            prompt_token_ids = decoder_input.get("prompt_token_ids")
+            prompt_is_token_ids = decoder_input.get("is_token_ids")
         else:
-            prompt_token_ids = decoder_inputs["prompt_token_ids"]
+            prompt_token_ids = decoder_input["prompt_token_ids"]
             prompt_embeds = None
             prompt_is_token_ids = None
 
@@ -340,16 +367,23 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
+            if sampling_params.trace_decode_token_ids:
+                self._normalize_trace_replay_params(
+                    sampling_params,
+                    length_from_prompt_token_ids_or_embeds(
+                        prompt_token_ids, prompt_embeds
+                    ),
+                )
         else:
             pooling_params = params.clone()
 
         # Multimodal related.
         mm_features: list[MultiModalFeatureSpec] | None = None
 
-        if decoder_inputs["type"] == "multimodal":
-            decoder_mm_inputs = decoder_inputs["mm_kwargs"]
-            decoder_mm_positions = decoder_inputs["mm_placeholders"]
-            decoder_mm_hashes = decoder_inputs["mm_hashes"]
+        if decoder_input["type"] == "multimodal":
+            decoder_mm_inputs = decoder_input["mm_kwargs"]
+            decoder_mm_positions = decoder_input["mm_placeholders"]
+            decoder_mm_hashes = decoder_input["mm_hashes"]
 
             if not all(
                 isinstance(leaf, str) for leaf in json_iter_leaves(decoder_mm_hashes)
@@ -391,7 +425,7 @@ class InputProcessor:
             pooling_params=pooling_params,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            cache_salt=decoder_inputs.get("cache_salt"),
+            cache_salt=decoder_input.get("cache_salt"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,

@@ -225,7 +225,8 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     save_req = ReqMeta(
         req_id="r0",
         token_len_chunk=64,
-        block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
+        # Block 0 is reserved as NULL_BLOCK_ID by the production block pool.
+        block_ids=([1, 2, 3, 4], [1, 2, 3, 4]),
         block_hashes=hs,
         can_save=True,
         store_job_id=1,

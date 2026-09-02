@@ -233,7 +233,6 @@ class FireRedASR2MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
             feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
@@ -246,7 +245,6 @@ class FireRedASR2MultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
@@ -332,7 +330,10 @@ class FireRedASR2ForConditionalGeneration(
             "net.0": "pre_layer_norm",
             "net.1": "linear_expand",
             "net.4": "linear_project",
-        }
+        },
+        orig_to_new_prefix={
+            "model.encoder.audio_encoder.positional_encoding.pe": None,
+        },
     )
 
     supports_transcription_only = True
@@ -477,8 +478,6 @@ class FireRedASR2ForConditionalGeneration(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self, skip_prefixes=["model.encoder.audio_encoder.positional_encoding.pe"]
-        )
+        loader = AutoWeightsLoader(self)
 
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

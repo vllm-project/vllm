@@ -1244,7 +1244,7 @@ def test_prompt_logprobs_with_chunking_and_preemption():
         max_model_len=512,
         enable_chunked_prefill=True,
         max_num_batched_tokens=48,  # Force prefill chunking
-        num_gpu_blocks_override=32,  # Force preemptions
+        num_gpu_blocks_override=33,  # Force preemptions (32 usable + null block)
         disable_log_stats=False,
         gpu_memory_utilization=0.25,
     ) as vllm_model:

@@ -231,7 +231,6 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         """Call the HuggingFace processor."""
         # Convert mm_data format: {'audios': [...]} -> {'audio': ...}
@@ -256,7 +255,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+            mm_kwargs,
         )
 
     def _get_mm_fields_config(
@@ -380,6 +379,12 @@ class KimiAudioForConditionalGeneration(
             "model.embed_tokens.": "language_model.model.embed_tokens.",
             "model.norm.": "language_model.model.norm.",
             "lm_head.": "language_model.lm_head.",
+            # MIMO/TTS weights and any `model.` residue no rule above
+            # claimed: this model only does ASR (speech-to-text).
+            "model.": None,
+            "mimo_layers.": None,
+            "mimo_output.": None,
+            "mimo_norm.": None,
         },
         orig_to_new_substr={
             ".fc1.": ".mlp.fc1.",
@@ -573,21 +578,8 @@ class KimiAudioForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights, skipping MIMO layers (TTS-only) for ASR."""
-        # Filter out MIMO/TTS weights since we only do ASR (speech-to-text)
-        skipped_patterns = [
-            # Audio tower
-            "model.",
-            # MIMO/TTS
-            "mimo_layers.",
-            "mimo_output.",
-            "mimo_norm.",
-        ]
-
-        # Load main model weights (LLM + projector) with mapper
-        loader = AutoWeightsLoader(self, skip_prefixes=skipped_patterns)
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        return loaded
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
     def get_speech_to_text_config(

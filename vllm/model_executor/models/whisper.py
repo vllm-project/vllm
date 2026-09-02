@@ -747,9 +747,9 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
     def create_encoder_prompt(
         self,
-        prompt: str | list[int],
+        prompt: list[int],
         mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
+    ) -> list[int]:
         # Strictly speaking, whisper encoder only accept audio features.
         # We create a dummy encoder prompt here which will be padded to
         # num_audio_tokens. So that we can create dummy data from this
@@ -761,7 +761,6 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
             feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
@@ -770,19 +769,10 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
                 **mm_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
             )
-        # The HF WhisperProcessor passes **kwargs to both the tokenizer
-        # and the feature extractor. Text-tokenizer kwargs like
-        # `truncation` and `max_length` must be removed when audio data
-        # is present, otherwise the feature extractor interprets
-        # `max_length` as raw audio samples and truncates the audio.
-        tok_kwargs = {
-            k: v for k, v in tok_kwargs.items() if k not in ("truncation", "max_length")
-        }
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
@@ -838,6 +828,7 @@ class WhisperForConditionalGeneration(
             ".encoder_attn.k_proj": (".encoder_attn.kv_proj", 0),
             ".encoder_attn.v_proj": (".encoder_attn.kv_proj", 1),
         },
+        orig_to_new_prefix={"proj_out.": None},
     )
 
     # Whisper only supports audio-conditioned generation.
@@ -1048,7 +1039,7 @@ class WhisperForConditionalGeneration(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
+        loader = AutoWeightsLoader(self)
 
         # add fake zeros bias for k_proj to state_dict
         weights = _create_fake_bias_for_k_proj(weights, ".k_proj.weight")

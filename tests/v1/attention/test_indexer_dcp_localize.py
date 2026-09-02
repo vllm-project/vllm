@@ -12,7 +12,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
-from vllm.v1.attention.ops.common import CPTritonContext, correct_attn_out
+from vllm.v1.attention.ops.dcp import CPTritonContext, correct_attn_out
 
 
 def _local_count(length: int, rank: int, world: int, interleave: int) -> int:
