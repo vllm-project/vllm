@@ -392,9 +392,9 @@ def select_fp8_moe_backend(
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_DEEPGEMM)
         else:
             backend = (
-                Fp8MoeBackend.DEEPGEMM
-                if activation_format == mk.FusedMoEActivationFormat.Standard
-                else Fp8MoeBackend.BATCHED_DEEPGEMM
+                Fp8MoeBackend.BATCHED_DEEPGEMM
+                if activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+                else Fp8MoeBackend.DEEPGEMM
             )
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format

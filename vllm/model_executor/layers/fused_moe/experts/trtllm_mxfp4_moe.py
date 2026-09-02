@@ -142,8 +142,8 @@ class TrtLlmMxfp4ExpertsBase:
         return activation_to_flashinfer_int(activation)
 
     @staticmethod
-    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
-        return [mk.FusedMoEActivationFormat.Standard]
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -480,8 +480,5 @@ class TrtLlmMxfp4Mxfp8ExpertsModular(TrtLlmMxfp4ExpertsModularBase):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
-    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
-        return [
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.PaddedStandard,
-        ]
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.PaddedStandard

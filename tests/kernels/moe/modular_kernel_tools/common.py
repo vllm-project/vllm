@@ -259,11 +259,13 @@ class Config:
 
     def is_valid(self) -> tuple[bool, str | None]:
         # Check prepare-finalize and fused-experts compatibility
-        if self.prepare_finalize_format() != self.fused_experts_format():
+        if not self.fused_experts_format().is_superset(self.prepare_finalize_format()):
             return (
                 False,
-                f"Mismatched format {self.prepare_finalize_format()}"
-                f"!= {self.fused_experts_format()}.",
+                (
+                    f"Mismatched format {self.prepare_finalize_format()}"
+                    f" -> {self.fused_experts_format()}."
+                ),
             )
 
         # Check quantization sanity
