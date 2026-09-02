@@ -283,9 +283,9 @@ class QuarkW8A8Fp8PerBlock(QuarkScheme):
             weight_loader,
             scale_dtype=scale_dtype,
         )
-        # Match Quark-exported checkpoints (``.weight_scale``). DeepSeek-V3
-        # native block-FP8 still registers ``weight_scale_inv`` on
-        # ``Fp8LinearMethod``; that path is unchanged.
+        # Match Quark-exported checkpoints (``.weight_scale``).
+        # ``Fp8LinearMethod.create_weights`` registers weight_scale_inv, which has the
+        # same semantic meaning as Quark's `weight_scale`.
         layer.register_parameter("weight_scale", weight_scale)
 
         assert self.activation_quant_key is not None
