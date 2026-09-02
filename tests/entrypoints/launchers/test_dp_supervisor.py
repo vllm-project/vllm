@@ -321,6 +321,85 @@ async def test_handles_probe_failure(
 
 
 @pytest.mark.asyncio
+async def test_fault_tolerant_keeps_survivors_on_child_exit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An exited rank with live peers is a scale-down, not a group failure."""
+    supervisor = DPSupervisor(
+        _make_unit_args(enable_fault_tolerance=True, dp_supervisor_probe_interval_s=0.0)
+    )
+    survivor_alive = iter([True, True, False])
+    supervisor._processes = [
+        SimpleNamespace(
+            name="APIServer_DPRank_4", is_alive=lambda: next(survivor_alive)
+        ),
+        SimpleNamespace(name="APIServer_DPRank_5", is_alive=lambda: False),
+    ]
+
+    async def fake_probe(*_args, **_kwargs) -> bool:
+        return True
+
+    monkeypatch.setattr(dp_sup, "_probe_endpoint", fake_probe)
+
+    await supervisor._monitor_children()
+    assert supervisor._removed_ports == {8001}
+    assert not supervisor._shutdown_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_fault_tolerant_waits_while_recovering(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A halted rank reported as recovering by its sentinel is not torn down."""
+    supervisor = DPSupervisor(
+        _make_unit_args(enable_fault_tolerance=True, dp_supervisor_probe_interval_s=0.0)
+    )
+    supervisor.child_ports = [8000]
+    probe_results = iter([True, False, False])
+    states = iter(["recovering", "gone"])
+    ready_seen: list[bool] = []
+
+    async def fake_probe(*_args, **_kwargs) -> bool:
+        return next(probe_results)
+
+    async def fake_child_state(_session, _port) -> str:
+        ready_seen.append(supervisor.is_ready)
+        return next(states)
+
+    monkeypatch.setattr(dp_sup, "_probe_endpoint", fake_probe)
+    monkeypatch.setattr(supervisor, "_child_state", fake_child_state)
+
+    await supervisor._probe_all_children()
+    assert ready_seen == [True, False]
+    assert supervisor.is_alive is False
+
+
+@pytest.mark.asyncio
+async def test_child_state_maps_sentinel_status():
+    supervisor = DPSupervisor(_make_unit_args())
+
+    def session_for(payload):
+        class FakeResponse:
+            status = 200
+
+            async def json(self):
+                return payload
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        return SimpleNamespace(get=lambda *_args, **_kwargs: FakeResponse())
+
+    for status, expected in [("healthy", "ok"), ("unhealthy", "recovering")]:
+        session = session_for({"engines": [{"status": status}]})
+        assert await supervisor._child_state(session, 8000) == expected
+    assert await supervisor._child_state(session_for({}), 8000) == "gone"
+
+
+@pytest.mark.asyncio
 async def test_shutdown_if_supervisor_server_error_on_startup(
     monkeypatch: pytest.MonkeyPatch,
 ):

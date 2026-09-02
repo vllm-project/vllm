@@ -228,7 +228,7 @@ def _build_dp_supervisor_app(supervisor: DPSupervisor) -> FastAPI:
 
     @app.get("/health", include_in_schema=False)
     async def health() -> Response:
-        return _status_response(app.state.supervisor.is_ready)
+        return _status_response(app.state.supervisor.is_alive)
 
     @app.get("/ready", include_in_schema=False)
     @app.get("/readyz", include_in_schema=False)
@@ -277,6 +277,9 @@ class DPSupervisor:
             for local_rank in range(args.data_parallel_size_local)
         ]
         self._is_ready = False
+        self._was_ready = False
+        self._fault_tolerant = getattr(args, "enable_fault_tolerance", False)
+        self._removed_ports: set[int] = set()
         self._processes: list[BaseProcess] = []
         self._shutdown_event = asyncio.Event()
         self._shutdown_signal = signal.SIGTERM
@@ -284,6 +287,28 @@ class DPSupervisor:
     @property
     def is_ready(self) -> bool:
         return self._is_ready and not self._shutdown_event.is_set()
+
+    @property
+    def is_alive(self) -> bool:
+        return self._was_ready and not self._shutdown_event.is_set()
+
+    async def _child_state(self, session: aiohttp.ClientSession, port: int) -> str:
+        """The rank's fault-tolerance state: "ok", "recovering" or "gone"."""
+        probe_ssl = False if self.args.ssl_keyfile and self.args.ssl_certfile else None
+        try:
+            async with session.get(
+                _child_base_url(self.args, port) + "/fault_tolerance/status",
+                ssl=probe_ssl,
+            ) as response:
+                if response.status != HTTPStatus.OK:
+                    return "gone"
+                engines = (await response.json()).get("engines", [])
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return "gone"
+        statuses = {engine.get("status") for engine in engines}
+        if "healthy" in statuses:
+            return "ok"
+        return "recovering" if "unhealthy" in statuses else "gone"
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -441,6 +466,7 @@ class DPSupervisor:
                             conn_err_retry_delay=self.args.dp_supervisor_probe_interval_s,
                         )
                         for port in self.child_ports
+                        if port not in self._removed_ports
                     ),
                     return_exceptions=True,
                 )
@@ -452,6 +478,22 @@ class DPSupervisor:
                     # where shutdown is set, THEN the probe returns true.
                     if not self._shutdown_event.is_set():
                         self._is_ready = True
+                        self._was_ready = True
+                elif self._fault_tolerant and self._was_ready:
+                    # A halted rank is recovering under its own sentinel and a
+                    # removed rank is gone; only tear down when no rank is left.
+                    states = await asyncio.gather(
+                        *(
+                            self._child_state(session, port)
+                            for port in self.child_ports
+                            if port not in self._removed_ports
+                        )
+                    )
+                    self._is_ready = "ok" in states
+                    if "recovering" not in states and not self._is_ready:
+                        logger.info("DPSupervisor found no serving DP Servers.")
+                        self._shutdown_event.set()
+                        return
                 elif self._is_ready:
                     # Once ready, any failure in the probe means vLLM is dead.
                     num_unhealthy = sum(1 for r in results if r is not True)
@@ -492,10 +534,21 @@ class DPSupervisor:
         try:
             while not self._shutdown_event.is_set():
                 # 1. Check for dead processes
-                n_failed = len([p for p in self._processes if not p.is_alive()])
-                if n_failed > 0:
-                    logger.info("DPSupervisor found %s exited DP Servers.", n_failed)
+                dead = [p for p in self._processes if not p.is_alive()]
+                if dead and not (
+                    self._fault_tolerant and len(dead) < len(self._processes)
+                ):
+                    logger.info("DPSupervisor found %s exited DP Servers.", len(dead))
                     break
+                for process in dead:
+                    # An exited rank with live peers was removed by the engine
+                    # (fault-tolerant scale-down); keep serving on the rest.
+                    port = self.child_ports[self._processes.index(process)]
+                    if port not in self._removed_ports:
+                        self._removed_ports.add(port)
+                        logger.info(
+                            "DPSupervisor keeps serving; %s exited.", process.name
+                        )
 
                 # 2. Check if the probe background task crashed or failed.
                 if probe_task.done():
