@@ -48,6 +48,31 @@ def _make_vllm_config():
     )
 
 
+@pytest.mark.parametrize(
+    "extra_config",
+    [
+        {"store_tp_size": 4},
+        {"enable_store_tp_lcm": True, "prefill_tp_sizes": [6, 4]},
+        {"prefill_tp_sizes": [4, 2]},
+        {"enable_store_tp_lcm": True, "prefill_tp_sizes": [4, 0]},
+        None,
+    ],
+)
+def test_store_tp_does_not_override_backend_kv_cache_layout(extra_config):
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
+
+    assert (
+        mooncake_store_connector.MooncakeStoreConnector.get_required_kvcache_layout(
+            vllm_config
+        )
+        is None
+    )
+
+
 def _make_kv_cache_config() -> KVCacheConfig:
     """Single-group full-attention KVCacheConfig — enough for the connector
     constructor's validate() pass."""
@@ -90,15 +115,18 @@ def test_scheduler_requires_align_mode_for_mamba():
         scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
 
 
-def _make_block_stored() -> BlockStored:
+def _make_block_stored(
+    block_hash: bytes = b"hash", group_idx: int | None = None
+) -> BlockStored:
     return BlockStored(
-        block_hashes=[b"hash"],
+        block_hashes=[block_hash],
         parent_block_hash=None,
         token_ids=[1, 2, 3],
         block_size=16,
         lora_id=None,
         medium="cpu",
         lora_name=None,
+        group_idx=group_idx,
     )
 
 
@@ -169,7 +197,7 @@ def test_worker_methods_delegate_to_store_worker():
     assert invalid_block_ids == {3, 4}
 
 
-def test_get_kv_connector_kv_cache_events_returns_none_when_empty():
+def test_get_kv_connector_kv_cache_events_returns_none_when_disabled():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()
 
@@ -184,7 +212,7 @@ def test_get_kv_connector_kv_cache_events_returns_none_when_empty():
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
 
-    mock_worker_cls.return_value.get_kv_events.return_value = []
+    mock_worker_cls.return_value.enable_kv_events = False
     assert connector.get_kv_connector_kv_cache_events() is None
 
 
@@ -248,11 +276,127 @@ def test_get_kv_connector_kv_cache_events_wraps_worker_events():
         )
 
     mock_worker_cls.return_value.get_kv_events.return_value = [event]
+    mock_worker_cls.return_value.enable_kv_events = True
+    mock_worker_cls.return_value.kv_send_thread = MagicMock()
+    mock_worker_cls.return_value.group_tp_replication_factors = (1,)
     kv_events = connector.get_kv_connector_kv_cache_events()
 
     assert isinstance(kv_events, mooncake_store_connector.MooncakeStoreKVEvents)
     assert kv_events.get_number_of_workers() == 1
     assert kv_events.get_all_events() == [event]
+
+
+def test_get_kv_connector_kv_cache_events_keeps_empty_worker_contribution():
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreWorker"
+        ) as mock_worker_cls,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+
+    worker = mock_worker_cls.return_value
+    worker.enable_kv_events = True
+    worker.kv_send_thread = MagicMock()
+    worker.group_tp_replication_factors = (2,)
+    worker.get_kv_events.return_value = []
+
+    kv_events = connector.get_kv_connector_kv_cache_events()
+
+    assert isinstance(kv_events, mooncake_store_connector.MooncakeStoreKVEvents)
+    assert kv_events.get_number_of_workers() == 1
+    assert kv_events.get_all_events() == []
+
+
+def _aggregate_store_events(
+    worker_events: list[list[BlockStored]],
+    replication_factors: tuple[int, ...],
+) -> list[BlockStored]:
+    combined = mooncake_store_connector.MooncakeStoreKVEvents(
+        num_workers=1,
+        group_tp_replication_factors=replication_factors,
+    )
+    combined.add_events(worker_events[0])
+    for events in worker_events[1:]:
+        combined.add_events(events)
+        combined.increment_workers()
+    combined.aggregate()
+    return combined.get_all_events()
+
+
+def test_gqa_store_events_follow_tp_replica_striping():
+    block_a = _make_block_stored(b"a", group_idx=0)
+    block_b = _make_block_stored(b"b", group_idx=0)
+
+    events = _aggregate_store_events(
+        [[block_a], [block_b], [block_a], [block_b]],
+        replication_factors=(2,),
+    )
+
+    assert events == [block_a, block_b]
+
+
+def test_mqa_store_events_require_one_replica():
+    blocks = [_make_block_stored(bytes([index]), group_idx=0) for index in range(4)]
+
+    events = _aggregate_store_events(
+        [[block] for block in blocks],
+        replication_factors=(4,),
+    )
+
+    assert events == blocks
+
+
+def test_store_events_require_every_non_replicated_worker():
+    complete = _make_block_stored(b"complete", group_idx=0)
+    incomplete = _make_block_stored(b"incomplete", group_idx=0)
+
+    events = _aggregate_store_events(
+        [
+            [complete, incomplete],
+            [complete],
+            [complete],
+            [complete],
+        ],
+        replication_factors=(1,),
+    )
+
+    assert events == [complete]
+
+
+def test_store_events_reject_incomplete_replica_coverage():
+    complete = _make_block_stored(b"complete", group_idx=0)
+    incomplete = _make_block_stored(b"incomplete", group_idx=0)
+
+    events = _aggregate_store_events(
+        [[complete, incomplete], [complete], [], []],
+        replication_factors=(2,),
+    )
+
+    assert events == [complete]
+
+
+def test_store_events_use_each_groups_replication_factor():
+    full_attention = _make_block_stored(b"full", group_idx=0)
+    replicated_attention = _make_block_stored(b"replicated", group_idx=1)
+
+    events = _aggregate_store_events(
+        [
+            [full_attention, replicated_attention],
+            [full_attention],
+            [full_attention, replicated_attention],
+            [full_attention],
+        ],
+        replication_factors=(1, 2),
+    )
+
+    assert events == [full_attention, replicated_attention]
 
 
 def test_update_connector_output_and_take_events():
@@ -281,6 +425,28 @@ def test_update_connector_output_and_take_events():
         output
     )
     assert list(connector.take_events()) == [event]
+    assert connector._kv_cache_events is None
+
+
+def test_store_events_persist_across_polls():
+    connector = object.__new__(mooncake_store_connector.MooncakeStoreConnector)
+    connector.connector_scheduler = MagicMock()
+    connector._kv_cache_events = None
+    complete = _make_block_stored(b"complete", group_idx=0)
+    pending = _make_block_stored(b"pending", group_idx=0)
+
+    def poll(worker_events: list[BlockStored]) -> list[BlockStored]:
+        events = mooncake_store_connector.MooncakeStoreKVEvents(
+            num_workers=4,
+            group_tp_replication_factors=(2,),
+        )
+        events.add_events(worker_events)
+        connector.update_connector_output(KVConnectorOutput(kv_cache_events=events))
+        return list(connector.take_events())
+
+    assert poll([complete, pending]) == []
+    assert poll([complete]) == [complete]
+    assert poll([pending, pending]) == [pending]
     assert connector._kv_cache_events is None
 
 

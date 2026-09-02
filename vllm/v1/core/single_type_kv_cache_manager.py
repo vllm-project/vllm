@@ -407,6 +407,15 @@ class SingleTypeKVCacheManager(ABC):
         self._pending_boundary_state_offloads = []
         return pending
 
+    def finalize_partial_tail_offload(
+        self,
+        request_id: str,
+        num_computed_tokens: int,
+        num_in_flight_tokens: int,
+    ) -> tuple[int, KVCacheBlock, int] | None:
+        """Finalize a producer partial tail when its request finishes."""
+        return None
+
     def _apply_cow(
         self,
         request_id: str,
@@ -1383,10 +1392,10 @@ class MambaManager(SingleTypeKVCacheManager):
             # current allocation.
             self._num_checkpoint_blocks: dict[str, int] = {}
             # Requests that registered their own last-prompt-boundary partial
-            # tail (producers). On the next step's CoW the boundary state moves
-            # into a private cow_block; we record that block for connector
-            # offload (see _pending_boundary_state_offloads).
-            self._producer_partial_tail_reqs: dict[str, int] = {}
+            # tail (producers). A later CoW hands its private copy to the
+            # connector; a request that finishes first hands off this table
+            # source directly.
+            self._producer_partial_tail_reqs: dict[str, tuple[KVCacheBlock, int]] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -1749,10 +1758,12 @@ class MambaManager(SingleTypeKVCacheManager):
                         self.block_pool.move_block_hashes(source_block, cow_block)
                         self._pending_cow_copies.append((source_block, cow_block))
                         source_block.ref_cnt += 1
-                        boundary_tokens = self._producer_partial_tail_reqs.pop(
+                        producer_tail = self._producer_partial_tail_reqs.pop(
                             request_id, None
                         )
-                        if boundary_tokens is not None:
+                        if producer_tail is not None:
+                            marker_block, boundary_tokens = producer_tail
+                            assert marker_block is source_block
                             # This CoW preserved a producer's own boundary
                             # state in cow_block; hand it to the connector for
                             # partial-tail offload once the copy has run.
@@ -1787,6 +1798,22 @@ class MambaManager(SingleTypeKVCacheManager):
         )
         req_blocks.append(block)
         req_blocks[block_idx] = self._null_block
+
+    def finalize_partial_tail_offload(
+        self,
+        request_id: str,
+        num_computed_tokens: int,
+        num_in_flight_tokens: int,
+    ) -> tuple[int, KVCacheBlock, int] | None:
+        if self.mamba_cache_mode != "align":
+            return None
+        producer_tail = self._producer_partial_tail_reqs.pop(request_id, None)
+        if producer_tail is None:
+            return None
+        source_block, boundary_tokens = producer_tail
+        if num_in_flight_tokens != 0 or num_computed_tokens != boundary_tokens:
+            return None
+        return self.kv_cache_group_id, source_block, boundary_tokens
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         if self.mamba_cache_mode == "align":
@@ -1894,7 +1921,10 @@ class MambaManager(SingleTypeKVCacheManager):
             # in ``source_block`` but the next step's forward overwrites it. The
             # upcoming CoW copies it into a durable cow_block; record the req so
             # allocate_new_blocks hands that block to the connector for offload.
-            self._producer_partial_tail_reqs[request.request_id] = num_tokens
+            self._producer_partial_tail_reqs[request.request_id] = (
+                source_block,
+                num_tokens,
+            )
         return partial_hash
 
 
