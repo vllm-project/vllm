@@ -381,6 +381,31 @@ class TokenizeParams:
 
         return text
 
+    def _get_text_truncation_offset(
+        self, tokenizer: TokenizerLike | None, text: str
+    ) -> int:
+        """Return the number of source characters removed from the left.
+
+        ``_text_len_check`` pre-truncates long text before tokenization when
+        an explicit truncation side is requested. Fast-tokenizer offsets are
+        then relative to that shortened string, so callers need this prefix
+        length to map them back to the original prompt.
+        """
+        max_input_tokens = self.max_input_tokens
+        if (
+            max_input_tokens is None
+            or tokenizer is None
+            or self.truncate_prompt_tokens is None
+            or self.truncation_side != "left"
+        ):
+            return 0
+
+        max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
+        if max_input_chars <= 0:
+            return 0
+
+        return max(len(text) - max_input_chars, 0)
+
     def _text_lowercase(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply lowercase to prompt text if necessary."""
         return text.lower() if self.do_lower_case else text
