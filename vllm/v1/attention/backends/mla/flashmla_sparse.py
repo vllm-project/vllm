@@ -148,7 +148,13 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major in [9, 10]
+        if capability.major in [9, 10]:
+            return True
+        # SM12x (consumer Blackwell): supported via the portable Triton
+        # sparse-MLA kernels (see ops/flashmla.py _use_triton_sparse_mla).
+        from vllm.v1.attention.ops.flashmla import _use_triton_sparse_mla
+
+        return capability.major == 12 and _use_triton_sparse_mla()
 
     @classmethod
     def supports_combination(
@@ -585,8 +591,17 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
     @staticmethod
     def _compute_fp8_decode_padded_heads(num_heads: int) -> int:
-        # FP8 decode kernel only supports h_q = 64 or 128
-        # Compute padded head count for decode
+        # Native FP8 decode kernel only supports h_q = 64 or 128. The Triton
+        # sparse path accepts %16 alignment, which matters at high TP where the
+        # per-rank head count is small (e.g. 64 heads -> 8/rank at TP=8: padding
+        # to 64 would waste 87% of the attention compute).
+        from vllm.v1.attention.ops.flashmla import _use_triton_sparse_mla
+
+        if _use_triton_sparse_mla():
+            if num_heads <= 16:
+                return 16
+            if num_heads <= 32:
+                return 32
         return 64 if num_heads <= 64 else 128
 
     def __init__(
@@ -917,17 +932,43 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             q_padded[:, :, :actual_num_heads, :] = q
             q = q_padded
 
-        out, lse = flash_mla_with_kvcache(
-            q=q,
-            k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
-            block_table=kernel_metadata.dummy_block_table,
-            head_dim_v=512,
-            cache_seqlens=kernel_metadata.cache_lens,
-            tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
-            is_fp8_kvcache=True,
-            indices=topk_indices,
-            softmax_scale=self.softmax_scale,
-        )
+        kv_cache_uint8 = kv_c_and_k_pe_cache.view(torch.uint8)
+        b12x_result = None
+        from vllm.v1.attention.ops.flashmla import _use_triton_sparse_mla
+
+        if _use_triton_sparse_mla():
+            # SM12x fused fast path; falls back to the (Triton-bound)
+            # flash_mla_with_kvcache below on any failure.
+            try:
+                from vllm.v1.attention.ops.deepseek_v4_ops.b12x_sparse_helpers import (
+                    b12x_glm_mla_attention,
+                )
+
+                b12x_result = b12x_glm_mla_attention(
+                    q=q,
+                    kv_cache=kv_cache_uint8,
+                    topk_indices=topk_indices,
+                    softmax_scale=self.softmax_scale,
+                )
+            except Exception as exc:
+                logger.warning_once(
+                    "B12x sparse MLA fast path failed; falling back: %r", exc
+                )
+
+        if b12x_result is None:
+            out, lse = flash_mla_with_kvcache(
+                q=q,
+                k_cache=kv_cache_uint8.unsqueeze(-2),
+                block_table=kernel_metadata.dummy_block_table,
+                head_dim_v=512,
+                cache_seqlens=kernel_metadata.cache_lens,
+                tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
+                is_fp8_kvcache=True,
+                indices=topk_indices,
+                softmax_scale=self.softmax_scale,
+            )
+        else:
+            out, lse = b12x_result
 
         # Slice output and lse back to actual head count if we padded
         if actual_num_heads < padded_num_heads:

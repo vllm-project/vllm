@@ -92,6 +92,11 @@ if TYPE_CHECKING:
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
+    VLLM_TRITON_MLA_SPARSE: bool | None = None
+    VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE: int = 512
+    VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE: int = 256
+    VLLM_TRITON_MLA_SPARSE_HEAD_BLOCK_SIZE: int | None = None
+    VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
@@ -641,6 +646,26 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
     "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_USE_TD", "").strip()
+    ),
+    # Portable Triton sparse-MLA path (consumer Blackwell / SM12x, where the
+    # compiled FlashMLA sparse kernels are unavailable). Unset = auto (enabled
+    # on SM12x); "1" forces the Triton path on any CUDA device; "0" disables.
+    "VLLM_TRITON_MLA_SPARSE": lambda: {"1": True, "0": False}.get(
+        os.getenv("VLLM_TRITON_MLA_SPARSE", "").strip()
+    ),
+    # Tuning knobs for the Triton sparse-MLA kernels (see
+    # vllm/v1/attention/backends/mla/sparse_mla_env.py for how they are used).
+    "VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE": lambda: int(
+        os.getenv("VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE", "512")
+    ),
+    "VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE": lambda: int(
+        os.getenv("VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE", "256")
+    ),
+    "VLLM_TRITON_MLA_SPARSE_HEAD_BLOCK_SIZE": lambda: (
+        int(v) if (v := os.getenv("VLLM_TRITON_MLA_SPARSE_HEAD_BLOCK_SIZE")) else None
+    ),
+    "VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE": lambda: {"1": True, "0": False}.get(
+        os.getenv("VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE", "").strip()
     ),
     # If set, enable PyTorch's GPU<->CPU synchronization debug mode around
     # the worker's `execute_model` and `sample_tokens` calls. Valid values
