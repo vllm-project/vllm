@@ -3089,7 +3089,28 @@ def test_tool_call_arguments_malformed_json_large(caplog):
     assert "coercing to an empty object" in caplog.records[0].message
 
 
-@pytest.mark.parametrize("non_obj", ["[]", "42", "true", '"hello"', "null"])
+def test_tool_call_arguments_double_encoded_object(caplog):
+    """Recover arguments a tool parser serialized twice.
+
+    A parser that serializes an `arguments` value the model had already
+    serialized produces a JSON string that decodes to another JSON string.
+    Decoding only once leaves a `str`, which used to be coerced to `{}` and
+    silently dropped the arguments from replayed conversation history.
+    """
+    # json.dumps('{"a": 1}'), i.e. the object serialized twice.
+    messages = _assistant_tool_call('"{\\"a\\": 1}"')
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {"a": 1}
+    assert not caplog.records
+
+
+# The quoted entries are those values serialized twice: unwrapping the extra
+# level must not turn a non-object into an accepted one.
+@pytest.mark.parametrize(
+    "non_obj",
+    ["[]", "42", "true", '"hello"', "null", '"[]"', '"42"', '"true"'],
+)
 def test_tool_call_arguments_valid_json_non_object(caplog, non_obj):
     messages = _assistant_tool_call(non_obj, name="bad_tool")
     _postprocess_messages(messages)

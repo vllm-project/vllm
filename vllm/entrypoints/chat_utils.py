@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import json
 import types
 from abc import ABC, abstractmethod
@@ -2098,6 +2099,15 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                                 parsed = None
                         else:
                             parsed = content
+
+                        if isinstance(parsed, str):
+                            # A tool parser that re-serialized an already
+                            # serialized argument string produced double-encoded
+                            # JSON. Unwrap one more level rather than discarding
+                            # the arguments. A string that does not itself hold
+                            # JSON still falls through to the coercion below.
+                            with contextlib.suppress(json.JSONDecodeError):
+                                parsed = json.loads(parsed)
 
                         if not isinstance(parsed, dict):
                             if parsed is not None:
