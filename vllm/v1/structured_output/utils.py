@@ -89,6 +89,7 @@ def apply_grammar_bitmask(
     grammar_output: GrammarOutput,
     input_batch: InputBatch,
     logits: torch.Tensor,
+    bitmask_backend: str = "auto",
 ) -> None:
     """
     Apply grammar bitmask to output logits of the model with xgrammar function.
@@ -97,6 +98,7 @@ def apply_grammar_bitmask(
         scheduler_output (SchedulerOutput): The result of engine scheduling.
         input_batch (InputBatch): The input of model runner.
         logits (torch.Tensor): The output logits of model forward.
+        bitmask_backend: The XGrammar backend used to apply the token bitmask.
     """
     # Serialization of np.ndarray is much more efficient than a tensor,
     # so we receive it in that format.
@@ -159,7 +161,12 @@ def apply_grammar_bitmask(
                 out_indices, dtype=torch.int32, device=logits.device
             )
 
-        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
+        xgr.apply_token_bitmask_inplace(
+            logits,
+            grammar_bitmask,
+            indices=index_tensor,
+            backend=bitmask_backend,
+        )
         return
 
     # CPU case, use list for indices.
@@ -169,11 +176,21 @@ def apply_grammar_bitmask(
     if logits.dtype != torch.float32:
         # Convert to float32, apply bitmask, then convert back
         logits_fp32 = logits.to(torch.float32)
-        xgr.apply_token_bitmask_inplace(logits_fp32, grammar_bitmask, indices=indices)
+        xgr.apply_token_bitmask_inplace(
+            logits_fp32,
+            grammar_bitmask,
+            indices=indices,
+            backend=bitmask_backend,
+        )
         # Copy the modified values back to the original tensor
         logits.copy_(logits_fp32.to(logits.dtype))
     else:
-        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=indices)
+        xgr.apply_token_bitmask_inplace(
+            logits,
+            grammar_bitmask,
+            indices=indices,
+            backend=bitmask_backend,
+        )
 
 
 class OutlinesVocabulary:

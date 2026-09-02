@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.config.structured_outputs import XGrammarBitmaskBackend
     from vllm.inputs import EngineInput
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
@@ -415,6 +416,18 @@ class Platform:
             f"Using default backend {AttentionBackendEnum.TORCH_SDPA} for vit attention"
         )
         return AttentionBackendEnum.TORCH_SDPA
+
+    @classmethod
+    def get_xgrammar_bitmask_backend(
+        cls, backend: "XGrammarBitmaskBackend"
+    ) -> "XGrammarBitmaskBackend":
+        """Resolve the XGrammar token-bitmask backend for this platform.
+
+        Platforms can override this hook to select a platform-specific default
+        or reject backends that are unavailable on their hardware. The base
+        implementation preserves the configured value, including ``"auto"``.
+        """
+        return backend
 
     @classmethod
     def get_device_capability(

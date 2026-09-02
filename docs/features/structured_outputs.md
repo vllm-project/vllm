@@ -39,6 +39,27 @@ request. You may also choose a specific backend, along with
 some options. A full set of options is available in the `vllm serve --help`
 text.
 
+### Selecting the XGrammar bitmask backend
+
+`--structured-outputs-config.bitmask_backend` selects the implementation used
+when vLLM applies an XGrammar token bitmask to logits. The default value,
+`auto`, preserves the optimized default for the active model runner. Set an
+explicit value only to evaluate an alternative implementation or work around a
+backend-specific issue. For example, the following starts a server that uses
+XGrammar's `torch_native` implementation when the XGrammar path is used:
+
+```bash
+vllm serve <model> \\
+  --structured-outputs-config.bitmask_backend=torch_native
+```
+
+The accepted values are `auto`, `cpu`, `cuda`, `triton`, `torch_compile`, and
+`torch_native`. Availability depends on the active hardware and the installed
+XGrammar version; an incompatible explicit value produces an error from the
+selected backend. This option controls only token-bitmask application and does
+not select the structured-output engine itself; use
+`--structured-outputs-config.backend` for that purpose.
+
 Now let's see an example for each of the cases, starting with the `choice`, as it's the easiest one:
 
 ??? code
