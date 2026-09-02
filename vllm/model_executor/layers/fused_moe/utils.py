@@ -86,7 +86,7 @@ def resolve_layer_fused_shared_expert(
     if fse_requested and not is_fused_shared_expert_enabled:
         logger.warning(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-            "cannot be enabled: %s.",
+            "cannot be enabled - skipping for this layer: %s.",
             fse_reason,
         )
     return is_fused_shared_expert_enabled
@@ -365,25 +365,9 @@ def moe_kernel_quantize_input(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
     is_scale_swizzled: bool = True,
-    ocp_mx_scheme: str | None = None,
     quantization_emulation: bool = False,
     mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    # Handle OCP MX scheme that requires QDQ (quantize-dequantize) for emulation
-    if ocp_mx_scheme is not None:
-        if ocp_mx_scheme in {"w_mxfp4", "w_mxfp4_a_mxfp4"}:
-            pass  # No QDQ needed for these schemes
-        elif ocp_mx_scheme.endswith("a_fp8"):
-            # Perform QDQ (quantize and dequantize) on activation for emulation
-            # purpose, because there is no native kernel for weight in ocp_mx_scheme
-            # and activation in FP8. The implementation is based on existing
-            # non-emulation ops.
-            # TODO: Remove this `ocp_mx_scheme is not None` block and rely solely
-            # on `quantization_emulation`.
-            return _fp8_quantize_dequantize(A, A_scale)
-        # else: For other schemes (e.g., *_a_mxfp6_e3m2, *_a_mxfp6_e2m3),
-        # weights are already dequantized, and we proceed with normal
-        # activation quantization below.
     if quant_dtype == current_platform.fp8_dtype():
         if quantization_emulation:
             return _fp8_quantize_dequantize(A, A_scale)
@@ -519,35 +503,6 @@ def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
     return max(moe_config.max_num_tokens * moe_config.dp_size, 8192)
 
 
-def trtllm_moe_pack_topk_ids_weights(
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    block_size: int = 1024,
-) -> torch.Tensor:
-    assert topk_ids.shape == topk_weights.shape
-    assert topk_ids.is_contiguous() and topk_weights.is_contiguous()
-
-    original_shape = topk_ids.shape
-    ids_flat = topk_ids.reshape(-1)
-    weights_flat = topk_weights.reshape(-1)
-
-    n_elements = ids_flat.numel()
-    output = torch.empty(n_elements, dtype=torch.int32, device=topk_ids.device)
-
-    use_gdc = current_platform.is_cuda() and current_platform.has_device_capability(90)
-    grid = (triton.cdiv(n_elements, block_size),)
-    _pack_topk_ids_weights_kernel[grid](
-        ids_flat,
-        weights_flat,
-        output,
-        n_elements,
-        BLOCK_SIZE=block_size,
-        USE_GDC=use_gdc,
-        launch_pdl=use_gdc,
-    )
-    return output.reshape(original_shape)
-
-
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _swiglu_limit_torch(
     output: torch.Tensor,
@@ -663,6 +618,8 @@ def swiglu_limit_func(
     # requires topk_ids. Fall back to the torch implementation otherwise.
     if topk_ids is not None:
         _swiglu_limit_pad_aware(output, input, topk_ids, swiglu_limit, expert_map)
+    elif current_platform.is_cuda():
+        torch.ops._C.silu_and_mul_with_clamp(output, input, swiglu_limit, 1.0, 0.0)
     else:
         _swiglu_limit_torch(output, input, swiglu_limit)
 

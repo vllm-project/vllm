@@ -95,57 +95,39 @@ class SimpleCPUOffloadWorker:
             logger.warning("No KV caches to offload.")
             return
 
-        # Resolve each entry to a representative tensor for storage
-        # deduplication. For attention layers the value is already a tensor;
-        # for Mamba layers it is a list of tensors that all share the same
-        # underlying raw storage, so we take the first one.
-        def _repr_tensor(v: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
-            assert isinstance(v, torch.Tensor | list)
-            return v if isinstance(v, torch.Tensor) else v[0]
-
-        any_tensor = _repr_tensor(next(iter(kv_caches.values())))
-        self.device = any_tensor.device
+        self.device = next(iter(kv_caches.values())).device
 
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
+        assert self.kv_cache_config.kv_cache_tensors
+        logical_storage_bytes = self.kv_cache_config.kv_cache_tensors[0].size
 
-        # Deduplicate: multiple layers may share the same backing storage.
-        seen_ptrs: dict[int, tuple[str, torch.Tensor]] = {}
-        for name, value in kv_caches.items():
-            tensor = _repr_tensor(value)
-            ptr = tensor.untyped_storage().data_ptr()
-            if ptr not in seen_ptrs:
-                seen_ptrs[ptr] = (name, tensor)
-
-        # Build [num_blocks, block_bytes] int8 views from each unique
-        # storage so that stride(0) gives block_bytes for the copy op.
-        #
-        # The physical layout varies across attention backends:
-        #   FlashAttn/ROCm:  (2, num_blocks, ...) -> K/V outermost, 2 segments
-        #   FlashInfer/MLA:  (num_blocks, ...)    -> blocks outermost, 1 segment
-        # We derive page_size_bytes = storage.nbytes() // num_blocks, then
-        # classify dims: any dim whose byte-stride exceeds page_size_bytes
-        # must be an outer segment dim (e.g. the K/V dim of size 2). A less
-        # hacky way is to update the interface with the layout.
+        # The DMA backend copies whole blocks as base + block_id * stride(0),
+        # so view each unique allocation as [num_blocks, block_bytes].
         unique_gpu_caches: dict[str, torch.Tensor] = {}
-        for name, tensor in seen_ptrs.values():
+        seen: set[tuple[torch.device, int]] = set()
+        for name, tensor in kv_caches.items():
             storage = tensor.untyped_storage()
-            raw = torch.empty(0, dtype=torch.int8, device=self.device).set_(
-                storage, 0, (storage.nbytes(),)
+            key = (tensor.device, storage.data_ptr())
+            if key in seen:
+                continue
+            seen.add(key)
+
+            physical_per_block, remainder = divmod(tensor.shape[0], num_blocks)
+            assert remainder == 0, (
+                f"KV cache {name!r} has {tensor.shape[0]} physical blocks, which "
+                f"is not divisible by {num_blocks} scheduler blocks"
             )
-            el = tensor.element_size()
-            page_size_bytes = storage.nbytes() // num_blocks
-            outer_dims = [
-                d for d in range(tensor.ndim) if tensor.stride(d) * el > page_size_bytes
-            ]
-            if not outer_dims:
-                unique_gpu_caches[name] = raw.view(num_blocks, -1)
-            else:
-                seg_stride = tensor.stride(outer_dims[0]) * el
-                for idx in range(tensor.shape[outer_dims[0]]):
-                    offset = idx * seg_stride
-                    chunk = raw[offset : offset + seg_stride]
-                    unique_gpu_caches[f"{name}.{idx}"] = chunk.view(num_blocks, -1)
+            block_bytes = tensor.stride(0) * tensor.element_size() * physical_per_block
+            raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(storage)
+            assert raw.numel() >= logical_storage_bytes, (
+                f"KV cache {name!r} storage has {raw.numel()} bytes, smaller "
+                f"than the configured {logical_storage_bytes}-byte allocation"
+            )
+            regions = raw[:logical_storage_bytes].view(-1, num_blocks, block_bytes)
+            for idx, region in enumerate(regions):
+                key_name = name if len(regions) == 1 else f"{name}.{idx}"
+                unique_gpu_caches[key_name] = region
 
         # Compute per-tensor bytes_per_block. Tensors may have different
         # page_size_bytes (e.g., UniformTypeKVCacheSpecs with varying head_size).
@@ -249,58 +231,59 @@ class SimpleCPUOffloadWorker:
         self._connector_metadata = None
 
     def start_load_kv(self) -> None:
-        # NOTE: we defer launching both load and store to get_finished(),
-        # which runs after model execution. This hides the CPU-side
-        # block copy op overhead (~5ms) behind GPU compute.
-        pass
+        # Invoked after the forward launch on steps without sync loads
+        # (SchedulerOutput.has_sync_kv_loads), so the CPU-side block copy
+        # op overhead (~5ms) stays hidden behind GPU compute. Stores are
+        # issued in wait_for_save().
+        metadata = self._connector_metadata
+        if metadata is not None and metadata.load_cpu_blocks:
+            backend = self._backend
+            assert backend is not None
+            backend.launch_copy(
+                metadata.load_cpu_blocks,
+                metadata.load_gpu_blocks,
+                is_store=False,
+                event_idx=metadata.load_event,
+                events_list=self._load_events,
+            )
 
     def wait_for_save(self) -> None:
-        pass
-
-    def get_finished(
-        self,
-        finished_req_ids: set[str],
-    ) -> tuple[set[str] | None, set[str] | None]:
-        """Submit transfers and report completed events to the scheduler.
+        """Submit async stores.
 
         Stores (GPU->CPU) read the live KV cache, which the compute stream may
         still be writing under v1 overlapped execution, so they are ordered
-        after a compute-done event recorded on the current stream. Loads
-        (CPU->GPU) read stable pinned host memory and launch immediately. See
+        after a compute-done event recorded on the current stream. See
         #45704 for the bug and #39306 for the srcAccessOrder rationale.
+        """
+        metadata = self._connector_metadata
+        if metadata is not None and metadata.store_gpu_blocks:
+            backend = self._backend
+            assert backend is not None
+            if self._store_compute_done is None:
+                self._store_compute_done = torch.Event()
+            self._store_compute_done.record(torch.cuda.current_stream())
+            backend.launch_copy(
+                metadata.store_gpu_blocks,
+                metadata.store_cpu_blocks,
+                is_store=True,
+                event_idx=metadata.store_event,
+                events_list=self._store_events,
+                wait_event=self._store_compute_done,
+            )
+
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[set[str] | None, set[str] | None]:
+        """Report completed transfer events to the scheduler.
+
+        Loads are submitted in start_load_kv() and stores in wait_for_save().
 
         Returns:
             tuple of (finished_sending, finished_recving).
             - finished_sending: always None (stores use worker metadata).
             - finished_recving: req_ids whose loads have completed.
         """
-        # (1) Submit transfers
         metadata = self._connector_metadata
-        if metadata is not None:
-            backend = self._backend
-            assert backend is not None
-            if metadata.load_cpu_blocks:
-                backend.launch_copy(
-                    metadata.load_cpu_blocks,
-                    metadata.load_gpu_blocks,
-                    is_store=False,
-                    event_idx=metadata.load_event,
-                    events_list=self._load_events,
-                )
-            if metadata.store_gpu_blocks:
-                if self._store_compute_done is None:
-                    self._store_compute_done = torch.Event()
-                self._store_compute_done.record(torch.cuda.current_stream())
-                backend.launch_copy(
-                    metadata.store_gpu_blocks,
-                    metadata.store_cpu_blocks,
-                    is_store=True,
-                    event_idx=metadata.store_event,
-                    events_list=self._store_events,
-                    wait_event=self._store_compute_done,
-                )
-
-        # (2) Track completed transfer events
         finished_recving: set[str] = set()
 
         if self._pending_load_event_indices:

@@ -26,6 +26,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
+from vllm.v1.worker.gpu.sample.trace_replay import TraceReplayState
 from vllm.v1.worker.gpu.states import RequestState
 
 
@@ -39,6 +40,7 @@ class Sampler:
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
         use_fp64_gumbel: bool = False,
+        enable_trace_replay: bool = False,
         reasoning_config: ReasoningConfig | None = None,
         return_sampling_mask: bool = False,
     ):
@@ -53,6 +55,9 @@ class Sampler:
         self.bad_words_state = BadWordsState(req_states)
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.thinking_budget_state = ThinkingBudgetState(req_states, reasoning_config)
+        self.trace_replay_state = (
+            TraceReplayState(req_states) if enable_trace_replay else None
+        )
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
@@ -69,6 +74,8 @@ class Sampler:
         self.bad_words_state.add_request(req_idx, sampling_params)
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         self.thinking_budget_state.add_request(req_idx, sampling_params)
+        if self.trace_replay_state is not None:
+            self.trace_replay_state.add_request(req_idx, sampling_params)
 
         states = self.sampling_states
         temperature = states.temperature.np[req_idx]
@@ -93,6 +100,24 @@ class Sampler:
         self.bad_words_state.apply_staged_writes()
         self.logprob_token_ids_state.apply_staged_writes()
         self.thinking_budget_state.apply_staged_writes()
+        if self.trace_replay_state is not None:
+            self.trace_replay_state.apply_staged_writes()
+
+    def get_logprobs_dims(
+        self, idx_mapping_np: np.ndarray, include_token_ids: bool = True
+    ) -> tuple[int, int] | None:
+        """(num_logprobs, max_per_req_token_ids) for the given requests, or
+        None when none of them want logprobs."""
+        max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
+        max_token_ids = (
+            self.logprob_token_ids_state.max_num_token_ids(idx_mapping_np)
+            if include_token_ids
+            else 0
+        )
+        if max_num_logprobs == NO_LOGPROBS and max_token_ids == 0:
+            return None
+        num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
+        return num_logprobs, max_token_ids
 
     def __call__(
         self,
@@ -111,11 +136,7 @@ class Sampler:
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.compute_nans else None
 
-        max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
-        max_per_req_token_ids = self.logprob_token_ids_state.max_num_token_ids(
-            idx_mapping_np
-        )
-        return_logprobs = max_num_logprobs != NO_LOGPROBS or max_per_req_token_ids > 0
+        logprobs_dims = self.get_logprobs_dims(idx_mapping_np)
 
         sampled, processed_logits = self.sample(
             logits,
@@ -125,15 +146,20 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
-            return_logprobs=return_logprobs,
+            return_logprobs=logprobs_dims is not None,
         )
 
-        if return_logprobs:
+        if self.trace_replay_state is not None:
+            # Overwrite sampled tokens with the replay trace up-front so that
+            # computed logprobs reflect the real distribution of the forced token.
+            self.trace_replay_state.apply_trace(sampled, idx_mapping)
+
+        if logprobs_dims is not None:
+            num_logprobs, max_per_req_token_ids = logprobs_dims
             if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
                 logits = processed_logits
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
-            num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
             logprobs_tensors = compute_topk_scores(
                 logits,
                 num_logprobs,
@@ -291,6 +317,7 @@ class Sampler:
                 self.sampling_states.seeds.gpu,
                 pos,
                 apply_temperature=False,
+                is_drafting=False,
                 use_fp64=self.use_fp64_gumbel,
             )
         return sampled, processed_logits

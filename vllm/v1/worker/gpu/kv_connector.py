@@ -51,11 +51,10 @@ class ActiveKVConnector(KVConnector):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
         # Register kv caches with KV Connector if applicable.
-        # TODO: support cross_layers_kv_cache
-        # (see https://github.com/vllm-project/vllm/pull/27743)
         self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
+        self._pending_load_start = False
         self._disabled = False
 
     def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
@@ -67,6 +66,16 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
 
+        if scheduler_output.has_sync_kv_loads:
+            # Sync loads need to run before this step's forward.
+            self._start_load_kv()
+        else:
+            # Start any async loads in post-forward instead, keeping
+            # their host-side submission cost off the critical path.
+            self._pending_load_start = True
+
+    def _start_load_kv(self) -> None:
+        self._pending_load_start = False
         # TODO: sort out KV Connectors' use of forward_context
         if is_forward_context_available():
             self.kv_connector.start_load_kv(get_forward_context())
@@ -79,6 +88,9 @@ class ActiveKVConnector(KVConnector):
     ) -> KVConnectorOutput | None:
         if self._disabled:
             return None
+
+        if self._pending_load_start:
+            self._start_load_kv()
 
         output = KVConnectorOutput()
         if wait_for_save:
