@@ -55,24 +55,30 @@ else
   configs=("${tp_configs[@]}")
 fi
 
-# Opt-in CI sharding: CONFIG_INDICES selects a comma-separated subset of the
-# chosen config array by zero-based index; unset means run everything, so all
-# existing callers are unchanged. CONFIG_EXPECTED_COUNT fails the run loudly
-# when the array size changes, instead of letting a newly added config be
-# silently skipped by stale shard index lists.
-if [[ -n "${CONFIG_EXPECTED_COUNT:-}" && "${#configs[@]}" -ne "${CONFIG_EXPECTED_COUNT}" ]]; then
-  echo "Selected config set has ${#configs[@]} entries, expected ${CONFIG_EXPECTED_COUNT}."
-  echo "Rebalance the CONFIG_INDICES shard lists in .buildkite/test_areas for this job."
-  exit 1
-fi
-if [[ -n "${CONFIG_INDICES:-}" ]]; then
-  IFS=',' read -r -a shard_indices <<< "${CONFIG_INDICES}"
+# Opt-in CI sharding; unset means run every config for existing callers.
+if [[ -n "${CONFIG_SHARD_ID:-}" || -n "${CONFIG_NUM_SHARDS:-}" ]]; then
+  if [[ ! "${CONFIG_SHARD_ID:-}" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    [[ ! "${CONFIG_NUM_SHARDS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "CONFIG_SHARD_ID and CONFIG_NUM_SHARDS must be non-negative and positive integers, respectively."
+    exit 1
+  fi
+  if (( CONFIG_SHARD_ID >= CONFIG_NUM_SHARDS )); then
+    echo "CONFIG_SHARD_ID=${CONFIG_SHARD_ID} must be less than CONFIG_NUM_SHARDS=${CONFIG_NUM_SHARDS}."
+    exit 1
+  fi
+
   shard_configs=()
-  for idx in "${shard_indices[@]}"; do
-    shard_configs+=("${configs[$idx]}")
+  for idx in "${!configs[@]}"; do
+    if (( idx % CONFIG_NUM_SHARDS == CONFIG_SHARD_ID )); then
+      shard_configs+=("${configs[$idx]}")
+    fi
   done
+  if (( ${#shard_configs[@]} == 0 )); then
+    echo "Shard ${CONFIG_SHARD_ID}/${CONFIG_NUM_SHARDS} selected no configs."
+    exit 1
+  fi
   configs=("${shard_configs[@]}")
-  echo "CONFIG_INDICES=${CONFIG_INDICES}: running ${#configs[@]} of the selected configs"
+  echo "Shard ${CONFIG_SHARD_ID}/${CONFIG_NUM_SHARDS}: running ${#configs[@]} configs"
 fi
 
 run_tests() {
