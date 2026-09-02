@@ -18,6 +18,7 @@ from vllm.entrypoints.chat_utils import (
     MEDIA_CONNECTOR_REGISTRY,
     AsyncMultiModalItemTracker,
     ConversationMessage,
+    _collapse_text_only_content,
     _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
@@ -47,6 +48,14 @@ def kimi_k2_5_model_config():
         limit_mm_per_prompt={
             "image": 2,
         },
+    )
+
+
+@pytest.fixture(scope="function")
+def qwen25_model_config():
+    return ModelConfig(
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        runner="generate",
     )
 
 
@@ -3138,3 +3147,90 @@ def test_tool_call_arguments_multiple_independent(caplog):
 
     assert len(caplog.records) == 1
     assert "bad" in caplog.records[0].message
+
+
+def test_collapse_text_only_content_helper():
+    # Plain string is passed through unchanged.
+    assert _collapse_text_only_content("hello") == "hello"
+
+    # A single text part collapses to its string.
+    assert _collapse_text_only_content([{"type": "text", "text": "hello"}]) == "hello"
+
+    # Multiple text parts are joined with newlines, matching the plain
+    # `content_format="string"` behavior.
+    assert (
+        _collapse_text_only_content(
+            [
+                {"type": "text", "text": "a"},
+                {"type": "text", "text": "b"},
+            ]
+        )
+        == "a\nb"
+    )
+
+    # An empty list of parts collapses to an empty string.
+    assert _collapse_text_only_content([]) == ""
+
+    # Structured (non-text) parts are left untouched so a template can
+    # still expand them, e.g. images or `tool_reference` entries.
+    mixed = [{"type": "text", "text": "a"}, {"type": "image"}]
+    assert _collapse_text_only_content(mixed) is mixed
+
+    tool_ref = [{"type": "tool_reference", "name": "x"}]
+    assert _collapse_text_only_content(tool_ref) is tool_ref
+
+
+def test_parse_chat_messages_openai_format_text_only_model(
+    qwen25_model_config,
+):
+    # https://github.com/vllm-project/vllm/issues/54491
+    # `--chat-template-content-format openai` used to wrap every message's
+    # content in `[{"type": "text", "text": ...}]` even for a plain
+    # text-only model, which broke chat templates (like Qwen2.5's) that
+    # only know how to handle a string `content` field -- see the
+    # `TypeError` this reproduces without the fix in `_collapse_text_only_content`.
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [{"role": "user", "content": "Reply with exactly OK."}],
+        qwen25_model_config,
+        content_format="openai",
+    )
+
+    assert conversation == [
+        {"role": "user", "content": "Reply with exactly OK."},
+    ]
+    assert mm_data is None
+    assert mm_uuids is None
+
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(qwen25_model_config.model)
+    # This must not raise `TypeError: can only concatenate str (not "list")
+    # to str`, which is what a plain-string chat template raises when given
+    # list-shaped content.
+    rendered = tokenizer.apply_chat_template(
+        conversation, tokenize=False, add_generation_prompt=True
+    )
+    assert "Reply with exactly OK." in rendered
+
+
+def test_parse_chat_messages_openai_format_multimodal_model_keeps_array(
+    phi3v_model_config,
+):
+    # A multimodal model's chat template is written for (and tested
+    # against) the array shape, so text-only content stays wrapped when the
+    # model actually supports multimodal input -- only text-only models get
+    # the plain-string fallback above.
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [{"role": "user", "content": "What about this one?"}],
+        phi3v_model_config,
+        content_format="openai",
+    )
+
+    assert conversation == [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "What about this one?"}],
+        },
+    ]
+    assert mm_data is None
+    assert mm_uuids is None

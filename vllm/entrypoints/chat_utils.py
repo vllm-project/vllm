@@ -1963,6 +1963,37 @@ _AssistantParser = partial(cast, ChatCompletionAssistantMessageParam)
 _ToolParser = partial(cast, ChatCompletionToolMessageParam)
 
 
+def _collapse_text_only_content(
+    content: str | None | list[dict[str, str]],
+) -> str | None | list[dict[str, str]]:
+    """Collapse OpenAI-style array content back to a plain string when it
+    contains only text parts.
+
+    ``content_format="openai"`` wraps every message's content in
+    ``[{"type": "text", "text": ...}, ...]`` regardless of role, but most
+    community chat templates (including many single-string Jinja templates)
+    only know how to handle a plain string content field and will raise a
+    ``TypeError`` trying to concatenate it. Structured parts that a template
+    needs to expand (images, audio, ``tool_reference``, etc.) are left
+    untouched.
+    """
+    if not isinstance(content, list):
+        return content
+
+    has_non_text = any(
+        isinstance(item, dict) and item.get("type") != "text" for item in content
+    )
+    if has_non_text:
+        return content
+
+    texts = [
+        item.get("text", "")
+        for item in content
+        if isinstance(item, dict) and item.get("type") == "text"
+    ]
+    return "\n".join(texts) if texts else ""
+
+
 def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
@@ -1987,7 +2018,23 @@ def _parse_chat_message_content(
         mm_processor_kwargs=mm_processor_kwargs,
     )
 
+    # `content_format="openai"` wraps every message's content in
+    # `[{"type": "text", "text": ...}, ...]` regardless of role. Multimodal
+    # chat templates generally expect (and are tested against) that
+    # consistent shape, but plain single-string Jinja templates used by
+    # most text-only models only know how to handle a plain string and
+    # raise a TypeError trying to concatenate it. For a model with no
+    # multimodal config there is no benefit to the array shape, so collapse
+    # text-only array content back to a string; structured parts a template
+    # still needs to expand (images, audio, `tool_reference`, etc.) are
+    # left untouched either way.
+    is_multimodal_model = mm_tracker.model_config.multimodal_config is not None
+
     for result_msg in result:
+        if role == "tool" or not is_multimodal_model:
+            result_msg["content"] = _collapse_text_only_content(
+                result_msg.get("content")
+            )
         if role == "assistant":
             parsed_msg = _AssistantParser(message)
 
@@ -2006,28 +2053,6 @@ def _parse_chat_message_content(
             parsed_msg = _ToolParser(message)
             if "tool_call_id" in parsed_msg:
                 result_msg["tool_call_id"] = parsed_msg["tool_call_id"]
-            # Normalize tool message content from OpenAI array format to plain
-            # string. Clients like Claude Code / Cursor send tool results as
-            # [{"type": "text", "text": "..."}], but most chat templates only
-            # handle string content for tool messages.
-            # However, tool_reference items must be preserved as structured
-            # dicts for the chat template to expand them.
-            msg_content = result_msg.get("content")
-            if isinstance(msg_content, list):
-                has_non_text = any(
-                    isinstance(item, dict) and item.get("type") != "text"
-                    for item in msg_content
-                )
-                if has_non_text:
-                    # Keep structured content (e.g., tool_reference)
-                    result_msg["content"] = msg_content
-                else:
-                    texts = [
-                        item.get("text", "")
-                        for item in msg_content
-                        if isinstance(item, dict) and item.get("type") == "text"
-                    ]
-                    result_msg["content"] = "\n".join(texts) if texts else ""
 
         if "name" in message and isinstance(message["name"], str):
             result_msg["name"] = message["name"]
