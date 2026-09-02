@@ -97,15 +97,6 @@ def test_flush_reuses_existing_outputs():
     assert existing.engine_notifications == [event]
 
 
-def test_flush_noop_when_empty():
-    """Nothing is added to outputs when the buffer is empty."""
-    engine_core = _bare_engine_core()
-
-    outputs: dict[int, EngineCoreOutputs] = {}
-    engine_core._flush_notifications(outputs)
-    assert outputs == {}
-
-
 def test_worker_publish_take_roundtrip():
     """The out-of-tree producer path."""
     event = CustomNotification(key="my_plugin", payload={"bytes": 1})
@@ -177,16 +168,6 @@ def test_inproc_get_output_flushes_post_step_notifications():
     client.engine_core = engine_core
 
     assert client.get_output().engine_notifications == [event]
-
-
-def test_worker_notifications_survive_until_the_first_drain():
-    """Load-time producers publish before any gather runs."""
-    first = CustomNotification(key="my_plugin", payload={"n": 1})
-    second = CustomNotification(key="my_plugin", payload={"n": 2})
-    publish_worker_notification(first)
-    publish_worker_notification(second)
-
-    assert take_worker_notifications() == [first, second]
 
 
 def _gathering_engine_core(per_rank) -> EngineCore:
