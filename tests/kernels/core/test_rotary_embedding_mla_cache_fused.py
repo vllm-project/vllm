@@ -221,6 +221,6 @@ def test_concat_and_cache_mla_rope_fused(
         ref_q_pe,
         atol=0.04
         if rocm_bf16
-        else (2e-3 if rocm_neox_fp16 else get_default_atol(query)),
+        else (1.2e-3 if rocm_neox_fp16 else get_default_atol(query)),
         rtol=get_default_rtol(query),
     )
