@@ -32,9 +32,9 @@ class FusedMoERouter(ABC):
         raise NotImplementedError
 
     @property
-    def original_routing_method_type(self) -> RoutingMethodType:
+    def original_routing_method_type(self) -> RoutingMethodType | None:
         """Routing method before any routing simulation override."""
-        return self.routing_method_type
+        return None
 
     @abstractmethod
     def _select_experts(
