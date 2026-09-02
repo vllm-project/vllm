@@ -105,9 +105,7 @@ steps:
       - ".dockerignore"
       - "rust/Cargo.lock"
       - "rust/Cargo.toml"
-      - "rust/src/engine-core-client/"
-      - "rust/src/metrics/"
-      - "rust/src/mock-engine/"
+      - "rust/"
       - "rust-toolchain.toml"
     commands:
       - docker build --file rust/src/mock-engine/Dockerfile .
