@@ -59,19 +59,34 @@ class BatchDescriptor:
 
 
 def _compute_sp_num_tokens(
-    num_tokens_across_dp_cpu: torch.Tensor, sequence_parallel_size: int
+    num_tokens_across_dp_cpu: torch.Tensor,
+    sequence_parallel_size: int,
+    num_replicas_per_token_count: int | None = None,
 ) -> list[int]:
+    """Expand token counts into EP-dispatcher order.
+
+    Sequence parallelism first shards each token count across TP. Remaining
+    dispatcher axes replicate that resulting local count.
+    """
+    if num_replicas_per_token_count is None:
+        num_replicas_per_token_count = sequence_parallel_size
+    assert num_replicas_per_token_count >= sequence_parallel_size
+
     sp_tokens = (
         num_tokens_across_dp_cpu + sequence_parallel_size - 1
     ) // sequence_parallel_size
 
-    sp_tokens = sp_tokens.repeat_interleave(sequence_parallel_size)
+    sp_tokens = sp_tokens.repeat_interleave(num_replicas_per_token_count)
     return sp_tokens.tolist()
 
 
 @dataclass
 class DPMetadata:
     num_tokens_across_dp_cpu: torch.Tensor
+    # Token counts indexed by rank_in_group of get_moe_non_sp_group().
+    # Each entry is local to one PCP coordinate before TP sequence-parallel
+    # sharding.
+    moe_non_sp_token_counts_cpu: torch.Tensor | None = None
 
     # NOTE: local_sizes should only be set by the chunked_sizes context manager
     local_sizes: list[int] | None = None
@@ -81,6 +96,7 @@ class DPMetadata:
         parallel_config: ParallelConfig,
         num_tokens: int,
         num_tokens_across_dp_cpu: torch.Tensor,
+        moe_non_sp_token_counts_cpu: torch.Tensor | None = None,
     ) -> "DPMetadata":
         assert num_tokens_across_dp_cpu is not None
         assert (
@@ -96,16 +112,50 @@ class DPMetadata:
         assert num_tokens_across_dp_cpu[dp_rank] == batchsize, (
             f"{num_tokens_across_dp_cpu[dp_rank]} {batchsize}"
         )
-        return DPMetadata(num_tokens_across_dp_cpu)
+        if (
+            parallel_config.data_parallel_size > 1
+            and parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.enable_expert_parallel
+        ):
+            assert moe_non_sp_token_counts_cpu is not None, (
+                "MoE non-SP token counts must be supplied by batch coordination"
+            )
+
+        return DPMetadata(
+            num_tokens_across_dp_cpu,
+            moe_non_sp_token_counts_cpu,
+        )
 
     @contextmanager
-    def sp_local_sizes(self, sequence_parallel_size: int):
+    def sp_local_sizes(
+        self,
+        sequence_parallel_size: int,
+        num_dispatchers_per_dp_rank: int | None = None,
+    ):
         """
         Context manager for setting self.local_sizes. Same as self.chunked_sizes
         but without any chunking.
         """
+        token_counts = self.num_tokens_across_dp_cpu
+        count_groups_per_dp_rank = 1
+        if self.moe_non_sp_token_counts_cpu is not None:
+            token_counts = self.moe_non_sp_token_counts_cpu
+            count_groups_per_dp_rank = (
+                token_counts.numel() // self.num_tokens_across_dp_cpu.numel()
+            )
+
+        if num_dispatchers_per_dp_rank is None:
+            num_dispatchers_per_dp_rank = (
+                sequence_parallel_size * count_groups_per_dp_rank
+            )
+        assert num_dispatchers_per_dp_rank % count_groups_per_dp_rank == 0
+        num_replicas_per_token_count = (
+            num_dispatchers_per_dp_rank // count_groups_per_dp_rank
+        )
         self.local_sizes = _compute_sp_num_tokens(
-            self.num_tokens_across_dp_cpu, sequence_parallel_size
+            token_counts,
+            sequence_parallel_size,
+            num_replicas_per_token_count,
         )
         try:
             yield self.local_sizes
@@ -262,6 +312,7 @@ def set_forward_context(
     vllm_config: VllmConfig,
     num_tokens: int | None = None,
     num_tokens_across_dp: torch.Tensor | None = None,
+    moe_non_sp_token_counts: torch.Tensor | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
@@ -296,7 +347,12 @@ def set_forward_context(
         ):
             assert ubatch_slices is None
             assert num_tokens is not None
-            _, num_tokens_across_dp, _ = coordinate_batch_across_dp(
+            (
+                _,
+                num_tokens_across_dp,
+                moe_non_sp_token_counts,
+                _,
+            ) = coordinate_batch_across_dp(
                 num_tokens_unpadded=num_tokens,
                 parallel_config=vllm_config.parallel_config,
                 allow_microbatching=False,
@@ -306,7 +362,10 @@ def set_forward_context(
             assert num_tokens is not None
             num_tokens_across_dp = torch.tensor([num_tokens], dtype=torch.int32)
         dp_metadata = DPMetadata.make(
-            vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
+            vllm_config.parallel_config,
+            num_tokens or 0,
+            num_tokens_across_dp,
+            moe_non_sp_token_counts,
         )
 
     # Convenience: if cudagraph is used and num_tokens is given, we can just

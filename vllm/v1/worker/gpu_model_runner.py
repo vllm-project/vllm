@@ -4054,6 +4054,7 @@ class GPUModelRunner(
         BatchDescriptor,
         bool,
         torch.Tensor | None,
+        torch.Tensor | None,
         CUDAGraphStat | None,
     ]:
         uniform_decode = self._is_uniform_decode(
@@ -4105,17 +4106,22 @@ class GPUModelRunner(
 
         # Extra coordination when running data-parallel since we need to coordinate
         # across ranks
-        should_ubatch, num_tokens_across_dp = False, None
+        should_ubatch = False
+        num_tokens_across_dp = None
+        moe_non_sp_token_counts = None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
-                coordinate_batch_across_dp(
-                    num_tokens_unpadded=num_tokens,
-                    parallel_config=self.parallel_config,
-                    allow_microbatching=allow_microbatching,
-                    num_tokens_padded=num_tokens_padded,
-                    uniform_decode=uniform_decode,
-                    cudagraph_mode=cudagraph_mode.value,
-                )
+            (
+                should_ubatch,
+                num_tokens_across_dp,
+                moe_non_sp_token_counts,
+                synced_cudagraph_mode,
+            ) = coordinate_batch_across_dp(
+                num_tokens_unpadded=num_tokens,
+                parallel_config=self.parallel_config,
+                allow_microbatching=allow_microbatching,
+                num_tokens_padded=num_tokens_padded,
+                uniform_decode=uniform_decode,
+                cudagraph_mode=cudagraph_mode.value,
             )
 
             # Extract DP-synced values
@@ -4145,6 +4151,7 @@ class GPUModelRunner(
             batch_descriptor,
             should_ubatch,
             num_tokens_across_dp,
+            moe_non_sp_token_counts,
             cudagraph_stats,
         )
 
@@ -4368,6 +4375,7 @@ class GPUModelRunner(
                 batch_desc,
                 should_ubatch,
                 num_tokens_across_dp,
+                moe_non_sp_token_counts,
                 cudagraph_stats,
             ) = self._determine_batch_execution_and_padding(
                 num_tokens=num_tokens_unpadded,
@@ -4532,6 +4540,7 @@ class GPUModelRunner(
                 self.vllm_config,
                 num_tokens=num_tokens_padded,
                 num_tokens_across_dp=num_tokens_across_dp,
+                moe_non_sp_token_counts=moe_non_sp_token_counts,
                 cudagraph_runtime_mode=cudagraph_mode,
                 batch_descriptor=batch_desc,
                 ubatch_slices=ubatch_slices_padded,
@@ -6022,29 +6031,33 @@ class GPUModelRunner(
 
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
-        _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = (
-            self._determine_batch_execution_and_padding(
-                num_tokens=num_tokens_unpadded,
-                num_reqs=num_reqs,
-                num_scheduled_tokens_np=num_scheduled_tokens,
-                max_num_scheduled_tokens=max_query_len,
-                use_cascade_attn=False,
-                allow_microbatching=allow_microbatching,
-                force_eager=is_profile
-                or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
-                # `force_uniform_decode` is used for cudagraph capture; because for
-                # capturing mixed prefill-decode batches, we sometimes use
-                # num_tokens == num_reqs which looks like a uniform decode batch to the
-                # dispatcher; but we actually want to capture a piecewise cudagraph
-                force_uniform_decode=uniform_decode,
-                # `force_has_lora` is used for cudagraph capture; because LoRA is
-                # activated later in the context manager, but we need to know the
-                # LoRA state when determining the batch descriptor for capture
-                force_has_lora=num_active_loras > 0,
-                # `force_num_active_loras` is used for cudagraph capture; because we
-                # need to capture graphs for specific num_active_loras counts
-                force_num_active_loras=num_active_loras,
-            )
+        (
+            _cudagraph_mode,
+            batch_desc,
+            should_ubatch,
+            num_tokens_across_dp,
+            moe_non_sp_token_counts,
+            _,
+        ) = self._determine_batch_execution_and_padding(
+            num_tokens=num_tokens_unpadded,
+            num_reqs=num_reqs,
+            num_scheduled_tokens_np=num_scheduled_tokens,
+            max_num_scheduled_tokens=max_query_len,
+            use_cascade_attn=False,
+            allow_microbatching=allow_microbatching,
+            force_eager=is_profile or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
+            # `force_uniform_decode` is used for cudagraph capture; because for
+            # capturing mixed prefill-decode batches, we sometimes use
+            # num_tokens == num_reqs which looks like a uniform decode batch to the
+            # dispatcher; but we actually want to capture a piecewise cudagraph
+            force_uniform_decode=uniform_decode,
+            # `force_has_lora` is used for cudagraph capture; because LoRA is
+            # activated later in the context manager, but we need to know the
+            # LoRA state when determining the batch descriptor for capture
+            force_has_lora=num_active_loras > 0,
+            # `force_num_active_loras` is used for cudagraph capture; because we
+            # need to capture graphs for specific num_active_loras counts
+            force_num_active_loras=num_active_loras,
         )
 
         if cudagraph_runtime_mode is None:
@@ -6227,6 +6240,8 @@ class GPUModelRunner(
                 num_tokens_padded = ubatch_slices_padded[0].num_tokens
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
+                if moe_non_sp_token_counts is not None:
+                    moe_non_sp_token_counts[:] = num_tokens_padded
 
             with (
                 self.maybe_randomize_inputs(
@@ -6237,6 +6252,7 @@ class GPUModelRunner(
                     self.vllm_config,
                     num_tokens=num_tokens_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
+                    moe_non_sp_token_counts=moe_non_sp_token_counts,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
