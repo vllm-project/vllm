@@ -51,6 +51,7 @@ def _make_block_table(block_counts):
 
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize(
     "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",
     [
@@ -74,6 +75,7 @@ def _make_block_table(block_counts):
     ],
 )
 def test_qsa_fused_pre_indexer_matches_unfused(
+    indexer_dtype,
     mrope,
     is_2d_positions,
     cache_rope_positions,
@@ -215,7 +217,7 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     fused_compressed_storage = torch.zeros(
         num_compressed_blocks,
         compressed_page_elements + 16,
-        dtype=torch.bfloat16,
+        dtype=indexer_dtype,
         device=device,
     )
     fused_compressed = torch.as_strided(
@@ -231,7 +233,7 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     q_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
     k_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
 
-    fused_query = torch.empty(num_tokens, HQ, D, dtype=torch.bfloat16, device=device)
+    fused_query = torch.empty(num_tokens, HQ, D, dtype=indexer_dtype, device=device)
     qsa_pre_indexer(
         projected_qk[:, : HQ * D],
         projected_qk[:, HQ * D :],
@@ -290,8 +292,26 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     if rope_positions is not None:
         qsa_store_cache_rows(rope_positions, raw_slots, position_rows)
 
-    torch.testing.assert_close(fused_query, unfused_query, rtol=RTOL, atol=ATOL)
+    if indexer_dtype == torch.float8_e4m3fn:
+        # Both paths round the same ~bf16 values to e4m3; fused and unfused
+        # bf16 intermediates differ by < RTOL, so allow one e4m3 ulp (2^-3
+        # relative) of disagreement after quantization.
+        unfused_query = unfused_query.to(indexer_dtype)
+        fp8_rtol, fp8_atol = 0.13, 0.06
+        torch.testing.assert_close(
+            fused_query.float(), unfused_query.float(), rtol=fp8_rtol, atol=fp8_atol
+        )
+    else:
+        torch.testing.assert_close(fused_query, unfused_query, rtol=RTOL, atol=ATOL)
     assert torch.equal(fused_raw.view(torch.int16), unfused_raw.view(torch.int16))
-    torch.testing.assert_close(
-        fused_compressed, unfused_compressed, rtol=RTOL, atol=ATOL
-    )
+    if indexer_dtype == torch.float8_e4m3fn:
+        torch.testing.assert_close(
+            fused_compressed.float(),
+            unfused_compressed.float(),
+            rtol=fp8_rtol,
+            atol=fp8_atol,
+        )
+    else:
+        torch.testing.assert_close(
+            fused_compressed, unfused_compressed, rtol=RTOL, atol=ATOL
+        )

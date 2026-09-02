@@ -13,6 +13,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -147,6 +148,31 @@ class QSAIndexer(nn.Module):
 
         cache_config = vllm_config.cache_config
         cache_prefix = f"{prefix}." if prefix else ""
+        # MiniMax-M3-style plain e4m3 indexer cache: values are GemmaRMSNormed
+        # before caching, so no scale column is needed. The compressed cache
+        # and the normed Q share this dtype so the logits kernels dot fp8xfp8
+        # directly (native tcgen05 on SM100; Triton upcasts to fp16 mma.sync
+        # at smaller tile shapes).
+        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+            "bf16"
+        )
+        if self.indexer_kv_dtype in ("fp8", "fp8_e4m3"):
+            # Triton cannot multiply fp8e4nv on SM120/SM121 (see #54846).
+            if not current_platform.has_device_capability(
+                90
+            ) or current_platform.is_device_capability_family(120):
+                raise NotImplementedError(
+                    "Qwen4Exp QSA fp8 indexer requires SM90 or SM100-family"
+                )
+            indexer_dtype = torch.float8_e4m3fn
+        elif self.indexer_kv_dtype == "bf16":
+            indexer_dtype = torch.bfloat16
+        else:
+            raise NotImplementedError(
+                f"indexer_kv_dtype={self.indexer_kv_dtype!r} is not supported "
+                "by the Qwen4Exp QSA indexer (only 'bf16' or 'fp8'/'fp8_e4m3')."
+            )
+        self.indexer_dtype = indexer_dtype
         self.raw_key_cache = QSAKeyStateCache(
             head_size=self.index_head_dim,
             dtype=torch.bfloat16,
@@ -158,7 +184,7 @@ class QSAIndexer(nn.Module):
         )
         self.compressed_key_cache = QSACompressedKeyCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=indexer_dtype,
             compress_ratio=self.compress_ratio,
             prefix=f"{cache_prefix}compressed_key_cache",
             cache_config=cache_config,
@@ -258,6 +284,7 @@ class QSAIndexer(nn.Module):
                 num_tokens,
                 self.index_n_heads,
                 self.index_head_dim,
+                dtype=self.indexer_dtype,
             )
             qsa_pre_indexer(
                 projected_q,
@@ -295,6 +322,7 @@ class QSAIndexer(nn.Module):
                 self.q_layernorm.variance_epsilon,
             ).reshape_as(q)
             q = apply_qsa_rope(self.rotary_emb, positions, q)
+            q = q.to(self.indexer_dtype)
 
             raw_key_cache = raw_key_state_cache.key_cache
             rope_position_cache = raw_key_state_cache.rope_position_cache

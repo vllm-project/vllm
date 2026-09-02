@@ -328,7 +328,9 @@ def warmup_qsa_mqa_paged_decode(
     for decode_query_len, num_requests in profiles:
         num_rows = decode_query_len * num_requests
         q_ptr = TritonWarmupTensor(
-            torch.bfloat16,
+            # The normed indexer Q shares the compressed cache dtype (bf16 or
+            # fp8 e4m3) so the logits kernel dots matching input dtypes.
+            k_cache.dtype,
             shape=(num_rows, num_heads, head_dim),
         )
         logits_ptr = TritonWarmupTensor(
@@ -509,6 +511,7 @@ def qsa_select_paged_decode(
     assert token_topk % compress_ratio == 0
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     assert decode_query_len > 0 and q.shape[0] % decode_query_len == 0
+    assert q.dtype == k_cache.dtype, "Q and the compressed K cache must match"
     num_requests = q.shape[0] // decode_query_len
     assert page_table.shape[0] == num_requests
     assert visible_blocks.shape == (q.shape[0],)
@@ -581,6 +584,7 @@ def qsa_select_paged_prefill(
 
     assert token_topk % compress_ratio == 0
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
+    assert q.dtype == k_cache.dtype, "Q and the compressed K cache must match"
     rows = q.shape[0]
     # No row scores beyond cdiv(max_seq_len, compress_ratio) compressed
     # columns. Round up to 64 to keep the logits row stride
