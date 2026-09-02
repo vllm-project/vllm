@@ -1291,7 +1291,9 @@ def test_an_unclaimed_file_outside_docker_still_fails_open(state):
     this?" guard is trivially true for every path under it. Elsewhere the
     escalation has to stay: other files reach that line with an answer too, and
     letting them defer removes the floor under a run-all only the world rule
-    would then hold up.
+    would then hold up. The build-map branch above the terminal narrows only
+    files the CMake walk actually maps; a .conf the build never reads keeps
+    the full run-all.
     """
     from ci_selector.codemap.classify import _classify
 
@@ -1495,8 +1497,9 @@ def test_undeclared_oddball_still_fails_open(state):
 def test_all_manual_declarers_fall_open(state, declared_deps_on):
     """Direction guard: with no auto-run declarer the rule must not silently
     select nothing. cmake/cpu_extension.cmake is graph-blind and declared only
-    by steps this test strips from `auto_step_ids`, so it reaches the terminal
-    fail-open."""
+    by steps this test strips from `auto_step_ids`, so it falls through — and
+    since the build map scopes it, the fail-open runs its device family
+    instead of everything."""
     import dataclasses
 
     from ci_selector.codemap.classify import _classify, _source_dep_steps
@@ -1506,6 +1509,51 @@ def test_all_manual_declarers_fall_open(state, declared_deps_on):
     assert declarers, "fixture drift: no step declares cmake/cpu_extension.cmake"
     st2 = dataclasses.replace(state, auto_step_ids=state.auto_step_ids - declarers)
     claim = _classify(st2, path, None)
+    assert claim.rule == "fail-open" and not claim.run_all
+    assert "build-map scoped" in claim.detail
+    assert claim.step_ids
+
+
+def test_a_mapped_build_file_fails_open_scoped_not_run_all(state):
+    """The terminal fail-open consults the build map: a {cpu}-mapped cmake
+    file runs its device family (~24 steps, CI's own 21 on PR 50219) instead
+    of everything, and the step_ids claim leaves the coverage stage armed on
+    the rest of the diff, where a run_all claim vetoed every drop PR-wide.
+
+    The no-device steps are deliberately shed — torch-stable-abi-audit
+    included: the audited wheel is CUDA-built and the lane-2 containment
+    measurement endorsed exactly this class (build-map-endorsed misses)."""
+    from ci_selector.codemap.classify import _classify
+
+    audit = "vllm_ci:torch-stable-abi-audit"
+    assert audit in state.auto_step_ids, "fixture drift: the audit step moved"
+    claim = _classify(state, "cmake/cpu_extension.cmake", None)
+    assert claim.rule == "fail-open" and not claim.run_all
+    assert "build-map scoped to ['cpu']" in claim.detail
+    kept = set(claim.step_ids) & state.auto_step_ids
+    assert 0 < len(kept) < 60
+    assert audit not in claim.step_ids
+    assert not claim.droppable_step_ids
+
+
+def test_the_scoped_terminal_stands_down_with_the_build_map_off(state, monkeypatch):
+    """The knob disarms the scoping, never the selection: off means back to
+    running everything, the wider answer."""
+    from ci_selector.codemap import build_map
+    from ci_selector.codemap.classify import _classify
+
+    monkeypatch.setenv(build_map.ENV_VAR, "off")
+    claim = _classify(state, "cmake/cpu_extension.cmake", None)
+    assert claim.rule == "fail-open" and claim.run_all
+
+
+def test_an_empty_scoped_complement_falls_back_to_run_all(state, monkeypatch):
+    """Nothing structurally forbids a family with zero live steps; the guard
+    must refuse to convert run-everything into run-nothing."""
+    from ci_selector.codemap import classify as cl
+
+    monkeypatch.setattr(cl, "_build_map_allowed", lambda s, f: set())
+    claim = cl._classify(state, "cmake/cpu_extension.cmake", None)
     assert claim.rule == "fail-open" and claim.run_all
 
 

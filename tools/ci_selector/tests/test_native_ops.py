@@ -10,6 +10,7 @@ floors against the live tree, then the pass and its switch through select().
 import textwrap
 
 import pytest
+import regex as re
 from ci_selector.codemap.classify import select
 from ci_selector.codemap.native_ops import ENV_VAR, NativeOps, mode
 from ci_selector.codemap.step_refs import _source_dep_steps
@@ -135,6 +136,96 @@ def test_a_header_inherits_its_including_tus_ops(tmp_path):
     assert no.file_ops.get("csrc/shapes.h") == frozenset({"hdr_op"})
 
 
+def test_namespaces_derive_from_cmake_and_join_wrappers(tmp_path):
+    """The full loop: a cmake target names the namespace (on the line after
+    the opener, as every real call site spells it), the csrc file registers
+    the op, and the vllm wrapper joins through the derived namespace."""
+    no = NativeOps.build(
+        _repo(
+            tmp_path,
+            {
+                "CMakeLists.txt": """
+            define_extension_target(
+              _demo_C
+              DESTINATION vllm
+              LANGUAGE CXX)
+        """,
+                "csrc/bindings.cpp": """
+            void impl_fn(int x) { return; }
+            ops.def("demo_op(Tensor a) -> ()");
+            ops.impl("demo_op", &impl_fn);
+        """,
+                "vllm/_ops.py": """
+            import torch
+
+            def demo_op(a):
+                return torch.ops._demo_C.demo_op(a)
+        """,
+            },
+        )
+    )
+    assert "_demo_C" in no.namespaces
+    assert no.wrappers.get("demo_op") == frozenset({("vllm/_ops.py", "demo_op")})
+
+
+def test_commented_build_files_mint_no_namespace(tmp_path):
+    """A commented-out target or registration must not widen the set: a
+    foreign name that vllm/ happens to reference would join a wrong
+    wrapper."""
+    no = NativeOps.build(
+        _repo(
+            tmp_path,
+            {
+                "CMakeLists.txt": """
+            # define_extension_target(_ghost_C DESTINATION vllm)
+            define_extension_target(
+              _real_C
+              DESTINATION vllm)
+        """,
+                "csrc/bindings.cpp": """
+            // TORCH_LIBRARY(_ghost2_C, m) {}
+            STABLE_TORCH_LIBRARY(_lit_C, m) { }
+            void f(int x) { return; }
+            ops.def("an_op(Tensor a) -> ()");
+            ops.impl("an_op", &f);
+        """,
+            },
+        )
+    )
+    assert "_ghost_C" not in no.namespaces
+    assert "_ghost2_C" not in no.namespaces
+    assert {"_real_C", "_lit_C"} <= no.namespaces
+
+
+def test_macro_placeholders_are_not_namespaces(tmp_path):
+    """registration.h's own macro definitions pass NAME/TORCH_EXTENSION_NAME/
+    CONCAT through the registration regexes; none is a namespace."""
+    no = NativeOps.build(
+        _repo(
+            tmp_path,
+            {
+                "csrc/registration.h": """
+            #define TORCH_LIBRARY_EXPAND(NAME, MODULE) TORCH_LIBRARY(NAME, MODULE)
+            #define REGISTER_EXTENSION(NAME) PyMODINIT_FUNC CONCAT(PyInit_, NAME)()
+        """,
+                "csrc/bindings.cpp": """
+            TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _sub), ops) { }
+            void f(int x) { return; }
+            ops.def("an_op(Tensor a) -> ()");
+            ops.impl("an_op", &f);
+        """,
+                "CMakeLists.txt": """
+            define_extension_target(
+              _base_C
+              DESTINATION vllm)
+        """,
+            },
+        )
+    )
+    assert not no.namespaces & {"NAME", "TORCH_EXTENSION_NAME", "CONCAT"}
+    assert "_base_C_sub" in no.namespaces  # CONCAT suffix expands over targets
+
+
 def test_no_csrc_tree_fails_open(tmp_path):
     no = NativeOps.build(tmp_path)
     assert no.file_ops == {}
@@ -181,10 +272,82 @@ def test_the_registration_parse_still_finds_the_ops(live_ops):
     )
     wrapped = sum(1 for op in live_ops.wrappers if live_ops.wrappers[op])
     assert wrapped >= 150, drift_message(
-        f"only {wrapped} ops reach a Python wrapper (floor 150)",
+        f"only {wrapped} ops reach a Python wrapper (floor 150; basis 220)",
         "An op with no wrapper blocks its whole file.",
-        "the torch.ops namespace set moved: update NATIVE_NS in "
-        "ci_selector/codemap/native_ops.py",
+        "the wrapper call sites moved, or the namespace derivation "
+        "(_derive_namespaces in ci_selector/codemap/native_ops.py) stopped "
+        "seeing the registering namespaces",
+    )
+
+
+@pytest.mark.drift
+def test_the_namespace_derivation_holds_its_anchors(live_ops):
+    """The four namespaces nothing should ever dislodge, plus a collapse
+    floor: losing the cmake leg alone leaves ~9 csrc literals."""
+    anchor = {"_C", "_moe_C", "_rocm_C", "cumem_allocator"}
+    assert anchor <= live_ops.namespaces, drift_message(
+        f"derived namespaces lost {sorted(anchor - live_ops.namespaces)}",
+        "Wrappers in a lost namespace stop joining, so their files silently "
+        "become permanently non-droppable.",
+        "define_extension_target or the registration macros moved: update "
+        "_derive_namespaces in ci_selector/codemap/native_ops.py",
+    )
+    assert len(live_ops.namespaces) >= 12, drift_message(
+        f"only {len(live_ops.namespaces)} namespaces derived (floor 12, basis 29)",
+        "A collapsed set means a whole build-file leg stopped parsing.",
+        "check the cmake/csrc legs of _derive_namespaces in native_ops.py",
+    )
+
+
+# Namespaces vllm/ references that nothing in-tree defines. Three kinds:
+# upstream torch, third-party packages, and vLLM-ecosystem extensions built
+# outside this repo (vllm-xpu-kernels; the vendored vllm-flash-attn
+# subproject's install components). The derivation can never produce these,
+# and the detector below fires when a NEW namespace appears in neither set.
+_EXTERNAL_NS = {
+    "aten",
+    "symm_mem",
+    "higher_order",
+    "zentorch",
+    "aiter",
+    "oink",
+    "fbgemm",
+    "_xpu_C",
+    "_vllm_fa2_C",
+    "_vllm_fa3_C",
+}
+_PY_LIB = re.compile(r'\bLibrary\(\s*"(\w+)"')
+_NS_REF = re.compile(r"\btorch\s*\.\s*ops\s*\.\s*(\w+)\s*\.")
+
+
+@pytest.mark.drift
+def test_every_torch_ops_namespace_is_accounted_for(vllm_repo, live_ops):
+    """The per-namespace detector the wrapped>=150 mass floor cannot be: one
+    new unaccounted namespace means its kernels never join and their files
+    are silently never droppable, which the mass floor cannot see."""
+    referenced: set[str] = set()
+    py_libs: set[str] = set()
+    for p in (vllm_repo / "vllm").rglob("*.py"):
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            continue
+        referenced.update(_NS_REF.findall(text))
+        py_libs.update(_PY_LIB.findall(text))
+    assert len(referenced) >= 15, drift_message(
+        f"the vllm/ sweep found only {len(referenced)} torch.ops namespaces "
+        "(floor 15, basis 19)",
+        "An empty enumeration would make this detector read clean forever.",
+        "the torch.ops call shape moved: fix _NS_REF in this test",
+    )
+    unaccounted = referenced - live_ops.namespaces - py_libs - _EXTERNAL_NS
+    assert not unaccounted, drift_message(
+        f"torch.ops namespaces nothing accounts for: {sorted(unaccounted)}",
+        "If it is a new in-tree extension its ops will never join a wrapper "
+        "and its files are silently never droppable; if it is external, "
+        "selection is fine but this detector is now blind to the next one.",
+        "in-tree: check _derive_namespaces sees its build files; external: "
+        "add it to _EXTERNAL_NS here with its origin",
     )
 
 
@@ -262,11 +425,18 @@ def test_direct_caller_test_steps_stay_non_droppable(state):
 
 def test_the_switch_off_disarms_both_routing_and_droppability(state, monkeypatch):
     """Off means the op parse is not trusted: nothing becomes droppable and
-    the routing rule declines, so the answer can only get wider."""
+    the routing rule declines. The fallback is the build-map-scoped fail-open
+    — family evidence from the cmake guards, independent of the parse the
+    switch just disarmed — so the off answer is no longer a superset: it
+    keeps the file's device families and sheds the cross-family steps the
+    op-name join over-reaches into (contract re-cut 2026-09-02, see knobs)."""
     on = select(state, [NVFP4])
     monkeypatch.setenv(ENV_VAR, "off")
     off = select(state, [NVFP4])
-    assert set(on.selected) <= set(off.selected) or off.run_all
+    assert off.selected and not off.run_all
+    assert any(
+        c.rule == "fail-open" and "build-map scoped" in c.detail for c in off.claims
+    )
     assert not any(c.droppable_step_ids for c in off.claims)
     assert any(c.droppable_step_ids for c in on.claims)
 

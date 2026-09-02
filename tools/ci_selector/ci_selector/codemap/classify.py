@@ -14,7 +14,8 @@ claims, then per file the first matching claim wins:
   a closure that has gone hub-like)
   added-file family -> renamed-or-copied -> rust -> requirements-file ->
   release-ci -> exclusive-family scoped fail-open -> target-coverage ->
-  package-data -> native-tests -> declared-deps -> terminal fail-open run-all.
+  package-data -> native-tests -> declared-deps -> docker image-union
+  deferral -> build-map-scoped fail-open -> terminal fail-open run-all.
 
 Then `unions.py` adds what every path owes, then preflight escalations.
 
@@ -896,6 +897,32 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
             f"{path} is unclaimed by any rule, but the build DAG knows which "
             "images it is copied into; deferring to the image-input union",
         )
+    # An unclaimed file the build map has families for cannot break a family
+    # it never compiles into, so the complement is scoped the way the
+    # exclusive-family branch scopes it. This drops the no-device steps
+    # (torch-stable-abi-audit included) for cpu/amd-only files — the lane-2
+    # containment measurement endorsed exactly that class. A step_ids claim
+    # here also lets the coverage stage work on the rest of the diff, where
+    # the old run_all vetoed every drop PR-wide.
+    fams = state.build_map.families.get(path)
+    if fams and not state.preflight.unmapped_devices and build_map.mode() == "on":
+        direct = {
+            sid
+            for p in state.pipelines
+            for sid, st in p.targets.items()
+            if _directly_collects(st, path)
+        }
+        step_ids = (
+            {s.step_id for p in state.pipelines for s in p.steps}
+            & _build_map_allowed(state, fams)
+        ) | direct
+        if step_ids:
+            return Claim(
+                "fail-open",
+                f"{path} is unclaimed by any rule; running the device "
+                f"families that compile it (build-map scoped to {sorted(fams)})",
+                step_ids=step_ids,
+            )
     src = state.docker_inputs.get(path)
     detail = (
         f"{path} is a docker-image build input ({src} COPY); the CI image is "

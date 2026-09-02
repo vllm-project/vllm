@@ -34,25 +34,20 @@ _IMPL = re.compile(r'\b\w+\.impl\(\s*"(\w+)(?:\.\w+)?"\s*,(?:[^&;]*)&(\w+)')
 _DEF_FN = re.compile(r'\b\w+\.def\(\s*"(\w+)"\s*,\s*(?:[^&;]*)&(\w+)')
 _TORCH_OPS = re.compile(r"\btorch\s*\.\s*ops\s*\.\s*(\w+)\s*\.\s*(\w+)")
 
-# Our own extension modules. A torch.ops chain landing anywhere else is
-# upstream torch, not a wrapper.
-NATIVE_NS = frozenset(
-    {
-        "_C",
-        "_C_stable_libtorch",
-        "_moe_C_stable_libtorch",
-        "_moe_C",
-        "_rocm_C",
-        "_C_cache_ops",
-        "_C_custom_ar",
-        "_C_cuda_utils",
-        "cumem_allocator",
-        "fs_io_C",
-        "spinloop",
-        "_C_AVX512",
-        "_C_AVX2",
-    }
+# Our own extension namespaces, derived from the build files (see
+# _derive_namespaces). A torch.ops chain landing anywhere else is upstream
+# torch, not a wrapper.
+_CMAKE_COMMENT = re.compile(r"#[^\n]*")
+_EXT_TARGET = re.compile(r"\bdefine_extension_target\s*\(\s*(\w+)")
+_EXT_NAME_DEF = re.compile(r"-DTORCH_EXTENSION_NAME=(\w+)")
+_LIB_REG = re.compile(
+    r"\b(?:STABLE_)?TORCH_LIBRARY(?:_FRAGMENT|_IMPL)?(?:_EXPAND)?\s*\(\s*(\w+)"
 )
+_REG_EXT = re.compile(r"\bREGISTER_EXTENSION\s*\(\s*(\w+)\s*\)")
+_NS_CONCAT = re.compile(r"\bCONCAT\s*\(\s*TORCH_EXTENSION_NAME\s*,\s*(\w+)\s*\)")
+# Macro-parameter placeholders the csrc regexes see in registration.h's own
+# definitions; TORCH_EXTENSION_NAME itself resolves through the cmake legs.
+_NS_PLACEHOLDERS = frozenset({"NAME", "TORCH_EXTENSION_NAME", "CONCAT"})
 
 
 def mode() -> str:
@@ -90,6 +85,8 @@ class NativeOps:
     wrappers: dict[str, frozenset[tuple[str, str]]] = field(default_factory=dict)
     # op -> test files whose text names it
     op_test_files: dict[str, frozenset[str]] = field(default_factory=dict)
+    # our extension namespaces, derived from cmake targets + csrc registrations
+    namespaces: frozenset[str] = frozenset()
     op_count: int = 0
     error: str | None = None
 
@@ -210,17 +207,54 @@ class NativeOps:
             if fams:
                 file_ops[h] = fams
 
-        wrappers = cls._wrapper_join(repo, ops)
+        namespaces = cls._derive_namespaces(repo, texts)
+        wrappers = cls._wrapper_join(repo, ops, namespaces)
         op_tests = cls._test_refs(repo, ops, test_catalog)
         return cls(
             file_ops={p: frozenset(o) for p, o in file_ops.items() if o},
             wrappers=wrappers,
             op_test_files=op_tests,
+            namespaces=namespaces,
             op_count=len(ops),
         )
 
     @staticmethod
-    def _wrapper_join(repo: Path, ops: set[str]) -> dict:
+    def _derive_namespaces(repo: Path, texts: dict[str, str]) -> frozenset[str]:
+        """Every namespace our extensions register under, from the build files.
+
+        New kernels land as new cmake files (flashkda, qutlass), so a hand
+        list here goes stale on the normal contribution pattern. Neither
+        source alone is complete: cmake names the extension targets (and so
+        every TORCH_EXTENSION_NAME value), csrc holds the literal
+        (STABLE_)TORCH_LIBRARY sub-namespaces. `texts` must already be
+        comment-stripped; cmake comments are #-style and stripped here. The
+        CONCAT products over all targets are mostly phantoms, which is safe:
+        a namespace only matters when vllm/ actually names it in a torch.ops
+        chain, and the join still requires the op be csrc-minted."""
+        targets: set[str] = set()
+        cmake_files = [repo / "CMakeLists.txt"]
+        cmake_dir = repo / "cmake"
+        if cmake_dir.is_dir():
+            cmake_files += sorted(cmake_dir.rglob("*.cmake"))
+        for cm in cmake_files:
+            try:
+                text = _CMAKE_COMMENT.sub("", cm.read_text(errors="replace"))
+            except OSError:
+                continue
+            targets.update(_EXT_TARGET.findall(text))
+            targets.update(_EXT_NAME_DEF.findall(text))
+        literals: set[str] = set()
+        suffixes: set[str] = set()
+        for text in texts.values():
+            literals.update(_LIB_REG.findall(text))
+            literals.update(_REG_EXT.findall(text))
+            suffixes.update(_NS_CONCAT.findall(text))
+        literals -= _NS_PLACEHOLDERS
+        expanded = {t + s for t in targets for s in suffixes}
+        return frozenset(targets | literals | expanded)
+
+    @staticmethod
+    def _wrapper_join(repo: Path, ops: set[str], namespaces: frozenset[str]) -> dict:
         """op -> {(vllm file, qualname)} for functions calling that op.
         Qualnames are spelled the way the recorder spells them."""
         import ast
@@ -232,7 +266,7 @@ class NativeOps:
                     q = f"{qual}{sep}{child.name}" if qual else child.name
                     seg = ast.get_source_segment(text, child) or ""
                     for ns, op in _TORCH_OPS.findall(seg):
-                        if ns in NATIVE_NS and op in ops:
+                        if ns in namespaces and op in ops:
                             out.setdefault(op, set()).add((rel, q))
                     walk(child, q, True, text, rel, out)
                 elif isinstance(child, ast.ClassDef):
