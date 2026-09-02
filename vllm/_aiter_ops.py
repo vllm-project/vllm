@@ -4,6 +4,7 @@ import ctypes
 import functools
 import os
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 from torch._ops import OpOverload
@@ -17,6 +18,9 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
 )
+
+if TYPE_CHECKING:
+    from aiter import ActivationType, QuantType
 
 logger = init_logger(__name__)
 
@@ -1790,7 +1794,7 @@ class rocm_aiter_ops:
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
     @staticmethod
-    def get_aiter_activation_type(activation_str: str):
+    def get_aiter_activation_type(activation_str: str) -> "ActivationType | None":
         """
         Given an activation type as a string, returns the corresponding aiter ActivationType enum.
         Supported activation types: "no", "none", "silu", "gelu", "swiglu".
@@ -1823,7 +1827,7 @@ class rocm_aiter_ops:
         return mapping.get(name)
 
     @staticmethod
-    def get_aiter_quant_type(quant_type_str: str):
+    def get_aiter_quant_type(quant_type_str: str) -> "QuantType | None":
         """
         Given a quantization type as a string, returns the corresponding aiter QuantType enum.
         Supported quantization types: "no", "per_tensor", "per_token", "per_1x32", "per_1x128", "per_128x128".
