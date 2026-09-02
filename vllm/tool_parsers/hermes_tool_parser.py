@@ -25,7 +25,12 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import is_complete_json, partial_tag_overlap
+from vllm.tool_parsers.utils import (
+    decode_json_string_prefix,
+    dump_tool_arguments,
+    is_complete_json,
+    partial_tag_overlap,
+)
 from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
@@ -98,9 +103,7 @@ class Hermes2ProToolParser(ToolParser):
                         function=FunctionCall(
                             name=function_call["name"],
                             # function call args are JSON but as a string
-                            arguments=json.dumps(
-                                function_call["arguments"], ensure_ascii=False
-                            ),
+                            arguments=dump_tool_arguments(function_call["arguments"]),
                         ),
                     )
                     for function_call in raw_function_calls
@@ -178,6 +181,10 @@ class Hermes2ProToolParser(ToolParser):
         Given {"name": "f", "arguments": {"x": 1}}, returns '{"x": 1}'.
         When is_complete, strips the trailing '}' that closes the outer
         object (not the arguments). For partial JSON, returns as-is.
+
+        When the model serialized `arguments` into a JSON string instead of
+        emitting an object, the slice is a string literal; it gets decoded so
+        the client is not sent double-encoded JSON.
         """
         match = re.search(r'"arguments"\s*:\s*', tc_json)
         if not match:
@@ -187,6 +194,17 @@ class Hermes2ProToolParser(ToolParser):
             raw = raw.rstrip()
             if raw.endswith("}"):
                 raw = raw[:-1].rstrip()
+        if raw.startswith('"'):
+            decoded = decode_json_string_prefix(raw)
+            if decoded is None or not decoded.lstrip():
+                # Too early to tell whether this string holds serialized
+                # arguments. Send nothing rather than a prefix that would have
+                # to be retracted once it becomes clear.
+                return None
+            # Only unwrap serialized structured arguments. A bare string stays
+            # as the literal, which is already the valid JSON encoding of it.
+            if decoded.lstrip()[0] in "{[":
+                return decoded
         return raw
 
     def _compute_args_diff(
