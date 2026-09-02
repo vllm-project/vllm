@@ -81,11 +81,7 @@ class DummyModelLoader(BaseModelLoader):
 
             yield (
                 name,
-                torch.empty(
-                    info["shape"],
-                    dtype=_SAFETENSORS_TO_TORCH_DTYPE[dtype],
-                    device="meta",
-                ),
+                torch.empty(info["shape"], dtype=_SAFETENSORS_TO_TORCH_DTYPE[dtype]),
             )
 
     def get_all_weights(
