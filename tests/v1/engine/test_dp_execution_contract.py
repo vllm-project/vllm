@@ -129,3 +129,19 @@ def test_scheduler_output_receives_engine_owned_contract_epoch() -> None:
 
     assert output.dp_execution_contract_refresh
     assert output.dp_execution_contract_epoch == 23
+
+
+def test_async_worker_launch_receives_current_contract_epoch() -> None:
+    core = _make_async_batch_queue_core()
+    core.cached_dp_execution_contract_enabled = True
+    core._dp_execution_contract_refresh = False
+    core._dp_execution_contract_epoch = 23
+    scheduler_output = SchedulerOutput.make_empty()
+    core.scheduler.has_requests.side_effect = [True, True, False]
+    core.scheduler.schedule.return_value = scheduler_output
+
+    _, worker_call_issued = core._process_engine_step()
+
+    assert worker_call_issued
+    assert scheduler_output.dp_execution_contract_epoch == 23
+    assert not scheduler_output.dp_execution_contract_refresh

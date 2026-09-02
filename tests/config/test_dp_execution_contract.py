@@ -150,9 +150,13 @@ def test_cached_contract_requires_positive_stability_steps():
         VllmConfig._verify_dp_execution_contract(config)
 
 
-def test_cached_contract_accepts_scheduler_owned_epoch_config():
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_cached_contract_accepts_scheduler_owned_epoch_config(
+    async_scheduling: bool,
+):
     config = _config()
     _enable_cached_contract(config)
     config.scheduler_config.prefill_schedule_interval = 32
+    config.scheduler_config.async_scheduling = async_scheduling
 
     VllmConfig._verify_dp_execution_contract(config)
