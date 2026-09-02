@@ -12,7 +12,7 @@ Supports:
 
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypedDict
 
 import torch
 import torch.nn as nn
@@ -120,6 +120,11 @@ class HCXVisionV2VideoEmbeddingInputs(TensorSchema):
 
 
 HCXVisionV2VideoInputs = HCXVisionV2VideoPixelInputs | HCXVisionV2VideoEmbeddingInputs
+
+
+class HCXVisionV2MultiModalInputs(TypedDict, total=False):
+    image: HCXVisionV2ImageInputs | None
+    video: HCXVisionV2VideoInputs | None
 
 
 class HCXVisionV2ProcessingInfo(BaseProcessingInfo):
@@ -329,6 +334,7 @@ class HCXVisionV2MultiModalProcessor(
                 if grid_thw_elem is not None:
                     # Access .data to get the actual tensor from MultiModalFieldElem
                     grid_thw = grid_thw_elem.data
+                    assert isinstance(grid_thw, torch.Tensor)
                     # Qwen2.5-VL style calculation
                     h, w = grid_thw[1].item(), grid_thw[2].item()
                     num_tokens = (h * w) // (merge_size**2)
@@ -340,6 +346,7 @@ class HCXVisionV2MultiModalProcessor(
                 if grid_thw_elem is not None:
                     # Access .data to get the actual tensor from MultiModalFieldElem
                     grid_thw = grid_thw_elem.data
+                    assert isinstance(grid_thw, torch.Tensor)
                     t, h, w = grid_thw[0].item(), grid_thw[1].item(), grid_thw[2].item()
                     num_tokens = (t * h * w) // (merge_size**2)
                 else:
@@ -606,8 +613,10 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return video_embeds.split(sizes)
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> HCXVisionV2MultiModalInputs:
+        modalities: HCXVisionV2MultiModalInputs = {}
 
         for input_key in kwargs:
             if (
