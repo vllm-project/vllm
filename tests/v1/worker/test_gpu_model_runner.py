@@ -2173,6 +2173,77 @@ class TestReloadDraftWeights:
         assert torch.equal(draft_model.lm_head.weight, head_from_ckpt)
         assert torch.equal(draft_model.proj.weight, draft_proj)
 
+    def test_disk_reload_rebuilds_fused_state_after_finalization(self):
+        """Drafters whose load_weights rebuilds fused buffers mid-lifecycle
+        (dflash/dspark) capture the temporarily meta-derived rotary buffer;
+        the runner must re-run that rebuild after finalize restores the tree.
+        """
+
+        class _Rotary(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.cache = torch.zeros(4)
+
+        class _Inner(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.rotary_emb = _Rotary()
+                self.captured = None
+                self.rebuild_calls = 0
+
+            def _build_fused_kv_buffers(self) -> None:
+                self.rebuild_calls += 1
+                self.captured = self.rotary_emb.cache
+
+            def load_weights(self, weights):
+                self._build_fused_kv_buffers()
+                return set()
+
+        class _Draft(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model = _Inner()
+
+            def load_weights(self, weights):
+                return self.model.load_weights(weights)
+
+        draft_model = _Draft()
+        target_model = Mock()
+        target_model.named_parameters.return_value = []
+        target_model.load_weights.return_value = set()
+        runner = self._make_runner()
+        runner.get_draft_model = Mock(return_value=draft_model)
+        runner.get_model = Mock(return_value=target_model)
+        model_loader = Mock()
+        model_loader.get_all_weights.return_value = iter([])
+        restored = _Rotary()
+
+        def finalize(model, _config):
+            # Emulate the real finalize: the module tree ends up holding a
+            # different, healthy buffer object than the meta one load_weights
+            # saw mid-lifecycle.
+            model.model.rotary_emb = restored
+
+        with (
+            patch.object(
+                gpu_model_runner_module,
+                "get_model_loader",
+                return_value=model_loader,
+            ),
+            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
+            patch.object(
+                gpu_model_runner_module,
+                "finalize_layerwise_reload",
+                side_effect=finalize,
+            ),
+        ):
+            runner.reload_weights()
+
+        # Mid-lifecycle rebuild from load_weights, then the post-finalize
+        # re-run: the cached reference must be the restored tree object.
+        assert draft_model.model.rebuild_calls == 2
+        assert draft_model.model.captured is restored.cache
+
     def test_disk_reload_detaches_repeated_lm_head_aliases(self):
         """MTP shares one target lm_head at draft.lm_head and each shared_head."""
 

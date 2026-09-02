@@ -5718,6 +5718,21 @@ class GPUModelRunner(
             )
             finalize_layerwise_reload(draft_model, draft_model_config)
 
+        # The dflash/dspark drafters rebuild fused buffers (a stacked copy of
+        # layer weights plus a cached rotary embedding reference) at the end of
+        # load_weights. Inside the layerwise lifecycle that rebuild captures
+        # the temporarily meta-derived rotary buffer; finalization then
+        # restores the real buffer on the module tree, leaving the cached
+        # reference on meta. Re-running the drafter's own rebuild after
+        # finalization re-captures the restored objects. No-op elsewhere.
+        rebuild_fused_state = getattr(
+            getattr(draft_model, "model", None) or draft_model,
+            "_build_fused_kv_buffers",
+            None,
+        )
+        if callable(rebuild_fused_state):
+            rebuild_fused_state()
+
     def reload_weights(
         self,
         weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
