@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi-K3 decode GEMM selection for unquantized BF16 on SM103.
+"""Kimi-K3 decode GEMM selection for unquantized BF16 on SM90/SM100/SM103.
 
 Dispatch is purely by local ``(N, K)`` shape and token count ``M`` — the module
 name plays no role. Each measured shape maps to a :class:`ProjectionSpec`
 holding the winning backend per token count. The static part of the decision is
 resolved once per module at install time into a small ``{M: call}`` plan, so the
 per-forward path is a single dict lookup.
+
+The supported capabilities carry separate measured tables:
+:data:`KIMI_K3_PROJECTIONS` was tuned on B300 (SM103),
+:data:`KIMI_K3_PROJECTIONS_SM100` on B200 (SM100), and
+:data:`KIMI_K3_PROJECTIONS_SM90` on H200 (SM90). The per-(shape, M) winners
+genuinely differ between the parts, so the tables must not be merged.
 """
 
 from __future__ import annotations
@@ -187,6 +193,14 @@ KIMI_K3_PROJECTIONS: dict[tuple[int, int], ProjectionSpec] = {
         ),
         name="dense_gate_up_proj",
     ),
+    (7168, 14336): ProjectionSpec(
+        7168,
+        14336,
+        cute_configs=(
+            (1, SkinnyGemmConfig(1, 256, 2, vector_width=4, static_k=14336)),
+            (2, _cute(2, 224, 4, 2)),
+        ),
+    ),
     (20480, 7168): ProjectionSpec(
         20480,
         7168,
@@ -280,6 +294,294 @@ KIMI_K3_PROJECTIONS: dict[tuple[int, int], ProjectionSpec] = {
     # vector_width=2, which measured slower than cuBLAS.
 }
 
+# Keyed by local (N, K), B200 (SM100) entries. Measured on B200 at TP8/TP16
+# shapes over M=1..16 with the same >=5%-over-cuBLAS threshold as the SM103
+# table. Per-(shape, M) entries take the best of the SM103-tuned config and a
+# fresh SM100 measurement: several SM103 configs (7168x8448, 20480x7168,
+# 40960x7168, 10240x7168, 7168x3072 M2, 7168x1536) beat the heuristic config on
+# B200 outright, while a few (6288x7168 M2..4, 3072x7168 M3..5) lose to cuBLAS
+# on B200 and are intentionally not inherited. The 7168x3584 residual configs
+# are intentionally absent: the B200 residual path was not measured.
+KIMI_K3_PROJECTIONS_SM100: dict[tuple[int, int], ProjectionSpec] = {
+    (1536, 128): ProjectionSpec(1536, 128, frozenset({1, 16}), name="f_b_proj"),
+    (3072, 128): ProjectionSpec(3072, 128, frozenset({8}), name="f_b_proj"),
+    # Same mla_g_proj aux-stream/PDL capture caveat as the SM103 entry applies;
+    # only M4/M8 measured a dsv3 win, so this is the narrow set either way.
+    (1536, 7168): ProjectionSpec(
+        1536,
+        7168,
+        frozenset({4, 8}),
+        (
+            (1, _cute(1, 224, 3, 2)),
+            (2, _cute(2, 128, 2, 2)),
+        ),
+        name="shared_gate_up_proj/mla_g_proj",
+    ),
+    (3072, 7168): ProjectionSpec(
+        3072,
+        7168,
+        cute_configs=(
+            (1, _cute(1, 224, 3, 4)),
+            (2, _cute(2, 128, 2, 1)),
+        ),
+        name="shared_gate_up_proj",
+    ),
+    (2112, 7168): ProjectionSpec(
+        2112,
+        7168,
+        frozenset({4, 16}),
+        (
+            (1, _cute(1, 224, 3, 2)),
+            (2, _cute(2, 128, 2, 2)),
+        ),
+        name="fused_qkv_a_proj",
+    ),
+    (2304, 1536): ProjectionSpec(2304, 1536, _M1_TO_16, name="q_b_proj"),
+    (4608, 1536): ProjectionSpec(4608, 1536, frozenset({1, 2, 4}), name="q_b_proj"),
+    # M2..4 of the SM103 configs lose to cuBLAS on B200; only M1 carries over.
+    (6288, 7168): ProjectionSpec(
+        6288,
+        7168,
+        cute_configs=((1, _cute(1, 224, 3, 4)),),
+        name="in_proj_qkvgfab",
+    ),
+    (12448, 7168): ProjectionSpec(
+        12448,
+        7168,
+        cute_configs=(
+            (1, _cute(1, 224, 4, 2)),
+            (2, _cute(2, 64, 4, 2)),
+            (3, _cute(3, 64, 2, 2)),
+            (4, _cute(4, 128, 2, 1)),
+        ),
+        name="in_proj_qkvgfab",
+    ),
+    (7168, 768): ProjectionSpec(7168, 768, frozenset({1}), name="shared_down_proj"),
+    # SM103-tuned config wins on B200 (+25%) where the heuristic config tied.
+    (7168, 1536): ProjectionSpec(
+        7168,
+        1536,
+        cute_configs=((1, _cute(1, 96, 4, 2)),),
+        name="o_proj",
+    ),
+    (7168, 3072): ProjectionSpec(
+        7168,
+        3072,
+        cute_configs=(
+            (1, _cute(1, 96, 2, 4)),
+            (2, _cute(2, 32, 4, 4)),
+        ),
+        name="o_proj",
+    ),
+    (7168, 3584): ProjectionSpec(
+        7168,
+        3584,
+        cute_configs=(
+            (1, _cute(1, 64, 4, 2)),
+            (2, _cute(2, 64, 4, 2)),
+        ),
+        name="routed_expert_up_proj",
+    ),
+    (7168, 8448): ProjectionSpec(
+        7168,
+        8448,
+        cute_configs=(
+            (1, _cute(1, 32, 4, 4)),
+            (2, _cute(2, 96, 4, 1)),
+            (3, _cute(3, 96, 4, 1)),
+        ),
+        name="dense_down_proj",
+    ),
+    (8448, 7168): ProjectionSpec(
+        8448,
+        7168,
+        cute_configs=(
+            (1, _cute(1, 224, 3, 4)),
+            (2, _cute(2, 32, 4, 4)),
+        ),
+        name="dense_gate_up_proj",
+    ),
+    (16896, 7168): ProjectionSpec(
+        16896,
+        7168,
+        cute_configs=((1, _cute(1, 224, 3, 4)),),
+        name="dense_gate_up_proj",
+    ),
+    (20480, 7168): ProjectionSpec(
+        20480,
+        7168,
+        cute_configs=(
+            (1, _cute(1, 224, 4, 2)),
+            (2, _cute(2, 64, 4, 2)),
+            (3, _cute(3, 64, 2, 2)),
+            (4, _cute(4, 64, 4, 1)),
+        ),
+        name="lm_head",
+    ),
+    (40960, 7168): ProjectionSpec(
+        40960,
+        7168,
+        cute_configs=(
+            (1, _cute(1, 128, 4, 2)),
+            (2, _cute(2, 64, 4, 2)),
+            (3, _cute(3, 64, 4, 1)),
+            (4, _cute(4, 64, 4, 1)),
+        ),
+        name="lm_head",
+    ),
+    (10240, 7168): ProjectionSpec(
+        10240,
+        7168,
+        cute_configs=(
+            (1, _cute(1, 224, 4, 2)),
+            (2, _cute(2, 32, 2, 4)),
+            (3, _cute(3, 64, 4, 1)),
+            (4, _cute(4, 64, 4, 1)),
+        ),
+        name="lm_head",
+    ),
+    # Latent-MoE replicated projections. dsv3 measured M2..8 wins on B300 for
+    # 3584x7168 but loses to cuBLAS there on B200; only CuTe wins land here.
+    (3584, 7168): ProjectionSpec(
+        3584,
+        7168,
+        cute_configs=(
+            (1, _cute(1, 224, 2, 4)),
+            (2, _cute(2, 128, 2, 1)),
+            (3, _cute(3, 128, 2, 1)),
+        ),
+        name="routed_expert_down_proj",
+    ),
+    # TP16 shapes, newly measured on B200 (they only appear in TP16 deployments;
+    # on TP8 these table entries simply never match).
+    (768, 7168): ProjectionSpec(
+        768,
+        7168,
+        cute_configs=(
+            (1, _cute(1, 224, 2, 4)),
+            (2, _cute(2, 224, 2, 2)),
+            (3, _cute(3, 224, 2, 2)),
+            (4, _cute(4, 224, 2, 2)),
+        ),
+        name="mla_g_proj/shared_gate_up_proj",
+    ),
+    (1152, 1536): ProjectionSpec(
+        1152,
+        1536,
+        cute_configs=((1, _cute(1, 192, 3, 4)),),
+        name="q_b_proj",
+    ),
+    (3216, 7168): ProjectionSpec(
+        3216,
+        7168,
+        cute_configs=(
+            (1, _cute(1, 224, 3, 4)),
+            (2, _cute(2, 128, 4, 2)),
+        ),
+        name="in_proj_qkvgfab",
+    ),
+    (4224, 7168): ProjectionSpec(
+        4224,
+        7168,
+        cute_configs=(
+            (1, _cute(1, 224, 3, 4)),
+            (2, _cute(2, 128, 2, 1)),
+            (3, _cute(3, 64, 2, 2)),
+        ),
+        name="dense_gate_up_proj",
+    ),
+}
+
+_SM90CuteConfig = tuple[int, int, int, int]
+
+
+def _sm90_spec(
+    n: int,
+    k: int,
+    dsv3_tokens: frozenset[int] = frozenset(),
+    configs: tuple[_SM90CuteConfig, ...] = (),
+) -> ProjectionSpec:
+    cute_configs = tuple(
+        (m, _cute(m, *config)) for m, config in enumerate(configs, start=1)
+    )
+    return ProjectionSpec(n, k, dsv3_tokens, cute_configs)
+
+
+KIMI_K3_PROJECTIONS_SM90: dict[tuple[int, int], ProjectionSpec] = {
+    (1536, 128): _sm90_spec(1536, 128, frozenset(range(1, 9))),
+    (3072, 128): _sm90_spec(3072, 128, frozenset({1, 2, 5, 6, 7, 8, 9})),
+    (1536, 7168): _sm90_spec(
+        1536,
+        7168,
+        frozenset(range(7, 17)),
+        (
+            (224, 2, 4, 8),
+            (128, 3, 2, 8),
+            (128, 2, 1, 8),
+            (128, 2, 1, 8),
+            (128, 3, 1, 8),
+            (128, 3, 1, 8),
+        ),
+    ),
+    (3072, 7168): _sm90_spec(
+        3072,
+        7168,
+        configs=((224, 2, 4, 8), (128, 2, 2, 8), (64, 4, 1, 8), (128, 6, 1, 8)),
+    ),
+    (2112, 7168): _sm90_spec(
+        2112,
+        7168,
+        frozenset(range(5, 17)),
+        ((224, 2, 4, 8), (128, 4, 2, 8), (128, 2, 1, 8), (128, 2, 1, 8)),
+    ),
+    (2304, 1536): _sm90_spec(
+        2304,
+        1536,
+        frozenset(range(3, 9)),
+        ((96, 4, 2, 8), (96, 4, 1, 8)),
+    ),
+    (4608, 1536): _sm90_spec(
+        4608,
+        1536,
+        configs=((96, 4, 2, 4), (96, 4, 1, 8), (64, 4, 1, 8)),
+    ),
+    (3584, 7168): _sm90_spec(
+        3584,
+        7168,
+        configs=((224, 2, 4, 8), (128, 4, 2, 8), (128, 2, 1, 8)),
+    ),
+    (6288, 7168): _sm90_spec(
+        6288,
+        7168,
+        configs=((224, 2, 4, 8), (128, 4, 2, 8), (64, 4, 1, 8)),
+    ),
+    (12448, 7168): _sm90_spec(
+        12448,
+        7168,
+        configs=((224, 2, 4, 8), (224, 4, 2, 8), (128, 2, 1, 8)),
+    ),
+    (7168, 768): _sm90_spec(7168, 768, configs=((96, 4, 2, 4), (96, 4, 1, 8))),
+    (7168, 1536): _sm90_spec(7168, 1536, configs=((96, 4, 2, 8), (96, 4, 1, 8))),
+    (7168, 3072): _sm90_spec(
+        7168,
+        3072,
+        configs=((96, 2, 4, 8), (64, 4, 2, 8), (64, 2, 2, 8)),
+    ),
+    (7168, 3584): _sm90_spec(
+        7168,
+        3584,
+        configs=((224, 4, 2, 8), (64, 4, 2, 8), (64, 4, 2, 8)),
+    ),
+    (7168, 4224): _sm90_spec(7168, 4224, configs=((96, 4, 2, 4), (32, 4, 2, 4))),
+    (7168, 8448): _sm90_spec(7168, 8448, configs=((96, 2, 4, 8), (32, 4, 2, 8))),
+    (7168, 14336): _sm90_spec(7168, 14336, configs=((224, 2, 4, 8), (128, 2, 2, 8))),
+    (20480, 7168): _sm90_spec(
+        20480,
+        7168,
+        configs=((224, 4, 2, 8), (224, 4, 2, 8), (128, 2, 1, 8)),
+    ),
+}
+
 
 def _backend_for(
     spec: ProjectionSpec, num_tokens: int, has_residual: bool
@@ -322,6 +624,17 @@ def _build_residual_plan(spec: ProjectionSpec) -> dict[int, SkinnyGemmConfig]:
 
 def _is_sm103() -> bool:
     return current_platform.is_device_capability((10, 3))
+
+
+def _low_latency_table() -> dict[tuple[int, int], ProjectionSpec] | None:
+    """Measured dispatch table for the current device, or None if unsupported."""
+    if _is_sm103():
+        return KIMI_K3_PROJECTIONS
+    if current_platform.is_device_capability((10, 0)):
+        return KIMI_K3_PROJECTIONS_SM100
+    if current_platform.is_device_capability((9, 0)):
+        return KIMI_K3_PROJECTIONS_SM90
+    return None
 
 
 def _is_packed_row_major(tensor: torch.Tensor) -> bool:
@@ -393,9 +706,12 @@ def try_low_latency_gemm(
     precomputed plan (see :func:`enable_kimi_k3_low_latency_gemm`) and does not
     use this path.
     """
-    if envs.VLLM_BATCH_INVARIANT or not _is_sm103() or not _runtime_ok(x, weight):
+    if envs.VLLM_BATCH_INVARIANT or not _runtime_ok(x, weight):
         return None
-    spec = KIMI_K3_PROJECTIONS.get((weight.shape[0], weight.shape[1]))
+    table = _low_latency_table()
+    if table is None:
+        return None
+    spec = table.get((weight.shape[0], weight.shape[1]))
     if spec is None:
         return None
     if residual is None:
@@ -409,6 +725,7 @@ class _KimiK3LowLatencyApply:
     """Mixin: try the precomputed plan, else defer to the base method."""
 
     def __init__(self, plan: dict[int, ResolvedCall]) -> None:
+        super().__init__()
         self._plan = plan
 
     def apply(
@@ -467,9 +784,14 @@ def enable_kimi_k3_low_latency_gemm(
     """Install shape-selected low-latency GEMMs and register CuTe warmups.
 
     Modules are matched purely by type, an exactly-unquantized method, and a
-    local ``(N, K)`` present in :data:`KIMI_K3_PROJECTIONS`.
+    local ``(N, K)`` present in the current device's measured table
+    (:data:`KIMI_K3_PROJECTIONS` on SM103, :data:`KIMI_K3_PROJECTIONS_SM100`
+    on SM100, :data:`KIMI_K3_PROJECTIONS_SM90` on SM90).
     """
-    if dtype != torch.bfloat16 or not _is_sm103():
+    if dtype != torch.bfloat16:
+        return
+    table = _low_latency_table()
+    if table is None:
         return
 
     warmup_configs: set[SkinnyGemmConfig] = set()
@@ -490,7 +812,7 @@ def enable_kimi_k3_low_latency_gemm(
         weight = getattr(child, "weight", None)
         if weight is None or weight.dim() != 2:
             continue
-        spec = KIMI_K3_PROJECTIONS.get((weight.shape[0], weight.shape[1]))
+        spec = table.get((weight.shape[0], weight.shape[1]))
         if spec is None:
             continue
         if is_linear:
