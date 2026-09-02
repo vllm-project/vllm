@@ -37,6 +37,9 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
+from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
+    qwen4_exp_qsa_triton_warmup,
+)
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
@@ -111,6 +114,12 @@ def _warmup_kimi_k3_gemm_rs_ar() -> None:
         logger.info_once("Warmed up %d Kimi-K3 GEMM-RS/AR variants.", compiled)
 
 
+def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
+    module = sys.modules.get("vllm.models.kimi_k3.nvidia.low_latency_gemm")
+    if module is not None:
+        module.autotune_kda_qkvg(model)
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
@@ -157,6 +166,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
         fa4_cutedsl_warmup(worker)
+        qwen4_exp_qsa_triton_warmup(worker)
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
@@ -339,6 +349,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         ):
             _run_flashinfer_autotune_dummy_runs(runner)
             replayssm_autotune_warmup(runner)
+            _autotune_kimi_k3_kda_qkvg(runner.get_model())
     finally:
         set_autotune_process_group(None)
 
