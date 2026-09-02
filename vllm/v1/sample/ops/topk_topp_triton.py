@@ -107,7 +107,7 @@ def _topk_topp_kernel(
     BLOCK_SIZE_TRUNC: tl.constexpr,
     TOPK_ENABLED: tl.constexpr,
     TOPP_ENABLED: tl.constexpr,
-    STANDALONE_TOPP: tl.constexpr,
+    SPLIT_COVERS_PONLY: tl.constexpr,
 ):
     NUM_TILES: tl.constexpr = (VOCAB_SIZE + BLOCK_SIZE - 1) // BLOCK_SIZE
     pid = tl.program_id(0)
@@ -593,10 +593,18 @@ def _topk_topp_kernel(
                         # Top-k + Top-p path
                         final_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
 
-        if STANDALONE_TOPP and TOPP_ENABLED and final_pivot == -float("inf"):
+        if TOPP_ENABLED and final_pivot == -float("inf"):
             #### STANDALONE TOP-P SAMPLING ####
+            # When the split top-p pipeline co-runs (mixed top-k + top-p
+            # batches), it covers p-only rows (k >= VOCAB_SIZE); skip those
+            # here. Rows whose top-k was a no-op because they have <= k
+            # finite logits (e.g. grammar masks) are NOT covered by the
+            # split pipeline and must get standalone top-p here.
+            run_standalone = True
+            if SPLIT_COVERS_PONLY and TOPK_ENABLED:
+                run_standalone = tl.load(K + row_id) < VOCAB_SIZE
             p = tl.load(P + row_id)
-            if p < 1.0:
+            if run_standalone and p < 1.0:
                 # Zeroth pass: Compute avg and std from a sample block
                 offs = tl.arange(0, BLOCK_SIZE)
                 mask_n = offs < VOCAB_SIZE
@@ -889,7 +897,6 @@ def _topp_sb_stats_kernel(
     LOGITS,
     LOGITS_STRIDE_0,
     STATS,
-    COUNTER,
     K,
     P,
     HAS_K: tl.constexpr,
@@ -906,8 +913,6 @@ def _topp_sb_stats_kernel(
         return
     if HAS_K and tl.load(K + row) < VOCAB_SIZE:
         return
-    if slice_id == 0:
-        tl.store(COUNTER + row, 0)  # zero the mask phase's tie counter
     slice_len = (VOCAB_SIZE + S - 1) // S
     start = slice_id * slice_len
     end = tl.minimum(start + slice_len, VOCAB_SIZE)
@@ -974,11 +979,15 @@ def _topp_sb_combine(
     """Combine one round's partials and advance the search state.
 
     Returns (done, nomask, pivot, dup, numdup, numkeep, lo, hi, best,
-    best_mass, best_minl, best_nmin). `best*` tracks the tightest fallback:
-    the largest evaluated pivot whose above-mass is >= p, which guarantees
-    the top-p mass invariant if the search fails to converge. Pivots are
-    recomputed from (lo, hi) via the same ladder the sweep used, so partials
-    line up with pivots without storing them.
+    best_mass, best_minl, best_nmin, sel_fidx, best_sel). `best*` tracks the
+    tightest fallback: the largest evaluated pivot whose above-mass is >= p,
+    which guarantees the top-p mass invariant if the search fails to
+    converge. Pivots are recomputed from (lo, hi) via the same ladder the
+    sweep used, so partials line up with pivots without storing them.
+    `sel_fidx` / `best_sel` report which ladder slot produced `dup` /
+    updated `best` this round (-1 if none), so callers can recover the
+    per-slice (minl, nmin) partials behind the boundary value for
+    deterministic duplicate handling.
     """
     fidx = tl.arange(0, F)
     sidx = tl.arange(0, S)
@@ -996,6 +1005,7 @@ def _topp_sb_combine(
     ge = mass >= p
     ge_idx = tl.max(tl.where(ge, fidx, -1).to(tl.float32))
 
+    best_sel = -1.0
     if ge_idx >= 0:
         bmask = fidx == ge_idx.to(tl.int32)
         bp = tl.sum(tl.where(bmask, pivs, 0.0))
@@ -1004,6 +1014,7 @@ def _topp_sb_combine(
             best_mass = tl.sum(tl.where(bmask, mass, 0.0))
             best_minl = tl.sum(tl.where(bmask, gmin, 0.0))
             best_nmin = tl.sum(tl.where(bmask, nmin, 0.0))
+            best_sel = ge_idx
 
     done = 0.0
     nomask = 0.0
@@ -1012,12 +1023,14 @@ def _topp_sb_combine(
     dup = 1.0
     numdup = 1.0
     numkeep = 1.0
+    sel_fidx = -1.0
     if ok_idx >= 0:
         bmask = fidx == ok_idx.to(tl.int32)
         pivot = tl.sum(tl.where(bmask, pivs, 0.0))
         sel_mass = tl.sum(tl.where(bmask, mass, 0.0))
         dup = tl.sum(tl.where(bmask, gmin, 0.0))
         numdup = tl.sum(tl.where(bmask, nmin, 0.0))
+        sel_fidx = ok_idx
         done = 1.0
     else:
         new_lo = tl.maximum(lo, tl.max(tl.where(ge, pivs, -float("inf"))))
@@ -1059,6 +1072,8 @@ def _topp_sb_combine(
         best_mass,
         best_minl,
         best_nmin,
+        sel_fidx,
+        best_sel,
     )
 
 
@@ -1119,6 +1134,8 @@ def _topp_sb_step_kernel(
                 best_mass,
                 best_minl,
                 best_nmin,
+                sel_fidx,
+                best_sel,
             ) = _topp_sb_combine(
                 PARTS + (row * NUM_ROUNDS + j) * S * F * 3,
                 Z,
@@ -1172,7 +1189,6 @@ def _topp_sb_mask_kernel(
     LOGITS_STRIDE_0,
     STATS,
     PARTS,
-    COUNTER,
     K,
     P,
     HAS_K: tl.constexpr,
@@ -1200,6 +1216,8 @@ def _topp_sb_mask_kernel(
         return  # (nearly) uniform row: keep everything
     # Replay the full combine chain; the last round finalizes with fallback
     # semantics. Rows that converged early stop the chain at that round.
+    # `fin` tracks the (round, ladder slot) whose per-slice partials define
+    # the boundary value, for deterministic duplicate handling below.
     lo = min_prob
     hi = max_prob
     best = -1.0
@@ -1212,6 +1230,8 @@ def _topp_sb_mask_kernel(
     dup = 1.0
     numdup = 1.0
     numkeep = 1.0
+    fin = -1.0
+    best_fin = -1.0
     for j in range(NUM_ROUNDS):
         if done == 0.0:
             (
@@ -1227,6 +1247,8 @@ def _topp_sb_mask_kernel(
                 best_mass,
                 best_minl,
                 best_nmin,
+                sel_fidx,
+                best_sel,
             ) = _topp_sb_combine(
                 PARTS + (row * NUM_ROUNDS + j) * S * F * 3,
                 Z,
@@ -1241,13 +1263,34 @@ def _topp_sb_mask_kernel(
                 F=F,
                 IS_LAST=j == NUM_ROUNDS - 1,
             )
+            if sel_fidx >= 0.0:
+                fin = j * F + sel_fidx
+            if best_sel >= 0.0:
+                best_fin = j * F + best_sel
     if nomask != 0.0:
         return
+    if fin < 0.0:
+        fin = best_fin
     logZ = tl.log(Z)
     pivot_logit = tl.log(pivot) + logZ + M
     dup_logit = tl.log(dup) + logZ + M
     # numdup/numkeep are exact small integers held in fp32.
     ties = numkeep < numdup
+    num_preceding = 0.0
+    if ties:
+        # Deterministic, index-ordered duplicate budget: per-slice counts of
+        # the boundary value come from the finalizing round's partials (a
+        # slice holds copies of `dup` iff its minl matches `dup`, with the
+        # count in nmin), so each slice knows exactly how many copies were
+        # kept by lower-indexed slices.
+        fin_round = tl.cast(fin / F, tl.int32)
+        fin_slot = tl.cast(fin - tl.cast(fin_round, tl.float32) * F, tl.int32)
+        pbase = PARTS + ((row * NUM_ROUNDS + fin_round) * S * F + fin_slot) * 3
+        sidx = tl.arange(0, S)
+        minl_s = tl.load(pbase + sidx * (F * 3) + 1)
+        nmin_s = tl.load(pbase + sidx * (F * 3) + 2)
+        dupc_s = tl.where(tl.abs(minl_s - dup) < 1e-9, nmin_s, 0.0)
+        num_preceding = tl.sum(tl.where(sidx < slice_id, dupc_s, 0.0))
     slice_len = (VOCAB_SIZE + S - 1) // S
     start = slice_id * slice_len
     end = tl.minimum(start + slice_len, VOCAB_SIZE)
@@ -1259,10 +1302,8 @@ def _topp_sb_mask_kernel(
         keep = x > pivot_logit
         if ties:
             dmask = tl.abs(x - dup_logit) < 1e-9
-            cnt = tl.sum(dmask.to(tl.int32))
-            base = tl.atomic_add(COUNTER + row, cnt)
-            cum = tl.cumsum(dmask.to(tl.int32))
-            keep_dup = dmask & ((base + cum) <= numkeep)
+            cum = tl.cumsum(dmask.to(tl.int32)).to(tl.float32) + num_preceding
+            keep_dup = dmask & (cum <= numkeep)
             keep = keep & (~dmask | keep_dup)
         tl.store(ROW + i + offs, tl.where(keep, x, MASK_VALUE), mask=mask_n)
 
@@ -1282,13 +1323,11 @@ def _apply_topp_split(
 
     ws = _TRITON_SPLIT_CACHE.get(logits.device)
     if ws is None:
-        dev = logits.device
         ws = {
             "stats": logits.new_empty((_SPLIT_MAX_BATCH * _SPLIT_MAX_SPLITS, 4)),
             "parts": logits.new_empty(
                 (_SPLIT_MAX_BATCH, _SPLIT_ROUNDS, _SPLIT_MAX_SPLITS, _SPLIT_FANOUT, 3)
             ),
-            "counter": torch.zeros(_SPLIT_MAX_BATCH, dtype=torch.int32, device=dev),
         }
         _TRITON_SPLIT_CACHE[logits.device] = ws
 
@@ -1299,7 +1338,6 @@ def _apply_topp_split(
         logits,
         logits.stride(0),
         ws["stats"],
-        ws["counter"],
         k_ptr,
         p,
         HAS_K=has_k,
@@ -1330,7 +1368,6 @@ def _apply_topp_split(
         logits.stride(0),
         ws["stats"],
         ws["parts"],
-        ws["counter"],
         k_ptr,
         p,
         HAS_K=has_k,
@@ -1400,11 +1437,12 @@ def apply_top_k_top_p_triton(
     # latency-bound (one program per row, serial vocab sweeps), so use the
     # split-row pipeline for rows without an active top-k. Rows with an
     # active top-k still go through the monolithic kernel (its truncation
-    # path is already fast), with its standalone top-p branch disabled.
+    # path is already fast). The monolithic's standalone top-p branch then
+    # covers only rows whose top-k is a no-op (k < vocab but <= k finite
+    # logits, e.g. grammar masks), which the split pipeline skips.
     use_split = (
         topp_enabled and batch_size <= _SPLIT_MAX_BATCH and logits.device.type == "cuda"
     )
-    standalone_topp = not use_split
     if use_split and not topk_enabled:
         _apply_topp_split(logits, None, p_ptr, mask_value, num_sm)
         return logits
@@ -1465,7 +1503,7 @@ def apply_top_k_top_p_triton(
         BLOCK_SIZE_TRUNC=block_size_trunc,
         TOPK_ENABLED=topk_enabled,
         TOPP_ENABLED=topp_enabled,
-        STANDALONE_TOPP=standalone_topp,
+        SPLIT_COVERS_PONLY=use_split,
         **launch_kwargs,
     )
     if use_split:
