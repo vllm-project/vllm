@@ -138,19 +138,6 @@ VLLM_TARGET_DEVICE=cpu VLLM_CPU_MOE_PREPACK=0 python setup.py bdist_wheel && \
     The Docker image (`Dockerfile.s390x`) already includes TCMalloc and sets
     `LD_PRELOAD` automatically.
 
-!!! warning "Protobuf workaround for s390x"
-    The C++ protobuf extension crashes on s390x. After installation, set the
-    following environment variable and remove the C++ extensions:
-
-    ```bash
-    export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
-
-    # Remove C++ protobuf extensions that crash on s390x
-    SITE_PKGS=$(python -c "import site; print(site.getsitepackages()[0])")
-    rm -rf "$SITE_PKGS/google/_upb/"*.so \
-           "$SITE_PKGS/google/protobuf/pyext/"*.so 2>/dev/null || true
-    ```
-
 --8<-- [end:build-wheel-from-source]
 --8<-- [start:pre-built-images]
 
