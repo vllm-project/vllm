@@ -8,8 +8,17 @@
 # Forward-only adaptation of flash-linear-attention 0.5.0.
 # ruff: noqa: E501
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.index import prepare_chunk_indices
 from vllm.third_party.flash_linear_attention.ops.op import exp2, gather
@@ -466,6 +475,353 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     tl.store(p_Akk, b_Ai.to(Akk.dtype.element_ty), boundary_check=(0, 1))
 
 
+class KimiK3ChunkKdaInterSolveKernel(
+    VllmTritonJitKernel["KimiK3ChunkKdaInterSolveKernel.CompileKey"]
+):
+    """JIT owner for the autotuned fused inter + solve_tril kernel."""
+
+    # Triton's Autotuner owns BK/num_warps and compile-warms every candidate
+    # for each logical key below. Only the compile is pre-warmed; the autotune
+    # decision itself runs at the first real launch / profile_run.
+    kernel = staticmethod(chunk_kda_fwd_kernel_inter_solve_fused)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        q_dtype: torch.dtype
+        k_dtype: torch.dtype
+        g_dtype: torch.dtype
+        beta_dtype: torch.dtype
+        aqk_dtype: torch.dtype
+        akkd_dtype: torch.dtype
+        akk_dtype: torch.dtype
+        num_heads: int
+        hv: int
+        qk_head_dim: int
+        block_t: int
+        block_c: int
+        is_varlen: bool
+        use_safe_gate: bool
+        solve_tril_dot_precision: str
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        q_dtype: torch.dtype,
+        k_dtype: torch.dtype,
+        g_dtype: torch.dtype,
+        beta_dtype: torch.dtype,
+        aqk_dtype: torch.dtype,
+        akkd_dtype: torch.dtype,
+        akk_dtype: torch.dtype,
+        num_heads: int,
+        hv: int,
+        qk_head_dim: int,
+        block_t: int = 64,
+        block_c: int = 16,
+        is_varlen: bool = True,
+        use_safe_gate: bool = False,
+        solve_tril_dot_precision: str = "ieee",
+    ) -> CompileKey:
+        return self.CompileKey(
+            q_dtype=q_dtype,
+            k_dtype=k_dtype,
+            g_dtype=g_dtype,
+            beta_dtype=beta_dtype,
+            aqk_dtype=aqk_dtype,
+            akkd_dtype=akkd_dtype,
+            akk_dtype=akk_dtype,
+            num_heads=num_heads,
+            hv=hv,
+            qk_head_dim=qk_head_dim,
+            block_t=block_t,
+            block_c=block_c,
+            is_varlen=is_varlen,
+            use_safe_gate=use_safe_gate,
+            solve_tril_dot_precision=solve_tril_dot_precision,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        q_dtype: torch.dtype,
+        k_dtype: torch.dtype,
+        g_dtype: torch.dtype,
+        beta_dtype: torch.dtype,
+        aqk_dtype: torch.dtype,
+        akkd_dtype: torch.dtype,
+        akk_dtype: torch.dtype,
+        num_heads: int,
+        hv: int,
+        qk_head_dim: int,
+        block_t: int = 64,
+        block_c: int = 16,
+        is_varlen: bool = True,
+        use_safe_gate: bool = False,
+        solve_tril_dot_precision: str = "ieee",
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            q_dtype=q_dtype,
+            k_dtype=k_dtype,
+            g_dtype=g_dtype,
+            beta_dtype=beta_dtype,
+            aqk_dtype=aqk_dtype,
+            akkd_dtype=akkd_dtype,
+            akk_dtype=akk_dtype,
+            num_heads=num_heads,
+            hv=hv,
+            qk_head_dim=qk_head_dim,
+            block_t=block_t,
+            block_c=block_c,
+            is_varlen=is_varlen,
+            use_safe_gate=use_safe_gate,
+            solve_tril_dot_precision=solve_tril_dot_precision,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        b = 1
+        t = compile_key.block_t
+        h = compile_key.num_heads
+        hv = compile_key.hv
+        k = compile_key.qk_head_dim
+        bt = compile_key.block_t
+        bc = compile_key.block_c
+        nt = 1
+        return {
+            "q": TritonWarmupTensor(compile_key.q_dtype, shape=(b, t, h, k)),
+            "k": TritonWarmupTensor(compile_key.k_dtype, shape=(b, t, h, k)),
+            "g": TritonWarmupTensor(compile_key.g_dtype, shape=(b, t, hv, k)),
+            "beta": TritonWarmupTensor(compile_key.beta_dtype, shape=(b, t, hv)),
+            "Aqk": TritonWarmupTensor(compile_key.aqk_dtype, shape=(b, t, hv, bt)),
+            "Akkd": TritonWarmupTensor(compile_key.akkd_dtype, shape=(b, t, hv, bc)),
+            "Akk": TritonWarmupTensor(compile_key.akk_dtype, shape=(b, t, hv, bt)),
+            "scale": 1.0,
+            "cu_seqlens": (
+                TritonWarmupTensor(torch.int32, shape=(b + 1,))
+                if compile_key.is_varlen
+                else None
+            ),
+            "chunk_indices": (
+                TritonWarmupTensor(torch.int32, shape=(nt, 2))
+                if compile_key.is_varlen
+                else None
+            ),
+            "chunk_size": compile_key.block_t,
+            "sub_chunk_size": compile_key.block_c,
+            "use_safe_gate": compile_key.use_safe_gate,
+            "solve_tril_dot_precision": compile_key.solve_tril_dot_precision,
+        }
+
+    @kernel_launcher
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        Aqk: torch.Tensor,
+        Akkd: torch.Tensor,
+        Akk: torch.Tensor,
+        scale: float,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.Tensor | None = None,
+        chunk_size: int = 64,
+        sub_chunk_size: int = 16,
+        use_safe_gate: bool = False,
+        solve_tril_dot_precision: str = "ieee",
+    ) -> LaunchSpec:
+        b, t, num_heads, qk_head_dim = k.shape
+        hv = g.shape[2]
+        block_t = chunk_size
+        block_c = sub_chunk_size
+        nt = triton.cdiv(t, block_t)
+        if chunk_indices is not None:
+            nt = chunk_indices.shape[0]
+        grid = (nt, b * hv)
+        return (
+            grid,
+            {
+                "T": t,
+                "H": num_heads,
+                "HV": hv,
+                "K": qk_head_dim,
+                "BT": block_t,
+                "BC": block_c,
+                "USE_SAFE_GATE": use_safe_gate,
+                "SOLVE_TRIL_DOT_PRECISION": solve_tril_dot_precision,
+            },
+        )
+
+
+class KimiK3ChunkKdaSubChunkKernel(
+    VllmTritonJitKernel["KimiK3ChunkKdaSubChunkKernel.CompileKey"]
+):
+    """JIT owner for the autotuned intra sub-chunk (safe-gate) kernel."""
+
+    # Triton's Autotuner owns num_warps/num_stages and compile-warms every
+    # candidate for each logical key below. Only the compile is pre-warmed;
+    # the autotune decision itself runs at the first real launch / profile_run.
+    kernel = staticmethod(chunk_kda_fwd_kernel_intra_sub_chunk)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        q_dtype: torch.dtype
+        k_dtype: torch.dtype
+        g_dtype: torch.dtype
+        beta_dtype: torch.dtype
+        aqk_dtype: torch.dtype
+        akk_dtype: torch.dtype
+        num_heads: int
+        hv: int
+        qk_head_dim: int
+        block_t: int
+        block_c: int
+        block_k: int
+        is_varlen: bool
+        use_gather: bool
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        q_dtype: torch.dtype,
+        k_dtype: torch.dtype,
+        g_dtype: torch.dtype,
+        beta_dtype: torch.dtype,
+        aqk_dtype: torch.dtype,
+        akk_dtype: torch.dtype,
+        num_heads: int,
+        hv: int,
+        qk_head_dim: int,
+        block_t: int = 64,
+        block_c: int = 16,
+        block_k: int = 128,
+        is_varlen: bool = True,
+        use_gather: bool = False,
+    ) -> CompileKey:
+        return self.CompileKey(
+            q_dtype=q_dtype,
+            k_dtype=k_dtype,
+            g_dtype=g_dtype,
+            beta_dtype=beta_dtype,
+            aqk_dtype=aqk_dtype,
+            akk_dtype=akk_dtype,
+            num_heads=num_heads,
+            hv=hv,
+            qk_head_dim=qk_head_dim,
+            block_t=block_t,
+            block_c=block_c,
+            block_k=block_k,
+            is_varlen=is_varlen,
+            use_gather=use_gather,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        q_dtype: torch.dtype,
+        k_dtype: torch.dtype,
+        g_dtype: torch.dtype,
+        beta_dtype: torch.dtype,
+        aqk_dtype: torch.dtype,
+        akk_dtype: torch.dtype,
+        num_heads: int,
+        hv: int,
+        qk_head_dim: int,
+        block_t: int = 64,
+        block_c: int = 16,
+        block_k: int = 128,
+        is_varlen: bool = True,
+        use_gather: bool = False,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            q_dtype=q_dtype,
+            k_dtype=k_dtype,
+            g_dtype=g_dtype,
+            beta_dtype=beta_dtype,
+            aqk_dtype=aqk_dtype,
+            akk_dtype=akk_dtype,
+            num_heads=num_heads,
+            hv=hv,
+            qk_head_dim=qk_head_dim,
+            block_t=block_t,
+            block_c=block_c,
+            block_k=block_k,
+            is_varlen=is_varlen,
+            use_gather=use_gather,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        b = 1
+        t = compile_key.block_t
+        h = compile_key.num_heads
+        hv = compile_key.hv
+        k = compile_key.qk_head_dim
+        bt = compile_key.block_t
+        bc = compile_key.block_c
+        nt = 1
+        return {
+            "q": TritonWarmupTensor(compile_key.q_dtype, shape=(b, t, h, k)),
+            "k": TritonWarmupTensor(compile_key.k_dtype, shape=(b, t, h, k)),
+            "g": TritonWarmupTensor(compile_key.g_dtype, shape=(b, t, hv, k)),
+            "beta": TritonWarmupTensor(compile_key.beta_dtype, shape=(b, t, hv)),
+            "Aqk": TritonWarmupTensor(compile_key.aqk_dtype, shape=(b, t, hv, bt)),
+            "Akk": TritonWarmupTensor(compile_key.akk_dtype, shape=(b, t, hv, bc)),
+            "scale": 1.0,
+            "cu_seqlens": (
+                TritonWarmupTensor(torch.int32, shape=(b + 1,))
+                if compile_key.is_varlen
+                else None
+            ),
+            "chunk_indices": (
+                TritonWarmupTensor(torch.int32, shape=(nt, 2))
+                if compile_key.is_varlen
+                else None
+            ),
+            "chunk_size": compile_key.block_t,
+            "sub_chunk_size": compile_key.block_c,
+            "use_gather": compile_key.use_gather,
+        }
+
+    @kernel_launcher
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        Aqk: torch.Tensor,
+        Akk: torch.Tensor,
+        scale: float,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.Tensor | None = None,
+        chunk_size: int = 64,
+        sub_chunk_size: int = 16,
+        use_gather: bool = False,
+    ) -> LaunchSpec:
+        b, t, num_heads, qk_head_dim = k.shape
+        hv = g.shape[2]
+        block_t = chunk_size
+        block_c = sub_chunk_size
+        block_k = triton.next_power_of_2(qk_head_dim)
+        nt = triton.cdiv(t, block_t)
+        if chunk_indices is not None:
+            nt = chunk_indices.shape[0]
+        nc = triton.cdiv(block_t, block_c)
+        grid = (nt, nc, b * hv)
+        return (
+            grid,
+            {
+                "T": t,
+                "H": num_heads,
+                "HV": hv,
+                "K": qk_head_dim,
+                "BT": block_t,
+                "BC": block_c,
+                "BK": block_k,
+                "USE_GATHER": use_gather,
+            },
+        )
+
+
 def chunk_kda_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -477,13 +833,11 @@ def chunk_kda_fwd_intra(
     chunk_indices: torch.LongTensor | None = None,
     safe_gate: bool = False,
 ):
-    B, T, H, K, HV = *k.shape, gk.shape[2]
+    B, T, _, _, HV = *k.shape, gk.shape[2]
     BT = chunk_size
     BC = 16
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    NC = triton.cdiv(BT, BC)
 
     Aqk = torch.empty(B, T, HV, BT, device=k.device, dtype=k.dtype)
     # Akk must be zero-initialized - kernel only writes lower triangular
@@ -493,9 +847,7 @@ def chunk_kda_fwd_intra(
 
     # Compute diagonal blocks into Akkd in fp32.
     if safe_gate:
-        grid = (NT, NC, B * HV)
-        BK = triton.next_power_of_2(K)
-        chunk_kda_fwd_kernel_intra_sub_chunk[grid](
+        _CHUNK_KDA_SUB_CHUNK_KERNEL(
             q=q,
             k=k,
             g=gk,
@@ -505,14 +857,9 @@ def chunk_kda_fwd_intra(
             scale=scale,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
-            T=T,
-            H=H,
-            HV=HV,
-            K=K,
-            BT=BT,
-            BC=BC,
-            BK=BK,
-            USE_GATHER=is_gather_supported,
+            chunk_size=BT,
+            sub_chunk_size=BC,
+            use_gather=is_gather_supported,
         )
     else:
         Aqk, Akkd = chunk_kda_fwd_intra_token_parallel(
@@ -535,8 +882,7 @@ def chunk_kda_fwd_intra(
         and current_platform.has_device_capability(80)
         else "ieee"
     )
-    grid = (NT, B * HV)
-    chunk_kda_fwd_kernel_inter_solve_fused[grid](
+    _CHUNK_KDA_INTER_SOLVE_KERNEL(
         q=q,
         k=k,
         g=gk,
@@ -547,13 +893,13 @@ def chunk_kda_fwd_intra(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        T=T,
-        H=H,
-        HV=HV,
-        K=K,
-        BT=BT,
-        BC=BC,
-        USE_SAFE_GATE=safe_gate,
-        SOLVE_TRIL_DOT_PRECISION=solve_tril_dot_precision,
+        chunk_size=BT,
+        sub_chunk_size=BC,
+        use_safe_gate=safe_gate,
+        solve_tril_dot_precision=solve_tril_dot_precision,
     )
     return Aqk, Akk
+
+
+_CHUNK_KDA_INTER_SOLVE_KERNEL = KimiK3ChunkKdaInterSolveKernel()
+_CHUNK_KDA_SUB_CHUNK_KERNEL = KimiK3ChunkKdaSubChunkKernel()

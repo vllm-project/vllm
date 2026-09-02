@@ -322,11 +322,34 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         from vllm.models.kimi_k3.nvidia.ops.third_party.kda.chunk import (
             _CHUNK_GLA_FWD_O_KERNEL,
+            _GATE_CHUNK_CUMSUM_KERNEL,
+            _RECOMPUTE_WU_KERNEL,
+        )
+        from vllm.models.kimi_k3.nvidia.ops.third_party.kda.chunk_intra import (
+            _CHUNK_KDA_INTER_SOLVE_KERNEL,
+            _CHUNK_KDA_SUB_CHUNK_KERNEL,
+        )
+        from vllm.models.kimi_k3.nvidia.ops.third_party.kda.chunk_intra_token_parallel import (  # noqa: E501
+            _CHUNK_KDA_TOKEN_PARALLEL_KERNEL,
         )
         from vllm.models.kimi_k3.nvidia.ops.third_party.kda.fused_recurrent import (
             _FUSED_RECURRENT_KDA_FWD_KERNEL,
             _FUSED_RECURRENT_KDA_PACKED_DECODE_KERNEL,
         )
+        from vllm.third_party.flash_linear_attention.ops.chunk_delta_h import (
+            _CHUNK_GATED_DELTA_RULE_FWD_H_KERNEL,
+        )
+        from vllm.third_party.flash_linear_attention.ops.kda import (
+            _LAYER_NORM_GATED_FWD_KERNEL,
+        )
+        from vllm.third_party.flash_linear_attention.ops.l2norm import (
+            _L2NORM_FWD_KERNEL2,
+        )
+        from vllm.third_party.flash_linear_attention.ops.utils import (
+            FLA_CHUNK_SIZE,
+            is_gather_supported,
+        )
+        from vllm.utils.math_utils import next_power_of_2
 
         recurrent_state = self.kv_cache[1]
         io_dtype = self.model_config.dtype
@@ -344,6 +367,52 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             use_lower_bound=self.gate_lower_bound is not None,
             launch_pdl=current_platform.is_arch_support_pdl(),
         )
+        _L2NORM_FWD_KERNEL2.register_warmup(
+            x_dtype=io_dtype,
+            y_dtype=io_dtype,
+            eps=1e-6,
+            n=head_dim,
+            bd=min(65536 // io_dtype.itemsize, next_power_of_2(head_dim)),
+            mblock=32,
+        )
+        _CHUNK_GATED_DELTA_RULE_FWD_H_KERNEL.register_warmup(
+            k_dtype=io_dtype,
+            v_dtype=io_dtype,
+            w_dtype=io_dtype,
+            gk_dtype=torch.float32,
+            h0_dtype=recurrent_state.dtype,
+            ht_dtype=torch.float32,
+            num_heads=num_heads,
+            num_k_heads=num_heads,
+            qk_head_dim=head_dim,
+            v_head_dim=head_dim,
+            block_t=FLA_CHUNK_SIZE,
+            use_g=False,
+            use_gk=True,
+            use_initial_state=True,
+            store_final_state=True,
+            save_new_value=True,
+            is_varlen=True,
+            use_exp2=True,
+        )
+        _LAYER_NORM_GATED_FWD_KERNEL.register_warmup(
+            x_dtype=io_dtype,
+            y_dtype=io_dtype,
+            g_dtype=io_dtype,
+            w_dtype=self.o_norm.weight.dtype,
+            eps=self.o_norm.eps,
+            num_heads=num_heads,
+            g_stride_n=num_heads * head_dim,
+            d=head_dim,
+            block_t=16,
+            block_d=min(65536 // io_dtype.itemsize, next_power_of_2(head_dim)),
+            activation="sigmoid",
+            is_rms_norm=True,
+            store_residual_out=False,
+            has_residual=False,
+            has_weight=True,
+            has_bias=False,
+        )
         _CHUNK_GLA_FWD_O_KERNEL.register_warmup(
             q_dtype=io_dtype,
             v_dtype=io_dtype,
@@ -354,9 +423,97 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             num_heads=num_heads,
             qk_head_dim=head_dim,
             v_head_dim=head_dim,
-            scale=head_dim**-0.5,
             is_varlen=True,
         )
+        use_lower_bound = self.gate_lower_bound is not None
+        _RECOMPUTE_WU_KERNEL.register_warmup(
+            k_dtype=io_dtype,
+            kg_dtype=io_dtype,
+            v_dtype=io_dtype,
+            beta_dtype=torch.float32,
+            w_dtype=io_dtype,
+            u_dtype=io_dtype,
+            a_dtype=io_dtype,
+            gk_dtype=torch.float32,
+            num_heads=num_heads,
+            qk_head_dim=head_dim,
+            v_head_dim=head_dim,
+            block_t=FLA_CHUNK_SIZE,
+            block_k=64,
+            block_v=64,
+            store_qg=False,
+            store_kg=True,
+            is_varlen=True,
+            dot_precision="ieee",
+        )
+        _GATE_CHUNK_CUMSUM_KERNEL.register_warmup(
+            s_dtype=io_dtype,
+            raw_beta_dtype=io_dtype,
+            a_log_dtype=self.A_log.dtype,
+            g_bias_dtype=self.dt_bias.dtype,
+            o_dtype=torch.float32,
+            beta_out_dtype=torch.float32,
+            num_heads=num_heads,
+            gate_dim=head_dim,
+            block_t=FLA_CHUNK_SIZE,
+            has_bias=True,
+            is_varlen=True,
+            use_lower_bound=use_lower_bound,
+        )
+        solve_tril_dot_precision = (
+            "tf32"
+            if current_platform.is_cuda() and current_platform.has_device_capability(80)
+            else "ieee"
+        )
+        _CHUNK_KDA_INTER_SOLVE_KERNEL.register_warmup(
+            q_dtype=io_dtype,
+            k_dtype=io_dtype,
+            g_dtype=torch.float32,
+            beta_dtype=torch.float32,
+            aqk_dtype=io_dtype,
+            akkd_dtype=torch.float32,
+            akk_dtype=io_dtype,
+            num_heads=num_heads,
+            hv=num_heads,
+            qk_head_dim=head_dim,
+            block_t=FLA_CHUNK_SIZE,
+            block_c=16,
+            is_varlen=True,
+            use_safe_gate=use_lower_bound,
+            solve_tril_dot_precision=solve_tril_dot_precision,
+        )
+        if use_lower_bound:
+            _CHUNK_KDA_SUB_CHUNK_KERNEL.register_warmup(
+                q_dtype=io_dtype,
+                k_dtype=io_dtype,
+                g_dtype=torch.float32,
+                beta_dtype=torch.float32,
+                aqk_dtype=io_dtype,
+                akk_dtype=torch.float32,
+                num_heads=num_heads,
+                hv=num_heads,
+                qk_head_dim=head_dim,
+                block_t=FLA_CHUNK_SIZE,
+                block_c=16,
+                block_k=next_power_of_2(head_dim),
+                is_varlen=True,
+                use_gather=is_gather_supported,
+            )
+        else:
+            _CHUNK_KDA_TOKEN_PARALLEL_KERNEL.register_warmup(
+                q_dtype=io_dtype,
+                k_dtype=io_dtype,
+                g_dtype=torch.float32,
+                beta_dtype=torch.float32,
+                aqk_dtype=io_dtype,
+                akk_dtype=torch.float32,
+                num_heads=num_heads,
+                hv=num_heads,
+                qk_head_dim=head_dim,
+                block_t=FLA_CHUNK_SIZE,
+                block_c=16,
+                is_varlen=True,
+            )
         _FUSED_RECURRENT_KDA_PACKED_DECODE_KERNEL.register_warmup(
             stride_mixed_token=3 * projection_size,
             stride_g_token=projection_size,

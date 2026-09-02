@@ -21,11 +21,29 @@ from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
 )
 from vllm.models.kimi_k3.nvidia.ops.third_party.kda.chunk import (
     _CHUNK_GLA_FWD_O_KERNEL,
+    _GATE_CHUNK_CUMSUM_KERNEL,
+    _RECOMPUTE_WU_KERNEL,
+)
+from vllm.models.kimi_k3.nvidia.ops.third_party.kda.chunk_intra import (
+    _CHUNK_KDA_INTER_SOLVE_KERNEL,
+    _CHUNK_KDA_SUB_CHUNK_KERNEL,
+)
+from vllm.models.kimi_k3.nvidia.ops.third_party.kda.chunk_intra_token_parallel import (  # noqa: E501
+    _CHUNK_KDA_TOKEN_PARALLEL_KERNEL,
 )
 from vllm.models.kimi_k3.nvidia.ops.third_party.kda.fused_recurrent import (
     _FUSED_KDA_GATE_BETA_KERNEL,
     _FUSED_RECURRENT_KDA_FWD_KERNEL,
     _FUSED_RECURRENT_KDA_PACKED_DECODE_KERNEL,
+)
+from vllm.third_party.flash_linear_attention.ops.chunk_delta_h import (
+    _CHUNK_GATED_DELTA_RULE_FWD_H_KERNEL,
+)
+from vllm.third_party.flash_linear_attention.ops.kda import (
+    _LAYER_NORM_GATED_FWD_KERNEL,
+)
+from vllm.third_party.flash_linear_attention.ops.l2norm import (
+    _L2NORM_FWD_KERNEL2,
 )
 from vllm.triton_utils import triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -235,7 +253,6 @@ def test_chunk_gla_fwd_o_autotune_warmup_matches_runtime_dispatch():
         "num_heads": _NUM_HEADS,
         "qk_head_dim": _HEAD_DIM,
         "v_head_dim": _HEAD_DIM,
-        "scale": _HEAD_DIM**-0.5,
         "block_t": 64,
         "is_varlen": True,
     }
@@ -521,3 +538,537 @@ def test_recoverssm_commit_warmup_matches_runtime_dispatch():
     assert set(
         _COMMIT_KDA_STATE_KERNEL.get_warmup_keys(**commit_registration)
     ) == expected
+
+
+def test_recompute_wu_autotune_warmup_matches_runtime_dispatch():
+    registration = {
+        "k_dtype": torch.bfloat16,
+        "kg_dtype": torch.bfloat16,
+        "v_dtype": torch.bfloat16,
+        "beta_dtype": torch.float32,
+        "w_dtype": torch.bfloat16,
+        "u_dtype": torch.bfloat16,
+        "a_dtype": torch.bfloat16,
+        "gk_dtype": torch.float32,
+        "num_heads": _NUM_HEADS,
+        "qk_head_dim": _HEAD_DIM,
+        "v_head_dim": _HEAD_DIM,
+        "block_t": 64,
+        "block_k": 64,
+        "block_v": 64,
+        "store_qg": False,
+        "store_kg": True,
+        "is_varlen": True,
+        "dot_precision": "ieee",
+    }
+
+    assert _RECOMPUTE_WU_KERNEL.get_warmup_keys(**registration) == [
+        _RECOMPUTE_WU_KERNEL.dispatch(**registration)
+    ]
+
+
+def test_recompute_wu_runtime_launch_is_independent_from_dispatch(monkeypatch):
+    owner = type(_RECOMPUTE_WU_KERNEL)()
+
+    def fail_dispatch(**kwargs):
+        raise AssertionError(kwargs)
+
+    monkeypatch.setattr(owner, "dispatch", fail_dispatch)
+    k = torch.empty(1, 64, _NUM_HEADS, _HEAD_DIM)
+    kg = torch.empty_like(k)
+    v = torch.empty_like(k)
+    beta = torch.empty(1, 64, _NUM_HEADS)
+    w = torch.empty_like(k)
+    u = torch.empty_like(k)
+    A = torch.empty(1, 64, _NUM_HEADS, 64)
+    gk = torch.empty_like(k)
+
+    call = type(owner).__call__.__wrapped__
+    grid, launch_kwargs = call(
+        owner,
+        None,
+        k,
+        None,
+        kg,
+        v,
+        beta,
+        w,
+        u,
+        A,
+        gk,
+    )
+
+    assert grid == (1, _NUM_HEADS)
+    assert launch_kwargs == {
+        "T": 64,
+        "H": _NUM_HEADS,
+        "K": _HEAD_DIM,
+        "V": _HEAD_DIM,
+        "BT": 64,
+        "BK": 64,
+        "BV": 64,
+        "DOT_PRECISION": "ieee",
+    }
+
+
+def test_gate_chunk_cumsum_autotune_warmup_matches_runtime_dispatch():
+    registration = {
+        "s_dtype": torch.bfloat16,
+        "raw_beta_dtype": torch.bfloat16,
+        "a_log_dtype": torch.float32,
+        "g_bias_dtype": torch.float32,
+        "o_dtype": torch.float32,
+        "beta_out_dtype": torch.float32,
+        "num_heads": _NUM_HEADS,
+        "gate_dim": _HEAD_DIM,
+        "block_t": 64,
+        "has_bias": True,
+        "is_varlen": True,
+        "use_lower_bound": True,
+    }
+
+    assert _GATE_CHUNK_CUMSUM_KERNEL.get_warmup_keys(**registration) == [
+        _GATE_CHUNK_CUMSUM_KERNEL.dispatch(**registration)
+    ]
+
+
+def test_gate_chunk_cumsum_runtime_launch_is_independent_from_dispatch(
+    monkeypatch,
+):
+    owner = type(_GATE_CHUNK_CUMSUM_KERNEL)()
+
+    def fail_dispatch(**kwargs):
+        raise AssertionError(kwargs)
+
+    monkeypatch.setattr(owner, "dispatch", fail_dispatch)
+    s = torch.empty(1, 64, _NUM_HEADS, _HEAD_DIM)
+    raw_beta = torch.empty(1, 64, _NUM_HEADS)
+    A_log = torch.empty(_NUM_HEADS)
+    g_bias = torch.empty(_NUM_HEADS * _HEAD_DIM)
+    o = torch.empty_like(s)
+    beta_out = torch.empty(1, 64, _NUM_HEADS)
+
+    call = type(owner).__call__.__wrapped__
+    grid, launch_kwargs = call(
+        owner,
+        s,
+        raw_beta,
+        A_log,
+        g_bias,
+        o,
+        beta_out,
+        use_lower_bound=True,
+    )
+
+    assert grid({"BS": 64}) == (3, 1, _NUM_HEADS)
+    assert launch_kwargs == {
+        "T": 64,
+        "stride_beta_batch": 64 * _NUM_HEADS,
+        "stride_beta_token": _NUM_HEADS,
+        "stride_beta_head": 1,
+        "H": _NUM_HEADS,
+        "S": _HEAD_DIM,
+        "BT": 64,
+        "USE_LOWER_BOUND": True,
+    }
+
+
+def test_chunk_kda_inter_solve_autotune_warmup_matches_runtime_dispatch():
+    registration = {
+        "q_dtype": torch.bfloat16,
+        "k_dtype": torch.bfloat16,
+        "g_dtype": torch.float32,
+        "beta_dtype": torch.float32,
+        "aqk_dtype": torch.bfloat16,
+        "akkd_dtype": torch.float32,
+        "akk_dtype": torch.bfloat16,
+        "num_heads": _NUM_HEADS,
+        "hv": _NUM_HEADS,
+        "qk_head_dim": _HEAD_DIM,
+        "block_t": 64,
+        "block_c": 16,
+        "is_varlen": True,
+        "use_safe_gate": True,
+        "solve_tril_dot_precision": "tf32",
+    }
+
+    assert _CHUNK_KDA_INTER_SOLVE_KERNEL.get_warmup_keys(**registration) == [
+        _CHUNK_KDA_INTER_SOLVE_KERNEL.dispatch(**registration)
+    ]
+
+
+def test_chunk_kda_inter_solve_runtime_launch_is_independent_from_dispatch(
+    monkeypatch,
+):
+    owner = type(_CHUNK_KDA_INTER_SOLVE_KERNEL)()
+
+    def fail_dispatch(**kwargs):
+        raise AssertionError(kwargs)
+
+    monkeypatch.setattr(owner, "dispatch", fail_dispatch)
+    k = torch.empty(1, 64, _NUM_HEADS, _HEAD_DIM)
+    q = torch.empty_like(k)
+    g = torch.empty_like(k)
+    beta = torch.empty(1, 64, _NUM_HEADS)
+    Aqk = torch.empty(1, 64, _NUM_HEADS, 64)
+    Akkd = torch.empty(1, 64, _NUM_HEADS, 16)
+    Akk = torch.empty(1, 64, _NUM_HEADS, 64)
+
+    call = type(owner).__call__.__wrapped__
+    grid, launch_kwargs = call(
+        owner,
+        q,
+        k,
+        g,
+        beta,
+        Aqk,
+        Akkd,
+        Akk,
+        1.0,
+        use_safe_gate=True,
+        solve_tril_dot_precision="tf32",
+    )
+
+    assert grid == (1, _NUM_HEADS)
+    assert launch_kwargs == {
+        "T": 64,
+        "H": _NUM_HEADS,
+        "HV": _NUM_HEADS,
+        "K": _HEAD_DIM,
+        "BT": 64,
+        "BC": 16,
+        "USE_SAFE_GATE": True,
+        "SOLVE_TRIL_DOT_PRECISION": "tf32",
+    }
+
+
+def test_chunk_kda_sub_chunk_autotune_warmup_matches_runtime_dispatch():
+    registration = {
+        "q_dtype": torch.bfloat16,
+        "k_dtype": torch.bfloat16,
+        "g_dtype": torch.float32,
+        "beta_dtype": torch.float32,
+        "aqk_dtype": torch.bfloat16,
+        "akk_dtype": torch.float32,
+        "num_heads": _NUM_HEADS,
+        "hv": _NUM_HEADS,
+        "qk_head_dim": _HEAD_DIM,
+        "block_t": 64,
+        "block_c": 16,
+        "block_k": 128,
+        "is_varlen": True,
+        "use_gather": True,
+    }
+
+    assert _CHUNK_KDA_SUB_CHUNK_KERNEL.get_warmup_keys(**registration) == [
+        _CHUNK_KDA_SUB_CHUNK_KERNEL.dispatch(**registration)
+    ]
+
+
+def test_chunk_kda_sub_chunk_runtime_launch_is_independent_from_dispatch(
+    monkeypatch,
+):
+    owner = type(_CHUNK_KDA_SUB_CHUNK_KERNEL)()
+
+    def fail_dispatch(**kwargs):
+        raise AssertionError(kwargs)
+
+    monkeypatch.setattr(owner, "dispatch", fail_dispatch)
+    k = torch.empty(1, 64, _NUM_HEADS, _HEAD_DIM)
+    q = torch.empty_like(k)
+    g = torch.empty_like(k)
+    beta = torch.empty(1, 64, _NUM_HEADS)
+    Aqk = torch.empty(1, 64, _NUM_HEADS, 64)
+    Akk = torch.empty(1, 64, _NUM_HEADS, 16)
+
+    call = type(owner).__call__.__wrapped__
+    grid, launch_kwargs = call(
+        owner,
+        q,
+        k,
+        g,
+        beta,
+        Aqk,
+        Akk,
+        1.0,
+        use_gather=True,
+    )
+
+    assert grid == (1, 4, _NUM_HEADS)
+    assert launch_kwargs == {
+        "T": 64,
+        "H": _NUM_HEADS,
+        "HV": _NUM_HEADS,
+        "K": _HEAD_DIM,
+        "BT": 64,
+        "BC": 16,
+        "BK": 128,
+        "USE_GATHER": True,
+    }
+
+
+def test_chunk_kda_token_parallel_autotune_warmup_matches_runtime_dispatch():
+    registration = {
+        "q_dtype": torch.bfloat16,
+        "k_dtype": torch.bfloat16,
+        "g_dtype": torch.float32,
+        "beta_dtype": torch.float32,
+        "aqk_dtype": torch.bfloat16,
+        "akk_dtype": torch.float32,
+        "num_heads": _NUM_HEADS,
+        "hv": _NUM_HEADS,
+        "qk_head_dim": _HEAD_DIM,
+        "block_t": 64,
+        "block_c": 16,
+        "is_varlen": True,
+    }
+
+    assert _CHUNK_KDA_TOKEN_PARALLEL_KERNEL.get_warmup_keys(**registration) == [
+        _CHUNK_KDA_TOKEN_PARALLEL_KERNEL.dispatch(**registration)
+    ]
+
+
+def test_chunk_kda_token_parallel_runtime_launch_is_independent_from_dispatch(
+    monkeypatch,
+):
+    owner = type(_CHUNK_KDA_TOKEN_PARALLEL_KERNEL)()
+
+    def fail_dispatch(**kwargs):
+        raise AssertionError(kwargs)
+
+    monkeypatch.setattr(owner, "dispatch", fail_dispatch)
+    q = torch.empty(1, 64, _NUM_HEADS, _HEAD_DIM)
+    k = torch.empty_like(q)
+    g = torch.empty_like(q)
+    beta = torch.empty(1, 64, _NUM_HEADS)
+    Aqk = torch.empty(1, 64, _NUM_HEADS, 64)
+    Akk = torch.empty(1, 64, _NUM_HEADS, 16)
+
+    call = type(owner).__call__.__wrapped__
+    grid, launch_kwargs = call(
+        owner,
+        q,
+        k,
+        g,
+        beta,
+        Aqk,
+        Akk,
+        1.0,
+    )
+
+    assert grid({"BH": 8}) == (64, 2)
+    assert launch_kwargs == {
+        "N": 1,
+        "T": 64,
+        "H": _NUM_HEADS,
+        "HV": _NUM_HEADS,
+        "K": _HEAD_DIM,
+        "BT": 64,
+        "BC": 16,
+    }
+
+
+def test_l2norm_warmup_covers_triton_scalar_classes():
+    registration = dict(
+        x_dtype=torch.bfloat16,
+        y_dtype=torch.bfloat16,
+        eps=1e-6,
+        n=_HEAD_DIM,
+        bd=128,
+        mblock=32,
+    )
+    warmed = set(_L2NORM_FWD_KERNEL2.get_warmup_keys(**registration))
+    expected = {
+        _L2NORM_FWD_KERNEL2.dispatch(m=m, **registration) for m in (1, 2, 16)
+    }
+    assert warmed == expected
+
+
+def test_l2norm_runtime_launch_is_independent_from_dispatch(monkeypatch):
+    owner = type(_L2NORM_FWD_KERNEL2)()
+
+    def fail_dispatch(**kwargs):
+        raise AssertionError(kwargs)
+
+    monkeypatch.setattr(owner, "dispatch", fail_dispatch)
+    x = torch.empty(64, _HEAD_DIM)
+    y = torch.empty_like(x)
+
+    call = type(owner).__call__.__wrapped__
+    grid, launch_kwargs = call(owner, x, y, 1e-6, 64, _HEAD_DIM, 128, 32)
+
+    assert grid == (triton.cdiv(64, 32),)
+    assert launch_kwargs["X"] is x
+    assert launch_kwargs["Y"] is y
+    assert {k: v for k, v in launch_kwargs.items() if k not in ("X", "Y")} == {
+        "eps": 1e-6,
+        "M": 64,
+        "N": _HEAD_DIM,
+        "BD": 128,
+        "MBLOCK": 32,
+    }
+
+
+def test_delta_h_autotune_warmup_matches_runtime_dispatch():
+    registration = {
+        "k_dtype": torch.bfloat16,
+        "v_dtype": torch.bfloat16,
+        "w_dtype": torch.bfloat16,
+        "gk_dtype": torch.float32,
+        "h0_dtype": torch.float32,
+        "ht_dtype": torch.float32,
+        "num_heads": _NUM_HEADS,
+        "num_k_heads": _NUM_HEADS,
+        "qk_head_dim": _HEAD_DIM,
+        "v_head_dim": _HEAD_DIM,
+        "block_t": 64,
+        "use_g": False,
+        "use_gk": True,
+        "use_initial_state": True,
+        "store_final_state": True,
+        "save_new_value": True,
+        "is_varlen": True,
+        "use_exp2": True,
+    }
+
+    keys = _CHUNK_GATED_DELTA_RULE_FWD_H_KERNEL.get_warmup_keys(**registration)
+    assert keys == [_CHUNK_GATED_DELTA_RULE_FWD_H_KERNEL.dispatch(**registration)]
+
+
+def test_delta_h_runtime_launch_is_independent_from_dispatch(monkeypatch):
+    owner = type(_CHUNK_GATED_DELTA_RULE_FWD_H_KERNEL)()
+
+    def fail_dispatch(**kwargs):
+        raise AssertionError(kwargs)
+
+    monkeypatch.setattr(owner, "dispatch", fail_dispatch)
+    k = torch.empty(1, 64, _NUM_HEADS, _HEAD_DIM)
+    v = torch.empty(1, 64, _NUM_HEADS, _HEAD_DIM)
+    w = torch.empty(1, 64, _NUM_HEADS, _HEAD_DIM)
+    v_new = torch.empty_like(v)
+    gk = torch.empty(1, 64, _NUM_HEADS, _HEAD_DIM)
+    h = torch.empty(1, 1, _NUM_HEADS, _HEAD_DIM, _HEAD_DIM)
+    h0 = torch.empty(1, _NUM_HEADS, _HEAD_DIM, _HEAD_DIM)
+    ht = torch.empty(1, _NUM_HEADS, _HEAD_DIM, _HEAD_DIM)
+    cu_seqlens = torch.tensor([0, 64], dtype=torch.int32)
+    chunk_offsets = torch.zeros(1, dtype=torch.int32)
+
+    call = type(owner).__call__.__wrapped__
+    grid, launch_kwargs = call(
+        owner,
+        k,
+        v,
+        w,
+        v_new,
+        None,
+        gk,
+        h,
+        h0,
+        ht,
+        cu_seqlens,
+        chunk_offsets,
+        chunk_size=64,
+        use_exp2=True,
+    )
+
+    assert grid({"BV": 64}) == (triton.cdiv(_HEAD_DIM, 64), _NUM_HEADS)
+    assert launch_kwargs == {
+        "T": 64,
+        "H": _NUM_HEADS,
+        "Hg": _NUM_HEADS,
+        "K": _HEAD_DIM,
+        "V": _HEAD_DIM,
+        "BT": 64,
+        "USE_EXP2": True,
+    }
+
+
+def test_o_norm_warmup_covers_triton_scalar_classes():
+    registration = dict(
+        x_dtype=torch.bfloat16,
+        y_dtype=torch.bfloat16,
+        g_dtype=torch.bfloat16,
+        w_dtype=torch.bfloat16,
+        eps=1e-5,
+        num_heads=_NUM_HEADS,
+        g_stride_n=_NUM_HEADS * _HEAD_DIM,
+        d=_HEAD_DIM,
+        block_t=16,
+        block_d=128,
+        activation="sigmoid",
+        is_rms_norm=True,
+        store_residual_out=False,
+        has_residual=False,
+        has_weight=True,
+        has_bias=False,
+    )
+    warmed = set(_LAYER_NORM_GATED_FWD_KERNEL.get_warmup_keys(**registration))
+    expected = {
+        _LAYER_NORM_GATED_FWD_KERNEL.dispatch(t=t, **registration)
+        for t in (1, 2, 16)
+    }
+    assert warmed == expected
+
+
+def test_o_norm_runtime_launch_is_independent_from_dispatch(monkeypatch):
+    owner = type(_LAYER_NORM_GATED_FWD_KERNEL)()
+
+    def fail_dispatch(**kwargs):
+        raise AssertionError(kwargs)
+
+    monkeypatch.setattr(owner, "dispatch", fail_dispatch)
+    x = torch.empty(32, _HEAD_DIM)
+    g = torch.empty(32, _NUM_HEADS, _HEAD_DIM)
+    y = torch.empty_like(x)
+    weight = torch.empty(_HEAD_DIM)
+    rstd = torch.empty(32)
+
+    call = type(owner).__call__.__wrapped__
+    grid, launch_kwargs = call(
+        owner,
+        x,
+        g,
+        y,
+        weight,
+        None,
+        None,
+        None,
+        None,
+        rstd,
+        1e-5,
+        32,
+        _NUM_HEADS,
+        _NUM_HEADS * _HEAD_DIM,
+        _HEAD_DIM,
+        128,
+        16,
+        "sigmoid",
+        True,
+    )
+
+    assert grid == (triton.cdiv(32, 16),)
+    assert launch_kwargs["x"] is x
+    assert launch_kwargs["g"] is g
+    assert launch_kwargs["y"] is y
+    assert launch_kwargs["w"] is weight
+    assert launch_kwargs["rstd"] is rstd
+    assert {
+        k: v
+        for k, v in launch_kwargs.items()
+        if k not in ("x", "g", "y", "w", "rstd")
+    } == {
+        "b": None,
+        "residual": None,
+        "residual_out": None,
+        "mean": None,
+        "eps": 1e-5,
+        "T": 32,
+        "H": _NUM_HEADS,
+        "g_stride_n": _NUM_HEADS * _HEAD_DIM,
+        "D": _HEAD_DIM,
+        "BD": 128,
+        "BT": 16,
+        "ACTIVATION": "sigmoid",
+        "IS_RMS_NORM": True,
+        "num_warps": 8,
+    }

@@ -10,8 +10,17 @@
 
 # Token-parallel implementation of KDA intra chunk kernel
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
 from vllm.third_party.flash_linear_attention.ops.op import exp2
 from vllm.triton_utils import tl, triton
 
@@ -122,6 +131,157 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         tl.store(Akk + i_t * HV * BC + o_hv * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), mask=m_hv)
 
 
+class KimiK3ChunkKdaTokenParallelKernel(
+    VllmTritonJitKernel["KimiK3ChunkKdaTokenParallelKernel.CompileKey"]
+):
+    """JIT owner for the autotuned token-parallel intra kernel."""
+
+    # Triton's Autotuner owns BH/num_warps and compile-warms every candidate
+    # for each logical key below. Only the compile is pre-warmed; the autotune
+    # decision itself runs at the first real launch / profile_run.
+    kernel = staticmethod(chunk_kda_fwd_kernel_intra_token_parallel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        q_dtype: torch.dtype
+        k_dtype: torch.dtype
+        g_dtype: torch.dtype
+        beta_dtype: torch.dtype
+        aqk_dtype: torch.dtype
+        akk_dtype: torch.dtype
+        num_heads: int
+        hv: int
+        qk_head_dim: int
+        block_t: int
+        block_c: int
+        is_varlen: bool
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        q_dtype: torch.dtype,
+        k_dtype: torch.dtype,
+        g_dtype: torch.dtype,
+        beta_dtype: torch.dtype,
+        aqk_dtype: torch.dtype,
+        akk_dtype: torch.dtype,
+        num_heads: int,
+        hv: int,
+        qk_head_dim: int,
+        block_t: int = 64,
+        block_c: int = 16,
+        is_varlen: bool = True,
+    ) -> CompileKey:
+        return self.CompileKey(
+            q_dtype=q_dtype,
+            k_dtype=k_dtype,
+            g_dtype=g_dtype,
+            beta_dtype=beta_dtype,
+            aqk_dtype=aqk_dtype,
+            akk_dtype=akk_dtype,
+            num_heads=num_heads,
+            hv=hv,
+            qk_head_dim=qk_head_dim,
+            block_t=block_t,
+            block_c=block_c,
+            is_varlen=is_varlen,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        q_dtype: torch.dtype,
+        k_dtype: torch.dtype,
+        g_dtype: torch.dtype,
+        beta_dtype: torch.dtype,
+        aqk_dtype: torch.dtype,
+        akk_dtype: torch.dtype,
+        num_heads: int,
+        hv: int,
+        qk_head_dim: int,
+        block_t: int = 64,
+        block_c: int = 16,
+        is_varlen: bool = True,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            q_dtype=q_dtype,
+            k_dtype=k_dtype,
+            g_dtype=g_dtype,
+            beta_dtype=beta_dtype,
+            aqk_dtype=aqk_dtype,
+            akk_dtype=akk_dtype,
+            num_heads=num_heads,
+            hv=hv,
+            qk_head_dim=qk_head_dim,
+            block_t=block_t,
+            block_c=block_c,
+            is_varlen=is_varlen,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        b = 1
+        t = compile_key.block_t
+        h = compile_key.num_heads
+        hv = compile_key.hv
+        k = compile_key.qk_head_dim
+        bt = compile_key.block_t
+        bc = compile_key.block_c
+        return {
+            "q": TritonWarmupTensor(compile_key.q_dtype, shape=(b, t, h, k)),
+            "k": TritonWarmupTensor(compile_key.k_dtype, shape=(b, t, h, k)),
+            "g": TritonWarmupTensor(compile_key.g_dtype, shape=(b, t, hv, k)),
+            "beta": TritonWarmupTensor(compile_key.beta_dtype, shape=(b, t, hv)),
+            "Aqk": TritonWarmupTensor(compile_key.aqk_dtype, shape=(b, t, hv, bt)),
+            "Akk": TritonWarmupTensor(compile_key.akk_dtype, shape=(b, t, hv, bc)),
+            "scale": 1.0,
+            "cu_seqlens": (
+                TritonWarmupTensor(torch.int32, shape=(b + 1,))
+                if compile_key.is_varlen
+                else None
+            ),
+            "chunk_size": compile_key.block_t,
+            "sub_chunk_size": compile_key.block_c,
+        }
+
+    @kernel_launcher
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        Aqk: torch.Tensor,
+        Akk: torch.Tensor,
+        scale: float,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_size: int = 64,
+        sub_chunk_size: int = 16,
+    ) -> LaunchSpec:
+        b, t, num_heads, qk_head_dim = q.shape
+        hv = g.shape[2]
+        n = b
+        if cu_seqlens is not None:
+            n = cu_seqlens.shape[0] - 1
+        block_t = chunk_size
+        block_c = sub_chunk_size
+
+        def grid(meta):
+            return (b * t, triton.cdiv(hv, meta["BH"]))
+
+        return (
+            grid,
+            {
+                "N": n,
+                "T": t,
+                "H": num_heads,
+                "HV": hv,
+                "K": qk_head_dim,
+                "BT": block_t,
+                "BC": block_c,
+            },
+        )
+
+
 def chunk_kda_fwd_intra_token_parallel(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -152,13 +312,7 @@ def chunk_kda_fwd_intra_token_parallel(
         chunk_size: BT (default 64)
         sub_chunk_size: BC (default 16)
     """
-    B, T, H, K, HV = *q.shape, gk.shape[2]
-    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
-    BT = chunk_size
-    BC = sub_chunk_size
-
-    def grid(meta): return (B * T, triton.cdiv(HV, meta['BH']))
-    chunk_kda_fwd_kernel_intra_token_parallel[grid](
+    _CHUNK_KDA_TOKEN_PARALLEL_KERNEL(
         q=q,
         k=k,
         g=gk,
@@ -167,12 +321,10 @@ def chunk_kda_fwd_intra_token_parallel(
         Akk=Akk,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        N=N,
-        T=T,
-        H=H,
-        HV=HV,
-        K=K,
-        BT=BT,
-        BC=BC,
+        chunk_size=chunk_size,
+        sub_chunk_size=sub_chunk_size,
     )
     return Aqk, Akk
+
+
+_CHUNK_KDA_TOKEN_PARALLEL_KERNEL = KimiK3ChunkKdaTokenParallelKernel()
