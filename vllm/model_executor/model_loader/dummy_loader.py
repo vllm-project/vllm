@@ -93,6 +93,8 @@ class DummyModelLoader(BaseModelLoader):
         model_config: ModelConfig,
         model: nn.Module,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        from .default_loader import DefaultModelLoader
+
         primary_weights = DefaultModelLoader.Source(
             model_config.model,
             model_config.revision,
