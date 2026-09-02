@@ -10,6 +10,8 @@ import importlib
 
 import pytest
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.fx.experimental.proxy_tensor import make_fx
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -105,6 +107,37 @@ def _w4a16_reference(
 
     out = a_mk.to(torch.float32) @ w_fp  # [M,N]
     return out.to(a_mk.dtype)
+
+
+def test_triton_w4a16_gemm_fake_impl():
+    with FakeTensorMode():
+        a = torch.empty((4, 256), device=device, dtype=torch.float16)
+        b_q = torch.empty((256, 64), device=device, dtype=torch.int32)
+        scales = torch.empty((2, 512), device=device, dtype=torch.float16)
+
+        out = triton_w4a16_gemm(
+            a=a,
+            b_q=b_q,
+            scales=scales,
+            qzeros=None,
+            group_size=128,
+        )
+
+        assert out.shape == (4, 512)
+        assert out.dtype == a.dtype
+        assert out.device == a.device
+
+        graph = make_fx(
+            lambda a, b_q, scales: triton_w4a16_gemm(
+                a, b_q, scales, qzeros=None, group_size=128
+            )
+        )(a, b_q, scales)
+
+        assert any(
+            node.op == "call_function"
+            and node.target == torch.ops.vllm.triton_w4a16_gemm.default
+            for node in graph.graph.nodes
+        )
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
@@ -306,6 +339,7 @@ def test_triton_w4a16_process_weights_after_loading_repacks_layout():
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 def test_triton_w4a16_process_weights_after_loading_keeps_gptq_qzeros_layout():
+    """AutoGPTQ qzeros are already [K//G, N//8] (output_dim=1): no transpose."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
 
@@ -413,6 +447,7 @@ def test_triton_w4a16_process_weights_after_loading_keeps_gptq_qzeros_layout():
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 def test_triton_w4a16_symmetric_apply_ignores_qzeros(monkeypatch):
+    """For symmetric (uint4b8) layers, apply_weights must pass qzeros=None."""
     from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
         MPLinearLayerConfig,
     )

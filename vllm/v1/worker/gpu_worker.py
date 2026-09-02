@@ -45,6 +45,8 @@ from vllm.distributed.parallel_state import (
     checkpoint_restore_distributed_state,
     get_pp_group,
     get_tp_group,
+    resume_device_comms,
+    suspend_device_comms,
 )
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
@@ -66,8 +68,14 @@ from vllm.tracing import instrument
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
+from vllm.utils.mem_utils import (
+    MemoryProfilingResult,
+    MemorySnapshot,
+    format_gib,
+    memory_profiling,
+)
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
+from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -90,6 +98,43 @@ from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
+
+
+def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> int:
+    spec_config = vllm_config.speculative_config
+    return (
+        2
+        if use_v2_model_runner and spec_config is not None and spec_config.use_dspark()
+        else 1
+    )
+
+
+def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int | None:
+    """Memory in bytes to size the KV cache from when profiling measured a
+    release on ROCm, or None to keep what profiling measured.
+
+    The measurement is the drop in free device memory across startup, so it comes
+    out negative when anything else on the device released memory meanwhile. Torch
+    reserved is process local, so it stands in as a lower bound instead of refusing
+    to start. Kept to ROCm, where the AMD CI groups hit this, following #45490.
+    """
+    if profile_result.total_consumed >= 0 or not current_platform.is_rocm():
+        return None
+
+    baseline = profile_result.before_create
+    after_profile = profile_result.after_profile
+    torch_reserved = max(after_profile.torch_memory - baseline.torch_memory, 0)
+    logger.warning(
+        "Free memory grew by %s GiB during profiling (initial %s GiB, current "
+        "%s GiB). Sizing the KV cache from the %s GiB torch reserved instead of "
+        "the profiling difference.",
+        format_gib(-profile_result.total_consumed),
+        format_gib(baseline.free_memory),
+        format_gib(after_profile.free_memory),
+        format_gib(torch_reserved),
+    )
+    return torch_reserved
+
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
@@ -173,13 +218,12 @@ class Worker(WorkerBase):
         self.profiler_config = vllm_config.profiler_config
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
-        # pending non-blocking PP send work from the previous iteration
-        self._pp_send_work: list[Handle] = []
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
 
-    def _get_sleep_mode_backend(self) -> "SleepModeBackend":
+    @property
+    def sleep_mode_backend(self) -> "SleepModeBackend":
         if self._sleep_mode_backend is None:
             from vllm.device_allocator.sleep_mode_backend import (
                 SleepModeBackendFactory,
@@ -206,7 +250,9 @@ class Worker(WorkerBase):
                     name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
 
-        self._get_sleep_mode_backend().suspend(level)
+        self.sleep_mode_backend.suspend(level)
+        if self.vllm_config.model_config.enable_nccl_comm_suspend:
+            suspend_device_comms()
 
         torch.accelerator.synchronize()
         deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
@@ -226,7 +272,9 @@ class Worker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        self._get_sleep_mode_backend().resume(tags)
+        self.sleep_mode_backend.resume(tags)
+        if self.vllm_config.model_config.enable_nccl_comm_suspend:
+            resume_device_comms()
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags
@@ -245,8 +293,7 @@ class Worker(WorkerBase):
                         buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
             self._sleep_saved_draft_buffers = {}
 
-        if tags is None or "kv_cache" in tags:
-            self.model_runner.post_kv_cache_wake_up()
+        self.synchronize_device()
 
     def checkpoint_prepare(self) -> None:
         checkpoint_prepare_distributed_state()
@@ -402,15 +449,24 @@ class Worker(WorkerBase):
         else:
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
-        # Initialize workspace manager
+        # DSpark target and draft CUDA graphs retain workspace views concurrently.
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
-        init_workspace_manager(self.device, num_ubatches)
+        init_workspace_manager(
+            self.device,
+            num_ubatches,
+            _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
+        )
 
         # Construct the model runner
         if self.use_v2_model_runner:
-            from vllm.v1.worker.gpu.model_runner import (
-                GPUModelRunner as GPUModelRunnerV2,
-            )
+            if self.vllm_config.is_mm_encoder_only:
+                from vllm.v1.worker.mm_encoder_model_runner import (
+                    MMEncoderModelRunner as GPUModelRunnerV2,
+                )
+            else:
+                from vllm.v1.worker.gpu.model_runner import (  # type: ignore[assignment]
+                    GPUModelRunner as GPUModelRunnerV2,
+                )
 
             # HACK(woosuk): This is a temporary fix to avoid type errors.
             self.model_runner: GPUModelRunner = GPUModelRunnerV2(  # type: ignore
@@ -524,24 +580,33 @@ class Worker(WorkerBase):
             else 0
         )
 
+        init_free_memory = self.init_snapshot.free_memory
+        free_gpu_memory = profile_result.after_profile.free_memory
+        rocm_fallback = maybe_rocm_profiling_fallback(profile_result)
+        if rocm_fallback is None:
+            # NOTE(woosuk): Here we assume that the other processes using the same
+            # GPU did not change their memory usage during the profiling.
+            assert init_free_memory >= free_gpu_memory, (
+                "Error in memory profiling. "
+                f"Initial free memory {format_gib(init_free_memory)} GiB, "
+                f"current free memory {format_gib(free_gpu_memory)} GiB. "
+                "This happens when other processes sharing the same container "
+                "release GPU memory while vLLM is profiling during initialization. "
+                "To fix this, ensure consistent GPU memory allocation or "
+                "isolate vLLM in its own container."
+            )
+        else:
+            profile_result.total_consumed = rocm_fallback
+            profile_result.non_kv_cache_memory = (
+                profile_result.total_consumed + profile_result.transient_peak_headroom
+            )
+
         self.total_consumed = profile_result.total_consumed
         self.peak_activation_memory = (
             profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
-        free_gpu_memory = profile_result.after_profile.free_memory
-        # NOTE(woosuk): Here we assume that the other processes using the same
-        # GPU did not change their memory usage during the profiling.
-        assert self.init_snapshot.free_memory >= free_gpu_memory, (
-            "Error in memory profiling. "
-            f"Initial free memory {format_gib(self.init_snapshot.free_memory)} GiB, "
-            f"current free memory {format_gib(free_gpu_memory)} GiB. "
-            "This happens when other processes sharing the same container "
-            "release GPU memory while vLLM is profiling during initialization. "
-            "To fix this, ensure consistent GPU memory allocation or "
-            "isolate vLLM in its own container."
-        )
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
             - profile_result.non_kv_cache_memory
@@ -655,6 +720,11 @@ class Worker(WorkerBase):
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
 
+        # Adopt the engine core's layout; workers spawned after resolution
+        # (e.g. elastic EP scale-up) only see it through the config.
+        if kv_cache_config.kv_cache_layout is not None:
+            record_kv_cache_layout(self.cache_config, kv_cache_config.kv_cache_layout)
+
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
@@ -662,8 +732,12 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
-        with self._maybe_get_memory_pool_context(tag="kv_cache"):
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+        self.model_runner.initialize_kv_cache(
+            kv_cache_config,
+            kv_cache_allocation_context=self._maybe_get_memory_pool_context(
+                tag="kv_cache"
+            ),
+        )
 
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
@@ -869,6 +943,19 @@ class Worker(WorkerBase):
     def get_draft_model(self) -> nn.Module | None:
         return self.model_runner.get_draft_model()
 
+    def supports_draft_weight_updates(self) -> bool:
+        engine = self.weight_transfer_engine
+        speculative_config = self.speculative_config
+        get_draft_model = getattr(self.model_runner, "get_draft_model", None)
+        return (
+            engine is not None
+            and engine.supports_draft_weight_update
+            and callable(get_draft_model)
+            and get_draft_model() is not None
+            and speculative_config is not None
+            and speculative_config.draft_model_config is not None
+        )
+
     def _set_draft_weight_update_target(self) -> None:
         assert self.weight_transfer_engine is not None
 
@@ -1026,12 +1113,6 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        # ensure any previous non-blocking PP sends are complete
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
-
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1104,8 +1185,12 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        # launch non-blocking send of intermediate tensors
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
+        # launch non-blocking send of intermediate tensors; the
+        # GroupCoordinator self-retains the source tensors and the
+        # metadata handle in ``_pending_isends`` and reaps them lazily on
+        # the next ``isend_tensor_dict(is_async=True)`` call, so this
+        # step returns without waiting for the receiver to drain.
+        get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=get_tp_group(),
             all_gather_tensors=all_gather_tensors,
@@ -1288,7 +1373,7 @@ class Worker(WorkerBase):
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
 
-    def update_weights(self, update_info: dict) -> None:
+    def update_weights(self, update_info: dict | list[dict]) -> None:
         """
         Receive one weight update chunk from the trainer.
 
@@ -1298,7 +1383,8 @@ class Worker(WorkerBase):
         / start_draft_weight_update call selected.
 
         Args:
-            update_info: Dictionary containing backend-specific update info
+            update_info: Backend-specific update info, or a list indexed by
+                global worker rank across data parallel replicas.
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1310,7 +1396,15 @@ class Worker(WorkerBase):
 
         with set_current_vllm_config(self.vllm_config):
             try:
-                self.weight_transfer_engine.update_weights(update_info)
+                if isinstance(update_info, list):
+                    parallel_config = self.vllm_config.parallel_config
+                    local_update_info = update_info[
+                        parallel_config.data_parallel_rank * parallel_config.world_size
+                        + self.rank
+                    ]
+                else:
+                    local_update_info = update_info
+                self.weight_transfer_engine.update_weights(local_update_info)
             except BaseException:
                 self._weight_update_active = False
                 self.weight_transfer_engine.reset_weight_update_target()
@@ -1349,6 +1443,8 @@ class Worker(WorkerBase):
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
 
+        self.elastic_ep_executor.shutdown()
+
         # Release GPU resources held by the model runner so that memory
         # can be reclaimed when running in-process
         if model_runner := getattr(self, "model_runner", None):
@@ -1376,7 +1472,7 @@ def init_worker_distributed_environment(
 ) -> None:
     """Initialize the distributed environment."""
     parallel_config = vllm_config.parallel_config
-    from vllm.model_executor.layers.batch_invariant import init_batch_invariance
+    from vllm.model_executor.determinism.batch_invariant import init_batch_invariance
 
     init_batch_invariance()
     override_envs_for_eplb(

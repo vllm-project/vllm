@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cached_property
@@ -31,6 +30,7 @@ from vllm.platforms import current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
+    checkpoint_has_lm_head,
     get_config,
     get_hf_image_processor_config,
     get_hf_text_config,
@@ -186,6 +186,10 @@ class ModelConfig:
     """The Hugging Face config of the model."""
     hf_text_config: PretrainedConfig = field(init=False)
     """The Hugging Face config of the text model (same as hf_config for text models)."""
+    word_embeddings_untied_by_checkpoint: bool = field(default=False, init=False)
+    """Whether `tie_word_embeddings` was overridden to `False` because the checkpoint
+    contains an `lm_head` of its own. The two may still turn out to be identical, in
+    which case they are re-tied once the weights have been loaded."""
     hf_config_path: str | None = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
@@ -241,6 +245,8 @@ class ModelConfig:
     flexibility."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
+    return_sampling_mask: bool = False
+    """Whether to return the post-processing token support for each sample."""
     max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -261,6 +267,12 @@ class ModelConfig:
     equivalent exponential-race sampling. FP64 preserves lower-tail sampling
     events that fp32 uniform/exponential draws can truncate, at the cost of
     significantly lower throughput on most GPUs."""
+    enable_trace_replay: bool = False
+    """Whether to allow requests to set
+    `SamplingParams.trace_decode_token_ids`, which forces decoding to follow a
+    predetermined token sequence while still computing real logprobs. Reserved
+    for debugging and RL workflows: enabling it reserves a per-request trace
+    buffer, so it is off by default."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -331,6 +343,10 @@ class ModelConfig:
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
+    enable_nccl_comm_suspend: bool = False
+    """Enable releasing NCCL communicator memory during sleep mode
+    (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
+    (the default) sleep still releases weights/KV-cache memory as before."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
@@ -347,8 +363,6 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation.
     - "terratorch" will use the TerraTorch model implementation.
     """
-    override_attention_dtype: str | None = None
-    """Override dtype for attention"""
     logits_processors: list[str | type[LogitsProcessor]] | None = None
     """One or more logits processors' fully-qualified class names or class
     definitions"""
@@ -422,15 +436,16 @@ class ModelConfig:
             "tokenizer_revision",
             "spec_target_max_model_len",
             "enforce_eager",
+            "return_sampling_mask",
             "logprobs_mode",
             "use_fp64_gumbel",
+            "enable_trace_replay",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
             "config_format",
             "hf_token",
             "hf_overrides",
-            "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
             "pooler_config",
@@ -590,12 +605,6 @@ class ModelConfig:
                 self.tokenizer,
                 self.tokenizer_revision,
                 self.hf_token,
-            )
-
-        if self.override_attention_dtype is not None and not current_platform.is_rocm():
-            warnings.warn(
-                "override-attention-dtype is set but not using ROCm platform",
-                stacklevel=2,
             )
 
         if self.enable_sleep_mode:
@@ -933,6 +942,12 @@ class ModelConfig:
                 f"got {type(self.max_model_len).__name__}: {self.max_model_len!r}. "
                 "Example: max_model_len=2048"
             )
+        if self.enable_prompt_embeds and self.is_encoder_decoder:
+            # No encoder-decoder model accepts `inputs_embeds`; their decoders
+            # embed `input_ids` internally.
+            raise ValueError(
+                "--enable-prompt-embeds is not supported with encoder-decoder models."
+            )
         return self
 
     def _resolve_mm_device_do_normalize(
@@ -1102,6 +1117,34 @@ class ModelConfig:
 
     def _get_encoder_config(self) -> dict[str, Any] | None:
         return get_sentence_transformer_tokenizer_config(self.model, self.revision)
+
+    def maybe_untie_word_embeddings(self) -> None:
+        """Stop trusting `tie_word_embeddings` when the checkpoint disagrees.
+
+        A config may claim the word embeddings are tied while the checkpoint
+        ships an `lm_head` of its own. Tying regardless would silently discard
+        that tensor, so build the `lm_head` as if untied and let it load. The
+        two are compared once loaded, and re-tied if they turn out to match, by
+        [maybe_retie_word_embeddings][vllm.model_executor.model_loader.weight_tying.maybe_retie_word_embeddings].
+
+        Transformers makes the same decision in `PreTrainedModel.tie_weights`,
+        where it can compare the two tensors directly.
+        """
+        if not getattr(self.hf_config, "tie_word_embeddings", False):
+            return
+        if not checkpoint_has_lm_head(self.model, revision=self.revision):
+            return
+
+        logger.debug(
+            "The config for %s says the word embeddings are tied, but the checkpoint "
+            "contains an lm_head. Loading it to find out whether they really are tied.",
+            self.model,
+        )
+        # Both levels must be updated: `VllmConfig.with_hf_config` reads the top
+        # level, and the text config is what the language model itself sees.
+        self.hf_config.tie_word_embeddings = False
+        self.hf_config.get_text_config().tie_word_embeddings = False
+        self.word_embeddings_untied_by_checkpoint = True
 
     def _get_default_runner_type(
         self,
@@ -1805,6 +1848,10 @@ class ModelConfig:
         return uses_xdrope_dim(self.hf_config)
 
     @property
+    def uses_xdrope(self) -> bool:
+        return self.uses_xdrope_dim > 0
+
+    @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
 
@@ -1851,7 +1898,7 @@ class ModelConfig:
         # actually contain any non-attention layers.
         layer_types = getattr(self.hf_config, "layer_types", None)
         return layer_types is None or not all(
-            layer == "attention" for layer in layer_types
+            layer in ("attention", "full_attention") for layer in layer_types
         )
 
     @property
@@ -1878,6 +1925,12 @@ class ModelConfig:
             # kv_lora_rank indicates that a Transformers model implementation uses MLA
             return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         # Manually maintained list of model types for vLLM model implementations
+
+        # Bidirectional DeepSeek variants (is_causal=False, used by some
+        # embedding models) must use the non-MLA attention path, since the
+        # MLA kernels only support causal attention.
+        if not getattr(self.hf_text_config, "is_causal", True):
+            return False
         return self.is_deepseek_mla
 
     @property

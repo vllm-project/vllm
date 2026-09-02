@@ -12,14 +12,11 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponse,
     CompletionStreamResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    UsageInfo,
-)
 from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import (
@@ -166,16 +163,17 @@ class ServingDerender(BaseServing):
             total_tokens=prompt_tokens + completion_tokens,
         )
 
+        model_name = request.model or self.models.model_name()
         logger.debug(
             "derender_chat request_id=%s model=%s choices=%d completion_tokens=%d",
             gen.request_id,
-            request.model,
+            model_name,
             len(choices),
             completion_tokens,
         )
         return ChatCompletionResponse(
             id=gen.request_id,
-            model=request.model,
+            model=model_name,
             created=int(time.time()),
             choices=choices,
             usage=usage,
@@ -231,17 +229,18 @@ class ServingDerender(BaseServing):
             total_tokens=total_prompt_tokens + total_completion_tokens,
         )
 
+        model_name = request.model or self.models.model_name()
         logger.debug(
             "derender_completion request_id=%s model=%s choices=%d"
             " completion_tokens=%d",
             first.request_id,
-            request.model,
+            model_name,
             len(choices),
             total_completion_tokens,
         )
         return CompletionResponse(
             id=first.request_id,
-            model=request.model,
+            model=model_name,
             created=int(time.time()),
             choices=choices,
             usage=usage,
@@ -264,9 +263,10 @@ class ServingDerender(BaseServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        model_name = request.model or self.models.model_name()
         try:
             chunk, updated_state = await self.online_derenderer.derender_chat_stream(
-                model=request.model,
+                model=model_name,
                 generate_chunk=request.generate_chunk,
                 state=request.stream_state,
                 chat_request=request.chat_request,
@@ -284,7 +284,7 @@ class ServingDerender(BaseServing):
         logger.debug(
             "derender_chat_stream request_id=%s model=%s delta_tokens=%d",
             request.generate_chunk.request_id,
-            request.model,
+            model_name,
             sum(
                 len(c.token_ids) for c in request.generate_chunk.choices if c.token_ids
             ),
@@ -304,12 +304,13 @@ class ServingDerender(BaseServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        model_name = request.model or self.models.model_name()
         try:
             (
                 chunk,
                 updated_state,
             ) = await self.online_derenderer.derender_completion_stream(
-                model=request.model,
+                model=model_name,
                 generate_chunk=request.generate_chunk,
                 state=request.stream_state,
                 prompt_tokens=request.prompt_tokens,
@@ -325,7 +326,7 @@ class ServingDerender(BaseServing):
         logger.debug(
             "derender_completion_stream request_id=%s model=%s delta_tokens=%d",
             request.generate_chunk.request_id,
-            request.model,
+            model_name,
             sum(
                 len(c.token_ids) for c in request.generate_chunk.choices if c.token_ids
             ),

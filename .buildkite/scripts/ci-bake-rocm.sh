@@ -15,16 +15,16 @@ set -euo pipefail
 
 DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
-DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils"
+DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt tools/install_torchcodec_rocm.sh rust-toolchain.toml tests/vllm_test_utils"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
-DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_nixl build_rocshmem build_deepep mori_base ci_base"
+DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_nixl lmcache_source build_lmcache build_rocshmem build_deepep mooncake_source build_mooncake package_mooncake export_mooncake mori_base ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="3"
 # ROCm CI forces REMOTE_VLLM=0, so content identity covers only the selected
 # local-source stages rather than unreachable remote-fetch alternatives.
 DEFAULT_ROCM_CSRC_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt pyproject.toml setup.py CMakeLists.txt cmake csrc vllm/envs.py vllm/__init__.py tools/build_rust.py"
 DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm build_vllm_dependencies rocm-triton-kernels csrc-build"
-DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore requirements/build/rust.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py tools/install_protoc.sh build_rust.sh"
-DEFAULT_ROCM_RUST_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust_input_0 rust-input rust-toolchain rust-build"
+DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore .git_archival.txt pyproject.toml requirements/build/rust.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py build_rust.sh"
+DEFAULT_ROCM_RUST_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm vllm-version rust_toolchain_input_0 rust-toolchain-input rust_input_0 rust-input rust-toolchain rust-build"
 # Docker's 128-character tag limit minus the longest cache prefix
 # ("csrc-rocm-branch-" and "rust-rocm-branch-", both 17 characters).
 ROCM_CACHE_BRANCH_TAG_MAX_LEN=111
@@ -199,11 +199,13 @@ get_buildkite_target_repo_url() {
 
 git_fetch_with_timeout() {
     local timeout_secs="${ROCM_CACHE_GIT_FETCH_TIMEOUT:-60}"
+    local -a fetch_command=(git fetch --no-auto-maintenance)
 
+    # Detached maintenance can race a later shallow fetch on .git/shallow.
     if command -v timeout >/dev/null 2>&1; then
-        timeout "${timeout_secs}s" git fetch "$@"
+        timeout "${timeout_secs}s" "${fetch_command[@]}" "$@"
     else
-        git fetch "$@"
+        "${fetch_command[@]}" "$@"
     fi
 }
 
@@ -523,8 +525,8 @@ prepare_ci_build_context() {
         return 1
     fi
 
-    # setuptools-scm understands Git's stable archive format, so full-source
-    # wheels retain their exact version without copying mutable Git history.
+    # setuptools-scm understands Git's stable archive format, so wheels and
+    # Rust artifacts retain their exact version without copying Git history.
     if ! is_ci_base_target; then
         write_ci_git_archival_metadata "${source_root}" "${context_root}" \
             || return $?
@@ -838,6 +840,29 @@ should_upload_wheel_artifacts() {
     [[ "${TARGET}" == *"with-wheel"* \
         || "${TARGET}" == *"export-wheel"* \
         || "${TARGET}" == *"artifact"* ]]
+}
+
+should_export_rocm_smoke() {
+    [[ "${TARGET}" == "test-rocm-ci-with-wheel" \
+        || "${TARGET}" == "smoke-test-rocm-ci" ]]
+}
+
+verify_rocm_smoke_export() {
+    local marker="./build/rocm-smoke-export/vllm-smoke-ok"
+    local expected_smoke_id="${BUILDKITE_BUILD_ID:-local}"
+    local actual_smoke_id=""
+
+    should_export_rocm_smoke || return 0
+    if [[ ! -f "${marker}" ]]; then
+        echo "ROCm BuildKit smoke marker is missing: ${marker}" >&2
+        return 1
+    fi
+    actual_smoke_id="$(< "${marker}")"
+    if [[ "${actual_smoke_id}" != "${expected_smoke_id}" ]]; then
+        echo "ROCm BuildKit smoke marker belongs to ${actual_smoke_id}, not ${expected_smoke_id}" \
+            >&2
+        return 1
+    fi
 }
 
 get_remote_image_label() {
@@ -1384,8 +1409,9 @@ maybe_skip_existing_image() {
         echo "FORCE_BUILD=1 set; skipping existing-image check"
         return 0
     fi
-    if ! is_ci_base_target && should_upload_wheel_artifacts; then
-        echo "Artifact-producing targets always run for the current build"
+    if ! is_ci_base_target \
+        && { should_upload_wheel_artifacts || should_export_rocm_smoke; }; then
+        echo "Local-output targets always run for the current build"
         return 0
     fi
 
@@ -1658,9 +1684,12 @@ ci_base_metadata_pairs() {
     metadata_pair "vllm.rocm.deepep_commit" "${DEEPEP_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_BRANCH")}"
     metadata_pair "vllm.rocm.deepep_nic" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_NIC")"
     metadata_pair "vllm.rocm.deepep_rocm_arch" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_ROCM_ARCH")"
+    metadata_pair "vllm.rocm.mooncake_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "MOONCAKE_REPO")"
+    metadata_pair "vllm.rocm.mooncake_commit" "${MOONCAKE_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "MOONCAKE_BRANCH")}"
     metadata_pair "vllm.rocm.nixl_cache_key" "${NIXL_CACHE_KEY:-}"
     metadata_pair "vllm.rocm.rocshmem_cache_key" "${ROCSHMEM_CACHE_KEY:-}"
     metadata_pair "vllm.rocm.deepep_cache_key" "${DEEPEP_CACHE_KEY:-}"
+    metadata_pair "vllm.rocm.mooncake_cache_key" "${MOONCAKE_CACHE_KEY:-}"
 }
 
 write_ci_base_metadata_annotations() {
@@ -1739,7 +1768,12 @@ EOF
 
 uses_rocm_csrc_cache() {
     case "${TARGET}" in
-        csrc-rocm-ci|test-rocm-ci|test-rocm-ci-with-wheel|test-rocm-ci-with-artifacts|export-wheel-rocm)
+        csrc-rocm-ci \
+            | test-rocm-ci \
+            | test-rocm-ci-with-wheel \
+            | test-rocm-ci-with-artifacts \
+            | export-wheel-rocm \
+            | smoke-test-rocm-ci)
             return 0
             ;;
         *)
@@ -1750,7 +1784,12 @@ uses_rocm_csrc_cache() {
 
 uses_rocm_rust_cache() {
     case "${TARGET}" in
-        rust-rocm-ci|test-rocm-ci|test-rocm-ci-with-wheel|test-rocm-ci-with-artifacts|export-wheel-rocm)
+        rust-rocm-ci \
+            | test-rocm-ci \
+            | test-rocm-ci-with-wheel \
+            | test-rocm-ci-with-artifacts \
+            | export-wheel-rocm \
+            | smoke-test-rocm-ci)
             return 0
             ;;
         *)
@@ -2138,7 +2177,7 @@ write_rocm_cache_override() {
     # exporter unless it is requested explicitly.
     if ((${#rust_cache_to[@]} > 0)); then
         case "${TARGET}" in
-            test-rocm-ci|export-wheel-rocm)
+            test-rocm-ci|export-wheel-rocm|smoke-test-rocm-ci)
                 BAKE_TARGETS=("rust-rocm-ci" "${BAKE_TARGETS[@]}")
                 ;;
         esac
@@ -2188,6 +2227,15 @@ EOF
         cat <<EOF
 }
 
+target "smoke-test-rocm-ci" {
+  cache-from = concat(
+    get_cache_from_rocm(),
+EOF
+        write_hcl_string_list "    " "${combined_content_cache_from[@]}"
+        cat <<EOF
+  )
+}
+
 target "export-wheel-rocm" {
   cache-from = concat(
     get_cache_from_rocm(),
@@ -2223,7 +2271,7 @@ extract_dependency_pins() {
         return 0
     fi
 
-    for var in NIXL_BRANCH UCX_BRANCH ROCSHMEM_BRANCH DEEPEP_BRANCH; do
+    for var in NIXL_BRANCH UCX_BRANCH ROCSHMEM_BRANCH DEEPEP_BRANCH MOONCAKE_BRANCH; do
         if [[ -n "${!var:-}" ]]; then
             echo "Using provided ${var}: ${!var}"
             continue
@@ -2247,9 +2295,11 @@ compute_dependency_cache_keys() {
     local ucx_branch=""
     local rocshmem_branch=""
     local deepep_branch=""
+    local mooncake_branch=""
     local nixl_material=""
     local rocshmem_material=""
     local deepep_material=""
+    local mooncake_material=""
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
     dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
@@ -2257,6 +2307,7 @@ compute_dependency_cache_keys() {
     ucx_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "UCX_BRANCH")
     rocshmem_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "ROCSHMEM_BRANCH")
     deepep_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "DEEPEP_BRANCH")
+    mooncake_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "MOONCAKE_BRANCH")
 
     if [[ -n "${nixl_branch}" && -n "${ucx_branch}" ]]; then
         nixl_material=$(compose_stage_cache_material "${dockerfile_rocm}" "base build_nixl")
@@ -2289,6 +2340,19 @@ compute_dependency_cache_keys() {
         )
         export DEEPEP_CACHE_KEY
         echo "DeepEP dependency cache key: ${DEEPEP_CACHE_KEY}"
+    fi
+
+    if [[ -n "${mooncake_branch}" ]]; then
+        mooncake_material=$(compose_stage_cache_material \
+            "${dockerfile_rocm}" \
+            "base mooncake_source build_mooncake package_mooncake export_mooncake")
+        MOONCAKE_CACHE_KEY=$(
+            compose_dependency_cache_key \
+                "${mooncake_branch}" \
+                "${mooncake_material}"
+        )
+        export MOONCAKE_CACHE_KEY
+        echo "Mooncake dependency cache key: ${MOONCAKE_CACHE_KEY}"
     fi
 }
 
@@ -2338,6 +2402,13 @@ dependency_cache_ref_for_target() {
                 printf '%s\n' "${cache_repo}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH:-}"
             fi
             ;;
+        mooncake-rocm-ci)
+            if [[ -n "${MOONCAKE_CACHE_KEY:-}" ]]; then
+                printf '%s\n' "${cache_repo}:mooncake-rocm-${MOONCAKE_CACHE_KEY}"
+            elif [[ -n "${MOONCAKE_BRANCH:-}" ]]; then
+                printf '%s\n' "${cache_repo}:mooncake-rocm-${MOONCAKE_BRANCH}"
+            fi
+            ;;
     esac
 }
 
@@ -2355,13 +2426,14 @@ resolve_ci_base_dependency_targets() {
     local nixl_ref=""
     local rocshmem_ref=""
     local deepep_ref=""
+    local mooncake_ref=""
 
     [[ "${TARGET}" == "ci-base-rocm-ci-with-deps" ]] || return 0
 
     case "${mode}" in
         always)
             echo "ROCM_DEP_CACHE_EXPORT_MODE=always; exporting all dependency caches serially"
-            for target in nixl-rocm-ci rocshmem-rocm-ci deepep-rocm-ci; do
+            for target in nixl-rocm-ci rocshmem-rocm-ci deepep-rocm-ci mooncake-rocm-ci; do
                 if [[ -n "$(dependency_cache_ref_for_target "${target}")" ]]; then
                     add_dependency_cache_target "${target}"
                 fi
@@ -2408,6 +2480,16 @@ resolve_ci_base_dependency_targets() {
         else
             echo "DeepEP dependency cache missing; will seed: ${deepep_ref}"
             add_dependency_cache_target "deepep-rocm-ci"
+        fi
+    fi
+
+    if [[ "${mode}" != "always" && -n "${MOONCAKE_CACHE_KEY:-}" ]]; then
+        mooncake_ref=$(dependency_cache_ref_for_target "mooncake-rocm-ci")
+        if dependency_cache_ref_exists "${mooncake_ref}"; then
+            echo "Mooncake dependency cache exists: ${mooncake_ref}"
+        else
+            echo "Mooncake dependency cache missing; will seed: ${mooncake_ref}"
+            add_dependency_cache_target "mooncake-rocm-ci"
         fi
     fi
 
@@ -2673,8 +2755,14 @@ main() {
         # clean prevents a failed/retried export from packaging a stale wheel.
         rm -rf ./wheel-export
     fi
+    if should_export_rocm_smoke; then
+        # The marker is a build output, not a cache. Never accept stale output
+        # from an earlier build or retry.
+        rm -rf ./build/rocm-smoke-export
+    fi
     seed_dependency_caches_if_needed
     run_bake
+    verify_rocm_smoke_export
     promote_stable_ci_base_tag
     publish_ci_base_handoff_ref
     upload_wheel_artifacts_if_present

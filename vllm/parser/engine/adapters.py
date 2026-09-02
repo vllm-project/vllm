@@ -19,12 +19,12 @@ from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
-    from vllm.entrypoints.openai.engine.protocol import (
+    from vllm.entrypoints.generate.base.protocol import (
         DeltaMessage,
         ExtractedToolCallInformation,
+    )
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
     )
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.parser.engine.parser_engine import ParserEngine
@@ -47,6 +47,11 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs) -> None:
         super().__init__(tokenizer, *args, **kwargs)
         self._parser_engine = self._parser_engine_cls(tokenizer, **kwargs)  # type: ignore[call-arg]
+        self._parser_engine_kwargs = kwargs
+        self._counting_parser_engine: ParserEngine | None = None
+        # TODO: Remove once Responses finalization reuses accumulated streaming
+        # parser results instead of reparsing the complete output.
+        self._streaming_count_valid = False
 
     @contextmanager
     def _skip_tool_parsing(self) -> Iterator[None]:
@@ -71,6 +76,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
+        self._streaming_count_valid = False
         with self._skip_tool_parsing():
             return self._parser_engine.extract_reasoning(model_output, request)
 
@@ -83,6 +89,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
+        self._streaming_count_valid = True
         with self._skip_tool_parsing():
             return self._parser_engine.extract_reasoning_streaming(
                 previous_text,
@@ -122,7 +129,18 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         return self._parser_engine.get_streaming_fallback_content(text, request)
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        return self._parser_engine.count_reasoning_tokens(token_ids)
+        if self._streaming_count_valid:
+            return self._parser_engine.count_reasoning_tokens(token_ids)
+        if not token_ids:
+            return 0
+        if self._counting_parser_engine is None:
+            self._counting_parser_engine = self._parser_engine_cls(
+                self.model_tokenizer, **self._parser_engine_kwargs
+            )  # type: ignore[call-arg]
+        self._counting_parser_engine._single_pass_parse(
+            self.model_tokenizer.decode(token_ids), token_ids
+        )
+        return self._counting_parser_engine.count_reasoning_tokens(token_ids)
 
 
 class ParserEngineToolAdapter(ToolParser):
@@ -131,6 +149,15 @@ class ParserEngineToolAdapter(ToolParser):
     :meth:`extract_tool_calls` starts the parser engine in ``CONTENT``
     state so it can parse reasoning-stripped content (i.e. the output of
     :meth:`ReasoningParser.extract_reasoning`).
+
+    When no reasoning parser is configured at the serving layer, the
+    owning :class:`~vllm.parser.abstract_parser.Parser` sets
+    :attr:`skip_reasoning_parsing` so reasoning markup — plain content
+    in that configuration — passes through verbatim instead of being
+    consumed or reclassified by the engine. The engine honors the flag
+    only for markers that are reasoning-exclusive in its config; a
+    grammar like Inkling, whose block closer is shared with text and
+    tool blocks, keeps parsing unchanged.
 
     Subclasses set :attr:`_parser_engine_cls` to the concrete
     :class:`ParserEngine` class.
@@ -147,6 +174,14 @@ class ParserEngineToolAdapter(ToolParser):
     ) -> None:
         super().__init__(tokenizer, tools)
         self._parser_engine = self._parser_engine_cls(tokenizer, tools, **kwargs)  # type: ignore[call-arg]
+
+    @property
+    def skip_reasoning_parsing(self) -> bool:
+        return self._parser_engine.skip_reasoning_parsing
+
+    @skip_reasoning_parsing.setter
+    def skip_reasoning_parsing(self, value: bool) -> None:
+        self._parser_engine.skip_reasoning_parsing = value
 
     def adjust_request(
         self,
