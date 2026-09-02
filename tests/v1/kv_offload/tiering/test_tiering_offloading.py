@@ -1040,12 +1040,12 @@ class TestTieringOffloadingManager:
         assert ctx.req_id not in self.manager._req_state
 
     def test_on_new_request_lifecycle(self, manager_setup):
-        """Policy defaults to CHUNK_LEVEL, escalates when a tier requests it,
+        """Policy defaults to BLOCK_LEVEL, escalates when a tier requests it,
         and is cleaned up on on_request_finished."""
-        # Default: all tiers return CHUNK_LEVEL
+        # Default: all tiers return BLOCK_LEVEL
         ctx = ReqContext(req_id="req_policy_lifecycle")
         result = self.manager.on_new_request(ctx)
-        assert result.policy == OffloadPolicy.CHUNK_LEVEL
+        assert result.policy == OffloadPolicy.BLOCK_LEVEL
         assert self.manager._req_state[ctx.req_id].request_level_tiers is None
         self.manager.on_request_finished(ctx)
         assert ctx.req_id not in self.manager._req_state
