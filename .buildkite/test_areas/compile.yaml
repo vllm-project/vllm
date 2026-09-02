@@ -83,6 +83,27 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
     # Qwen/Deepseek requires +quant_fp8 as -quant_fp8 rms+quant fusion is not supported
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and (qwen3 or deepseek)"
+  mirror:
+    amd:
+      label: ":amd: (MI355) Fusion E2E Quick"
+      dind: false
+      device: mi355_1
+      working_dir: "/vllm-workspace/"
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/quantization/
+      - vllm/model_executor/
+      - vllm/v1/attention/
+      - vllm/compilation/
+      - tests/compile/fusions_e2e/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - rocm-smi
+      - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
+      - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and +rms_norm and +quant_fp8 and qwen3'"
 
 - label: ":nvidia: (H100) Fusion E2E Config Sweep"
   key: fusion-e2e-config-sweep-h100
@@ -103,6 +124,28 @@ steps:
     - nvidia-smi
     # Run just llama3 (fp8) for all config combinations
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
+  mirror:
+    amd:
+      label: ":amd: (MI355) Fusion E2E Config Sweep"
+      dind: false
+      device: mi355_1
+      working_dir: "/vllm-workspace/"
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/quantization/
+      - vllm/compilation/
+      - vllm/model_executor/layers/layernorm.py
+      - vllm/model_executor/layers/activation.py
+      - vllm/model_executor/layers/attention/attention.py
+      - vllm/model_executor/layers/quantization/input_quant_fp8.py
+      - tests/compile/fusions_e2e/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - rocm-smi
+      - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
 - label: ":nvidia: (B200) Fusion E2E Config Sweep"
   key: fusion-e2e-config-sweep-b200

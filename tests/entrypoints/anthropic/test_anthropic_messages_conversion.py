@@ -3,7 +3,7 @@
 """Unit tests for Anthropic-to-OpenAI request conversion.
 
 Tests the image source handling and tool_result content parsing in
-AnthropicServingMessages._convert_anthropic_to_openai_request().
+AnthropicServingMessages.to_chat_completion_request().
 
 Also covers extended-thinking edge cases such as ``redacted_thinking``
 blocks echoed back by Anthropic clients, and streaming conversion in
@@ -32,6 +32,11 @@ from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
     _build_anthropic_usage,
 )
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
@@ -39,19 +44,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
-    PromptTokenUsageInfo,
-    UsageInfo,
-)
+from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
 from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
 from vllm.exceptions import VLLMValidationError
 
-_convert = AnthropicServingMessages._convert_anthropic_to_openai_request
+_convert = AnthropicServingMessages.to_chat_completion_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
 
 
