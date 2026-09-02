@@ -47,6 +47,18 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                 cache_dtype=speculative_config.kv_cache_dtype,
             ),
         )
+    # Assigned unconditionally, mirroring the V1 proposer: a None backend
+    # clears the target's so the draft autoselects independently instead of
+    # inheriting, because draft and target attention shapes often differ.
+    # Must be applied before get_model(): init_attn_backend reads the backend
+    # off each constructed layer, so an override applied later has no effect.
+    vllm_config = replace(
+        vllm_config,
+        attention_config=replace(
+            vllm_config.attention_config,
+            backend=speculative_config.attention_backend,
+        ),
+    )
     with set_model_tag("eagle_head"):
         eagle_model = get_model(
             vllm_config=vllm_config, model_config=draft_model_config
