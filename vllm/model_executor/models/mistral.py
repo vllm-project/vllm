@@ -120,10 +120,10 @@ class MistralAttention(LlamaAttention):
         self.do_llama_4_scaling = llama_4_scaling_config is not None
         if self.do_llama_4_scaling:
             assert llama_4_scaling_config is not None
-            self.llama_4_scaling_original_max_position_embeddings = (
+            self.llama_4_scaling_original_max_position_embeddings = int(
                 llama_4_scaling_config["original_max_position_embeddings"]
             )
-            self.llama_4_scaling_beta = llama_4_scaling_config["beta"]
+            self.llama_4_scaling_beta = float(llama_4_scaling_config["beta"])
 
     def forward(
         self,
@@ -232,6 +232,7 @@ class MistralModel(LlamaModel):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
         t_cond: torch.Tensor | None = None,
+        **extra_layer_kwargs: object,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
         llama_4_scaling = None
@@ -248,12 +249,13 @@ class MistralModel(LlamaModel):
             inputs_embeds,
             t_cond=t_cond,
             llama_4_scaling=llama_4_scaling,
+            **extra_layer_kwargs,
         )
 
 
 class MistralForCausalLM(LlamaForCausalLM):
     # Mistral: We don't support LoRA on the embedding layers.
-    embedding_modules: dict[str, str] = {}
+    embedding_modules = {}
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints

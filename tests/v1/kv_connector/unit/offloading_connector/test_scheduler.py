@@ -36,7 +36,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     is_store_reachable_swa_chunk,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock, KVCacheBlockCopy
+from vllm.v1.core.sched.output import (
+    KVConnectorBlockState,
+    SchedulerOutput,
+)
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -107,11 +111,16 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
-    scheduler.manager.prepare_store.side_effect = (
-        lambda keys, req_context: generate_store_output(keys)
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
     )
 
-    output = SimpleNamespace(partial_tail_offloads={"req": [(1, 99, 28)]})
+    output = SimpleNamespace(
+        kv_connector_block_state=KVConnectorBlockState(
+            block_ids={},
+            boundary_state_offloads={"req": [(1, 99, 28)]},
+        )
+    )
     jobs = scheduler._build_partial_tail_store_jobs(output)
 
     assert len(jobs) == 1
@@ -153,6 +162,83 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     assert recurrent_event.token_ids == []
     assert len(recurrent_event.block_hashes) == 1
     assert recurrent_event.parent_block_hash is None
+
+
+def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
+    scheduler = _make_partial_tail_scheduler()
+    _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.group_states[0].block_ids[:] = [11, 12]
+    req_status.group_states[1].block_ids[:] = [0, 21]
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    output = SimpleNamespace(
+        kv_connector_block_state=KVConnectorBlockState(
+            block_ids={},
+            boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
+        )
+    )
+    jobs = scheduler._build_partial_tail_store_jobs(output)
+
+    assert len(jobs) == 2
+    src_spec = next(
+        job.src_spec for job in jobs.values() if len(job.src_spec.block_ids) == 1
+    )
+    assert isinstance(src_spec, GPULoadStoreSpec)
+    assert src_spec.block_ids.tolist() == [98]
+    assert src_spec.group_sizes == [0, 1]
+    assert src_spec.block_indices == [0, 0]
+
+
+def test_aligned_boundary_store_flushes_before_cow_destination_reuse():
+    scheduler = _make_partial_tail_scheduler()
+    _make_partial_tail_request(scheduler)
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        block_ids={},
+        boundary_state_offloads={"req": [(1, 99, 16)]},
+    )
+    meta = scheduler.build_connector_meta(output)
+    [job_id] = meta.store_jobs
+
+    output = SchedulerOutput.make_empty()
+    output.kv_cache_block_copies = [KVCacheBlockCopy(98, 99)]
+    meta = scheduler.build_connector_meta(output)
+
+    assert meta.jobs_to_flush == {job_id}
+
+
+def test_normal_store_excludes_align_mode_mamba_sources():
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    request.num_computed_tokens = 0
+    request.status = RequestStatus.RUNNING
+    req_status = scheduler._req_status["req"]
+    req_status.group_states[0].block_ids[:] = [11]
+    req_status.group_states[1].block_ids[:] = [99]
+    req_status.update_offload_keys()
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    output = SimpleNamespace(
+        num_scheduled_tokens={"req": 16},
+        finished_req_ids=set(),
+    )
+    jobs = scheduler._build_store_jobs(output)
+
+    assert len(jobs) == 1
+    [job] = jobs.values()
+    src_spec = job.src_spec
+    assert isinstance(src_spec, GPULoadStoreSpec)
+    assert src_spec.block_ids.tolist() == [11]
+    assert src_spec.group_sizes == [1, 0]
 
 
 def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
@@ -1207,12 +1293,21 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
 
 def _make_scheduler_with_lookup(
     lookup_results: dict[int, LookupResult],
+    default: LookupResult = LookupResult.MISS,
 ) -> OffloadingConnectorScheduler:
-    """Create an OffloadingConnectorScheduler with a mocked manager.lookup."""
+    """Create an OffloadingConnectorScheduler with a mocked manager.lookup.
+
+    Keys are addressed by their integer hash; `default` answers anything else.
+    """
     manager = MagicMock(spec=OffloadingManager)
-    manager.lookup.side_effect = lambda key, req_context: lookup_results.get(
-        int(get_offload_block_hash(key).decode()), LookupResult.MISS
-    )
+
+    def lookup(key, req_context):
+        block_hash = get_offload_block_hash(key)
+        if not block_hash.isdigit():
+            return default
+        return lookup_results.get(int(block_hash.decode()), default)
+
+    manager.lookup.side_effect = lookup
 
     scheduler = object.__new__(OffloadingConnectorScheduler)
     scheduler.manager = manager
@@ -1234,6 +1329,32 @@ def _maximal_lookup(sched, keys, start_chunk_idx: int = 0):
         _LOOKUP_GROUP_CONFIG,
         start_chunk_idx,
     )
+
+
+# Lookups issued, and end index returned, by a window-1 scan over 3 keys all
+# resolving to the same result. A result that keeps the streak alive ends the
+# scan at the first key; one that resets it makes the scan walk every key,
+# which is what widens the demanded set. A new member has to be added here.
+_SCAN_BEHAVIOR = {
+    LookupResult.HIT: (1, 3),
+    LookupResult.HIT_PENDING: (1, None),
+    LookupResult.RETRY: (3, None),
+    LookupResult.MISS: (3, 0),
+}
+
+
+@pytest.mark.parametrize("result", list(LookupResult))
+def test_scan_behavior_declared_for_every_lookup_result(result: LookupResult):
+    """Whether a result keeps a sliding-window streak alive decides how wide
+    the demanded chunk set gets, so every member needs deliberate behavior."""
+    assert result in _SCAN_BEHAVIOR, f"{result} has no declared scan behavior"
+    expected_lookups, expected_end = _SCAN_BEHAVIOR[result]
+
+    keys = to_keys([1, 2, 3])
+    sched = _make_scheduler_with_lookup(dict.fromkeys([1, 2, 3], result))
+
+    assert sched._sliding_window_lookup(keys, 1, _EMPTY_REQ_CTX) == expected_end
+    assert len(sched.manager.lookup.call_args_list) == expected_lookups
 
 
 class TestMaximalPrefixLookup:
@@ -1468,6 +1589,62 @@ class TestSlidingWindowLookup:
         assert (
             sched._sliding_window_lookup(to_keys([1, 2, 3]), 3, _EMPTY_REQ_CTX) is None
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests for SWA store pruning vs. load demand
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("alignment_chunk_count", [4, 8, 64])
+@pytest.mark.parametrize("sliding_window_chunks", [1, 2, 3])
+@pytest.mark.parametrize("is_eagle_group", [False, True])
+@pytest.mark.parametrize("tail_chunks", [0, 1, 5])
+def test_sliding_window_demand_is_store_reachable(
+    alignment_chunk_count: int,
+    sliding_window_chunks: int,
+    is_eagle_group: bool,
+    tail_chunks: int,
+):
+    """Every chunk the load path looks up must be one the store path keeps.
+
+    `is_store_reachable_swa_chunk` prunes chunks `_sliding_window_lookup` can
+    never query, but the two mirror each other by hand: this pins the relation,
+    where `test_is_store_reachable_swa_chunk` pins only the predicate's values.
+    A looked-up key is a demanded key, since a secondary-tier hit queues a
+    promotion immediately.
+    """
+    storable_chunk_count = alignment_chunk_count + tail_chunks
+    # Both sides widen by one for an unverified EAGLE group.
+    required_window = sliding_window_chunks + int(is_eagle_group)
+
+    sched = _make_scheduler_with_lookup(
+        {i: LookupResult.HIT_PENDING for i in range(storable_chunk_count)}
+    )
+    sched._sliding_window_lookup(
+        to_keys(range(storable_chunk_count)), required_window, _EMPTY_REQ_CTX
+    )
+
+    demanded = {
+        int(get_offload_block_hash(lookup_call.args[0]).decode())
+        for lookup_call in sched.manager.lookup.call_args_list
+    }
+    assert demanded, "the scan must query something"
+    unsuppliable = sorted(
+        chunk_idx
+        for chunk_idx in demanded
+        if not is_store_reachable_swa_chunk(
+            chunk_idx,
+            storable_chunk_count,
+            alignment_chunk_count,
+            sliding_window_chunks,
+            is_eagle_group,
+        )
+    )
+    assert not unsuppliable, (
+        f"chunks {unsuppliable} are demanded by the load path but pruned by the "
+        f"store path, so a warm producer can never supply them"
+    )
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -2219,6 +2396,146 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
             (1, 6),
             (1, 7),
         ),
+    )
+
+
+def _full_and_swa_groups(
+    full_attn_block_size: int, swa_block_size: int, sliding_window: int
+) -> list[KVCacheGroupSpec]:
+    """Group 0 full attention (MLA-like), group 1 sliding window."""
+    return [
+        KVCacheGroupSpec(
+            ["layer0"],
+            FullAttentionSpec(
+                block_size=full_attn_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["layer1"],
+            SlidingWindowSpec(
+                block_size=swa_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=sliding_window,
+            ),
+        ),
+    ]
+
+
+def _demanded_keys(runner, offload_keys_per_group: list[list], num_tokens: int) -> set:
+    """Keys a cold consumer's lookup scan would demand for `num_tokens`.
+
+    Drives the real scan functions with every key resolving as a promoting
+    secondary tier resolves it.
+    """
+    scan = _make_scheduler_with_lookup({}, default=LookupResult.HIT_PENDING)
+    for group_config, offload_keys in zip(
+        runner.connector_scheduler.config.kv_group_configs, offload_keys_per_group
+    ):
+        num_chunks = num_tokens // group_config.tokens_per_chunk
+        keys = offload_keys[:num_chunks]
+        window = group_config.sliding_window_size_in_chunks
+        if window is None:
+            _maximal_lookup(scan, keys)
+        else:
+            scan._sliding_window_lookup(keys, window, _EMPTY_REQ_CTX)
+    return {lookup_call.args[0] for lookup_call in scan.manager.lookup.call_args_list}
+
+
+@pytest.mark.parametrize("warmth", ["cold", "gpu_warm", "primary_warm"])
+@pytest.mark.parametrize("with_swa_group", [False, True])
+def test_request_level_supply_covers_consumer_demand(
+    request_runner, warmth: str, with_swa_group: bool
+):
+    """A REQUEST_LEVEL producer must offer every key a consumer will demand.
+
+    Same relation as `test_sliding_window_demand_is_store_reachable`, but at
+    the level where the key set is really built: `_build_store_jobs` prunes
+    chunks with a null GPU block and unreachable SWA chunks, while the demand
+    comes from an independent scan.
+    """
+    full_attn_block_size = 16
+    swa_block_size = 4
+    num_tokens = 32
+
+    kv_cache_groups = (
+        _full_and_swa_groups(full_attn_block_size, swa_block_size, sliding_window=8)
+        if with_swa_group
+        else None
+    )
+    runner = request_runner(
+        block_size=swa_block_size if with_swa_group else full_attn_block_size,
+        num_gpu_blocks=200,
+        async_scheduling=False,
+        kv_cache_groups=kv_cache_groups,
+    )
+
+    def store_everything_offered():
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+
+    # `_run` rather than `run`, which asserts on an expected GPU-block set this
+    # test deliberately does not hard-code.
+    if warmth != "cold":
+        runner.new_request(token_ids=[0] * num_tokens)
+        store_everything_offered()
+        runner._run(decoded_tokens=[0], complete_transfers=True)
+        runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+        if warmth == "primary_warm":
+            # Warm only in the primary tier, so the producer must load first.
+            runner.scheduler.reset_prefix_cache()
+
+    # The producer leg: same prompt, REQUEST_LEVEL, so prefix hits stay in the
+    # store path instead of being skipped.
+    runner.manager.reset_mock()
+    store_everything_offered()
+    runner.manager.on_new_request.return_value = RequestOffloadingContext(
+        policy=OffloadPolicy.REQUEST_LEVEL
+    )
+    if warmth == "primary_warm":
+        # HIT is final; HIT_PENDING would defer the request on every step.
+        runner.manager.lookup.return_value = LookupResult.HIT
+    runner.new_request(token_ids=[0] * num_tokens)
+
+    offload_keys_per_group: list[list] = []
+
+    def capture_offload_keys() -> None:
+        for req_status in runner.connector_scheduler._req_status.values():
+            offload_keys_per_group.clear()
+            offload_keys_per_group.extend(
+                list(group_state.offload_keys)
+                for group_state in req_status.group_states
+            )
+
+    runner._run(
+        decoded_tokens=[0],
+        complete_transfers=True,
+        post_step_fn=capture_offload_keys,
+    )
+    runner._run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        complete_transfers=True,
+        post_step_fn=capture_offload_keys,
+    )
+
+    assert offload_keys_per_group, "no request state was captured"
+    supplied = {
+        key
+        for store_call in runner.manager.prepare_store.call_args_list
+        for key in store_call.args[0]
+    }
+    demanded = _demanded_keys(runner, offload_keys_per_group, num_tokens)
+
+    assert demanded, "the scan must demand something"
+    missing = demanded - supplied
+    assert not missing, (
+        f"{len(missing)} of {len(demanded)} demanded keys are never offered to "
+        f"prepare_store, so a peer fetching them would wait out the load timeout"
     )
 
 
