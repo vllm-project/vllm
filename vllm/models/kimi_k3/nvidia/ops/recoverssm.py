@@ -9,7 +9,15 @@ from typing import Any
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+    triton_scalar_specialization_rep,
+)
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
@@ -582,6 +590,261 @@ def _commit_kda_state_kernel(
     tl.store(final_ptrs, state, mask=mask_state)
 
 
+class KimiK3RecoverSSMVerifyKernel(
+    VllmTritonJitKernel["KimiK3RecoverSSMVerifyKernel.CompileKey"]
+):
+    """JIT owner for RecoverSSM speculative verification."""
+
+    kernel = staticmethod(_kda_recoverssm_verify_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        io_dtype: torch.dtype
+        state_dtype: torch.dtype
+        a_log_dtype: torch.dtype
+        dt_bias_dtype: torch.dtype
+        num_heads: int
+        key_dim: int
+        value_dim: int
+        block_k: int
+        block_v: int
+        spec_query_len: int
+        stride_q_token: int
+        stride_k_token: int
+        stride_v_token: int
+        stride_g_token: int
+        stride_beta_token: int
+        stride_out_token: int
+        stride_state_block: int
+        stride_correction_block: int
+        stride_kg_block: int
+        stride_state_indices: int
+        use_lower_bound: bool
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        io_dtype: torch.dtype,
+        state_dtype: torch.dtype,
+        a_log_dtype: torch.dtype,
+        dt_bias_dtype: torch.dtype,
+        num_heads: int,
+        key_dim: int,
+        value_dim: int,
+        spec_query_len: int,
+        stride_q_token: int,
+        stride_k_token: int,
+        stride_v_token: int,
+        stride_g_token: int,
+        stride_beta_token: int,
+        stride_out_token: int,
+        stride_state_block: int,
+        stride_correction_block: int,
+        stride_kg_block: int,
+        stride_state_indices: int,
+        use_lower_bound: bool,
+    ) -> CompileKey:
+        block_k = next_power_of_2(key_dim)
+        block_v = min(next_power_of_2(value_dim), 32)
+        return self.CompileKey(
+            io_dtype=io_dtype,
+            state_dtype=state_dtype,
+            a_log_dtype=a_log_dtype,
+            dt_bias_dtype=dt_bias_dtype,
+            num_heads=num_heads,
+            key_dim=key_dim,
+            value_dim=value_dim,
+            block_k=block_k,
+            block_v=block_v,
+            spec_query_len=spec_query_len,
+            stride_q_token=stride_q_token,
+            stride_k_token=stride_k_token,
+            stride_v_token=stride_v_token,
+            stride_g_token=stride_g_token,
+            stride_beta_token=triton_scalar_specialization_rep(stride_beta_token),
+            stride_out_token=stride_out_token,
+            stride_state_block=stride_state_block,
+            stride_correction_block=stride_correction_block,
+            stride_kg_block=stride_kg_block,
+            stride_state_indices=triton_scalar_specialization_rep(
+                stride_state_indices
+            ),
+            use_lower_bound=use_lower_bound,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        io_dtype: torch.dtype,
+        state_dtype: torch.dtype,
+        a_log_dtype: torch.dtype,
+        dt_bias_dtype: torch.dtype,
+        num_heads: int,
+        head_dim: int,
+        spec_query_len: int,
+        stride_q_token: int,
+        stride_k_token: int,
+        stride_v_token: int,
+        stride_g_token: int,
+        stride_beta_token: int | tuple[int, ...],
+        stride_out_token: int,
+        stride_state_block: int,
+        stride_correction_block: int,
+        stride_kg_block: int,
+        stride_state_indices: int | tuple[int, ...],
+        use_lower_bound: bool,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            io_dtype=io_dtype,
+            state_dtype=state_dtype,
+            a_log_dtype=a_log_dtype,
+            dt_bias_dtype=dt_bias_dtype,
+            num_heads=num_heads,
+            key_dim=head_dim,
+            value_dim=head_dim,
+            spec_query_len=spec_query_len,
+            stride_q_token=stride_q_token,
+            stride_k_token=stride_k_token,
+            stride_v_token=stride_v_token,
+            stride_g_token=stride_g_token,
+            stride_beta_token=stride_beta_token,
+            stride_out_token=stride_out_token,
+            stride_state_block=stride_state_block,
+            stride_correction_block=stride_correction_block,
+            stride_kg_block=stride_kg_block,
+            stride_state_indices=stride_state_indices,
+            use_lower_bound=use_lower_bound,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        h = compile_key.num_heads
+        k = compile_key.key_dim
+        v = compile_key.value_dim
+        spec = compile_key.spec_query_len
+        io = compile_key.io_dtype
+        t = spec
+        nb = 2
+        q_row = compile_key.stride_q_token
+        k_row = compile_key.stride_k_token
+        v_row = compile_key.stride_v_token
+        g_row = compile_key.stride_g_token
+        out_row = compile_key.stride_out_token
+        return dict(
+            q=TritonWarmupTensor(
+                io, shape=(1, t, h, k), strides=(t * q_row, q_row, k, 1)
+            ),
+            k=TritonWarmupTensor(
+                io, shape=(1, t, h, k), strides=(t * k_row, k_row, k, 1)
+            ),
+            v=TritonWarmupTensor(
+                io, shape=(1, t, h, v), strides=(t * v_row, v_row, v, 1)
+            ),
+            raw_g=TritonWarmupTensor(
+                io, shape=(1, t, h, k), strides=(t * g_row, g_row, k, 1)
+            ),
+            raw_beta=TritonWarmupTensor(
+                io,
+                shape=(1, t, h),
+                strides=(
+                    t * compile_key.stride_beta_token,
+                    compile_key.stride_beta_token,
+                    1,
+                ),
+            ),
+            A_log=TritonWarmupTensor(compile_key.a_log_dtype, shape=(h,)),
+            dt_bias=TritonWarmupTensor(compile_key.dt_bias_dtype, shape=(h * k,)),
+            state=TritonWarmupTensor(
+                compile_key.state_dtype,
+                shape=(nb, h, v, k),
+                strides=(compile_key.stride_state_block, v * k, k, 1),
+            ),
+            correction_cache=TritonWarmupTensor(
+                torch.float32,
+                shape=(nb, h, spec, v),
+                strides=(compile_key.stride_correction_block, spec * v, v, 1),
+            ),
+            kg_cache=TritonWarmupTensor(
+                io,
+                shape=(nb, h, spec, 2 * k),
+                strides=(compile_key.stride_kg_block, spec * 2 * k, 2 * k, 1),
+            ),
+            out=TritonWarmupTensor(
+                io, shape=(1, t, h, v), strides=(t * out_row, out_row, v, 1)
+            ),
+            query_start_loc=TritonWarmupTensor(torch.int32, shape=(2,)),
+            state_indices=TritonWarmupTensor(
+                torch.int32,
+                shape=(1,),
+                strides=(compile_key.stride_state_indices,),
+            ),
+            lower_bound=-1.0 if compile_key.use_lower_bound else None,
+            spec_query_len=spec,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        raw_g: torch.Tensor,
+        raw_beta: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        state: torch.Tensor,
+        correction_cache: torch.Tensor,
+        kg_cache: torch.Tensor,
+        out: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        state_indices: torch.Tensor,
+        *,
+        lower_bound: float | None,
+        spec_query_len: int,
+    ) -> LaunchSpec:
+        batch = state_indices.shape[0]
+        num_heads = q.shape[2]
+        key_dim = q.shape[3]
+        value_dim = v.shape[3]
+        use_lower_bound = lower_bound is not None
+        # Reproduce HEAD's launch geometry inline; ``dispatch`` remains an
+        # independent compile-key enumeration so the JIT monitor can verify it.
+        block_k = next_power_of_2(key_dim)
+        block_v = min(next_power_of_2(value_dim), 32)
+        grid = (cdiv(value_dim, block_v), batch, num_heads)
+        return grid, dict(
+            lower_bound=lower_bound if lower_bound is not None else 0.0,
+            null_block_id=NULL_BLOCK_ID,
+            stride_q_token=q.stride(1),
+            stride_k_token=k.stride(1),
+            stride_v_token=v.stride(1),
+            stride_g_token=raw_g.stride(1),
+            stride_beta_token=raw_beta.stride(1),
+            stride_state_block=state.stride(0),
+            stride_state_head=state.stride(1),
+            stride_state_v=state.stride(2),
+            stride_state_k=state.stride(3),
+            stride_correction_block=correction_cache.stride(0),
+            stride_correction_head=correction_cache.stride(1),
+            stride_correction_pos=correction_cache.stride(2),
+            stride_correction_dim=correction_cache.stride(3),
+            stride_kg_block=kg_cache.stride(0),
+            stride_kg_head=kg_cache.stride(1),
+            stride_kg_pos=kg_cache.stride(2),
+            stride_kg_dim=kg_cache.stride(3),
+            stride_out_token=out.stride(1),
+            stride_query_start_loc=query_start_loc.stride(0),
+            stride_state_indices=state_indices.stride(0),
+            K=key_dim,
+            V=value_dim,
+            BK=block_k,
+            BV=block_v,
+            SPEC_QUERY_LEN=spec_query_len,
+            USE_LOWER_BOUND=use_lower_bound,
+            num_warps=4,
+            num_stages=2,
+        )
+
+
 def kda_recoverssm_verify(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -677,10 +940,7 @@ def kda_recoverssm_verify(
     if total_tokens == 0:
         return out
 
-    block_k = triton.next_power_of_2(key_dim)
-    block_v = min(triton.next_power_of_2(value_dim), 32)
-    grid = (triton.cdiv(value_dim, block_v), batch, num_heads)
-    _kda_recoverssm_verify_kernel[grid](
+    _RECOVERSSM_VERIFY_KERNEL(
         q,
         k,
         v,
@@ -694,38 +954,452 @@ def kda_recoverssm_verify(
         out,
         query_start_loc,
         state_indices,
-        lower_bound or 0.0,
-        NULL_BLOCK_ID,
-        q.stride(1),
-        k.stride(1),
-        v.stride(1),
-        raw_g.stride(1),
-        raw_beta.stride(1),
-        checkpoint_state.stride(0),
-        checkpoint_state.stride(1),
-        checkpoint_state.stride(2),
-        checkpoint_state.stride(3),
-        correction_cache.stride(0),
-        correction_cache.stride(1),
-        correction_cache.stride(2),
-        correction_cache.stride(3),
-        kg_cache.stride(0),
-        kg_cache.stride(1),
-        kg_cache.stride(2),
-        kg_cache.stride(3),
-        out.stride(1),
-        query_start_loc.stride(0),
-        state_indices.stride(0),
-        K=key_dim,
-        V=value_dim,
-        BK=block_k,
-        BV=block_v,
-        SPEC_QUERY_LEN=spec_query_len,
-        USE_LOWER_BOUND=lower_bound is not None,
-        num_warps=4,
-        num_stages=2,
+        lower_bound=lower_bound,
+        spec_query_len=spec_query_len,
     )
     return out
+
+
+class KimiK3RecoverSSMPrepareCommitPlanKernel(
+    VllmTritonJitKernel["KimiK3RecoverSSMPrepareCommitPlanKernel.CompileKey"]
+):
+    """JIT owner for RecoverSSM commit planning."""
+
+    kernel = staticmethod(_prepare_commit_plan_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        spec_query_len: int
+        has_request_indices: bool
+        align_mode: bool
+        mamba_block_size: int
+        block_table_width: int
+        stride_state_indices: int
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        spec_query_len: int,
+        has_request_indices: bool,
+        align_mode: bool,
+        mamba_block_size: int,
+        block_table_width: int,
+        stride_state_indices: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            spec_query_len=spec_query_len,
+            has_request_indices=has_request_indices,
+            align_mode=align_mode,
+            mamba_block_size=mamba_block_size,
+            block_table_width=block_table_width,
+            stride_state_indices=triton_scalar_specialization_rep(
+                stride_state_indices
+            ),
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        spec_query_len: int,
+        align_mode: bool,
+        mamba_block_size: int,
+        block_table_width: int,
+        stride_state_indices: int | tuple[int, ...],
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            spec_query_len=spec_query_len,
+            has_request_indices=(False, True),
+            align_mode=align_mode,
+            mamba_block_size=mamba_block_size,
+            block_table_width=block_table_width,
+            stride_state_indices=stride_state_indices,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        n = 2
+        width = compile_key.block_table_width
+        request_indices = None
+        if compile_key.has_request_indices:
+            request_indices = TritonWarmupTensor(torch.int32, shape=(n,))
+        block_table = None
+        num_computed = None
+        if compile_key.align_mode:
+            block_table = TritonWarmupTensor(
+                torch.int32, shape=(n, width), strides=(width, 1)
+            )
+            num_computed = TritonWarmupTensor(torch.int32, shape=(n,))
+        return dict(
+            num_accepted=TritonWarmupTensor(torch.int32, shape=(n,)),
+            request_indices=request_indices,
+            state_indices=TritonWarmupTensor(
+                torch.int32,
+                shape=(n,),
+                strides=(compile_key.stride_state_indices,),
+            ),
+            query_start_loc=TritonWarmupTensor(torch.int32, shape=(n + 1,)),
+            block_table=block_table,
+            num_computed=num_computed,
+            commit_lens=TritonWarmupTensor(torch.int32, shape=(n,)),
+            final_state_indices=TritonWarmupTensor(torch.int32, shape=(n,)),
+            boundary_state_indices=TritonWarmupTensor(torch.int32, shape=(n,)),
+            boundary_recovery_lens=TritonWarmupTensor(torch.int32, shape=(n,)),
+            spec_query_len=compile_key.spec_query_len,
+            mamba_block_size=compile_key.mamba_block_size,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        num_accepted: torch.Tensor,
+        request_indices: torch.Tensor | None,
+        state_indices: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        block_table: torch.Tensor | None,
+        num_computed: torch.Tensor | None,
+        commit_lens: torch.Tensor,
+        final_state_indices: torch.Tensor,
+        boundary_state_indices: torch.Tensor,
+        boundary_recovery_lens: torch.Tensor,
+        *,
+        spec_query_len: int,
+        mamba_block_size: int,
+    ) -> LaunchSpec:
+        batch = state_indices.shape[0]
+        has_request_indices = request_indices is not None
+        align_mode = block_table is not None
+        block_table_width = block_table.shape[1] if block_table is not None else 1
+        block_table_stride = (0, 0) if block_table is None else block_table.stride()
+        num_computed_stride = 0 if num_computed is None else num_computed.stride(0)
+        grid = (batch,)
+        return grid, dict(
+            null_block_id=NULL_BLOCK_ID,
+            mamba_block_size=mamba_block_size,
+            block_table_width=block_table_width,
+            stride_num_accepted=num_accepted.stride(0),
+            stride_request_indices=(
+                request_indices.stride(0) if request_indices is not None else 0
+            ),
+            stride_state_indices=state_indices.stride(0),
+            stride_query_start_loc=query_start_loc.stride(0),
+            stride_block_table_row=block_table_stride[0],
+            stride_block_table_col=block_table_stride[1],
+            stride_num_computed=num_computed_stride,
+            SPEC_QUERY_LEN=spec_query_len,
+            num_warps=1,
+        )
+
+
+class KimiK3RecoverSSMCompactConvStateKernel(
+    VllmTritonJitKernel["KimiK3RecoverSSMCompactConvStateKernel.CompileKey"]
+):
+    """JIT owner for RecoverSSM convolution-state compaction."""
+
+    kernel = staticmethod(_compact_conv_state_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        conv_state_dtype: torch.dtype
+        conv_dim: int
+        conv_history_len: int
+        block_history: int
+        block_d: int
+        align_mode: bool
+        stride_state_indices: int
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        conv_state_dtype: torch.dtype,
+        conv_dim: int,
+        conv_history_len: int,
+        align_mode: bool,
+        stride_state_indices: int,
+    ) -> CompileKey:
+        block_history = next_power_of_2(conv_history_len)
+        block_d = 256
+        return self.CompileKey(
+            conv_state_dtype=conv_state_dtype,
+            conv_dim=conv_dim,
+            conv_history_len=conv_history_len,
+            block_history=block_history,
+            block_d=block_d,
+            align_mode=align_mode,
+            stride_state_indices=triton_scalar_specialization_rep(
+                stride_state_indices
+            ),
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        conv_state_dtype: torch.dtype,
+        conv_dim: int,
+        conv_history_len: int,
+        align_mode: bool,
+        stride_state_indices: int | tuple[int, ...],
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            conv_state_dtype=conv_state_dtype,
+            conv_dim=conv_dim,
+            conv_history_len=conv_history_len,
+            align_mode=align_mode,
+            stride_state_indices=stride_state_indices,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        n = 2
+        nl = 2
+        return dict(
+            conv_state_ref=TritonWarmupTensor(
+                compile_key.conv_state_dtype, shape=(1,)
+            ),
+            conv_state_base_addrs=TritonWarmupTensor(torch.int64, shape=(nl,)),
+            conv_state_block_strides=TritonWarmupTensor(torch.int64, shape=(nl,)),
+            conv_state_dim_strides=TritonWarmupTensor(torch.int64, shape=(nl,)),
+            conv_state_token_strides=TritonWarmupTensor(torch.int64, shape=(nl,)),
+            state_indices=TritonWarmupTensor(
+                torch.int32,
+                shape=(n,),
+                strides=(compile_key.stride_state_indices,),
+            ),
+            commit_lens=TritonWarmupTensor(torch.int32, shape=(n,)),
+            final_state_indices=TritonWarmupTensor(torch.int32, shape=(n,)),
+            boundary_state_indices=TritonWarmupTensor(torch.int32, shape=(n,)),
+            boundary_recovery_lens=TritonWarmupTensor(torch.int32, shape=(n,)),
+            conv_dim=compile_key.conv_dim,
+            conv_history_len=compile_key.conv_history_len,
+            align_mode=compile_key.align_mode,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        conv_state_ref: torch.Tensor,
+        conv_state_base_addrs: torch.Tensor,
+        conv_state_block_strides: torch.Tensor,
+        conv_state_dim_strides: torch.Tensor,
+        conv_state_token_strides: torch.Tensor,
+        state_indices: torch.Tensor,
+        commit_lens: torch.Tensor,
+        final_state_indices: torch.Tensor,
+        boundary_state_indices: torch.Tensor,
+        boundary_recovery_lens: torch.Tensor,
+        *,
+        conv_dim: int,
+        conv_history_len: int,
+        align_mode: bool,
+    ) -> LaunchSpec:
+        batch = state_indices.shape[0]
+        num_layers = conv_state_base_addrs.shape[0]
+        block_history = next_power_of_2(conv_history_len)
+        grid = (cdiv(conv_dim, 256), batch, num_layers)
+        return grid, dict(
+            null_block_id=NULL_BLOCK_ID,
+            conv_dim=conv_dim,
+            conv_history_len=conv_history_len,
+            stride_state_indices=state_indices.stride(0),
+            BLOCK_D=256,
+            BLOCK_HISTORY=block_history,
+            ALIGN_MODE=align_mode,
+            num_warps=4,
+        )
+
+
+class KimiK3RecoverSSMCommitKdaStateKernel(
+    VllmTritonJitKernel["KimiK3RecoverSSMCommitKdaStateKernel.CompileKey"]
+):
+    """JIT owner for RecoverSSM KDA-state commits."""
+
+    kernel = staticmethod(_commit_kda_state_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        state_dtype: torch.dtype
+        kg_dtype: torch.dtype
+        a_log_dtype: torch.dtype
+        dt_bias_dtype: torch.dtype
+        num_heads: int
+        key_dim: int
+        value_dim: int
+        block_k: int
+        block_v: int
+        spec_query_len: int
+        use_lower_bound: bool
+        align_mode: bool
+        stride_state_indices: int
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        state_dtype: torch.dtype,
+        kg_dtype: torch.dtype,
+        a_log_dtype: torch.dtype,
+        dt_bias_dtype: torch.dtype,
+        num_heads: int,
+        key_dim: int,
+        value_dim: int,
+        spec_query_len: int,
+        use_lower_bound: bool,
+        align_mode: bool,
+        stride_state_indices: int,
+    ) -> CompileKey:
+        block_k = next_power_of_2(key_dim)
+        block_v = min(next_power_of_2(value_dim), 32)
+        return self.CompileKey(
+            state_dtype=state_dtype,
+            kg_dtype=kg_dtype,
+            a_log_dtype=a_log_dtype,
+            dt_bias_dtype=dt_bias_dtype,
+            num_heads=num_heads,
+            key_dim=key_dim,
+            value_dim=value_dim,
+            block_k=block_k,
+            block_v=block_v,
+            spec_query_len=spec_query_len,
+            use_lower_bound=use_lower_bound,
+            align_mode=align_mode,
+            stride_state_indices=triton_scalar_specialization_rep(
+                stride_state_indices
+            ),
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        state_dtype: torch.dtype,
+        kg_dtype: torch.dtype,
+        a_log_dtype: torch.dtype,
+        dt_bias_dtype: torch.dtype,
+        num_heads: int,
+        head_dim: int,
+        spec_query_len: int,
+        use_lower_bound: bool,
+        align_mode: bool,
+        stride_state_indices: int | tuple[int, ...],
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            state_dtype=state_dtype,
+            kg_dtype=kg_dtype,
+            a_log_dtype=a_log_dtype,
+            dt_bias_dtype=dt_bias_dtype,
+            num_heads=num_heads,
+            key_dim=head_dim,
+            value_dim=head_dim,
+            spec_query_len=spec_query_len,
+            use_lower_bound=use_lower_bound,
+            align_mode=align_mode,
+            stride_state_indices=stride_state_indices,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        h = compile_key.num_heads
+        k = compile_key.key_dim
+        v = compile_key.value_dim
+        spec = compile_key.spec_query_len
+        nb = 2
+        nl = 2
+        n = 2
+        return dict(
+            state_ref=TritonWarmupTensor(
+                compile_key.state_dtype, shape=(nb, h, v, k)
+            ),
+            state_base_addrs=TritonWarmupTensor(torch.int64, shape=(nl,)),
+            state_block_strides=TritonWarmupTensor(torch.int64, shape=(nl,)),
+            correction_cache_ref=TritonWarmupTensor(
+                torch.float32, shape=(nb, h, spec, v)
+            ),
+            correction_cache_base_addrs=TritonWarmupTensor(
+                torch.int64, shape=(nl,)
+            ),
+            correction_cache_block_strides=TritonWarmupTensor(
+                torch.int64, shape=(nl,)
+            ),
+            kg_cache_ref=TritonWarmupTensor(
+                compile_key.kg_dtype, shape=(nb, h, spec, 2 * k)
+            ),
+            kg_cache_base_addrs=TritonWarmupTensor(torch.int64, shape=(nl,)),
+            kg_cache_block_strides=TritonWarmupTensor(torch.int64, shape=(nl,)),
+            A_log=TritonWarmupTensor(compile_key.a_log_dtype, shape=(nl, h)),
+            dt_bias=TritonWarmupTensor(compile_key.dt_bias_dtype, shape=(nl, h, k)),
+            state_indices=TritonWarmupTensor(
+                torch.int32,
+                shape=(n,),
+                strides=(compile_key.stride_state_indices,),
+            ),
+            commit_lens=TritonWarmupTensor(torch.int32, shape=(n,)),
+            final_state_indices=TritonWarmupTensor(torch.int32, shape=(n,)),
+            boundary_state_indices=TritonWarmupTensor(torch.int32, shape=(n,)),
+            boundary_recovery_lens=TritonWarmupTensor(torch.int32, shape=(n,)),
+            lower_bound=-1.0 if compile_key.use_lower_bound else None,
+            align_mode=compile_key.align_mode,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        state_ref: torch.Tensor,
+        state_base_addrs: torch.Tensor,
+        state_block_strides: torch.Tensor,
+        correction_cache_ref: torch.Tensor,
+        correction_cache_base_addrs: torch.Tensor,
+        correction_cache_block_strides: torch.Tensor,
+        kg_cache_ref: torch.Tensor,
+        kg_cache_base_addrs: torch.Tensor,
+        kg_cache_block_strides: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        state_indices: torch.Tensor,
+        commit_lens: torch.Tensor,
+        final_state_indices: torch.Tensor,
+        boundary_state_indices: torch.Tensor,
+        boundary_recovery_lens: torch.Tensor,
+        *,
+        lower_bound: float | None,
+        align_mode: bool,
+    ) -> LaunchSpec:
+        batch = state_indices.shape[0]
+        num_layers = state_base_addrs.shape[0]
+        num_heads = state_ref.shape[1]
+        value_dim = state_ref.shape[2]
+        key_dim = state_ref.shape[3]
+        use_lower_bound = lower_bound is not None
+        # Reproduce HEAD's launch geometry inline; ``dispatch`` remains an
+        # independent compile-key enumeration so the JIT monitor can verify it.
+        block_k = next_power_of_2(key_dim)
+        block_v = min(next_power_of_2(value_dim), 32)
+        grid = (
+            cdiv(value_dim, block_v),
+            batch,
+            num_layers * num_heads,
+        )
+        return grid, dict(
+            lower_bound=lower_bound if lower_bound is not None else 0.0,
+            null_block_id=NULL_BLOCK_ID,
+            stride_state_head=state_ref.stride(1),
+            stride_state_v=state_ref.stride(2),
+            stride_state_k=state_ref.stride(3),
+            stride_correction_cache_head=correction_cache_ref.stride(1),
+            stride_correction_cache_pos=correction_cache_ref.stride(2),
+            stride_correction_cache_dim=correction_cache_ref.stride(3),
+            stride_kg_cache_head=kg_cache_ref.stride(1),
+            stride_kg_cache_pos=kg_cache_ref.stride(2),
+            stride_kg_cache_dim=kg_cache_ref.stride(3),
+            stride_A_layer=A_log.stride(0),
+            stride_A_head=A_log.stride(1),
+            stride_dt_bias_layer=dt_bias.stride(0),
+            stride_dt_bias_head=dt_bias.stride(1),
+            stride_dt_bias_dim=dt_bias.stride(2),
+            stride_state_indices=state_indices.stride(0),
+            K=key_dim,
+            V=value_dim,
+            BK=block_k,
+            BV=block_v,
+            NUM_HEADS=num_heads,
+            USE_LOWER_BOUND=use_lower_bound,
+            ALIGN_MODE=align_mode,
+            num_warps=4,
+            num_stages=2,
+        )
 
 
 @dataclass
@@ -955,16 +1629,10 @@ class KDARecoverSSMCommitContext:
         ):
             raise ValueError("KDA RecoverSSM commit inputs must be on the same device")
 
-        block_table_stride = (0, 0) if block_table is None else block_table.stride()
-        num_computed_stride = (
-            0 if num_computed_tokens is None else num_computed_tokens.stride(0)
-        )
-
-        num_layers = len(self.checkpoints)
         conv_ref = self.conv_states[0]
         conv_dim = conv_ref.shape[1]
-        block_history = triton.next_power_of_2(self.conv_history_len)
-        _prepare_commit_plan_kernel[(batch,)](
+        align_mode = block_table is not None
+        _PREPARE_COMMIT_PLAN_KERNEL(
             num_accepted_tokens,
             request_indices,
             state_indices,
@@ -975,20 +1643,10 @@ class KDARecoverSSMCommitContext:
             self.final_state_indices,
             self.boundary_state_indices,
             self.boundary_recovery_lens,
-            NULL_BLOCK_ID,
-            mamba_block_size or 1,
-            block_table.shape[1] if block_table is not None else 1,
-            num_accepted_tokens.stride(0),
-            request_indices.stride(0) if request_indices is not None else 0,
-            state_indices.stride(0),
-            query_start_loc.stride(0),
-            block_table_stride[0],
-            block_table_stride[1],
-            num_computed_stride,
-            SPEC_QUERY_LEN=self.spec_query_len,
-            num_warps=1,
+            spec_query_len=self.spec_query_len,
+            mamba_block_size=mamba_block_size or 1,
         )
-        _compact_conv_state_kernel[(triton.cdiv(conv_dim, 256), batch, num_layers)](
+        _COMPACT_CONV_STATE_KERNEL(
             conv_ref,
             self.conv_state_base_addrs,
             self.conv_state_block_strides,
@@ -999,27 +1657,12 @@ class KDARecoverSSMCommitContext:
             self.final_state_indices,
             self.boundary_state_indices,
             self.boundary_recovery_lens,
-            NULL_BLOCK_ID,
-            conv_dim,
-            self.conv_history_len,
-            state_indices.stride(0),
-            BLOCK_D=256,
-            BLOCK_HISTORY=block_history,
-            ALIGN_MODE=block_table is not None,
-            num_warps=4,
+            conv_dim=conv_dim,
+            conv_history_len=self.conv_history_len,
+            align_mode=align_mode,
         )
-
-        state_ref = self.checkpoints[0]
-        _, num_heads, value_dim, key_dim = state_ref.shape
-        block_k = triton.next_power_of_2(key_dim)
-        block_v = min(triton.next_power_of_2(value_dim), 32)
-        grid = (
-            triton.cdiv(value_dim, block_v),
-            batch,
-            num_layers * num_heads,
-        )
-        _commit_kda_state_kernel[grid](
-            state_ref,
+        _COMMIT_KDA_STATE_KERNEL(
+            self.checkpoints[0],
             self.state_base_addrs,
             self.state_block_strides,
             self.correction_caches[0],
@@ -1035,33 +1678,15 @@ class KDARecoverSSMCommitContext:
             self.final_state_indices,
             self.boundary_state_indices,
             self.boundary_recovery_lens,
-            self.lower_bound or 0.0,
-            NULL_BLOCK_ID,
-            state_ref.stride(1),
-            state_ref.stride(2),
-            state_ref.stride(3),
-            self.correction_caches[0].stride(1),
-            self.correction_caches[0].stride(2),
-            self.correction_caches[0].stride(3),
-            self.kg_caches[0].stride(1),
-            self.kg_caches[0].stride(2),
-            self.kg_caches[0].stride(3),
-            self.A_log.stride(0),
-            self.A_log.stride(1),
-            self.dt_bias.stride(0),
-            self.dt_bias.stride(1),
-            self.dt_bias.stride(2),
-            state_indices.stride(0),
-            K=key_dim,
-            V=value_dim,
-            BK=block_k,
-            BV=block_v,
-            NUM_HEADS=num_heads,
-            USE_LOWER_BOUND=self.lower_bound is not None,
-            ALIGN_MODE=block_table is not None,
-            num_warps=4,
-            num_stages=2,
+            lower_bound=self.lower_bound,
+            align_mode=align_mode,
         )
+
+
+_RECOVERSSM_VERIFY_KERNEL = KimiK3RecoverSSMVerifyKernel()
+_PREPARE_COMMIT_PLAN_KERNEL = KimiK3RecoverSSMPrepareCommitPlanKernel()
+_COMPACT_CONV_STATE_KERNEL = KimiK3RecoverSSMCompactConvStateKernel()
+_COMMIT_KDA_STATE_KERNEL = KimiK3RecoverSSMCommitKdaStateKernel()
 
 
 __all__ = ["KDARecoverSSMCommitContext", "kda_recoverssm_verify"]

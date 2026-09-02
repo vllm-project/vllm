@@ -7,8 +7,19 @@
 # Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
 # ruff: noqa: E501
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import WarmupIntRange, zip_inputs
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+    triton_scalar_specialization_rep,
+)
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.op import exp, log
 from vllm.triton_utils import tl, triton
@@ -90,6 +101,153 @@ def _kda_gate_beta_fwd_kernel(
     tl.store(beta_out + o_t * H + i_h, tl.sigmoid(b_beta), mask=m_t)
 
 
+class KimiK3FusedKdaGateBetaKernel(
+    VllmTritonJitKernel["KimiK3FusedKdaGateBetaKernel.CompileKey"]
+):
+    """JIT owner for KDA gate/beta materialization."""
+
+    kernel = staticmethod(_kda_gate_beta_fwd_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        io_dtype: torch.dtype
+        a_log_dtype: torch.dtype
+        dt_bias_dtype: torch.dtype
+        num_heads: int
+        head_dim: int
+        num_tokens: int
+        block_t: int
+        block_d: int
+        stride_g_token: int
+        stride_beta_token: int
+        has_dt_bias: bool
+        use_lower_bound: bool
+        num_warps: int
+        launch_pdl: bool
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        io_dtype: torch.dtype,
+        a_log_dtype: torch.dtype,
+        dt_bias_dtype: torch.dtype,
+        num_heads: int,
+        head_dim: int,
+        num_tokens: int,
+        stride_g_token: int,
+        stride_beta_token: int,
+        has_dt_bias: bool,
+        use_lower_bound: bool,
+        launch_pdl: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            io_dtype=io_dtype,
+            a_log_dtype=a_log_dtype,
+            dt_bias_dtype=dt_bias_dtype,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            num_tokens=triton_scalar_specialization_rep(num_tokens),
+            block_t=16,
+            block_d=next_power_of_2(head_dim),
+            stride_g_token=stride_g_token,
+            stride_beta_token=stride_beta_token,
+            has_dt_bias=has_dt_bias,
+            use_lower_bound=use_lower_bound,
+            num_warps=4,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        io_dtype: torch.dtype,
+        a_log_dtype: torch.dtype,
+        dt_bias_dtype: torch.dtype,
+        num_heads: int,
+        head_dim: int,
+        max_num_tokens: int,
+        stride_g_token: int,
+        stride_beta_token: int | tuple[int, ...],
+        has_dt_bias: bool,
+        use_lower_bound: bool,
+        launch_pdl: bool,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            io_dtype=io_dtype,
+            a_log_dtype=a_log_dtype,
+            dt_bias_dtype=dt_bias_dtype,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            num_tokens=WarmupIntRange(1, max_num_tokens + 1),
+            stride_g_token=stride_g_token,
+            stride_beta_token=stride_beta_token,
+            has_dt_bias=has_dt_bias,
+            use_lower_bound=use_lower_bound,
+            launch_pdl=launch_pdl,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        h = compile_key.num_heads
+        d = compile_key.head_dim
+        t = compile_key.num_tokens
+        io = compile_key.io_dtype
+        g_stride = compile_key.stride_g_token
+        beta_stride = compile_key.stride_beta_token
+        return dict(
+            raw_g=TritonWarmupTensor(
+                io, shape=(1, t, h, d), strides=(t * g_stride, g_stride, d, 1)
+            ),
+            raw_beta=TritonWarmupTensor(
+                io, shape=(1, t, h), strides=(t * beta_stride, beta_stride, 1)
+            ),
+            A_log=TritonWarmupTensor(compile_key.a_log_dtype, shape=(h,)),
+            dt_bias=(
+                TritonWarmupTensor(compile_key.dt_bias_dtype, shape=(h * d,))
+                if compile_key.has_dt_bias
+                else None
+            ),
+            gate=TritonWarmupTensor(
+                torch.float32, shape=(1, t, h, d), strides=(t * h * d, h * d, d, 1)
+            ),
+            beta_out=TritonWarmupTensor(
+                torch.float32, shape=(1, t, h), strides=(t * h, h, 1)
+            ),
+            lower_bound=-1.0 if compile_key.use_lower_bound else None,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        raw_g: torch.Tensor,
+        raw_beta: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor | None,
+        gate: torch.Tensor,
+        beta_out: torch.Tensor,
+        *,
+        lower_bound: float | None,
+    ) -> LaunchSpec:
+        _, t, h, d = raw_g.shape
+        # Reproduce HEAD's launch geometry inline; ``dispatch`` remains an
+        # independent compile-key enumeration so the JIT monitor can verify it.
+        block_t = 16
+        grid = (cdiv(t, block_t), h)
+        return grid, dict(
+            lower_bound=lower_bound,
+            softplus_beta=1.0,
+            softplus_threshold=20.0,
+            T=t,
+            stride_g_token=raw_g.stride(1),
+            stride_beta_token=raw_beta.stride(1),
+            H=h,
+            D=d,
+            BT=block_t,
+            BD=next_power_of_2(d),
+            num_warps=4,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+
+
 def _fused_kda_gate_beta(
     raw_g: torch.Tensor,
     raw_beta: torch.Tensor,
@@ -105,26 +263,14 @@ def _fused_kda_gate_beta(
     gate = torch.empty((B, T, H, D), dtype=torch.float32, device=raw_g.device)
     beta = torch.empty((B, T, H), dtype=torch.float32, device=raw_beta.device)
 
-    BT = 16
-    _kda_gate_beta_fwd_kernel[(cdiv(T, BT), H)](
-        raw_g=raw_g,
-        raw_beta=raw_beta,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        gate=gate,
-        beta_out=beta,
+    _FUSED_KDA_GATE_BETA_KERNEL(
+        raw_g,
+        raw_beta,
+        A_log,
+        dt_bias,
+        gate,
+        beta,
         lower_bound=lower_bound,
-        softplus_beta=1.0,
-        softplus_threshold=20.0,
-        T=T,
-        stride_g_token=raw_g.stride(1),
-        stride_beta_token=raw_beta.stride(1),
-        H=H,
-        D=D,
-        BT=BT,
-        BD=next_power_of_2(D),
-        num_warps=4,
-        launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return gate, beta
 
@@ -302,17 +448,304 @@ def fused_recurrent_kda_fwd_kernel(
         tl.extra.cuda.gdc_launch_dependents()
 
 
-# Consumed by kimi_k3_triton_warmup.py during kernel_warmup().
-def get_fused_recurrent_kda_fwd_warmup_profiles(
-    num_heads: int,
-) -> tuple[int, ...]:
-    """Return representative sequence counts for gated launch variants."""
-    # The region above 192 head-sequences reuses the second launch variant.
-    return (
-        1,
-        48 // num_heads + 1,
-        96 // num_heads + 1,
-    )
+class KimiK3FusedRecurrentKdaFwdKernel(
+    VllmTritonJitKernel["KimiK3FusedRecurrentKdaFwdKernel.CompileKey"]
+):
+    """JIT owner for recurrent KDA speculative decode."""
+
+    kernel = staticmethod(fused_recurrent_kda_fwd_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        io_dtype: torch.dtype
+        # ``g``/``beta`` are the model io dtype on the fused-gate path (raw
+        # activations) but freshly-materialized fp32 on the non-fused path
+        # (see ``_fused_kda_gate_beta``), so their element types are tracked
+        # separately — Triton specializes each pointer arg on its dtype.
+        gate_dtype: torch.dtype
+        beta_dtype: torch.dtype
+        state_dtype: torch.dtype
+        a_log_dtype: torch.dtype
+        dt_bias_dtype: torch.dtype
+        scale: float
+        num_heads: int
+        head_dim: int
+        block_k: int
+        block_v: int
+        stride_qkv_token: int
+        stride_g_token: int
+        stride_out_token: int
+        stride_state_token: int
+        stride_indices_seq: int
+        is_spec_decoding: bool
+        use_qk_l2norm: bool
+        use_gate_in_kernel: bool
+        apply_beta_sigmoid: bool
+        # ``A_log`` is a live tensor on the fused-gate path but ``None`` on the
+        # non-fused path; Triton specializes a ``None`` pointer arg distinctly.
+        has_a_log: bool
+        has_dt_bias: bool
+        use_lower_bound: bool
+        num_warps: int
+        num_stages: int
+        launch_pdl: bool
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        io_dtype: torch.dtype,
+        gate_dtype: torch.dtype,
+        beta_dtype: torch.dtype,
+        state_dtype: torch.dtype,
+        a_log_dtype: torch.dtype,
+        dt_bias_dtype: torch.dtype,
+        num_heads: int,
+        head_dim: int,
+        n_sequences: int,
+        scale: float,
+        stride_qkv_token: int,
+        stride_g_token: int,
+        stride_out_token: int,
+        stride_state_token: int,
+        stride_indices_seq: int,
+        is_spec_decoding: bool,
+        use_qk_l2norm: bool,
+        use_gate_in_kernel: bool,
+        apply_beta_sigmoid: bool,
+        has_a_log: bool,
+        has_dt_bias: bool,
+        use_lower_bound: bool,
+        launch_pdl: bool,
+    ) -> CompileKey:
+        head_sequences = num_heads * n_sequences
+        # Tuned on GB300 for Kimi-K3 shapes on the fused-gate path; the
+        # non-fused path uses HEAD's fixed BV=8/num_stages=2. Kept as
+        # conditional expressions so the warmup dispatch tracer can enumerate
+        # both branches (statement-level if/else is not traceable here).
+        block_v = (
+            (4 if head_sequences <= 48 else (16 if 96 < head_sequences <= 192 else 8))
+            if use_gate_in_kernel
+            else 8
+        )
+        num_stages = (4 if head_sequences <= 48 else 3) if use_gate_in_kernel else 2
+        return self.CompileKey(
+            io_dtype=io_dtype,
+            gate_dtype=gate_dtype,
+            beta_dtype=beta_dtype,
+            state_dtype=state_dtype,
+            a_log_dtype=a_log_dtype,
+            dt_bias_dtype=dt_bias_dtype,
+            scale=scale,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            block_k=next_power_of_2(head_dim),
+            block_v=block_v,
+            stride_qkv_token=stride_qkv_token,
+            stride_g_token=stride_g_token,
+            stride_out_token=stride_out_token,
+            stride_state_token=stride_state_token,
+            stride_indices_seq=stride_indices_seq,
+            is_spec_decoding=is_spec_decoding,
+            use_qk_l2norm=use_qk_l2norm,
+            use_gate_in_kernel=use_gate_in_kernel,
+            apply_beta_sigmoid=apply_beta_sigmoid,
+            has_a_log=has_a_log,
+            has_dt_bias=has_dt_bias,
+            use_lower_bound=use_lower_bound,
+            num_warps=1,
+            num_stages=num_stages,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        io_dtype: torch.dtype,
+        state_dtype: torch.dtype,
+        a_log_dtype: torch.dtype,
+        dt_bias_dtype: torch.dtype,
+        num_heads: int,
+        head_dim: int,
+        scale: float,
+        stride_qkv_token: int,
+        stride_g_token: int,
+        stride_out_token: int,
+        stride_state_token: int,
+        stride_indices_seq: int,
+        has_dt_bias: bool,
+        use_lower_bound: bool,
+        launch_pdl: bool,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            zip_inputs(
+                dict(
+                    gate_dtype=io_dtype,
+                    beta_dtype=io_dtype,
+                    a_log_dtype=a_log_dtype,
+                    dt_bias_dtype=dt_bias_dtype,
+                    use_gate_in_kernel=True,
+                    apply_beta_sigmoid=True,
+                    has_a_log=True,
+                    has_dt_bias=has_dt_bias,
+                    use_lower_bound=use_lower_bound,
+                ),
+                dict(
+                    gate_dtype=torch.float32,
+                    beta_dtype=torch.float32,
+                    a_log_dtype=torch.float32,
+                    dt_bias_dtype=torch.float32,
+                    use_gate_in_kernel=False,
+                    apply_beta_sigmoid=False,
+                    has_a_log=False,
+                    has_dt_bias=False,
+                    use_lower_bound=False,
+                ),
+            ),
+            io_dtype=io_dtype,
+            state_dtype=state_dtype,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            n_sequences=(1, 48 // num_heads + 1, 96 // num_heads + 1),
+            scale=scale,
+            stride_qkv_token=stride_qkv_token,
+            stride_g_token=stride_g_token,
+            stride_out_token=stride_out_token,
+            stride_state_token=stride_state_token,
+            stride_indices_seq=stride_indices_seq,
+            is_spec_decoding=True,
+            use_qk_l2norm=True,
+            launch_pdl=launch_pdl,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        h = compile_key.num_heads
+        d = compile_key.head_dim
+        if compile_key.block_v == 4:
+            n = 1
+        elif compile_key.block_v == 16:
+            n = 96 // h + 1
+        else:
+            n = 48 // h + 1
+        t = n
+        io = compile_key.io_dtype
+        qkv = compile_key.stride_qkv_token
+        g_stride = compile_key.stride_g_token
+        out_stride = compile_key.stride_out_token
+        indices_seq = compile_key.stride_indices_seq
+        return dict(
+            q=TritonWarmupTensor(io, shape=(1, t, h, d), strides=(t * qkv, qkv, d, 1)),
+            k=TritonWarmupTensor(io, shape=(1, t, h, d), strides=(t * qkv, qkv, d, 1)),
+            v=TritonWarmupTensor(io, shape=(1, t, h, d), strides=(t * qkv, qkv, d, 1)),
+            g=TritonWarmupTensor(
+                compile_key.gate_dtype,
+                shape=(1, t, h, d),
+                strides=(t * g_stride, g_stride, d, 1),
+            ),
+            beta=TritonWarmupTensor(
+                compile_key.beta_dtype, shape=(1, t, h), strides=(t * h, h, 1)
+            ),
+            A_log=(
+                TritonWarmupTensor(compile_key.a_log_dtype, shape=(h,))
+                if compile_key.has_a_log
+                else None
+            ),
+            dt_bias=(
+                TritonWarmupTensor(compile_key.dt_bias_dtype, shape=(h * d,))
+                if compile_key.has_dt_bias
+                else None
+            ),
+            out=TritonWarmupTensor(
+                io, shape=(1, t, h, d), strides=(t * out_stride, out_stride, d, 1)
+            ),
+            state=TritonWarmupTensor(
+                compile_key.state_dtype,
+                shape=(2, h, d, d),
+                strides=(compile_key.stride_state_token, d * d, d, 1),
+            ),
+            cu_seqlens=TritonWarmupTensor(torch.int32, shape=(n + 1,)),
+            state_indices=TritonWarmupTensor(
+                torch.int32, shape=(n, indices_seq), strides=(indices_seq, 1)
+            ),
+            num_accepted_tokens=TritonWarmupTensor(torch.int32, shape=(n,)),
+            scale=compile_key.scale,
+            lower_bound=-1.0 if compile_key.use_lower_bound else None,
+            use_qk_l2norm_in_kernel=compile_key.use_qk_l2norm,
+            use_gate_in_kernel=compile_key.use_gate_in_kernel,
+            use_beta_sigmoid_in_kernel=compile_key.apply_beta_sigmoid,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        A_log: torch.Tensor | None,
+        dt_bias: torch.Tensor | None,
+        out: torch.Tensor,
+        state: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        state_indices: torch.Tensor,
+        num_accepted_tokens: torch.Tensor | None,
+        *,
+        scale: float,
+        lower_bound: float | None,
+        use_qk_l2norm_in_kernel: bool,
+        use_gate_in_kernel: bool,
+        use_beta_sigmoid_in_kernel: bool,
+    ) -> LaunchSpec:
+        num_tokens = q.shape[1]
+        num_heads = q.shape[2]
+        head_dim = q.shape[3]
+        # This owner stores a single ``head_dim`` and reuses it for both the K
+        # and V inner dims (grid over V, ``BK`` from K). KDA q/k/v share the same
+        # head_dim so K == V; assert it so a future non-square caller fails here
+        # instead of launching a mismatched grid.
+        assert v.shape[3] == head_dim
+        n_sequences = cu_seqlens.numel() - 1
+        # Reproduce HEAD's launch geometry inline; ``dispatch`` remains an
+        # independent compile-key enumeration so the JIT monitor can verify it.
+        if use_gate_in_kernel:
+            # Tuned on GB300 for Kimi-K3 shapes. Keep dispatch()'s warmup
+            # profiles in sync with these boundaries.
+            head_sequences = num_heads * n_sequences
+            if head_sequences <= 48:
+                block_v, num_stages = 4, 4
+            elif head_sequences <= 96:
+                block_v, num_stages = 8, 3
+            elif head_sequences <= 192:
+                block_v, num_stages = 16, 3
+            else:
+                block_v, num_stages = 8, 3
+            num_warps = 1
+        else:
+            block_v, num_warps, num_stages = 8, 1, 2
+        grid = (cdiv(head_dim, block_v) * n_sequences * num_heads,)
+        return grid, dict(
+            lower_bound=lower_bound,
+            scale=scale,
+            N=n_sequences,
+            T=num_tokens,
+            H=num_heads,
+            K=head_dim,
+            V=head_dim,
+            BK=next_power_of_2(head_dim),
+            BV=block_v,
+            stride_qkv_token=q.stride(1),
+            stride_g_token=g.stride(1),
+            stride_beta_token=beta.stride(1),
+            stride_out_token=out.stride(1),
+            stride_state_token=state.stride(0),
+            stride_indices_seq=state_indices.stride(0),
+            USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+            USE_GATE_IN_KERNEL=use_gate_in_kernel,
+            APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
+            num_warps=num_warps,
+            num_stages=num_stages,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
 
 
 def fused_recurrent_kda_fwd(
@@ -371,57 +804,24 @@ def fused_recurrent_kda_fwd(
     if scale is None:
         scale = K**-0.5
 
-    if use_gate_in_kernel:
-        # Tuned on GB300 for Kimi-K3 shapes. Keep the warmup profiles above in
-        # sync with these boundaries.
-        head_sequences = H * N
-        if head_sequences <= 48:
-            BV, num_stages = 4, 4
-        elif head_sequences <= 96:
-            BV, num_stages = 8, 3
-        elif head_sequences <= 192:
-            BV, num_stages = 16, 3
-        else:
-            BV, num_stages = 8, 3
-        num_warps = 1
-    else:
-        BV, num_warps, num_stages = 8, 1, 2
-    grid = (cdiv(V, BV) * N * H,)
-    fused_recurrent_kda_fwd_kernel[grid](
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        beta=beta,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        out=out,
-        state=initial_state,
-        cu_seqlens=cu_seqlens,
-        state_indices=ssm_state_indices,
-        num_accepted_tokens=num_accepted_tokens,
-        lower_bound=lower_bound,
+    _FUSED_RECURRENT_KDA_FWD_KERNEL(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        A_log,
+        dt_bias,
+        out,
+        initial_state,
+        cu_seqlens,
+        ssm_state_indices,
+        num_accepted_tokens,
         scale=scale,
-        N=N,
-        T=T,
-        H=H,
-        K=K,
-        V=V,
-        BK=next_power_of_2(K),
-        BV=BV,
-        stride_qkv_token=q.stride(1),
-        stride_g_token=g.stride(1),
-        stride_beta_token=beta.stride(1),
-        stride_out_token=out.stride(1),
-        stride_state_token=initial_state.stride(0),
-        stride_indices_seq=ssm_state_indices.stride(0),
-        IS_SPEC_DECODING=num_accepted_tokens is not None,
-        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        USE_GATE_IN_KERNEL=use_gate_in_kernel,
-        APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
-        num_warps=num_warps,
-        num_stages=num_stages,
-        launch_pdl=current_platform.is_arch_support_pdl(),
+        lower_bound=lower_bound,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_gate_in_kernel=use_gate_in_kernel,
+        use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
     )
     return out, initial_state
 
@@ -581,6 +981,175 @@ def fused_recurrent_kda_packed_decode_kernel(
     tl.store(p_state, b_state.to(p_state.dtype.element_ty), mask=mask_state)
 
 
+class KimiK3FusedRecurrentKdaPackedDecodeKernel(
+    VllmTritonJitKernel["KimiK3FusedRecurrentKdaPackedDecodeKernel.CompileKey"]
+):
+    """JIT owner for one-token packed KDA decode."""
+
+    kernel = staticmethod(fused_recurrent_kda_packed_decode_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        io_dtype: torch.dtype
+        state_dtype: torch.dtype
+        a_log_dtype: torch.dtype
+        dt_bias_dtype: torch.dtype
+        scale: float
+        num_heads: int
+        k_dim: int
+        v_dim: int
+        block_k: int
+        block_v: int
+        stride_mixed_token: int
+        stride_g_token: int
+        stride_state_token: int
+        use_lower_bound: bool
+        launch_pdl: bool
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        io_dtype: torch.dtype,
+        state_dtype: torch.dtype,
+        a_log_dtype: torch.dtype,
+        dt_bias_dtype: torch.dtype,
+        num_heads: int,
+        k_dim: int,
+        v_dim: int,
+        scale: float,
+        stride_mixed_token: int,
+        stride_g_token: int,
+        stride_state_token: int,
+        use_lower_bound: bool,
+        launch_pdl: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            io_dtype=io_dtype,
+            state_dtype=state_dtype,
+            a_log_dtype=a_log_dtype,
+            dt_bias_dtype=dt_bias_dtype,
+            scale=scale,
+            num_heads=num_heads,
+            k_dim=k_dim,
+            v_dim=v_dim,
+            block_k=next_power_of_2(k_dim),
+            block_v=min(next_power_of_2(v_dim), 32),
+            stride_mixed_token=stride_mixed_token,
+            stride_g_token=stride_g_token,
+            stride_state_token=stride_state_token,
+            use_lower_bound=use_lower_bound,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        io_dtype: torch.dtype,
+        state_dtype: torch.dtype,
+        a_log_dtype: torch.dtype,
+        dt_bias_dtype: torch.dtype,
+        num_heads: int,
+        head_dim: int,
+        stride_mixed_token: int,
+        stride_g_token: int,
+        stride_state_token: int,
+        use_lower_bound: bool,
+        launch_pdl: bool,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            io_dtype=io_dtype,
+            state_dtype=state_dtype,
+            a_log_dtype=a_log_dtype,
+            dt_bias_dtype=dt_bias_dtype,
+            num_heads=num_heads,
+            k_dim=head_dim,
+            v_dim=head_dim,
+            scale=head_dim**-0.5,
+            stride_mixed_token=stride_mixed_token,
+            stride_g_token=stride_g_token,
+            stride_state_token=stride_state_token,
+            use_lower_bound=use_lower_bound,
+            launch_pdl=launch_pdl,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        h = compile_key.num_heads
+        k = compile_key.k_dim
+        v = compile_key.v_dim
+        io = compile_key.io_dtype
+        b = 1
+        g_stride = compile_key.stride_g_token
+        return dict(
+            mixed_qkv=TritonWarmupTensor(
+                io,
+                shape=(b, compile_key.stride_mixed_token),
+                strides=(compile_key.stride_mixed_token, 1),
+            ),
+            raw_g=TritonWarmupTensor(
+                io, shape=(1, b, h, k), strides=(b * g_stride, g_stride, k, 1)
+            ),
+            raw_beta=TritonWarmupTensor(io, shape=(1, b, h), strides=(b * h, h, 1)),
+            A_log=TritonWarmupTensor(compile_key.a_log_dtype, shape=(h,)),
+            dt_bias=TritonWarmupTensor(compile_key.dt_bias_dtype, shape=(h * k,)),
+            out=TritonWarmupTensor(
+                io, shape=(1, b, h, v), strides=(b * h * v, h * v, v, 1)
+            ),
+            state=TritonWarmupTensor(
+                compile_key.state_dtype,
+                shape=(2, h, v, k),
+                strides=(compile_key.stride_state_token, v * k, k, 1),
+            ),
+            state_indices=TritonWarmupTensor(torch.int32, shape=(b,)),
+            scale=compile_key.scale,
+            lower_bound=-1.0 if compile_key.use_lower_bound else None,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        mixed_qkv: torch.Tensor,
+        raw_g: torch.Tensor,
+        raw_beta: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        out: torch.Tensor,
+        state: torch.Tensor,
+        state_indices: torch.Tensor,
+        *,
+        scale: float,
+        lower_bound: float | None,
+    ) -> LaunchSpec:
+        b = mixed_qkv.shape[0]
+        h = state.shape[1]
+        v = state.shape[2]
+        k = state.shape[3]
+        use_lower_bound = lower_bound is not None
+        # Reproduce HEAD's launch geometry inline; ``dispatch`` remains an
+        # independent compile-key enumeration so the JIT monitor can verify it.
+        block_k = next_power_of_2(k)
+        block_v = min(next_power_of_2(v), 32)
+        grid = (cdiv(v, block_v), b * h)
+        return grid, dict(
+            lower_bound=lower_bound if lower_bound is not None else 0.0,
+            scale=scale,
+            stride_mixed_token=mixed_qkv.stride(0),
+            stride_g_token=raw_g.stride(1),
+            stride_beta_token=raw_beta.stride(1),
+            stride_state_token=state.stride(0),
+            stride_state_indices=state_indices.stride(0),
+            H=h,
+            K=k,
+            V=v,
+            BK=block_k,
+            BV=block_v,
+            SOFTPLUS_THRESHOLD=20.0,
+            USE_LOWER_BOUND=use_lower_bound,
+            num_warps=4,
+            num_stages=2,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+
+
 def fused_recurrent_kda_packed_decode(
     mixed_qkv: torch.Tensor,
     raw_g: torch.Tensor,
@@ -634,38 +1203,25 @@ def fused_recurrent_kda_packed_decode(
     if state_indices.shape[0] != B:
         raise ValueError("`state_indices` must contain one entry per token.")
 
-    BK = next_power_of_2(K)
-    BV = min(next_power_of_2(V), 32)
     if scale is None:
         scale = K**-0.5
 
     out = torch.empty((1, B, H, V), dtype=mixed_qkv.dtype, device=device)
-    grid = (cdiv(V, BV), B * H)
-    fused_recurrent_kda_packed_decode_kernel[grid](
-        mixed_qkv=mixed_qkv,
-        raw_g=raw_g,
-        raw_beta=raw_beta,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        out=out,
-        state=initial_state,
-        state_indices=state_indices,
-        lower_bound=lower_bound or 0.0,
+    _FUSED_RECURRENT_KDA_PACKED_DECODE_KERNEL(
+        mixed_qkv,
+        raw_g,
+        raw_beta,
+        A_log,
+        dt_bias,
+        out,
+        initial_state,
+        state_indices,
         scale=scale,
-        stride_mixed_token=mixed_qkv.stride(0),
-        stride_g_token=raw_g.stride(1),
-        stride_beta_token=raw_beta.stride(1),
-        stride_state_token=initial_state.stride(0),
-        stride_state_indices=state_indices.stride(0),
-        H=H,
-        K=K,
-        V=V,
-        BK=BK,
-        BV=BV,
-        SOFTPLUS_THRESHOLD=20.0,
-        USE_LOWER_BOUND=lower_bound is not None,
-        num_warps=4,
-        num_stages=2,
-        launch_pdl=current_platform.is_arch_support_pdl(),
+        lower_bound=lower_bound,
     )
     return out, initial_state
+
+
+_FUSED_KDA_GATE_BETA_KERNEL = KimiK3FusedKdaGateBetaKernel()
+_FUSED_RECURRENT_KDA_FWD_KERNEL = KimiK3FusedRecurrentKdaFwdKernel()
+_FUSED_RECURRENT_KDA_PACKED_DECODE_KERNEL = KimiK3FusedRecurrentKdaPackedDecodeKernel()

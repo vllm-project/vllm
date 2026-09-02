@@ -315,6 +315,64 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        super().bind_kv_cache(kv_cache)
+        if not current_platform.is_cuda():
+            return
+
+        from vllm.models.kimi_k3.nvidia.ops.third_party.kda.chunk import (
+            _CHUNK_GLA_FWD_O_KERNEL,
+        )
+        from vllm.models.kimi_k3.nvidia.ops.third_party.kda.fused_recurrent import (
+            _FUSED_RECURRENT_KDA_FWD_KERNEL,
+            _FUSED_RECURRENT_KDA_PACKED_DECODE_KERNEL,
+        )
+
+        recurrent_state = self.kv_cache[1]
+        io_dtype = self.model_config.dtype
+        num_heads = self.local_num_heads
+        head_dim = self.head_dim
+        projection_size = self.local_projection_size
+        registration = dict(
+            io_dtype=io_dtype,
+            state_dtype=recurrent_state.dtype,
+            a_log_dtype=self.A_log.dtype,
+            dt_bias_dtype=self.dt_bias.dtype,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            stride_state_token=recurrent_state.stride(0),
+            use_lower_bound=self.gate_lower_bound is not None,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+        _CHUNK_GLA_FWD_O_KERNEL.register_warmup(
+            q_dtype=io_dtype,
+            v_dtype=io_dtype,
+            g_dtype=torch.float32,
+            h_dtype=io_dtype,
+            out_dtype=io_dtype,
+            a_dtype=io_dtype,
+            num_heads=num_heads,
+            qk_head_dim=head_dim,
+            v_head_dim=head_dim,
+            scale=head_dim**-0.5,
+            is_varlen=True,
+        )
+        _FUSED_RECURRENT_KDA_PACKED_DECODE_KERNEL.register_warmup(
+            stride_mixed_token=3 * projection_size,
+            stride_g_token=projection_size,
+            **registration,
+        )
+        if self.num_spec > 0:
+            _FUSED_RECURRENT_KDA_FWD_KERNEL.register_warmup(
+                scale=head_dim**-0.5,
+                stride_qkv_token=3 * projection_size,
+                stride_g_token=projection_size,
+                stride_out_token=projection_size,
+                stride_indices_seq=self.num_spec + 1,
+                has_dt_bias=True,
+                **registration,
+            )
+
     def rearrange_mixed_qkv(
         self, mixed_qkv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

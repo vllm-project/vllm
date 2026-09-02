@@ -205,9 +205,15 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         runtime_launcher = kwargs.pop("_runtime_launcher", None)
         runtime_launcher_arg_count = kwargs.pop("_runtime_launcher_arg_count", 0)
         if self._warming:
-            warmup = getattr(self.kernel, "warmup", None)
-            assert warmup is not None
             kwargs.update(forwarded)
+            kernel = self.kernel
+            warmup = getattr(kernel, "warmup", None)
+            if warmup is None and hasattr(kernel, "values"):
+                for name, heuristic in kernel.values.items():
+                    kwargs[name] = heuristic(kwargs)
+                kernel = kernel.fn
+                warmup = getattr(kernel, "warmup", None)
+            assert warmup is not None
             return warmup(grid=(1,), **kwargs)
         if runtime_launcher is not None:
             kwargs.update(forwarded)

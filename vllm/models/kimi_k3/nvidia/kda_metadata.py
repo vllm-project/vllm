@@ -13,11 +13,17 @@ RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 
 from dataclasses import dataclass, field
 from functools import cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -52,53 +58,175 @@ def _metadata_launch_pdl() -> bool:
     return current_platform.is_arch_support_pdl()
 
 
-@triton.jit(do_not_specialize=["num_requests"])
-def _get_aligned_state_indices_kernel(
-    block_table_ptr,
-    seq_lens_ptr,
-    state_indices_ptr,
-    block_table_stride_0: tl.constexpr,
-    block_table_stride_1: tl.constexpr,
-    seq_lens_stride: tl.constexpr,
-    state_indices_stride_0: tl.constexpr,
-    state_indices_stride_1: tl.constexpr,
-    num_requests,
-    CACHE_BLOCK_SIZE: tl.constexpr,
-    NUM_STATE_SLOTS: tl.constexpr,
-    BLOCK_STATE_SLOTS: tl.constexpr,
-    BLOCK_ROWS: tl.constexpr,
-    launch_pdl: tl.constexpr,
+_METADATA_BLOCK_ROWS = 32
+
+
+class KimiK3AlignedStateIndicesKernel(
+    VllmTritonJitKernel["KimiK3AlignedStateIndicesKernel.CompileKey"]
 ):
-    if launch_pdl:
-        tl.extra.cuda.gdc_wait()
-        tl.extra.cuda.gdc_launch_dependents()
+    """JIT owner for MRV1 aligned state-index gathering."""
 
-    rows = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
-    valid_row = rows < num_requests
-    seq_lens = tl.load(
-        seq_lens_ptr + rows * seq_lens_stride,
-        mask=valid_row,
-        other=1,
-    )
-    # Triton truncates signed division toward zero, unlike PyTorch floor
-    # division. Clamping makes both semantics equivalent for seq_lens <= 0.
-    first_state_slot = tl.maximum((seq_lens - 1) // CACHE_BLOCK_SIZE, 0)
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_table_stride_0: int
+        block_table_stride_1: int
+        seq_lens_stride: int
+        state_indices_stride_0: int
+        state_indices_stride_1: int
+        cache_block_size: int
+        num_state_slots: int
+        block_state_slots: int
+        block_rows: int
+        launch_pdl: bool
 
-    state_slots = tl.arange(0, BLOCK_STATE_SLOTS)
-    valid_state_slot = state_slots < NUM_STATE_SLOTS
-    state_indices = tl.load(
-        block_table_ptr
-        + rows[:, None] * block_table_stride_0
-        + (first_state_slot[:, None] + state_slots[None, :]) * block_table_stride_1,
-        mask=valid_row[:, None] & valid_state_slot[None, :],
-    )
-    tl.store(
-        state_indices_ptr
-        + rows[:, None] * state_indices_stride_0
-        + state_slots[None, :] * state_indices_stride_1,
-        state_indices,
-        mask=valid_row[:, None] & valid_state_slot[None, :],
-    )
+    @staticmethod
+    @triton.jit(do_not_specialize=["num_requests"])
+    def kernel(
+        block_table_ptr,
+        seq_lens_ptr,
+        state_indices_ptr,
+        block_table_stride_0: tl.constexpr,
+        block_table_stride_1: tl.constexpr,
+        seq_lens_stride: tl.constexpr,
+        state_indices_stride_0: tl.constexpr,
+        state_indices_stride_1: tl.constexpr,
+        num_requests,
+        CACHE_BLOCK_SIZE: tl.constexpr,
+        NUM_STATE_SLOTS: tl.constexpr,
+        BLOCK_STATE_SLOTS: tl.constexpr,
+        BLOCK_ROWS: tl.constexpr,
+        launch_pdl: tl.constexpr,
+    ):
+        if launch_pdl:
+            tl.extra.cuda.gdc_wait()
+            tl.extra.cuda.gdc_launch_dependents()
+
+        rows = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
+        valid_row = rows < num_requests
+        seq_lens = tl.load(
+            seq_lens_ptr + rows * seq_lens_stride,
+            mask=valid_row,
+            other=1,
+        )
+        # Triton truncates signed division toward zero, unlike PyTorch floor
+        # division. Clamping makes both semantics equivalent for seq_lens <= 0.
+        first_state_slot = tl.maximum((seq_lens - 1) // CACHE_BLOCK_SIZE, 0)
+
+        state_slots = tl.arange(0, BLOCK_STATE_SLOTS)
+        valid_state_slot = state_slots < NUM_STATE_SLOTS
+        state_indices = tl.load(
+            block_table_ptr
+            + rows[:, None] * block_table_stride_0
+            + (first_state_slot[:, None] + state_slots[None, :]) * block_table_stride_1,
+            mask=valid_row[:, None] & valid_state_slot[None, :],
+        )
+        tl.store(
+            state_indices_ptr
+            + rows[:, None] * state_indices_stride_0
+            + state_slots[None, :] * state_indices_stride_1,
+            state_indices,
+            mask=valid_row[:, None] & valid_state_slot[None, :],
+        )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        block_table_stride_0: int,
+        block_table_stride_1: int,
+        seq_lens_stride: int,
+        state_indices_stride_0: int,
+        state_indices_stride_1: int,
+        cache_block_size: int,
+        num_state_slots: int,
+        launch_pdl: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            block_table_stride_0=block_table_stride_0,
+            block_table_stride_1=block_table_stride_1,
+            seq_lens_stride=seq_lens_stride,
+            state_indices_stride_0=state_indices_stride_0,
+            state_indices_stride_1=state_indices_stride_1,
+            cache_block_size=cache_block_size,
+            num_state_slots=num_state_slots,
+            block_state_slots=triton.next_power_of_2(num_state_slots),
+            block_rows=_METADATA_BLOCK_ROWS,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        max_num_blocks_per_req: int,
+        num_state_slots: int,
+        cache_block_size: int,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            block_table_stride_0=max_num_blocks_per_req,
+            block_table_stride_1=1,
+            seq_lens_stride=1,
+            state_indices_stride_0=num_state_slots,
+            state_indices_stride_1=1,
+            cache_block_size=cache_block_size,
+            num_state_slots=num_state_slots,
+            launch_pdl=_metadata_launch_pdl(),
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        num_requests = compile_key.block_rows
+        return dict(
+            block_table=TritonWarmupTensor(
+                torch.int32,
+                shape=(num_requests, compile_key.block_table_stride_0),
+                strides=(
+                    compile_key.block_table_stride_0,
+                    compile_key.block_table_stride_1,
+                ),
+            ),
+            seq_lens=TritonWarmupTensor(
+                torch.int32,
+                shape=(num_requests,),
+                strides=(compile_key.seq_lens_stride,),
+            ),
+            state_indices=TritonWarmupTensor(
+                torch.int32,
+                shape=(num_requests, compile_key.num_state_slots),
+                strides=(
+                    compile_key.state_indices_stride_0,
+                    compile_key.state_indices_stride_1,
+                ),
+            ),
+            num_requests=num_requests,
+            cache_block_size=compile_key.cache_block_size,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+        state_indices: torch.Tensor,
+        num_requests: int,
+        cache_block_size: int,
+    ) -> LaunchSpec:
+        num_state_slots = state_indices.shape[1]
+        # Reproduce HEAD's launch geometry inline; ``dispatch`` remains an
+        # independent compile-key enumeration so the JIT monitor can verify it.
+        block_rows = 32
+        grid = (triton.cdiv(num_requests, block_rows),)
+        return grid, dict(
+            block_table_stride_0=block_table.stride(0),
+            block_table_stride_1=block_table.stride(1),
+            seq_lens_stride=seq_lens.stride(0),
+            state_indices_stride_0=state_indices.stride(0),
+            state_indices_stride_1=state_indices.stride(1),
+            num_requests=num_requests,
+            CACHE_BLOCK_SIZE=cache_block_size,
+            NUM_STATE_SLOTS=num_state_slots,
+            BLOCK_STATE_SLOTS=triton.next_power_of_2(num_state_slots),
+            BLOCK_ROWS=block_rows,
+            launch_pdl=_metadata_launch_pdl(),
+            num_warps=1,
+        )
 
 
 def _mamba_get_block_table_tensor(
@@ -118,93 +246,197 @@ def _mamba_get_block_table_tensor(
         dtype=block_table.dtype,
         device=block_table.device,
     )
-    BLOCK_ROWS = 32
-    grid = (triton.cdiv(num_requests, BLOCK_ROWS),)
-    _get_aligned_state_indices_kernel[grid](
+    _ALIGNED_STATE_INDICES_KERNEL(
         block_table,
         seq_lens,
         state_indices,
-        block_table.stride(0),
-        block_table.stride(1),
-        seq_lens.stride(0),
-        state_indices.stride(0),
-        state_indices.stride(1),
         num_requests,
-        CACHE_BLOCK_SIZE=kv_cache_spec.block_size,
-        NUM_STATE_SLOTS=num_state_slots,
-        BLOCK_STATE_SLOTS=triton.next_power_of_2(num_state_slots),
-        BLOCK_ROWS=BLOCK_ROWS,
-        num_warps=1,
-        launch_pdl=_metadata_launch_pdl(),
+        kv_cache_spec.block_size,
     )
     return state_indices
 
 
-@triton.jit(do_not_specialize=["num_spec_decodes", "batch_size"])
-def _stage_spec_decode_metadata_kernel(
-    state_indices_ptr,
-    query_start_loc_ptr,
-    num_accepted_tokens_ptr,
-    staged_state_indices_ptr,
-    staged_query_start_loc_ptr,
-    staged_num_accepted_tokens_ptr,
-    state_indices_stride_0: tl.constexpr,
-    state_indices_stride_1: tl.constexpr,
-    staged_state_indices_stride_0: tl.constexpr,
-    staged_state_indices_stride_1: tl.constexpr,
-    num_spec_decodes,
-    batch_size,
-    NUM_STATE_SLOTS: tl.constexpr,
-    BLOCK_STATE_SLOTS: tl.constexpr,
-    NULL_STATE_ID: tl.constexpr,
-    BLOCK_ROWS: tl.constexpr,
-    launch_pdl: tl.constexpr,
+class KimiK3StageSpecDecodeKernel(
+    VllmTritonJitKernel["KimiK3StageSpecDecodeKernel.CompileKey"]
 ):
-    if launch_pdl:
-        tl.extra.cuda.gdc_wait()
-        tl.extra.cuda.gdc_launch_dependents()
+    """JIT owner for speculative-decode metadata staging."""
 
-    rows = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
-    real_request = rows < num_spec_decodes
+    @dataclass(frozen=True)
+    class CompileKey:
+        state_indices_stride_0: int
+        state_indices_stride_1: int
+        staged_state_indices_stride_0: int
+        staged_state_indices_stride_1: int
+        num_state_slots: int
+        block_state_slots: int
+        null_state_id: int
+        block_rows: int
+        launch_pdl: bool
 
-    state_slots = tl.arange(0, BLOCK_STATE_SLOTS)
-    valid_state_slot = state_slots < NUM_STATE_SLOTS
-    state_indices = tl.load(
-        state_indices_ptr
-        + rows[:, None] * state_indices_stride_0
-        + state_slots[None, :] * state_indices_stride_1,
-        mask=real_request[:, None] & valid_state_slot[None, :],
-        other=NULL_STATE_ID,
-    )
-    tl.store(
-        staged_state_indices_ptr
-        + rows[:, None] * staged_state_indices_stride_0
-        + state_slots[None, :] * staged_state_indices_stride_1,
-        state_indices,
-        mask=(rows < batch_size)[:, None] & valid_state_slot[None, :],
-    )
+    @staticmethod
+    @triton.jit(do_not_specialize=["num_spec_decodes", "batch_size"])
+    def kernel(
+        state_indices_ptr,
+        query_start_loc_ptr,
+        num_accepted_tokens_ptr,
+        staged_state_indices_ptr,
+        staged_query_start_loc_ptr,
+        staged_num_accepted_tokens_ptr,
+        state_indices_stride_0: tl.constexpr,
+        state_indices_stride_1: tl.constexpr,
+        staged_state_indices_stride_0: tl.constexpr,
+        staged_state_indices_stride_1: tl.constexpr,
+        num_spec_decodes,
+        batch_size,
+        NUM_STATE_SLOTS: tl.constexpr,
+        BLOCK_STATE_SLOTS: tl.constexpr,
+        NULL_STATE_ID: tl.constexpr,
+        BLOCK_ROWS: tl.constexpr,
+        launch_pdl: tl.constexpr,
+    ):
+        if launch_pdl:
+            tl.extra.cuda.gdc_wait()
+            tl.extra.cuda.gdc_launch_dependents()
 
-    query_row = tl.minimum(rows, num_spec_decodes)
-    query_start_loc = tl.load(
-        query_start_loc_ptr + query_row,
-        mask=rows <= batch_size,
-    )
-    tl.store(
-        staged_query_start_loc_ptr + rows,
-        query_start_loc,
-        mask=rows <= batch_size,
-    )
+        rows = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
+        real_request = rows < num_spec_decodes
 
-    num_accepted_tokens = tl.load(
-        num_accepted_tokens_ptr + rows,
-        mask=real_request,
-        other=1,
-    )
-    tl.store(
-        staged_num_accepted_tokens_ptr + rows,
-        num_accepted_tokens,
-        mask=rows < batch_size,
-    )
+        state_slots = tl.arange(0, BLOCK_STATE_SLOTS)
+        valid_state_slot = state_slots < NUM_STATE_SLOTS
+        state_indices = tl.load(
+            state_indices_ptr
+            + rows[:, None] * state_indices_stride_0
+            + state_slots[None, :] * state_indices_stride_1,
+            mask=real_request[:, None] & valid_state_slot[None, :],
+            other=NULL_STATE_ID,
+        )
+        tl.store(
+            staged_state_indices_ptr
+            + rows[:, None] * staged_state_indices_stride_0
+            + state_slots[None, :] * staged_state_indices_stride_1,
+            state_indices,
+            mask=(rows < batch_size)[:, None] & valid_state_slot[None, :],
+        )
+
+        query_row = tl.minimum(rows, num_spec_decodes)
+        query_start_loc = tl.load(
+            query_start_loc_ptr + query_row,
+            mask=rows <= batch_size,
+        )
+        tl.store(
+            staged_query_start_loc_ptr + rows,
+            query_start_loc,
+            mask=rows <= batch_size,
+        )
+
+        num_accepted_tokens = tl.load(
+            num_accepted_tokens_ptr + rows,
+            mask=real_request,
+            other=1,
+        )
+        tl.store(
+            staged_num_accepted_tokens_ptr + rows,
+            num_accepted_tokens,
+            mask=rows < batch_size,
+        )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        state_indices_stride_0: int,
+        state_indices_stride_1: int,
+        staged_state_indices_stride_0: int,
+        staged_state_indices_stride_1: int,
+        num_state_slots: int,
+        null_state_id: int,
+        launch_pdl: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            state_indices_stride_0=state_indices_stride_0,
+            state_indices_stride_1=state_indices_stride_1,
+            staged_state_indices_stride_0=staged_state_indices_stride_0,
+            staged_state_indices_stride_1=staged_state_indices_stride_1,
+            num_state_slots=num_state_slots,
+            block_state_slots=triton.next_power_of_2(num_state_slots),
+            null_state_id=null_state_id,
+            block_rows=_METADATA_BLOCK_ROWS,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        source_state_indices_stride_0: int,
+        spec_state_slots: int,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            state_indices_stride_0=source_state_indices_stride_0,
+            state_indices_stride_1=1,
+            staged_state_indices_stride_0=spec_state_slots,
+            staged_state_indices_stride_1=1,
+            num_state_slots=spec_state_slots,
+            null_state_id=NULL_BLOCK_ID,
+            launch_pdl=_metadata_launch_pdl(),
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        rows = compile_key.block_rows
+        slots = compile_key.num_state_slots
+        return dict(
+            state_indices=TritonWarmupTensor(
+                torch.int32,
+                shape=(rows, slots),
+                strides=(
+                    compile_key.state_indices_stride_0,
+                    compile_key.state_indices_stride_1,
+                ),
+            ),
+            query_start_loc=TritonWarmupTensor(torch.int32, shape=(rows + 1,)),
+            num_accepted_tokens=TritonWarmupTensor(torch.int32, shape=(rows,)),
+            staged_state_indices=TritonWarmupTensor(
+                torch.int32,
+                shape=(rows, slots),
+                strides=(
+                    compile_key.staged_state_indices_stride_0,
+                    compile_key.staged_state_indices_stride_1,
+                ),
+            ),
+            staged_query_start_loc=TritonWarmupTensor(torch.int32, shape=(rows + 1,)),
+            staged_num_accepted_tokens=TritonWarmupTensor(torch.int32, shape=(rows,)),
+            num_spec_decodes=rows,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        state_indices: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_accepted_tokens: torch.Tensor,
+        staged_state_indices: torch.Tensor,
+        staged_query_start_loc: torch.Tensor,
+        staged_num_accepted_tokens: torch.Tensor,
+        *,
+        num_spec_decodes: int,
+    ) -> LaunchSpec:
+        batch_size, num_state_slots = staged_state_indices.shape
+        # Reproduce HEAD's launch geometry inline; ``dispatch`` remains an
+        # independent compile-key enumeration so the JIT monitor can verify it.
+        block_rows = 32
+        grid = (triton.cdiv(batch_size + 1, block_rows),)
+        return grid, dict(
+            state_indices_stride_0=state_indices.stride(0),
+            state_indices_stride_1=state_indices.stride(1),
+            staged_state_indices_stride_0=staged_state_indices.stride(0),
+            staged_state_indices_stride_1=staged_state_indices.stride(1),
+            num_spec_decodes=num_spec_decodes,
+            batch_size=batch_size,
+            NUM_STATE_SLOTS=num_state_slots,
+            BLOCK_STATE_SLOTS=triton.next_power_of_2(num_state_slots),
+            NULL_STATE_ID=NULL_BLOCK_ID,
+            BLOCK_ROWS=block_rows,
+            launch_pdl=_metadata_launch_pdl(),
+            num_warps=1,
+        )
 
 
 def stage_spec_decode_metadata(
@@ -220,28 +452,14 @@ def stage_spec_decode_metadata(
     """Stage speculative-decode metadata into CUDA-graph buffers."""
     assert state_indices.is_cuda
     assert state_indices.ndim == 2
-    batch_size, num_state_slots = staged_state_indices.shape
-    BLOCK_ROWS = 32
-    grid = (triton.cdiv(batch_size + 1, BLOCK_ROWS),)
-    _stage_spec_decode_metadata_kernel[grid](
+    _STAGE_SPEC_DECODE_KERNEL(
         state_indices,
         query_start_loc,
         num_accepted_tokens,
         staged_state_indices,
         staged_query_start_loc,
         staged_num_accepted_tokens,
-        state_indices.stride(0),
-        state_indices.stride(1),
-        staged_state_indices.stride(0),
-        staged_state_indices.stride(1),
-        num_spec_decodes,
-        batch_size,
-        NUM_STATE_SLOTS=num_state_slots,
-        BLOCK_STATE_SLOTS=triton.next_power_of_2(num_state_slots),
-        NULL_STATE_ID=NULL_BLOCK_ID,
-        BLOCK_ROWS=BLOCK_ROWS,
-        num_warps=1,
-        launch_pdl=_metadata_launch_pdl(),
+        num_spec_decodes=num_spec_decodes,
     )
 
 
@@ -737,3 +955,7 @@ class KimiK3KDAAttentionBackend(GDNAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type[KimiK3KDAMetadataBuilder]:
         return KimiK3KDAMetadataBuilder
+
+
+_ALIGNED_STATE_INDICES_KERNEL = KimiK3AlignedStateIndicesKernel()
+_STAGE_SPEC_DECODE_KERNEL = KimiK3StageSpecDecodeKernel()

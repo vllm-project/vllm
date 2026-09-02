@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from typing import Any
 
 import torch
 from einops import rearrange
@@ -39,7 +40,15 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter, BlockQuantScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
+    _ALIGNED_STATE_INDICES_KERNEL,
+    _STAGE_SPEC_DECODE_KERNEL,
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
 )
@@ -234,6 +243,9 @@ def _flashkda_prefill(
     return out, final_state
 
 
+_STORE_CHECKPOINTS_BLOCK_SIZE = 256
+
+
 @triton.jit
 def _store_cache_checkpoints_kernel(
     x_ptr,
@@ -295,6 +307,177 @@ def _store_cache_checkpoints_kernel(
         recurrent,
         mask=valid_recurrent,
     )
+
+
+class KimiK3StoreCacheCheckpointsKernel(
+    VllmTritonJitKernel["KimiK3StoreCacheCheckpointsKernel.CompileKey"]
+):
+    """JIT owner for FlashKDA prefill checkpoint storage."""
+
+    kernel = staticmethod(_store_cache_checkpoints_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        x_dtype: torch.dtype
+        conv_state_dtype: torch.dtype
+        recurrent_state_dtype: torch.dtype
+        x_stride_0: int
+        x_stride_1: int
+        state_stride_0: int
+        state_stride_1: int
+        state_stride_2: int
+        checkpoint_stride_0: int
+        recurrent_state_stride_0: int
+        checkpoint_offset_stride: int
+        state_len: int
+        width: int
+        recurrent_row_size: int
+        null_state_idx: int
+        block_size: int
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        x_dtype: torch.dtype,
+        conv_state_dtype: torch.dtype,
+        recurrent_state_dtype: torch.dtype,
+        x_stride_0: int,
+        x_stride_1: int,
+        state_stride_0: int,
+        state_stride_1: int,
+        state_stride_2: int,
+        checkpoint_stride_0: int,
+        recurrent_state_stride_0: int,
+        checkpoint_offset_stride: int,
+        state_len: int,
+        width: int,
+        recurrent_row_size: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            x_dtype=x_dtype,
+            conv_state_dtype=conv_state_dtype,
+            recurrent_state_dtype=recurrent_state_dtype,
+            x_stride_0=x_stride_0,
+            x_stride_1=x_stride_1,
+            state_stride_0=state_stride_0,
+            state_stride_1=state_stride_1,
+            state_stride_2=state_stride_2,
+            checkpoint_stride_0=checkpoint_stride_0,
+            recurrent_state_stride_0=recurrent_state_stride_0,
+            checkpoint_offset_stride=checkpoint_offset_stride,
+            state_len=state_len,
+            width=width,
+            recurrent_row_size=recurrent_row_size,
+            null_state_idx=NULL_BLOCK_ID,
+            block_size=_STORE_CHECKPOINTS_BLOCK_SIZE,
+        )
+
+    def get_warmup_keys(  # type: ignore[override]
+        self,
+        *,
+        x_dtype: torch.dtype,
+        conv_state_dtype: torch.dtype,
+        recurrent_state_dtype: torch.dtype,
+        x_stride_0: int | tuple[int, ...],
+        state_stride_0: int,
+        state_stride_1: int,
+        state_stride_2: int,
+        checkpoint_stride_0: int,
+        recurrent_state_stride_0: int,
+        state_len: int,
+        width: int,
+        recurrent_row_size: int,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            x_dtype=x_dtype,
+            conv_state_dtype=conv_state_dtype,
+            recurrent_state_dtype=recurrent_state_dtype,
+            x_stride_0=x_stride_0,
+            x_stride_1=1,
+            state_stride_0=state_stride_0,
+            state_stride_1=state_stride_1,
+            state_stride_2=state_stride_2,
+            checkpoint_stride_0=checkpoint_stride_0,
+            recurrent_state_stride_0=recurrent_state_stride_0,
+            checkpoint_offset_stride=1,
+            state_len=state_len,
+            width=width,
+            recurrent_row_size=recurrent_row_size,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        ck = compile_key
+        # Only dtype and (declared) strides drive Triton specialization; shapes
+        # are nominal single-slot placeholders.
+        return dict(
+            x=TritonWarmupTensor(
+                ck.x_dtype,
+                shape=(1, ck.width),
+                strides=(ck.x_stride_0, ck.x_stride_1),
+            ),
+            conv_state=TritonWarmupTensor(
+                ck.conv_state_dtype,
+                shape=(1, ck.width, ck.state_len),
+                strides=(ck.state_stride_0, ck.state_stride_1, ck.state_stride_2),
+            ),
+            recurrent_checkpoint=TritonWarmupTensor(
+                ck.recurrent_state_dtype,
+                shape=(1, ck.recurrent_row_size),
+                strides=(ck.checkpoint_stride_0, 1),
+            ),
+            recurrent_state=TritonWarmupTensor(
+                ck.recurrent_state_dtype,
+                shape=(1, ck.recurrent_row_size),
+                strides=(ck.recurrent_state_stride_0, 1),
+            ),
+            query_start_loc=TritonWarmupTensor(torch.int32, shape=(2,)),
+            checkpoint_offsets=TritonWarmupTensor(
+                torch.int32,
+                shape=(1,),
+                strides=(ck.checkpoint_offset_stride,),
+            ),
+            checkpoint_state_indices=TritonWarmupTensor(torch.int32, shape=(1,)),
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        x: torch.Tensor,
+        conv_state: torch.Tensor,
+        recurrent_checkpoint: torch.Tensor,
+        recurrent_state: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        checkpoint_offsets: torch.Tensor,
+        checkpoint_state_indices: torch.Tensor,
+    ) -> LaunchSpec:
+        state_len = conv_state.shape[-1]
+        width = x.shape[-1]
+        recurrent_row_size = recurrent_checkpoint[0].numel()
+        # Reproduce HEAD's launch geometry inline; ``dispatch`` remains an
+        # independent compile-key enumeration so the JIT monitor can verify it.
+        block_size = 256
+        grid = (
+            checkpoint_offsets.numel(),
+            triton.cdiv(
+                max(width * state_len, recurrent_row_size),
+                block_size,
+            ),
+        )
+        return grid, dict(
+            x_stride_0=x.stride(0),
+            x_stride_1=x.stride(1),
+            state_stride_0=conv_state.stride(0),
+            state_stride_1=conv_state.stride(1),
+            state_stride_2=conv_state.stride(2),
+            checkpoint_stride_0=recurrent_checkpoint.stride(0),
+            recurrent_state_stride_0=recurrent_state.stride(0),
+            checkpoint_offset_stride=checkpoint_offsets.stride(0),
+            STATE_LEN=state_len,
+            WIDTH=width,
+            RECURRENT_ROW_SIZE=recurrent_row_size,
+            NULL_STATE_IDX=NULL_BLOCK_ID,
+            BLOCK_SIZE=block_size,
+        )
 
 
 def resolve_kda_prefill_backend(
@@ -591,12 +774,313 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+        self._vllm_config = vllm_config
+        self._register_metadata_kernel_warmup(vllm_config)
+
+    def _register_metadata_kernel_warmup(self, vllm_config: VllmConfig) -> None:
+        """Register reachable KDA metadata kernels."""
+        mamba_cache_mode = vllm_config.cache_config.mamba_cache_mode
+        kv_cache_spec = self.get_kv_cache_spec(vllm_config)
+        # Kimi-K3 is decoder-only (no encoder), so the block-table width is
+        # driven by ``max_model_len`` alone, matching the runner's
+        # ``max(max_model_len, max_encoder_len)``.
+        max_len = vllm_config.model_config.max_model_len
+        max_num_blocks_per_req = kv_cache_spec.max_num_blocks_per_req(
+            vllm_config, max_len
+        )
+
+        # Kernel 1: MRV1-only aligned state-index gather. The V2 runner
+        # precomputes aligned indices, so this fallback launch is unreachable
+        # there (see ``KimiK3KDAMetadataBuilder.build``).
+        if mamba_cache_mode == "align" and not vllm_config.use_v2_model_runner:
+            _ALIGNED_STATE_INDICES_KERNEL.register_warmup(
+                max_num_blocks_per_req=max_num_blocks_per_req,
+                num_state_slots=1 + kv_cache_spec.num_speculative_blocks,
+                cache_block_size=kv_cache_spec.block_size,
+            )
+
+        # Kernel 2: cudagraph speculative-decode metadata staging. The runtime
+        # launch is further gated on full-cudagraph capture with no
+        # prefills/decodes; warming it whenever spec decode is enabled is a
+        # harmless superset. The staged source is a row-slice of the block table,
+        # whose row stride depends on the cache mode.
+        if self.num_spec > 0:
+            spec_state_slots = 1 if self.use_recoverssm else self.num_spec + 1
+            if mamba_cache_mode == "align":
+                source_state_indices_stride_0 = 1 + kv_cache_spec.num_speculative_blocks
+            else:
+                source_state_indices_stride_0 = max_num_blocks_per_req
+            _STAGE_SPEC_DECODE_KERNEL.register_warmup(
+                source_state_indices_stride_0=source_state_indices_stride_0,
+                spec_state_slots=spec_state_slots,
+            )
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
         spec = super().get_kv_cache_spec(vllm_config)
         assert isinstance(spec, MambaSpec)
         return replace(
             spec,
             num_prefill_checkpoint_blocks=int(self.kda_prefill_backend == "flashkda"),
+        )
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        super().bind_kv_cache(kv_cache)
+        self._register_store_checkpoints_warmup()
+        self._register_fused_recurrent_warmup()
+        self._register_recoverssm_warmup()
+
+    def _register_store_checkpoints_warmup(self) -> None:
+        """Register FlashKDA checkpoint storage after cache binding."""
+        if self.kda_prefill_backend != "flashkda":
+            return
+        if self.cache_config.mamba_cache_mode != "align":
+            return
+
+        conv_state, recurrent_state = self.kv_cache[0], self.kv_cache[1]
+        # Mirror the ``_forward`` view: the checkpoint kernel indexes conv_state
+        # as ``(slot, width, history)``.
+        if not is_conv_state_dim_first():
+            conv_state = conv_state.transpose(-1, -2)
+
+        kda_width = 3 * self.local_projection_size
+        in_proj_row_width = (
+            4 * self.local_projection_size
+            + self.head_dim
+            + self.local_num_heads
+            + self.in_proj_padding
+        )
+        recurrent_row_size = self.local_num_heads * self.head_dim * self.head_dim
+
+        common = dict(
+            x_dtype=self.model_config.dtype,
+            conv_state_dtype=conv_state.dtype,
+            recurrent_state_dtype=recurrent_state.dtype,
+            state_stride_0=conv_state.stride(0),
+            state_stride_1=conv_state.stride(1),
+            state_stride_2=conv_state.stride(2),
+            # The checkpoint scratch buffer is contiguous ``(N, H, D, D)``.
+            checkpoint_stride_0=recurrent_row_size,
+            recurrent_state_stride_0=recurrent_state.stride(0),
+            state_len=conv_state.shape[-1],
+            width=kda_width,
+            recurrent_row_size=recurrent_row_size,
+        )
+        # Pure prefill: ``mixed_qkv_ns`` is a column slice of the in-proj output,
+        # so it keeps the full in-proj row stride. Prefill interleaved with spec
+        # decode: ``index_select`` compacts it to a contiguous ``kda_width`` row.
+        _STORE_CACHE_CHECKPOINTS_KERNEL.register_warmup(
+            x_stride_0=(in_proj_row_width, kda_width),
+            **common,
+        )
+
+    def _register_fused_recurrent_warmup(self) -> None:
+        """Register recurrent KDA kernels after cache binding."""
+        from vllm.models.kimi_k3.nvidia.ops.third_party.kda.chunk import (
+            _CHUNK_GLA_FWD_O_KERNEL,
+        )
+        from vllm.models.kimi_k3.nvidia.ops.third_party.kda.fused_recurrent import (
+            _FUSED_KDA_GATE_BETA_KERNEL,
+            _FUSED_RECURRENT_KDA_FWD_KERNEL,
+            _FUSED_RECURRENT_KDA_PACKED_DECODE_KERNEL,
+        )
+
+        recurrent_state = self.kv_cache[1]
+        io_dtype = self.model_config.dtype
+        num_heads = self.local_num_heads
+        head_dim = self.head_dim
+        local_projection_size = self.local_projection_size
+        stride_state_token = recurrent_state.stride(0)
+        use_lower_bound = self.gate_lower_bound is not None
+        launch_pdl = current_platform.is_arch_support_pdl()
+
+        if self.kda_prefill_backend == "triton":
+            _CHUNK_GLA_FWD_O_KERNEL.register_warmup(
+                q_dtype=io_dtype,
+                v_dtype=io_dtype,
+                g_dtype=torch.float32,
+                h_dtype=io_dtype,
+                out_dtype=io_dtype,
+                a_dtype=io_dtype,
+                num_heads=num_heads,
+                qk_head_dim=head_dim,
+                v_head_dim=head_dim,
+                scale=head_dim**-0.5,
+                is_varlen=True,
+            )
+
+        # Pure-decode packed kernel: always reachable. ``mixed_qkv`` is the
+        # post-conv contiguous packed row (width ``3 * local_projection_size``);
+        # ``raw_g`` keeps the contiguous ``local_projection_size`` gate row.
+        _FUSED_RECURRENT_KDA_PACKED_DECODE_KERNEL.register_warmup(
+            io_dtype=io_dtype,
+            state_dtype=recurrent_state.dtype,
+            a_log_dtype=self.A_log.dtype,
+            dt_bias_dtype=self.dt_bias.dtype,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            stride_mixed_token=3 * local_projection_size,
+            stride_g_token=local_projection_size,
+            stride_state_token=stride_state_token,
+            use_lower_bound=use_lower_bound,
+            launch_pdl=launch_pdl,
+        )
+
+        # Spec-decode fused-gate forward kernel: q/k/v are column slices of the
+        # packed conv output (row stride ``3 * local_projection_size``); the gate
+        # and output rows stay contiguous at ``local_projection_size``. The
+        # staged 2D state-index rows have stride ``spec_query_len`` (== the
+        # non-RecoverSSM ``spec_state_slots``).
+        if self.num_spec > 0 and not self.use_recoverssm:
+            _FUSED_RECURRENT_KDA_FWD_KERNEL.register_warmup(
+                io_dtype=io_dtype,
+                state_dtype=recurrent_state.dtype,
+                a_log_dtype=self.A_log.dtype,
+                dt_bias_dtype=self.dt_bias.dtype,
+                num_heads=num_heads,
+                head_dim=head_dim,
+                scale=head_dim**-0.5,
+                stride_qkv_token=3 * local_projection_size,
+                stride_g_token=local_projection_size,
+                stride_out_token=local_projection_size,
+                stride_state_token=stride_state_token,
+                stride_indices_seq=self.spec_query_len,
+                has_dt_bias=True,
+                use_lower_bound=use_lower_bound,
+                launch_pdl=launch_pdl,
+            )
+            in_proj_row_width = (
+                4 * local_projection_size
+                + head_dim
+                + num_heads
+                + self.in_proj_padding
+            )
+            _FUSED_KDA_GATE_BETA_KERNEL.register_warmup(
+                io_dtype=io_dtype,
+                a_log_dtype=self.A_log.dtype,
+                dt_bias_dtype=self.dt_bias.dtype,
+                num_heads=num_heads,
+                head_dim=head_dim,
+                max_num_tokens=(
+                    self._vllm_config.scheduler_config.max_num_batched_tokens
+                ),
+                stride_g_token=local_projection_size,
+                stride_beta_token=(in_proj_row_width, num_heads),
+                has_dt_bias=True,
+                use_lower_bound=use_lower_bound,
+                launch_pdl=launch_pdl,
+            )
+
+    def _register_recoverssm_warmup(self) -> None:
+        """Register RecoverSSM kernels after cache binding."""
+        if not (self.use_recoverssm and self.num_spec > 0):
+            return
+
+        from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
+            _COMMIT_KDA_STATE_KERNEL,
+            _COMPACT_CONV_STATE_KERNEL,
+            _PREPARE_COMMIT_PLAN_KERNEL,
+            _RECOVERSSM_VERIFY_KERNEL,
+        )
+
+        if len(self.kv_cache) != 4:
+            raise ValueError(
+                "KDA RecoverSSM requires conv, state, correction, and key/gate "
+                "KV-cache pages"
+            )
+        conv_state = self.kv_cache[0]
+        checkpoint_state = self.kv_cache[1]
+        correction_cache = self.kv_cache[2]
+        kg_cache = self.kv_cache[3]
+        # Mirror ``KDARecoverSSMCommitContext.create``: the compaction kernel
+        # indexes conv state as ``(slot, width, history)``.
+        if not is_conv_state_dim_first():
+            conv_state = conv_state.transpose(-1, -2)
+
+        io_dtype = self.model_config.dtype
+        num_heads = self.local_num_heads
+        head_dim = self.head_dim
+        lps = self.local_projection_size
+        in_proj_row_width = (
+            4 * lps + head_dim + num_heads + self.in_proj_padding
+        )
+        spec_query_len = self.spec_query_len
+        use_lower_bound = self.gate_lower_bound is not None
+
+        # Deployment-fixed align geometry (only live under ``align`` cache mode;
+        # otherwise the planner's align branch is dead constexpr code).
+        mamba_cache_mode = self._vllm_config.cache_config.mamba_cache_mode
+        align_mode = mamba_cache_mode == "align"
+        kv_cache_spec = self.get_kv_cache_spec(self._vllm_config)
+        max_len = self._vllm_config.model_config.max_model_len
+        max_num_blocks_per_req = kv_cache_spec.max_num_blocks_per_req(
+            self._vllm_config, max_len
+        )
+        state_index_strides = (self.spec_state_slots, max_num_blocks_per_req)
+        if align_mode:
+            block_table_width = max_num_blocks_per_req
+            mamba_block_size = kv_cache_spec.block_size
+        else:
+            block_table_width = 1
+            mamba_block_size = 1
+
+        # Verify kernel: q/k/v are column slices of the packed conv output (row
+        # stride ``3 * lps``); the gate and output rows stay contiguous at
+        # ``lps``. The checkpoint / correction / key-gate page block strides are
+        # the padded KV-page strides read from the just-bound cache.
+        _RECOVERSSM_VERIFY_KERNEL.register_warmup(
+            io_dtype=io_dtype,
+            state_dtype=checkpoint_state.dtype,
+            a_log_dtype=self.A_log.dtype,
+            dt_bias_dtype=self.dt_bias.dtype,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            spec_query_len=spec_query_len,
+            stride_q_token=3 * lps,
+            stride_k_token=3 * lps,
+            stride_v_token=3 * lps,
+            stride_g_token=lps,
+            stride_beta_token=(in_proj_row_width, num_heads),
+            stride_out_token=lps,
+            stride_state_block=checkpoint_state.stride(0),
+            stride_correction_block=correction_cache.stride(0),
+            stride_kg_block=kg_cache.stride(0),
+            stride_state_indices=state_index_strides,
+            use_lower_bound=use_lower_bound,
+        )
+
+        # Commit planner: stride-independent; warms both the clean-batch and
+        # mixed-batch (``HAS_REQUEST_INDICES``) variants internally.
+        _PREPARE_COMMIT_PLAN_KERNEL.register_warmup(
+            spec_query_len=spec_query_len,
+            align_mode=align_mode,
+            mamba_block_size=mamba_block_size,
+            block_table_width=block_table_width,
+            stride_state_indices=state_index_strides,
+        )
+
+        # Conv-state compaction.
+        conv_dim = conv_state.shape[1]
+        conv_history_len = conv_state.shape[2] - spec_query_len + 1
+        _COMPACT_CONV_STATE_KERNEL.register_warmup(
+            conv_state_dtype=conv_state.dtype,
+            conv_dim=conv_dim,
+            conv_history_len=conv_history_len,
+            align_mode=align_mode,
+            stride_state_indices=state_index_strides,
+        )
+
+        # KDA-state commit.
+        _COMMIT_KDA_STATE_KERNEL.register_warmup(
+            state_dtype=checkpoint_state.dtype,
+            kg_dtype=kg_cache.dtype,
+            a_log_dtype=self.A_log.dtype,
+            dt_bias_dtype=self.dt_bias.dtype,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            spec_query_len=spec_query_len,
+            use_lower_bound=use_lower_bound,
+            align_mode=align_mode,
+            stride_state_indices=state_index_strides,
         )
 
     def forward(
@@ -898,19 +1382,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         )
                         core_attn_out_non_spec = flashkda_out
                         last_recurrent_state = final_state
-                        state_len = conv_state.shape[-1]
-                        width = mixed_qkv_ns.shape[-1]
-                        recurrent_row_size = checkpoint_state[0].numel()
-                        block_size = 256
-                        _store_cache_checkpoints_kernel[
-                            (
-                                checkpoint_offsets.numel(),
-                                triton.cdiv(
-                                    max(width * state_len, recurrent_row_size),
-                                    block_size,
-                                ),
-                            )
-                        ](
+                        _STORE_CACHE_CHECKPOINTS_KERNEL(
                             mixed_qkv_ns,
                             conv_state,
                             checkpoint_state,
@@ -918,19 +1390,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                             non_spec_query_start_loc,
                             checkpoint_offsets,
                             checkpoint.state_indices,
-                            mixed_qkv_ns.stride(0),
-                            mixed_qkv_ns.stride(1),
-                            conv_state.stride(0),
-                            conv_state.stride(1),
-                            conv_state.stride(2),
-                            checkpoint_state.stride(0),
-                            recurrent_state.stride(0),
-                            checkpoint_offsets.stride(0),
-                            state_len,
-                            width,
-                            recurrent_row_size,
-                            NULL_BLOCK_ID,
-                            block_size,
                         )
                     else:
                         (
@@ -1016,3 +1475,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # Triton normalizes in place, so this is a self-copy with no device
         # work. Keep it for the out-of-place native implementation.
         core_attn_out.copy_(self.o_norm(core_attn_out, g2))
+
+
+_STORE_CACHE_CHECKPOINTS_KERNEL = KimiK3StoreCacheCheckpointsKernel()

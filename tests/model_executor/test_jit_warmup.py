@@ -16,6 +16,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupInputs,
+    VllmTritonJitKernel,
+    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 
@@ -96,6 +100,72 @@ class RecordingToyKernel(ToyKernel):
 
     def compile(self, compile_key: ToyKernel.CompileKey) -> None:
         self.compiled.append(compile_key)
+
+
+class _RecordingTritonJitFunction:
+    arg_names = ("ptr", "value", "BLOCK_SIZE")
+
+    def __init__(self) -> None:
+        self.warmups: list[dict[str, Any]] = []
+
+    def warmup(self, **kwargs: Any) -> None:
+        self.warmups.append(kwargs)
+
+
+class _RecordingTritonAutotuner:
+    arg_names = _RecordingTritonJitFunction.arg_names
+
+    def __init__(self) -> None:
+        self.fn = _RecordingTritonJitFunction()
+        self.configs = ({"num_warps": 4}, {"num_warps": 8})
+
+    def warmup(self, **kwargs: Any) -> None:
+        for config in self.configs:
+            self.fn.warmup(**kwargs, **config)
+
+
+class _RecordingTritonHeuristics:
+    arg_names = _RecordingTritonJitFunction.arg_names
+
+    def __init__(self) -> None:
+        self.fn = _RecordingTritonAutotuner()
+        self.values = {"BLOCK_SIZE": lambda args: args["value"] * 2}
+
+
+class _HeuristicTritonKernel(
+    VllmTritonJitKernel["_HeuristicTritonKernel.CompileKey"]
+):
+    kernel = _RecordingTritonHeuristics()
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        value: int
+
+    def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+        return self.CompileKey(value)
+
+    def get_warmup_keys(self) -> list[CompileKey]:
+        return []
+
+    def warmup_inputs(self, compile_key: CompileKey) -> TritonWarmupInputs:
+        return {"ptr": object(), "value": compile_key.value}
+
+    @kernel_launcher
+    def __call__(self, ptr: Any, value: int) -> LaunchSpec:
+        return (1,), {}
+
+
+def test_triton_warmup_evaluates_wrappers_without_runtime_launch() -> None:
+    owner = _HeuristicTritonKernel()
+    owner.kernel = _RecordingTritonHeuristics()
+
+    owner.compile(owner.CompileKey(8))
+
+    warmups = owner.kernel.fn.fn.warmups
+    assert [warmup["num_warps"] for warmup in warmups] == [4, 8]
+    assert all(warmup["value"] == 8 for warmup in warmups)
+    assert all(warmup["BLOCK_SIZE"] == 16 for warmup in warmups)
+    assert all(warmup["grid"] == (1,) for warmup in warmups)
 
 
 @pytest.mark.parametrize(
