@@ -10,6 +10,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models import gemma
+from vllm.model_executor.models.gemma4 import Gemma4Model
 
 MODELS = ["google/gemma-2b", "google/gemma-2-2b", "google/gemma-3-4b-it"]
 
@@ -49,6 +50,31 @@ def test_checkpoint_lm_head_can_override_tied_config(monkeypatch) -> None:
     assert loaded == {"model.embed_tokens.weight", "lm_head.weight"}
     assert torch.equal(model.model.embed_tokens.weight[:4], embedding_weight)
     assert torch.equal(model.lm_head.weight[:4], lm_head_weight)
+
+
+@pytest.mark.cpu_test
+def test_gemma4_kv_shared_k_norm_marked_loaded_when_absent() -> None:
+    """Fine-tuned Gemma 4 E2B/E4B checkpoints omit k_norm on KV-shared
+    layers (transformers' save_pretrained prunes the unused tensor);
+    load_weights must report those weights as loaded anyway."""
+
+    class StubModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace()
+            self.start_layer = 0
+            self.end_layer = 4
+            self.layers = [
+                SimpleNamespace(self_attn=SimpleNamespace(is_kv_shared_layer=(i >= 2)))
+                for i in range(4)
+            ]
+
+    loaded = Gemma4Model.load_weights(cast(Gemma4Model, StubModel()), [])
+
+    assert loaded == {
+        "layers.2.self_attn.k_norm.weight",
+        "layers.3.self_attn.k_norm.weight",
+    }
 
 
 @pytest.mark.parametrize("model", MODELS)
