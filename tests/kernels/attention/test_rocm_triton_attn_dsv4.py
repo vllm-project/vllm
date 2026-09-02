@@ -454,9 +454,10 @@ def test_aiter_sparse_prefill_opus_selection(
         _can_use_aiter_sparse_prefill_opus,
     )
 
-    q = torch.empty(num_queries, 16, HEAD_DIM, dtype=torch.bfloat16)
-    kv = torch.empty(num_queries, HEAD_DIM, dtype=torch.bfloat16)
-    attn_sink = torch.empty(16, dtype=torch.float32)
+    device = torch.device("cuda")
+    q = torch.empty(num_queries, 16, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    kv = torch.empty(num_queries, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    attn_sink = torch.empty(16, dtype=torch.float32, device=device)
     output = torch.empty_like(q)
 
     assert (
@@ -467,14 +468,15 @@ def test_aiter_sparse_prefill_opus_selection(
     )
 
 
-def test_aiter_sparse_prefill_opus_selection_rejects_incompatible_layouts() -> None:
+def test_aiter_sparse_prefill_opus_selection_rejects_incompatible_inputs() -> None:
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         _can_use_aiter_sparse_prefill_opus,
     )
 
-    q = torch.empty(1024, 16, HEAD_DIM, dtype=torch.bfloat16)
-    kv = torch.empty(1024, HEAD_DIM, dtype=torch.bfloat16)
-    attn_sink = torch.empty(16, dtype=torch.float32)
+    device = torch.device("cuda")
+    q = torch.empty(1024, 16, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    kv = torch.empty(1024, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    attn_sink = torch.empty(16, dtype=torch.float32, device=device)
     output = torch.empty_like(q)
 
     assert _can_use_aiter_sparse_prefill_opus(q, kv, attn_sink, output, on_gfx950=True)
@@ -486,10 +488,10 @@ def test_aiter_sparse_prefill_opus_selection_rejects_incompatible_layouts() -> N
         on_gfx950=True,
     )
     assert not _can_use_aiter_sparse_prefill_opus(
-        q, kv[:, :-1], attn_sink, output, on_gfx950=True
+        q, kv, attn_sink[:-1], output, on_gfx950=True
     )
     assert not _can_use_aiter_sparse_prefill_opus(
-        q, kv, attn_sink[:-1], output, on_gfx950=True
+        q.cpu(), kv.cpu(), attn_sink.cpu(), output.cpu(), on_gfx950=True
     )
 
 

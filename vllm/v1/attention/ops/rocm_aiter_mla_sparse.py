@@ -2669,12 +2669,8 @@ def _can_use_aiter_sparse_prefill_opus(
 ) -> bool:
     return (
         on_gfx950
-        and q.ndim == 3
-        and kv.ndim == 2
-        and output.shape == q.shape
         and q.shape[0] >= _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES
-        and q.shape[-1] == 512
-        and kv.shape[-1] == q.shape[-1]
+        and q.is_cuda
         and q.dtype in (torch.bfloat16, torch.float16)
         and kv.dtype == q.dtype
         and output.dtype == q.dtype
@@ -3216,14 +3212,21 @@ def rocm_sparse_attn_prefill(
     ragged_indices: torch.Tensor | None = None,
     ragged_indptr: torch.Tensor | None = None,
 ) -> None:
+    assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
     assert kv.ndim == 3 and kv.shape[1] == 1, (
         f"ROCm Triton sparse prefill expects kv=[skv,1,d], got {kv.shape}"
+    )
+    assert output.shape == q.shape, (
+        f"output buffer shape {output.shape} must match q shape {q.shape}"
     )
     _validate_dsv4_sparse_dims(
         head_dim,
         nope_head_dim,
         rope_head_dim,
         "rocm_sparse_attn_prefill",
+    )
+    assert q.shape[-1] == head_dim and kv.shape[-1] == head_dim, (
+        f"expected q/kv head dim {head_dim}, got q={q.shape} and kv={kv.shape}"
     )
     kv_flat = kv.squeeze(1)
     sliced_attn_sink = None if attn_sink is None else attn_sink[: q.shape[1]]
