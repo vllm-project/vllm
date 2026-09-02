@@ -7,6 +7,10 @@ ARG BASE_IMAGE=rocm/vllm-dev:base
 ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
 ARG ROCM_TRITON_KERNELS_COMMIT=0f380657dbf3ee86eb57558ff71df24f03b5d4e7
 ARG INSTALL_LMCACHE=false
+ARG MOONCAKE_BRANCH=df508641d76be20803349bf715d3bfc5205a7b58
+ARG MOONCAKE_REPO=https://github.com/kvcache-ai/Mooncake.git
+ARG MOONCAKE_GO_VERSION=1.25.10
+ARG MOONCAKE_GO_SHA256=42d4f7a32316aa66591eca7e89867256057a4264451aca10570a715b3637ba70
 # NIC backend for MoRI RDMA support.
 # By default (all), drivers and userspace libraries for all supported NIC types
 # (ainic and bnxt) are installed; MoRI selects the appropriate one at runtime.
@@ -643,6 +647,82 @@ RUN /bin/bash -lc 'set -euo pipefail; \
    *)     echo "ERROR: unknown NIC_BACKEND=${NIC_BACKEND}. Use one of: none, ainic, bnxt, all"; exit 2 ;; \
  esac'
 
+FROM base AS mooncake_source
+ARG MOONCAKE_GO_VERSION
+ARG MOONCAKE_GO_SHA256
+ENV PATH=/usr/local/go/bin:${PATH}
+ENV GOTOOLCHAIN=local
+RUN test "$(uname -m)" = "x86_64" \
+    && test ! -e /usr/local/go \
+    && curl --fail --location --retry 5 \
+        --output /tmp/go.tar.gz \
+        "https://go.dev/dl/go${MOONCAKE_GO_VERSION}.linux-amd64.tar.gz" \
+    && echo "${MOONCAKE_GO_SHA256}  /tmp/go.tar.gz" | sha256sum --check - \
+    && tar -C /usr/local -xzf /tmp/go.tar.gz \
+    && rm /tmp/go.tar.gz \
+    && test "$(go env GOVERSION)" = "go${MOONCAKE_GO_VERSION}"
+
+# Build a pinned ROCm Mooncake wheel outside the long-lived ROCm base image.
+ARG MOONCAKE_BRANCH
+ARG MOONCAKE_REPO
+RUN git init mooncake \
+    && cd mooncake \
+    && git remote add origin "${MOONCAKE_REPO}" \
+    && git fetch --depth=1 origin "${MOONCAKE_BRANCH}" \
+    && git checkout --detach FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = "${MOONCAKE_BRANCH}" \
+    && grep -qx 'GOVER=1.25.9' dependencies.sh \
+    && sed -i "s/^GOVER=.*/GOVER=${MOONCAKE_GO_VERSION}/" dependencies.sh \
+    && bash dependencies.sh -y
+
+FROM mooncake_source AS build_mooncake
+ARG USE_SCCACHE
+ENV HIPCC_COMPILE_FLAGS_APPEND=--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/11
+RUN --mount=type=cache,id=vllm-rocm-mooncake-go-mod,target=/root/go/pkg/mod \
+    --mount=type=cache,id=vllm-rocm-mooncake-go-build,target=/root/.cache/go-build \
+    cd mooncake \
+    && cmake -G Ninja -B build \
+        -DUSE_HIP=ON -DUSE_CUDA=OFF -DWITH_EP=OFF \
+        -DUSE_HTTP=ON -DUSE_ETCD=ON -DSTORE_USE_ETCD=ON \
+        -DBUILD_UNIT_TESTS=OFF -DBUILD_BENCHMARK=OFF \
+        -DENABLE_DEBUG_SYMBOLS=OFF \
+        -DENABLE_SCCACHE="${USE_SCCACHE:-OFF}" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DPython3_EXECUTABLE="$(command -v python3)" \
+    && cmake --build build -j"${MAX_JOBS:-$(nproc)}" \
+    && cmake --install build
+
+FROM build_mooncake AS package_mooncake
+# Pin both the outer packaging tools and the isolated PEP 517 build environment.
+# patchelf 0.14.3 from dependencies.sh corrupts auditwheel RPATHs.
+ENV PIP_CONSTRAINT=/tmp/mooncake-build-constraints.txt
+ENV PIP_BUILD_CONSTRAINT=/tmp/mooncake-build-constraints.txt
+RUN --mount=type=cache,id=vllm-rocm-mooncake-pip,target=/root/.cache/pip \
+    printf '%s\n' \
+        'pip==26.2.1' \
+        'build==1.5.0' \
+        'setuptools==79.0.1' \
+        'wheel==0.48.0' \
+        'auditwheel==6.8.1' \
+        'packaging==26.3' \
+        'pyproject-hooks==1.2.0' \
+        'pyelftools==0.33' \
+        'patchelf==0.19.1.0' \
+        > "${PIP_CONSTRAINT}" \
+    && python3 -m pip install --upgrade \
+        pip build setuptools wheel auditwheel patchelf \
+    && cd mooncake \
+    && export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/local/lib" \
+    && HIP_BUILD=1 OUTPUT_DIR=dist PLATFORM_TAG=manylinux_2_35_x86_64 \
+        ./scripts/build_wheel.sh \
+    && test "$(find mooncake-wheel/dist -maxdepth 1 -type f \
+        -name 'mooncake_transfer_engine_rocm-*.whl' | wc -l)" -eq 1 \
+    && mkdir -p /app/install \
+    && cp mooncake-wheel/dist/mooncake_transfer_engine_rocm-*.whl /app/install/
+
+FROM scratch AS export_mooncake
+COPY --from=package_mooncake /app/install/ /
+
 # -----------------------
 # vLLM wheel release build stage (for building distributable wheels)
 # This stage pins dependencies to custom ROCm wheel versions and handles version detection
@@ -873,6 +953,15 @@ RUN --mount=type=bind,from=build_lmcache,src=/app/install,target=/lmcache_instal
         /lmcache_install/*.whl \
     && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"
 
+RUN --mount=type=bind,from=export_mooncake,src=/,target=/mooncake_install,ro \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --no-deps \
+        /mooncake_install/mooncake_transfer_engine_rocm-*.whl \
+    && python3 -c "import aiohttp, msgpack, requests" \
+    && python3 -c "from mooncake.engine import SUPPORT_HIP, TransferEngine; assert SUPPORT_HIP" \
+    && python3 -c "from mooncake.store import MooncakeDistributedStore" \
+    && mooncake_master --version
+
 # -----------------------
 # Test vLLM image (Tier 2) - vLLM-only layer on top of ci_base.
 FROM ${CI_BASE_IMAGE} AS test
@@ -898,6 +987,17 @@ RUN mkdir src && mv vllm src/vllm
 
 # Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
 ENV VLLM_GPU_SYNC_CHECK=error
+
+# Run the structural smoke test inside BuildKit, where the test image layers
+# are already available. Export only a build-scoped success marker.
+FROM test AS test_smoke
+ARG ROCM_SMOKE_ID
+RUN --network=none \
+    bash /vllm-workspace/.buildkite/scripts/rocm/smoke-test-image.sh --inside \
+    && printf '%s\n' "${ROCM_SMOKE_ID:-local}" > /vllm-smoke-ok
+
+FROM scratch AS export_test_smoke
+COPY --from=test_smoke /vllm-smoke-ok /
 
 # -----------------------
 # Final vLLM image
@@ -941,10 +1041,21 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     uv pip install --system /nixl_install/*.whl
 
+RUN --mount=type=bind,from=export_mooncake,src=/,target=/mooncake_install,ro \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --no-deps \
+        /mooncake_install/mooncake_transfer_engine_rocm-*.whl \
+    && python3 -c "import aiohttp, msgpack, requests" \
+    && python3 -c "from mooncake.engine import SUPPORT_HIP, TransferEngine; assert SUPPORT_HIP" \
+    && python3 -c "from mooncake.store import MooncakeDistributedStore" \
+    && mooncake_master --version
+
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
 ARG NIC_BACKEND
 ARG AINIC_VERSION
+ARG MOONCAKE_BRANCH
+ARG MOONCAKE_REPO
 
 # Copy over the benchmark scripts as well
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
@@ -973,7 +1084,9 @@ RUN echo "ROCTRACER_MAX_EVENTS=10000000" > ${COMMON_WORKDIR}/libkineto.conf
 ENV KINETO_CONFIG="${COMMON_WORKDIR}/libkineto.conf"
 RUN echo "VLLM_BASE_IMAGE=${BASE_IMAGE}" >> ${COMMON_WORKDIR}/versions.txt \
     && echo "MORI_NIC_BACKEND=${NIC_BACKEND}" >> ${COMMON_WORKDIR}/versions.txt \
-    && echo "AINIC_VERSION=${AINIC_VERSION}" >> ${COMMON_WORKDIR}/versions.txt
+    && echo "AINIC_VERSION=${AINIC_VERSION}" >> ${COMMON_WORKDIR}/versions.txt \
+    && echo "MOONCAKE_BRANCH=${MOONCAKE_BRANCH}" >> ${COMMON_WORKDIR}/versions.txt \
+    && echo "MOONCAKE_REPO=${MOONCAKE_REPO}" >> ${COMMON_WORKDIR}/versions.txt
 
 CMD ["/bin/bash"]
 

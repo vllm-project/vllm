@@ -1602,8 +1602,6 @@ def test_ngram_embedding_construction_accepts_every_graph_mode_under_v2(
             config,
             8,
             0,
-            16,
-            4,
             "model.layers.1.ple.ple_embedding",
             "model.layers.1.ple",
             params_dtype=torch.float32,
@@ -1645,8 +1643,6 @@ def test_ngram_embedding_construction_refuses_v1(
             config,
             8,
             0,
-            16,
-            4,
             "model.layers.1.ple.ple_embedding",
             "model.layers.1.ple",
             params_dtype=torch.float32,
@@ -1683,8 +1679,6 @@ def test_ngram_embedding_forward_compiles_across_two_different_token_counts(
             config,
             8,
             0,
-            16,
-            4,
             "model.layers.2.ple.ple_embedding",
             "model.layers.2.ple",
             params_dtype=torch.float32,
@@ -1936,8 +1930,6 @@ def test_v2_staging_survives_torch_compile_and_full_cudagraph_capture_replay(
             config,
             embedding_dim,
             0,
-            padded_tokens,
-            max_num_reqs,
             "model.layers.0.ple.ple_embedding",
             "model.layers.0.ple",
             params_dtype=torch.float32,
@@ -2110,8 +2102,6 @@ def test_v2_staging_cudagraph_replay_red_proof_disconnected_staging(
             config,
             embedding_dim,
             0,
-            padded_tokens,
-            max_num_reqs,
             "model.layers.0.ple.ple_embedding",
             "model.layers.0.ple",
             params_dtype=torch.float32,
@@ -2237,8 +2227,6 @@ def _build_mmap_ngram_layer(
             config,
             embedding_dim,
             layer_idx,
-            max_total_tokens,
-            max_num_reqs,
             f"model.layers.{layer_idx}.ple.ple_embedding",
             f"model.layers.{layer_idx}.ple",
             params_dtype=torch.float32,
@@ -2805,8 +2793,6 @@ def test_ngram_embedding_construction_refuses_a_bad_checkpoint_before_load(
             config,
             8,
             0,
-            16,
-            4,
             "model.layers.1.ple.ple_embedding",
             "model.layers.1.ple",
             params_dtype=torch.float32,
@@ -4293,8 +4279,6 @@ def test_env_on_off_forward_equivalence_fp8_and_dequantized(
         config,
         embedding_dim,
         0,
-        16,
-        4,
         "model.layers.1.ple.ple_embedding",
         "model.layers.1.ple",
         quant_config=quant_config,
@@ -4316,27 +4300,31 @@ def test_env_on_off_forward_equivalence_fp8_and_dequantized(
 
     # The stock branch of forward() routes ID generation through the
     # REGISTERED qwen4_exp_compute_ple_ngram_ids op (upstream architecture,
-    # untouched by this PR). That op only has a CUDA dispatch-key impl
-    # (matches upstream test_ple.py, which drives it as a plain function for
-    # the same reason), so on a CUDA-platform host it cannot run against CPU
-    # tensors through torch.ops. Shadow the OpOverloadPacket with the real
-    # underlying function, and stand in a no_compile_layers context
-    # resolving straight to `stock` -- mirrors test_ple.py's
-    # test_ple_ngram_ids_custom_op_uses_current_request_layout. This must
-    # compute the SAME real IDs the mmap arm below gets via a direct
-    # compute_ngram_ids call, or the equivalence assertion would compare
-    # unrelated values.
-    monkeypatch.setattr(
-        ple_layer_module,
-        "get_forward_context",
-        lambda: SimpleNamespace(
-            no_compile_layers={stock.layer_name: SimpleNamespace(ple_embedding=stock)}
-        ),
-    )
+    # untouched by this PR). That op only has a CUDA dispatch-key impl, so on
+    # a CUDA-platform host it cannot run against CPU tensors through
+    # torch.ops. Shadow the OpOverloadPacket with a stand-in that resolves
+    # straight to `stock`. On CUDA the fused ple_ngram_ids kernel writes the
+    # IDs into `output` in place; the eager CPU fallback of
+    # compute_ngram_ids returns a fresh tensor and leaves `output` untouched,
+    # so the stand-in copies the result in itself. This must compute the SAME
+    # real IDs the mmap arm below gets via a direct compute_ngram_ids call,
+    # or the equivalence assertion would compare unrelated values.
+    def _compute_ple_ngram_ids_on_cpu(
+        op_input_ids: torch.Tensor,
+        op_query_start_loc: torch.Tensor,
+        op_ngram_context: torch.Tensor,
+        output: torch.Tensor,
+        layer_name: str,
+    ) -> None:
+        assert layer_name == stock.layer_name
+        output.copy_(
+            stock.compute_ngram_ids(op_input_ids, op_query_start_loc, op_ngram_context)
+        )
+
     monkeypatch.setattr(
         torch.ops.vllm,
         "qwen4_exp_compute_ple_ngram_ids",
-        ple_layer_module.qwen4_exp_compute_ple_ngram_ids,
+        _compute_ple_ngram_ids_on_cpu,
         raising=False,
     )
 
@@ -4362,8 +4350,6 @@ def test_env_on_off_forward_equivalence_fp8_and_dequantized(
             config,
             embedding_dim,
             0,
-            16,
-            4,
             "model.layers.1.ple.ple_embedding",
             "model.layers.1.ple",
             params_dtype=torch.bfloat16,
@@ -4453,8 +4439,6 @@ def test_compute_ngram_ids_matches_golden_ids() -> None:
         config,
         8,
         0,
-        8,
-        2,
         "model.layers.1.ple.ple_embedding",
         "model.layers.1.ple",
         params_dtype=torch.float32,
@@ -4519,8 +4503,6 @@ def test_mmap_forward_allocates_an_fp8_output_buffer(
             config,
             8,
             0,
-            16,
-            4,
             f"{layer_name}.ple_embedding",
             layer_name,
             params_dtype=torch.bfloat16,
@@ -4577,8 +4559,6 @@ def test_ngram_embedding_stores_the_layer_name_it_is_constructed_with() -> None:
         config,
         8,
         0,
-        16,
-        4,
         "model.layers.1.ple.ple_embedding",
         "model.layers.1.ple",
         params_dtype=torch.float32,
@@ -6718,8 +6698,6 @@ def test_default_off_uses_the_stock_vocab_parallel_embedding() -> None:
         config,
         8,
         0,
-        16,
-        4,
         "model.layers.1.ple.ple_embedding",
         "model.layers.1.ple",
         params_dtype=torch.float32,
@@ -6742,8 +6720,6 @@ def test_default_off_forward_never_calls_the_mmap_gather_op(
         config,
         8,
         0,
-        16,
-        4,
         "model.layers.1.ple.ple_embedding",
         "model.layers.1.ple",
         params_dtype=torch.float32,
