@@ -1257,12 +1257,25 @@ class AiterMLAHelper:
             )
         )
 
+    _AITER_NATIVE_MLA_TILES: Final = (16, 32, 64, 128)
+
+    @staticmethod
+    def _pad_to_native_tile_enabled() -> bool:
+        import vllm.envs as envs
+
+        return envs.VLLM_ROCM_AITER_MLA_PAD_NATIVE_TILE
+
     @staticmethod
     def get_actual_mla_num_heads(num_heads: int) -> int:
         if num_heads == 24 and _aiter_mla_native_h24_supported():
             return num_heads
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
-        return -(-num_heads // m) * m
+        aligned = -(-num_heads // m) * m
+        if AiterMLAHelper._pad_to_native_tile_enabled():
+            for tile in AiterMLAHelper._AITER_NATIVE_MLA_TILES:
+                if aligned <= tile:
+                    return tile
+        return aligned
 
     @staticmethod
     def get_fp8_prefill_num_heads(num_heads: int) -> int:
