@@ -1569,6 +1569,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     prefill_start : num_reqs + 1
                 ]
                 assert paged_kv_indptr_prefill_cpu.shape[0] == num_prefills + 1
+                # plan() copies these to the GPU with non_blocking=True;
+                # stage them in pinned memory so the copies stay async
+                # (the reused buffers themselves are intentionally not pinned).
+                if PIN_MEMORY:
+                    qo_indptr_prefill_cpu = qo_indptr_prefill_cpu.pin_memory()
+                    paged_kv_indptr_prefill_cpu = (
+                        paged_kv_indptr_prefill_cpu.pin_memory()
+                    )
+                    paged_kv_last_page_len_prefill_cpu = (
+                        paged_kv_last_page_len_prefill_cpu.pin_memory()
+                    )
                 if self.use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
                     prefill_wrapper.plan(
@@ -1695,13 +1706,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 o_dtype = (
                     FP8_DTYPE if self.is_kvcache_nvfp4 else self.model_config.dtype
                 )
+                paged_kv_indptr_cpu = self.paged_kv_indptr.cpu[: num_input_tokens + 1]
+                paged_kv_last_page_len_cpu = self.paged_kv_last_page_len.cpu[
+                    :num_input_tokens
+                ]
+                # plan() copies these to the GPU with non_blocking=True;
+                # stage them in pinned memory so the copies stay async
+                # (the reused buffers themselves are intentionally not pinned).
+                if PIN_MEMORY:
+                    paged_kv_indptr_cpu = paged_kv_indptr_cpu.pin_memory()
+                    paged_kv_last_page_len_cpu = paged_kv_last_page_len_cpu.pin_memory()
                 fast_plan_decode(
                     decode_wrapper,
-                    indptr_cpu=self.paged_kv_indptr.cpu[: num_input_tokens + 1],
+                    indptr_cpu=paged_kv_indptr_cpu,
                     indices=paged_kv_indices,
-                    last_page_len_cpu=self.paged_kv_last_page_len.cpu[
-                        :num_input_tokens
-                    ],
+                    last_page_len_cpu=paged_kv_last_page_len_cpu,
                     num_qo_heads=self.num_qo_heads * self.dcp_world_size,
                     num_kv_heads=self.num_kv_heads,
                     head_dim=self.head_dim,
