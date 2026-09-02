@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.base import VLLM_ATTN_ATTR, Base
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
 from vllm.model_executor.models.transformers.moe import MoEMixin
@@ -35,13 +35,10 @@ from vllm.model_executor.models.transformers.pooling import (
     EmbeddingMixin,
     SequenceClassificationMixin,
 )
-from vllm.model_executor.models.transformers.utils import VLLM_ATTN_ATTR
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 if TYPE_CHECKING:
     import torch
-
-    from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 
 def vllm_attention_forward(
@@ -51,24 +48,9 @@ def vllm_attention_forward(
     key: "torch.Tensor",
     value: "torch.Tensor",
     attention_mask: "torch.Tensor",
-    # Transformers kwargs
-    scaling: float | None = None,
-    # vLLM kwargs
-    attention_instances: "dict[int, Attention] | None" = None,
     **kwargs,
 ):
-    # Prefer the attached submodule: reading an attribute is the same expression in
-    # every layer, whereas `attention_instances[module.layer_idx]` bakes this layer's
-    # index into a traced graph and costs one compiled artifact per layer. See
-    # `Base.create_attention_instances`.
-    self_attn = getattr(module, VLLM_ATTN_ATTR, None)
-    if self_attn is None:
-        self_attn = attention_instances[module.layer_idx]
-        # Only needed on this path: an attached layer took its scale from the module at
-        # construction, and writing it per forward would be lost the moment one compiled
-        # artifact is reused across layers.
-        if scaling is not None:
-            self_attn.impl.scale = float(scaling)
+    self_attn = getattr(module, VLLM_ATTN_ATTR)
     hidden = query.shape[-2]
     head_dim_qk = query.shape[-1]
     head_dim_v = value.shape[-1]
@@ -95,16 +77,9 @@ def vllm_mla_attention_forward(
     kv_c_normed: "torch.Tensor",
     k_pe: "torch.Tensor",
     attention_mask: "torch.Tensor",
-    # Transformers kwargs
-    scaling: float | None = None,
-    # vLLM kwargs
-    attention_instances: "dict[int, MLAAttention] | None" = None,
     **kwargs,
 ):
-    # See `vllm_attention_forward` above on why the submodule is preferred.
-    self_attn = getattr(module, VLLM_ATTN_ATTR, None)
-    if self_attn is None:
-        self_attn = attention_instances[module.layer_idx]
+    self_attn = getattr(module, VLLM_ATTN_ATTR)
     # [batch=1, heads, num_tokens, qk_head_dim] -> [num_tokens, heads, qk_head_dim]
     query = query.transpose(1, 2).flatten(0, 1)
     num_tokens, num_heads = query.shape[:2]
