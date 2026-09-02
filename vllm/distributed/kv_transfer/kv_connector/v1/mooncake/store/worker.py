@@ -40,6 +40,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
+    mooncake_store_group_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     BlobBlockHashes,
@@ -1670,12 +1671,13 @@ class MooncakeStoreWorker:
 
         self._kv_cache_groups = [
             dataclasses.replace(
-                group,
+                kv_cache_config.kv_cache_groups[group_id],
                 kv_cache_spec=resolve_dcp_kv_cache_spec(
-                    group.kv_cache_spec, self.dcp_size
+                    kv_cache_config.kv_cache_groups[group_id].kv_cache_spec,
+                    self.dcp_size,
                 ),
             )
-            for group in kv_cache_config.transfer_groups
+            for group_id in mooncake_store_group_ids(kv_cache_config)
         ]
         spec_cfg = getattr(vllm_config, "speculative_config", None)
         use_eagle_block_drop = bool(
@@ -1923,10 +1925,16 @@ class MooncakeStoreWorker:
         use_group_regions = self._kv_cache_config.hisparse_host_num_blocks is not None
 
         if not use_group_regions:
+            store_layer_names = {
+                layer_name
+                for group in self._kv_cache_groups
+                for layer_name in group.layer_names
+            }
             seen_storage_ptrs: set[int] = set()
             cache_tensors = [
                 group_kernel_blocks(_repr_tensor(cache), self.num_blocks)
-                for cache in kv_caches.values()
+                for layer_name, cache in kv_caches.items()
+                if layer_name in store_layer_names
             ]
             for cache in cache_tensors:
                 cache_storage = cache.untyped_storage()
