@@ -172,6 +172,7 @@ steps:
   optional: true
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal/generation_ppl_test/
   commands:
     - pytest -v -s models/multimodal/generation_ppl_test/

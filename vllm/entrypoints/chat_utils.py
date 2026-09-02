@@ -871,19 +871,30 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[_AsyncMultiModalItem]
         if not self._items_by_modality:
             return None, None
 
+        # Fetch all modalities together. Each tracked item is already an
+        # independent awaitable, and the async connector offloads blocking
+        # decode work, so waiting for one modality before starting the next
+        # needlessly adds their latency.
+        # Keep the original group and item order when rebuilding the result.
+        item_groups = list(self._items_by_modality.items())
+        items = [item for _, group in item_groups for item in group]
+        results = await asyncio.gather(
+            *(item() for item in items), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                # Gathering with return_exceptions=True lets every task finish
+                # (or itself fail) before we raise, instead of abandoning
+                # still-in-flight fetches (real network/thread-pool work) the
+                # moment the first one fails.
+                raise result
+
         resolved_items_by_modality: dict[str, list[Any]] = {}
-        for modality, items in self._items_by_modality.items():
-            results = await asyncio.gather(
-                *(item() for item in items), return_exceptions=True
-            )
-            for result in results:
-                if isinstance(result, BaseException):
-                    # Gathering with return_exceptions=True lets every task in
-                    # this modality finish (or itself fail) before we raise,
-                    # instead of abandoning still-in-flight fetches (real
-                    # network/thread-pool work) the moment the first one fails.
-                    raise result
-            resolved_items_by_modality[modality] = results
+        result_idx = 0
+        for modality, group in item_groups:
+            next_result_idx = result_idx + len(group)
+            resolved_items_by_modality[modality] = results[result_idx:next_result_idx]
+            result_idx = next_result_idx
 
         mm_processor = (
             self.mm_processor if self._model_config.is_multimodal_model else None
