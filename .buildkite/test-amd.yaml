@@ -3054,7 +3054,7 @@ steps:
 #------------------------------------------------------  mi300 · weight_loading  -------------------------------------------------------#
 
 - label: ":amd: (MI300) Weight Loading Multi-GPU" # TBD
-  timeout_in_minutes: 30
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
