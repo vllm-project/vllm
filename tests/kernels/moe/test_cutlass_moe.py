@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 import dataclasses
+from collections.abc import Callable
 from math import prod
 
 import pytest
@@ -33,7 +34,9 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp8,
     CutlassExpertsMxfp4,
     CutlassExpertsW4A8Fp8,
+    run_cutlass_moe_fp4,
     run_cutlass_moe_fp8,
+    run_cutlass_moe_mxfp4,
 )
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
@@ -129,6 +132,166 @@ def test_nvfp4_clamp_allows_shared_activation_backends(
     )
 
     assert selected == expected
+
+
+@pytest.mark.skipif(
+    (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
+        current_platform.get_device_capability()
+    ),
+    reason="Grouped gemm is not supported on this GPU type.",
+)
+def test_cutlass_moe_permutation_maps_padding_to_zero():
+    """Invalid top-k routes must not leave unsafe permutation-map entries."""
+    num_experts = 2
+    topk_ids = torch.tensor(
+        [[0, -1], [1, num_experts]], device="cuda", dtype=torch.int32
+    )
+    num_routes = topk_ids.numel()
+
+    expert_offsets = torch.empty(num_experts + 1, device="cuda", dtype=torch.int32)
+    blockscale_offsets = torch.empty_like(expert_offsets)
+    problem_sizes1 = torch.empty(num_experts, 3, device="cuda", dtype=torch.int32)
+    problem_sizes2 = torch.empty_like(problem_sizes1)
+    input_permutation = torch.empty(num_routes, device="cuda", dtype=torch.int32)
+    output_permutation = torch.empty_like(input_permutation)
+
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_experts,
+        128,
+        128,
+        blockscale_offsets,
+    )
+
+    input_tensor = torch.randn(2, 128, device="cuda", dtype=torch.bfloat16)
+    permuted = ops.shuffle_rows(input_tensor, input_permutation)
+    restored = ops.shuffle_rows(permuted, output_permutation)
+
+    torch.testing.assert_close(permuted[:2], input_tensor)
+    torch.testing.assert_close(permuted[2:], torch.zeros_like(permuted[2:]))
+    torch.testing.assert_close(restored[0], input_tensor[0])
+    torch.testing.assert_close(restored[1], torch.zeros_like(restored[1]))
+    torch.testing.assert_close(restored[2], input_tensor[1])
+    torch.testing.assert_close(restored[3], torch.zeros_like(restored[3]))
+
+
+@pytest.mark.parametrize("quantization", ["nvfp4", "mxfp4"])
+@torch.inference_mode()
+def test_cutlass_fp4_moe_padded_routes_do_not_change_valid_output(quantization: str):
+    """Padded routes must not participate in either activation quantization."""
+    experts_cls = CutlassExpertsFp4 if quantization == "nvfp4" else CutlassExpertsMxfp4
+    if not experts_cls._supports_current_device():
+        pytest.skip(f"CUTLASS {quantization} MoE is not supported on this GPU")
+
+    set_random_seed(7)
+    num_experts, n, k = 4, 128, 128
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    w1 = torch.full(
+        (num_experts, 2 * n, k // 2), 0x11, device=device, dtype=torch.uint8
+    )
+    w2 = torch.full((num_experts, k, n // 2), 0x11, device=device, dtype=torch.uint8)
+
+    runner: Callable[..., None]
+    quant_args: tuple[torch.Tensor, ...]
+    if quantization == "nvfp4":
+        scale_kwargs = {
+            "device": device,
+            "dtype": torch.float8_e4m3fn,
+        }
+        w1_scale = torch.full((num_experts, 2 * n, k // 16), 1 / 16, **scale_kwargs)
+        w2_scale = torch.full((num_experts, k, n // 16), 1 / 16, **scale_kwargs)
+        gscale = torch.ones(num_experts, device=device, dtype=torch.float32)
+        runner = run_cutlass_moe_fp4
+        quant_args = (
+            gscale,
+            w1,
+            w1_scale,
+            gscale,
+            gscale,
+            w2,
+            w2_scale,
+            gscale,
+        )
+    else:
+        scale_exponent = 127 - 4
+        w1_scale = torch.full(
+            (num_experts, 2 * n, k // 32),
+            scale_exponent,
+            device=device,
+            dtype=torch.uint8,
+        )
+        w2_scale = torch.full(
+            (num_experts, k, n // 32),
+            scale_exponent,
+            device=device,
+            dtype=torch.uint8,
+        )
+        runner = run_cutlass_moe_mxfp4
+        quant_args = (w1, w1_scale, w2, w2_scale)
+
+    def run_moe(
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        workspace_value: float,
+    ) -> torch.Tensor:
+        m, topk = topk_ids.shape
+        output = torch.empty((m, k), device=device, dtype=dtype)
+        workspace13 = torch.full(
+            (m * topk, max(2 * n, k)),
+            workspace_value,
+            device=device,
+            dtype=dtype,
+        )
+        workspace2 = torch.full(
+            (m * topk, n), workspace_value, device=device, dtype=dtype
+        )
+
+        runner(
+            output,
+            hidden_states,
+            *quant_args,
+            topk_weights,
+            topk_ids,
+            MoEActivation.SILU,
+            workspace13,
+            workspace2,
+            m,
+            n,
+            k,
+            num_experts,
+            device,
+        )
+        return output
+
+    valid_input = torch.randn((1, k), device=device, dtype=dtype)
+    expected = run_moe(
+        valid_input,
+        torch.zeros((1, 1), device=device, dtype=torch.int32),
+        torch.ones((1, 1), device=device, dtype=torch.float32),
+        workspace_value=0,
+    )
+    assert expected.abs().max() > 0
+
+    # Force the quantizers' grid-stride loops to revisit padded tail rows.
+    num_tokens = 4096
+    padded_input = torch.zeros((num_tokens, k), device=device, dtype=dtype)
+    padded_input[0] = valid_input[0]
+    padded_ids = torch.full((num_tokens, 2), -1, device=device, dtype=torch.int32)
+    padded_ids[0, 0] = 0
+    padded_weights = torch.zeros((num_tokens, 2), device=device, dtype=torch.float32)
+    padded_weights[0, 0] = 1
+
+    for workspace_value in (0, 64):
+        actual = run_moe(padded_input, padded_ids, padded_weights, workspace_value)
+        torch.testing.assert_close(actual[0], expected[0], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(actual[1:], torch.zeros_like(actual[1:]))
 
 
 @dataclasses.dataclass
