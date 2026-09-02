@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -19,6 +18,9 @@ from vllm.v1.kv_cache_interface import (
 from .config import SING_PROBE_ATTN_MODEL_TYPE, ProbeConfig
 from .loader import read_probe_config
 from .token_probe import TokenProbe, TokenProbeForwardContext
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.block_table import MultiGroupBlockTable
 
 
 @dataclass(frozen=True)
@@ -86,7 +88,7 @@ class TokenProbeRunner:
         num_reqs: int,
         max_query_len: int,
         slot_mappings_by_group: dict[int, torch.Tensor] | None,
-        block_tables: Sequence[Any],
+        block_tables: "MultiGroupBlockTable",
         query_start_loc: torch.Tensor,
         kv_cache_initialized: bool,
         is_prefill_only: bool,
@@ -173,7 +175,7 @@ class TokenProbeRunner:
         *,
         model: nn.Module,
         kv_cache_config: KVCacheConfig,
-        block_tables: Sequence[Any],
+        block_tables: "MultiGroupBlockTable",
         async_output: bool,
     ) -> None:
         if not self.enabled:

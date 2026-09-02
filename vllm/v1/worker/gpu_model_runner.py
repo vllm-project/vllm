@@ -7603,7 +7603,7 @@ class GPUModelRunner(
             model=self.get_model(),
             kv_cache_config=kv_cache_config,
             block_tables=self.input_batch.block_table,
-            async_output=self.use_async_scheduling,
+            async_output=bool(self.use_async_scheduling),
         )
 
         if (

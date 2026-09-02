@@ -56,6 +56,7 @@ class TokenProbe(nn.Module):
         self._query_start_loc: torch.Tensor | None = None
         self._max_query_len = 1
         self._launched = False
+        self.kv_cache: torch.Tensor | None
         self.register_buffer("kv_cache", None, persistent=False)
         self.kv_block_size = 0
 
@@ -174,7 +175,7 @@ class TokenProbe(nn.Module):
         device = (
             self.kv_cache.device
             if self.kv_cache is not None
-            else torch.device("cuda", torch.cuda.current_device())
+            else torch.device("cuda", torch.accelerator.current_device_index())
         )
         if async_output and self._output_copy_event is None:
             self._output_copy_event = torch.cuda.Event(external=True)

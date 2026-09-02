@@ -160,7 +160,7 @@ flush_prefix_cache() {
     printf '{"skipped":true}\n' > "$output_file"
     return 0
   fi
-  for attempt in $(seq 1 10); do
+  for ((attempt = 1; attempt <= 10; attempt++)); do
     http_status=$(curl --noproxy '*' -sS --max-time 30 \
       -o "$output_file" -w '%{http_code}' \
       -X POST "http://$HOST:$PORT/reset_prefix_cache") || true
