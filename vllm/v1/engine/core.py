@@ -1572,6 +1572,143 @@ class EngineCoreProc(EngineCore):
                 "Unrecognized input request type encountered: %s", request_type
             )
 
+    def trimtab_reinit(self, fields: dict) -> dict:
+        """trimtab warm reinit. Rebuild the KV cache, attention groups, CUDA
+        graphs and the scheduler at a new size. Weights never leave the GPU.
+
+        Accepts gpu_memory_utilization, max_num_seqs, max_num_batched_tokens.
+        Needs an idle engine (callers drain) and --enable-sleep-mode.
+        """
+        import time as _time
+
+        t0 = _time.perf_counter()
+        allowed = {"gpu_memory_utilization", "max_num_seqs", "max_num_batched_tokens"}
+        bad = sorted(set(fields) - allowed)
+        if bad:
+            return {"ok": False, "error": f"not warm-reinitable: {bad}"}
+        if not self.vllm_config.model_config.enable_sleep_mode:
+            return {"ok": False, "error": "warm reinit needs the server launched with --enable-sleep-mode"}
+        if self.scheduler.has_requests():
+            return {"ok": False, "error": "engine busy, drain before a warm reinit"}
+
+        cc, sc = self.vllm_config.cache_config, self.vllm_config.scheduler_config
+        previous = {"gpu_memory_utilization": cc.gpu_memory_utilization,
+                    "max_num_seqs": sc.max_num_seqs, "max_num_batched_tokens": sc.max_num_batched_tokens}
+        released = self.collective_rpc("trimtab_release_kv")
+        logger.info("trimtab release result %s", released)
+        freed_at = _time.perf_counter()
+
+        def _rebuild(values):
+            if "gpu_memory_utilization" in values:
+                cc.gpu_memory_utilization = float(values["gpu_memory_utilization"])
+            if "max_num_seqs" in values:
+                sc.max_num_seqs = int(values["max_num_seqs"])
+            if "max_num_batched_tokens" in values:
+                sc.max_num_batched_tokens = int(values["max_num_batched_tokens"])
+            cc.num_gpu_blocks = None
+            kv_cache_config = self._initialize_kv_caches(self.vllm_config)
+            block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, self.vllm_config)
+            old = self.scheduler
+            self.scheduler = type(old)(
+                vllm_config=self.vllm_config,
+                kv_cache_config=kv_cache_config,
+                structured_output_manager=self.structured_output_manager,
+                include_finished_set=old.finished_req_ids_dict is not None,
+                log_stats=self.log_stats,
+                block_size=block_size,
+                hash_block_size=hash_block_size,
+            )
+            return kv_cache_config
+
+        try:
+            kv_cache_config = _rebuild(fields)
+        except Exception as e:
+            logger.warning("trimtab reinit with %s failed (%s), restoring previous sizing", fields, e)
+            self.collective_rpc("trimtab_release_kv")
+            kv_cache_config = _rebuild(previous)
+            fields = {"error": str(e), "restored": previous}
+
+        sched = self.scheduler
+        sched._trimtab_ceilings = {"max_num_seqs": sched.max_num_running_reqs,
+                                   "max_num_batched_tokens": sched.max_num_scheduled_tokens}
+        done = _time.perf_counter()
+        info = {
+            "ok": "error" not in fields, "fields": fields,
+            "num_gpu_blocks": kv_cache_config.num_blocks,
+            "max_num_seqs": sched.max_num_running_reqs,
+            "freed_gib": [r.get("released_gib") for r in released],
+            "free_s": round(freed_at - t0, 3), "rebuild_s": round(done - freed_at, 3), "total_s": round(done - t0, 3),
+        }
+        self._trimtab_last_reinit = info
+        logger.info("trimtab warm reinit %s", info)
+        return info
+
+    def trimtab_set_knobs(self, knobs: dict) -> dict:
+        """trimtab (github.com/numinous-technology/trimtab) hot scheduler knobs.
+
+        Applies validated values to the live scheduler, which reads them on
+        the next step. Ceilings are the values allocated at boot.
+        """
+        sched = self.scheduler
+        if not hasattr(sched, "_trimtab_ceilings"):
+            sched._trimtab_ceilings = {
+                "max_num_seqs": sched.max_num_running_reqs,
+                "max_num_batched_tokens": sched.max_num_scheduled_tokens,
+            }
+        applied, rejected = {}, {}
+        for key, value in knobs.items():
+            if key == "long_prefill_token_threshold":
+                if not isinstance(value, (int, float)) or int(value) < 0:
+                    rejected[key] = "must be >= 0 (0 disables the threshold)"
+                else:
+                    sched.scheduler_config.long_prefill_token_threshold = int(value)
+                    applied[key] = int(value)
+                continue
+            if key == "log_level":
+                level = str(value).upper()
+                if level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+                    rejected[key] = "must be DEBUG, INFO, WARNING or ERROR"
+                else:
+                    import logging as _logging
+
+                    _logging.getLogger("vllm").setLevel(level)
+                    sched._trimtab_log_level = level
+                    applied[key] = level
+                continue
+            if key not in sched._trimtab_ceilings:
+                rejected[key] = "unknown knob"
+                continue
+            ceiling = sched._trimtab_ceilings[key]
+            if not isinstance(value, (int, float)) or not (1 <= int(value) <= ceiling):
+                rejected[key] = f"valid range is 1..{ceiling} (the boot allocation)"
+                continue
+            if key == "max_num_seqs":
+                # The scheduler asserts len(running) <= cap every step, so a cap
+                # below current occupancy is applied as "stop admitting now" and
+                # tightened to the target in schedule() as requests finish.
+                target = int(value)
+                sched._trimtab_pending_max_num_seqs = target
+                sched.max_num_running_reqs = max(target, len(sched.running))
+            else:
+                sched.max_num_scheduled_tokens = int(value)
+            applied[key] = int(value)
+        return {"ok": not rejected, "applied": applied, "rejected": rejected}
+
+    def trimtab_get_knobs(self) -> dict:
+        sched = self.scheduler
+        pending = getattr(sched, "_trimtab_pending_max_num_seqs", None)
+        return {
+            "max_num_seqs": pending if pending is not None else sched.max_num_running_reqs,
+            "max_num_seqs_effective": sched.max_num_running_reqs,
+            "max_num_batched_tokens": sched.max_num_scheduled_tokens,
+            "long_prefill_token_threshold": sched.scheduler_config.long_prefill_token_threshold,
+            "log_level": getattr(sched, "_trimtab_log_level", None),
+            "running": len(sched.running),
+            "ceilings": getattr(sched, "_trimtab_ceilings", {}),
+            "last_reinit": getattr(self, "_trimtab_last_reinit", None),
+            "num_gpu_blocks": self.vllm_config.cache_config.num_gpu_blocks,
+        }
+
     def _reject_add_in_shutdown(self, request: Request) -> bool:
         if self.shutdown_state == EngineShutdownState.RUNNING:
             return False

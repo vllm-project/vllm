@@ -508,6 +508,11 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        pending = getattr(self, "_trimtab_pending_max_num_seqs", None)
+        if pending is not None:  # trimtab: tighten the cap as occupancy allows
+            self.max_num_running_reqs = max(pending, len(self.running))
+            if len(self.running) <= pending:
+                self._trimtab_pending_max_num_seqs = None
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
