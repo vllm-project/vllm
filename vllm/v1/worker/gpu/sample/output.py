@@ -155,35 +155,26 @@ class SamplingMaskTensors(NamedTuple):
 
     def tolists(self, num_sampled_tokens: np.ndarray) -> SamplingMaskLists:
         """Convert the captured masks to the scheduler's CSR representation."""
-        sampled_rows = np.flatnonzero(num_sampled_tokens)
-        max_num_kept = self.token_ids.shape[1]
-        counts = self.counts.cpu().numpy()[sampled_rows]
-        offsets = np.empty(len(counts) + 1, dtype=np.int64)
-        offsets[0] = 0
-        np.cumsum(counts, dtype=np.int64, out=offsets[1:])
+        counts = self.counts.cpu().numpy()
+        token_ids = self.token_ids.cpu().numpy()
+        packed_mask = self.packed_mask.cpu().numpy()
+        width = token_ids.shape[1]
 
-        overflow = np.flatnonzero(counts > max_num_kept)
-        if len(overflow) == 0:
-            token_ids = self.token_ids.cpu().numpy()[sampled_rows]
-            kept = np.arange(max_num_kept)[None, :] < counts[:, None]
-            flat_token_ids = token_ids[kept]
-        else:
-            # Rare: rebuild the overflowing rows from the exact bitmask.
-            flat_token_ids = np.empty(offsets[-1], dtype=np.int32)
-            token_ids = self.token_ids.cpu().numpy()[sampled_rows]
-            packed_mask = self.packed_mask.cpu().numpy()[sampled_rows]
-            for i, count in enumerate(counts):
-                if count > max_num_kept:
-                    bits = np.unpackbits(
-                        packed_mask[i], count=self.vocab_size, bitorder="little"
-                    )
-                    row = np.flatnonzero(bits).astype(np.int32, copy=False)
-                else:
-                    row = token_ids[i, :count]
-                flat_token_ids[offsets[i] : offsets[i + 1]] = row
+        def support(row: int) -> np.ndarray:
+            if counts[row] <= width:
+                return token_ids[row, : counts[row]]
+            # Wider than the compact row (top-k ties or a top_k above the
+            # cap): rebuild the exact support from the bitmask.
+            bits = np.unpackbits(
+                packed_mask[row], count=self.vocab_size, bitorder="little"
+            )
+            return np.flatnonzero(bits).astype(np.int32, copy=False)
 
+        supports = [support(row) for row in np.flatnonzero(num_sampled_tokens)]
+        offsets = np.zeros(len(supports) + 1, dtype=np.int64)
+        np.cumsum([len(s) for s in supports], out=offsets[1:])
         return SamplingMaskLists(
-            token_ids=flat_token_ids,
+            token_ids=np.concatenate(supports or [np.empty(0, dtype=np.int32)]),
             offsets=offsets,
             cu_num_generated_tokens=np.cumsum(
                 np.concatenate(([0], num_sampled_tokens))
