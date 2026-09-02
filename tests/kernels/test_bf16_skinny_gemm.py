@@ -18,6 +18,7 @@ from vllm.models.deepseek_v32.nvidia import glm52_low_latency_gemm as glm52_gemm
 from vllm.models.kimi_k3.nvidia import low_latency_gemm as k3_gemm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
 from vllm.models.qwen4_exp.nvidia import low_latency_gemm as qwen4_exp_gemm
+from vllm.platforms import current_platform
 
 # Keyed by local (N, K): (cute token counts, dsv3 token counts). 1536x7168 is
 # the unified shared_gate_up_proj/mla_g_proj entry (dsv3 M1..16).
@@ -284,7 +285,7 @@ def test_kda_projection_overlap_is_tp8_only(tp_size: int) -> None:
 def test_kda_qkvg_autotune_enables_full_overlap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import flashinfer.gemm
+    flashinfer_gemm = pytest.importorskip("flashinfer.gemm")
 
     from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 
@@ -302,7 +303,7 @@ def test_kda_qkvg_autotune_enables_full_overlap(
         calls.append((a.shape, b.shape, pdl, backend))
         return torch.empty(a.shape[0], b.shape[1], dtype=a.dtype)
 
-    monkeypatch.setattr(flashinfer.gemm, "mm_bf16", fake_mm_bf16)
+    monkeypatch.setattr(flashinfer_gemm, "mm_bf16", fake_mm_bf16)
 
     k3_gemm.autotune_kda_qkvg(kda)
 
@@ -1216,6 +1217,12 @@ def test_residual_dispatch_falls_back_to_addmm(
     assert output is fallback
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="The base UnquantizedLinearMethod is platform-dispatched: on ROCm it "
+    "goes through the vllm::rocm_unquantized_gemm custom op, which has no CPU "
+    "kernel, so the CPU-tensor fallback cannot be exercised there.",
+)
 def test_fallback_preserves_default_method() -> None:
     x = torch.randn(2, 4)
     weight = torch.randn(3, 4)
