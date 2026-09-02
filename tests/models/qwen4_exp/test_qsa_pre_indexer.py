@@ -49,6 +49,18 @@ def _make_block_table(block_counts):
     return table, num_blocks
 
 
+def assert_fp8_within_one_ulp(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    # e4m3 is sign-magnitude, so within a sign the uint8 code order matches the
+    # value order and one ulp is one code step. In the denormal range the grid
+    # is absolute-spaced and the bf16 intermediates differ in absolute terms
+    # (cancellation in pooling/norm), so fall back to the bf16 atol there.
+    code_diff = (
+        actual.view(torch.uint8).int() - expected.view(torch.uint8).int()
+    ).abs()
+    abs_diff = (actual.float() - expected.float()).abs()
+    assert bool(((code_diff <= 1) | (abs_diff <= ATOL)).all())
+
+
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
@@ -293,24 +305,14 @@ def test_qsa_fused_pre_indexer_matches_unfused(
         qsa_store_cache_rows(rope_positions, raw_slots, position_rows)
 
     if indexer_dtype == torch.float8_e4m3fn:
-        # Both paths round the same ~bf16 values to e4m3; fused and unfused
-        # bf16 intermediates differ by < RTOL, so allow one e4m3 ulp (2^-3
-        # relative) of disagreement after quantization.
+        # Both paths round the same ~bf16 intermediates to e4m3.
         unfused_query = unfused_query.to(indexer_dtype)
-        fp8_rtol, fp8_atol = 0.13, 0.06
-        torch.testing.assert_close(
-            fused_query.float(), unfused_query.float(), rtol=fp8_rtol, atol=fp8_atol
-        )
+        assert_fp8_within_one_ulp(fused_query, unfused_query)
     else:
         torch.testing.assert_close(fused_query, unfused_query, rtol=RTOL, atol=ATOL)
     assert torch.equal(fused_raw.view(torch.int16), unfused_raw.view(torch.int16))
     if indexer_dtype == torch.float8_e4m3fn:
-        torch.testing.assert_close(
-            fused_compressed.float(),
-            unfused_compressed.float(),
-            rtol=fp8_rtol,
-            atol=fp8_atol,
-        )
+        assert_fp8_within_one_ulp(fused_compressed, unfused_compressed)
     else:
         torch.testing.assert_close(
             fused_compressed, unfused_compressed, rtol=RTOL, atol=ATOL

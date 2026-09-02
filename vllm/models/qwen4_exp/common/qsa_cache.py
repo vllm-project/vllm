@@ -728,9 +728,7 @@ class QSAStateBackend(AttentionBackend):
     """Key-only dummy backend for out-of-band BF16 QSA side-cache operations."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
-    # bf16 default; fp8 for the optional e4m3 compressed indexer cache
-    # (mirrors the MiniMax M3 indexer backend to keep spec validation
-    # permissive).
+    # fp8 entries allow the optional e4m3 compressed indexer cache.
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "bfloat16",

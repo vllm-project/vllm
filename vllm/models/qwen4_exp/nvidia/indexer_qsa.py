@@ -148,16 +148,13 @@ class QSAIndexer(nn.Module):
 
         cache_config = vllm_config.cache_config
         cache_prefix = f"{prefix}." if prefix else ""
-        # MiniMax-M3-style plain e4m3 indexer cache: values are GemmaRMSNormed
-        # before caching, so no scale column is needed. The compressed cache
-        # and the normed Q share this dtype so the logits kernels dot fp8xfp8
-        # directly (native tcgen05 on SM100; Triton upcasts to fp16 mma.sync
-        # at smaller tile shapes).
+        # Plain e4m3 without scales: Q and the compressed K are RMSNormed
+        # before quantization, and the logits kernels dot fp8 x fp8 directly.
         self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
             "bf16"
         )
         if self.indexer_kv_dtype in ("fp8", "fp8_e4m3"):
-            # Triton cannot multiply fp8e4nv on SM120/SM121 (see #54846).
+            # The fp8 indexer is only validated on SM90 and SM100-family.
             if not current_platform.has_device_capability(
                 90
             ) or current_platform.is_device_capability_family(120):
