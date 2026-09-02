@@ -639,14 +639,9 @@ class VllmModelLike(Protocol):
 def initialize_dummy_model(
     model_cls: VllmModelLike,
     vllm_config: VllmConfig,
-    *,
-    device: str | None = None,
 ):
     temp_file = tempfile.mkstemp()[1]
     current_device = torch.get_default_device()
-
-    if device is None:
-        device = current_platform.device_type
 
     with set_current_vllm_config(vllm_config=vllm_config):
         init_distributed_environment(
@@ -659,7 +654,7 @@ def initialize_dummy_model(
         initialize_model_parallel(tensor_model_parallel_size=1)
 
         with set_default_torch_dtype(vllm_config.model_config.dtype):
-            torch.set_default_device(device)
+            torch.set_default_device(current_platform.device_type)
             model = model_cls(vllm_config=vllm_config)
             torch.set_default_device(current_device)
         yield model

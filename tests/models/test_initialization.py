@@ -126,20 +126,21 @@ def _load_dummy_weights(vllm_config: VllmConfig):
     target_device = torch.device(load_device)
     model_config = vllm_config.model_config
 
-    model = initialize_model(
-        vllm_config=vllm_config,
-        model_config=model_config,
-        prefix="",
-    )
+    with torch.device("meta"):
+        model = initialize_model(
+            vllm_config=vllm_config,
+            model_config=model_config,
+            prefix="",
+        )
 
-    weights_it = _get_dummy_weights(model, model_config)
-    loaded_weights = model.load_weights(weights_it)
-    validate_weights_loading(model, loaded_weights)
+        weights_it = _get_dummy_weights(model, model_config)
+        loaded_weights = model.load_weights(weights_it)
+        validate_weights_loading(model, loaded_weights)
 
-    if _has_online_quant(model):
-        finalize_layerwise_processing(model, model_config)
+        if _has_online_quant(model):
+            finalize_layerwise_processing(model, model_config)
 
-    process_weights_after_loading(model, model_config, target_device)
+        process_weights_after_loading(model, model_config, target_device)
 
     return model
 
@@ -229,7 +230,7 @@ def can_initialize(model_arch: str, EXAMPLE_MODELS: HfExampleModels):
 
     try:
         # TODO: Handle speculative model
-        with initialize_dummy_model(_load_dummy_weights, vllm_config, device="meta"):
+        with initialize_dummy_model(_load_dummy_weights, vllm_config):
             pass
     except _SkipValidation as e:
         logger.warning(
