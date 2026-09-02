@@ -44,10 +44,9 @@ def _compact_sampling_mask_kernel(
 
     for start_idx in range(0, vocab_size, BLOCK_SIZE):
         offsets = start_idx + tl.arange(0, BLOCK_SIZE)
-        valid = offsets < vocab_size
         logits = tl.load(
             logits_ptr + req_idx * logits_row_stride + offsets * logits_col_stride,
-            mask=valid,
+            mask=offsets < vocab_size,
             other=-float("inf"),
         )
         keep = (logits > -float("inf")) & (logits < float("inf")) & is_active
@@ -60,13 +59,11 @@ def _compact_sampling_mask_kernel(
         )
         count += tl.sum(keep_i32)
 
-        keep_bits = tl.reshape(keep_i32, (BLOCK_SIZE // 8, 8))
-        bit_shifts = tl.arange(0, 8)[None, :]
-        packed = tl.sum(keep_bits << bit_shifts, axis=1).to(tl.uint8)
+        bits = tl.reshape(keep_i32, (BLOCK_SIZE // 8, 8)) << tl.arange(0, 8)[None, :]
         byte_offsets = start_idx // 8 + tl.arange(0, BLOCK_SIZE // 8)
         tl.store(
             packed_mask_ptr + req_idx * packed_mask_row_stride + byte_offsets,
-            packed,
+            tl.sum(bits, axis=1).to(tl.uint8),
             mask=byte_offsets < tl.cdiv(vocab_size, 8),
         )
 
@@ -134,8 +131,8 @@ class SamplingMaskTensors(NamedTuple):
             self.vocab_size,
         )
 
-    def tolists(self, num_sampled_tokens: np.ndarray) -> SamplingMaskLists:
-        """Convert the captured masks to the scheduler's CSR representation."""
+    def tolists(self) -> SamplingMaskLists:
+        """CSR over all requests; rows without a sampled token are empty."""
         counts = self.counts.cpu().numpy()
         token_ids = self.token_ids.cpu().numpy()
         packed_mask = self.packed_mask.cpu().numpy()
@@ -150,11 +147,7 @@ class SamplingMaskTensors(NamedTuple):
             )
             return np.flatnonzero(bits).astype(np.int32, copy=False)
 
-        supports = [support(row) for row in np.flatnonzero(num_sampled_tokens)]
+        supports = [support(row) for row in range(len(counts))]
         offsets = np.zeros(len(supports) + 1, dtype=np.int64)
         np.cumsum([len(s) for s in supports], out=offsets[1:])
-        return SamplingMaskLists(
-            token_ids=np.concatenate(supports or [np.empty(0, dtype=np.int32)]),
-            offsets=offsets,
-            cu_num_generated_tokens=[0, *np.cumsum(num_sampled_tokens).tolist()],
-        )
+        return SamplingMaskLists(np.concatenate(supports), offsets)

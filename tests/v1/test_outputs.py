@@ -75,16 +75,10 @@ def test_sampling_mask_tensors_tolist():
         vocab_size=8,
     )
 
-    result = tensors.tolists(np.array([1, 0, 1]))
+    result = tensors.tolists()
 
     assert result.token_ids.tolist() == [3, 5, 7]
-    assert result.offsets.tolist() == [0, 2, 3]
-    assert result.cu_num_generated_tokens == [0, 1, 1, 2]
-
-    empty = tensors.tolists(np.zeros(3, dtype=np.int32))
-    assert empty.token_ids.size == 0
-    assert empty.offsets.tolist() == [0]
-    assert empty.cu_num_generated_tokens == [0, 0, 0, 0]
+    assert result.offsets.tolist() == [0, 2, 2, 3]
 
 
 def test_sampling_mask_tensors_tolist_overflow_uses_bitmask():
@@ -100,7 +94,7 @@ def test_sampling_mask_tensors_tolist_overflow_uses_bitmask():
         vocab_size=16,
     )
 
-    result = tensors.tolists(np.array([1, 1]))
+    result = tensors.tolists()
 
     assert result.token_ids.tolist() == [1, 4, 6, 8, 10, 9]
     assert result.offsets.tolist() == [0, 5, 6]
@@ -128,7 +122,6 @@ def test_sampling_mask_lists_slice_single_position():
     batch = SamplingMaskLists(
         token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
         offsets=np.array([0, 2, 2, 4]),
-        cu_num_generated_tokens=[0, 1, 2, 3],
     )
     chunks = [batch.slice_request(i, 1) for i in range(3)]
 
@@ -150,11 +143,10 @@ def test_sampling_mask_tensors_from_logits():
         max_num_kept=2,
     )
 
-    result = tensors.tolists(np.array([1, 0, 1]))
+    result = tensors.tolists()
 
     assert result.token_ids.tolist() == [0, 2, 1, 2]
-    assert result.offsets.tolist() == [0, 2, 4]
-    assert result.cu_num_generated_tokens == [0, 1, 1, 2]
+    assert result.offsets.tolist() == [0, 2, 2, 4]
 
 
 def test_sampling_mask_matches_processed_top_k_top_p_support():
@@ -175,7 +167,7 @@ def test_sampling_mask_matches_processed_top_k_top_p_support():
         num_sampled_tokens=torch.tensor([1], device=DEVICE_TYPE),
         max_num_kept=3,
     )
-    result = tensors.tolists(np.array([1]))
+    result = tensors.tolists()
 
     assert result.to_nested_list() == [expected_token_ids]
 
@@ -196,7 +188,7 @@ def test_sampling_mask_tensors_from_logits_caps_compact_width():
         num_sampled_tokens=torch.tensor([1, 1], device=DEVICE_TYPE),
         max_num_kept=vocab_size,
     )
-    result = tensors.tolists(np.array([1, 1]))
+    result = tensors.tolists()
 
     assert tensors.token_ids.shape[1] == MAX_COMPACT_SUPPORT
     assert result.to_nested_list() == [wide.tolist(), [5, 6]]
@@ -215,7 +207,7 @@ def test_sampling_mask_tensors_from_logits_large_vocab():
         num_sampled_tokens=torch.tensor([1, 1], device=DEVICE_TYPE),
         max_num_kept=8,
     )
-    result = tensors.tolists(np.array([1, 1]))
+    result = tensors.tolists()
 
     assert result.to_nested_list() == [kept.tolist(), [3]]
 
