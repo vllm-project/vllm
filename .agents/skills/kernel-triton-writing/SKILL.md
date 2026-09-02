@@ -7,7 +7,6 @@ description: >
   Triton kernel in vLLM.
 license: Apache-2.0
 metadata:
-  author: NVIDIA Corporation
   source: https://github.com/NVIDIA/TensorRT-LLM
   source_commit: 395985c025c8d1cf5aa842bc752b337ba88721b6
 ---
@@ -15,10 +14,9 @@ metadata:
 # Triton Kernel Writing
 
 <!--
-Copied and adapted from NVIDIA TensorRT-LLM's kernel-triton-writing skill at
-commit 395985c025c8d1cf5aa842bc752b337ba88721b6.
-Copyright (c) 2011-2026 NVIDIA CORPORATION & AFFILIATES.
-Licensed under Apache-2.0. See ORIGIN.md for details.
+The initial draft was copied from NVIDIA TensorRT-LLM's kernel-triton-writing
+skill at commit 395985c025c8d1cf5aa842bc752b337ba88721b6. The content has
+since been substantially rewritten for vLLM. See ORIGIN.md for provenance.
 -->
 
 Use this workflow for OpenAI Triton (`@triton.jit`) work in vLLM. Use the
