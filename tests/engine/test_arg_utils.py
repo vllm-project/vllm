@@ -905,3 +905,57 @@ class TestDpDeviceIdSharding:
             get_physical_gpu_ids_for_local_dp_rank(
                 evar, local_dp_rank=2, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
             )
+
+
+class _FakePlatform:
+    """Minimal platform stub for get_batch_defaults tier tests."""
+
+    def __init__(self, memory_bytes: int, name: str, rocm: bool):
+        self._memory = memory_bytes
+        self._name = name
+        self._rocm = rocm
+
+    def get_device_total_memory(self) -> int:
+        return self._memory
+
+    def get_device_name(self) -> str:
+        return self._name
+
+    def is_rocm(self) -> bool:
+        return self._rocm
+
+    def is_tpu(self) -> bool:
+        return False
+
+    def is_cpu(self) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    ("memory_gib", "name", "rocm", "expected_api_tokens"),
+    [
+        # B200-class NVIDIA keeps the largest default.
+        (192, "NVIDIA B200", False, 16384),
+        # MI300X clears 160 GiB but must stay on the H100-class tier:
+        # the doubled activation peak during profile_run breaks KV cache
+        # init at long context there (#53961).
+        (192, "AMD Instinct MI300X", True, 8192),
+        # MI325X (256GB) takes the same branch.
+        (256, "AMD Instinct MI325X", True, 8192),
+        # MI355X is verified fine at 16384 and stays in the tier.
+        (288, "AMD Instinct MI355X", True, 16384),
+        # H100 stays on the 70 GiB branch as before.
+        (80, "NVIDIA H100 80GB HBM3", False, 8192),
+    ],
+)
+def test_get_batch_defaults_160gib_tier_excludes_mi300_family(
+    monkeypatch, memory_gib, name, rocm, expected_api_tokens
+):
+    from vllm.engine import arg_utils
+    from vllm.usage.usage_lib import UsageContext
+
+    fake = _FakePlatform(memory_gib * (1 << 30), name, rocm)
+    monkeypatch.setattr(arg_utils, "current_platform", fake)
+
+    batched_tokens, _ = EngineArgs.get_batch_defaults(world_size=1)
+    assert batched_tokens[UsageContext.OPENAI_API_SERVER] == expected_api_tokens

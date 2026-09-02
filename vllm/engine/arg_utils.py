@@ -2645,8 +2645,14 @@ class EngineArgs:
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
         # So here we do an extra device name check to prevent such regression.
-        if device_memory >= 160 * GiB_bytes:
+        mi300_family = current_platform.is_rocm() and (
+            "mi300x" in device_name or "mi325x" in device_name
+        )
+        if device_memory >= 160 * GiB_bytes and not mi300_family:
             # for GPUs like B200/B300 with >= 160GB memory, use the largest defaults
+            # (MI300X/MI325X also clear 160GB, but the doubled activation peak
+            # during profile_run breaks KV cache init at long context there;
+            # MI355X is verified fine at 16384)
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
                 UsageContext.OPENAI_API_SERVER: 16384,
