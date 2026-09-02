@@ -49,14 +49,11 @@ from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-# Compiled AITER MiniMax-M3 score/top-k contract (aiter#4787): the kernels are
-# instantiated for this shape only (max-reduce, 16 winners, 128-token blocks,
-# 128-dim index heads). Wider/looser checks would select AITER for configs the
-# objects cannot serve.
-COMPILED_TOPK_BLOCKS = 16
-COMPILED_SCORE_TYPE = "max"
-COMPILED_SPARSE_BLOCK_SIZE = 128
-COMPILED_INDEX_HEAD_DIM = 128
+# Compiled AITER MiniMax-M3 score/top-k contract
+MSA_TOPK_BLOCKS = 16
+MSA_SCORE_TYPE = "max"
+MSA_SPARSE_BLOCK_SIZE = 128
+MSA_INDEX_HEAD_DIM = 128
 # Wave width the top-k is written against: it gives one lane per output slot and
 # reads the score row in wave-wide strips.
 WAVE_SIZE = 64
@@ -99,7 +96,7 @@ def aiter_indexer_max_decode_query_len(vllm_config: VllmConfig) -> int:
 
 @cache
 def aiter_msa_kernels_unavailable_reason() -> str | None:
-    """Why AITER's MSA score/top-k kernels cannot be reached, or None if they can.
+    """Return why the AITER MSA score/top-k ops cannot be imported, or None.
 
     They are a recent addition, so an AITER that predates them imports fine
     while these three names do not exist, and the failure would otherwise
@@ -129,18 +126,18 @@ def aiter_indexer_unsupported_reason(
     max_decode_query_len: int = 1,
     score_type: str = "max",
 ) -> str | None:
-    """Why the AITER indexer cannot serve this configuration, or None if it can.
+    """Return why this config cannot use the AITER indexer, or None if it can.
 
-    Returning the reason rather than a bool keeps the fallback log actionable,
-    since most of these limits are shape constants a deployment can change.
-    Covers whether AITER can supply the kernels at all, so a caller that gets
-    None back can import them without guarding.
-
-    Score/top-k are compiled for ``topk_blocks==16``, ``score_type=="max"``,
-    and 128-token / 128-dim blocks; anything else must not select this impl.
+    Checks platform (ROCm/gfx950), index-cache dtype, the compiled score/top-k
+    contract, MFMA column limits, max context in blocks, and whether AITER
+    exposes the MSA kernels. ``select_indexer_impl_cls`` logs the string and
+    falls back when it is not None.
     """
     if not current_platform.is_rocm():
-        return "not running on ROCm"
+        return (
+            "needs ROCm for the AITER fp8 MFMA score/top-k, "
+            f"got platform={current_platform.device_type!r}"
+        )
     if indexer_kv_dtype not in ("fp8", "fp8_e4m3"):
         # The score kernels are fp8 MFMA; there is no bf16 instantiation.
         return (
@@ -150,22 +147,18 @@ def aiter_indexer_unsupported_reason(
 
     if not on_gfx950():
         return f"needs {' or '.join(SUPPORTED_ARCHS)} for the fp8 MFMA"
-    if score_type != COMPILED_SCORE_TYPE:
+    if score_type != MSA_SCORE_TYPE:
+        return f"needs score_type={MSA_SCORE_TYPE!r}, got score_type={score_type!r}"
+    if topk_blocks != MSA_TOPK_BLOCKS:
+        return f"needs topk_blocks={MSA_TOPK_BLOCKS}, got topk_blocks={topk_blocks}"
+    if sparse_block_size != MSA_SPARSE_BLOCK_SIZE:
         return (
-            f"needs score_type={COMPILED_SCORE_TYPE!r}, got score_type={score_type!r}"
-        )
-    if topk_blocks != COMPILED_TOPK_BLOCKS:
-        return (
-            f"needs topk_blocks={COMPILED_TOPK_BLOCKS}, got topk_blocks={topk_blocks}"
-        )
-    if sparse_block_size != COMPILED_SPARSE_BLOCK_SIZE:
-        return (
-            f"needs sparse_block_size={COMPILED_SPARSE_BLOCK_SIZE}, "
+            f"needs sparse_block_size={MSA_SPARSE_BLOCK_SIZE}, "
             f"got sparse_block_size={sparse_block_size}"
         )
-    if index_head_dim != COMPILED_INDEX_HEAD_DIM:
+    if index_head_dim != MSA_INDEX_HEAD_DIM:
         return (
-            f"needs index_head_dim={COMPILED_INDEX_HEAD_DIM}, "
+            f"needs index_head_dim={MSA_INDEX_HEAD_DIM}, "
             f"got index_head_dim={index_head_dim}"
         )
     if num_index_heads > MFMA_COLS:
@@ -183,11 +176,6 @@ def aiter_indexer_unsupported_reason(
             f"max_model_len={max_model_len} needs {max_blocks} blocks per row, "
             f"more than the top-k's {MAX_SUPPORTED_BLOCKS}"
         )
-    # Last, because it is the only check that costs anything: reaching the
-    # kernels pulls in AITER itself. Every configuration that gets this far is
-    # one that would load AITER anyway, so by here the import is already paid
-    # for -- whereas a ROCm deployment not using AITER at all bails on the
-    # dtype above without ever touching it.
     return aiter_msa_kernels_unavailable_reason()
 
 
