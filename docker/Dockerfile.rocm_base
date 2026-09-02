@@ -409,6 +409,18 @@ RUN git init -q /src && cd /src \
     && git sparse-checkout set projects/rocprofiler-sdk shared cmake \
     && git fetch --filter=blob:none --depth 1 origin ${ROCPROFILER_SDK_COMMIT} \
     && git checkout -q FETCH_HEAD
+# Patch the ROCm 7.2.3 build of rocprofiler-sdk to include queue-interposition fixes that are
+# absent from the pinned 7.14 build. This resolves hangs on torch.profiler on ROCm.
+# TODO: Drop these once ${ROCPROFILER_SDK_COMMIT} is bumped to a build that already 
+# contains them, such as ROCm 10.0. See https://github.com/vllm-project/vllm/issues/54087.
+ARG ROCPROFILER_SDK_PR_7796=fae7fd57ffb8a76e811d6410b8a0cee1e94d710a
+ARG ROCPROFILER_SDK_PR_7924=f8db22adbe17686a9b05ae03367dd1ec73011653
+RUN cd /src \
+    && HSA_PATHS='projects/rocprofiler-sdk/source/lib/rocprofiler-sdk/hsa/*' \
+    && curl -fsSL -o /tmp/qi-7796.patch "${ROCPROFILER_SDK_REPO%.git}/commit/${ROCPROFILER_SDK_PR_7796}.patch" \
+    && curl -fsSL -o /tmp/qi-7924.patch "${ROCPROFILER_SDK_REPO%.git}/commit/${ROCPROFILER_SDK_PR_7924}.patch" \
+    && git apply -p1 --include="$HSA_PATHS" --verbose /tmp/qi-7796.patch \
+    && git apply -p1 --include="$HSA_PATHS" --verbose /tmp/qi-7924.patch
 RUN cd /src/projects/rocprofiler-sdk \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export CMAKE_C_COMPILER_LAUNCHER=sccache \
