@@ -479,6 +479,57 @@ def test_hermes_streaming_bare_string_arguments_with_stream_interval(
     assert json.loads(args_str) == "hello"
 
 
+@pytest.mark.parametrize(
+    "args_value",
+    [
+        '{"param": "max_connections"}',
+        "hello",
+        # A string that only looks structured: unwrapping it would hand the
+        # client something that is not JSON at all.
+        "{hello world}",
+        "[oops",
+        '{"a": 1} tail text',
+    ],
+)
+@pytest.mark.parametrize("stream_interval", [1, 3])
+def test_hermes_streaming_string_arguments_match_non_streaming(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    args_value: str,
+    stream_interval: int,
+) -> None:
+    """Both paths must return the same arguments for a string-valued argument.
+
+    Whether such a string holds serialized arguments cannot be judged from a
+    prefix, so the streaming path waits for the literal to close and then
+    applies the same rule, rather than deciding on the first character.
+    """
+    text = (
+        "<tool_call>"
+        + json.dumps({"name": "f", "arguments": args_value})
+        + "</tool_call>"
+    )
+    non_streaming = Hermes2ProToolParser(qwen_tokenizer).extract_tool_calls(
+        model_output=text,
+        request=any_chat_request,
+    )
+    expected = non_streaming.tool_calls[0].function.arguments
+
+    deltas = _simulate_streaming(
+        qwen_tokenizer,
+        Hermes2ProToolParser(qwen_tokenizer),
+        any_chat_request,
+        text,
+        stream_interval,
+    )
+    tool_calls = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    args_str = "".join(tc.function.arguments or "" for tc in tool_calls)
+
+    assert args_str == expected
+    # Valid JSON whatever the model emitted, which is what the API promises.
+    json.loads(args_str)
+
+
 def test_hermes_streaming_content_and_tool_call_in_single_chunk(
     qwen_tokenizer: TokenizerLike,
     any_chat_request: ChatCompletionRequest,
