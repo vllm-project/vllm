@@ -150,6 +150,15 @@ def _log_gdn_backend_decision(
     head_k_dim = getattr(
         vllm_config.model_config.hf_text_config, "linear_key_head_dim", None
     )
+
+    if current_platform.is_cpu():
+        logger.info_once(
+            "Using %s GDN prefill kernel (head_k_dim=%s).",
+            "CPU",
+            head_k_dim,
+        )
+        return
+
     chosen = {
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
@@ -197,6 +206,8 @@ def fi_chunk_gated_delta_rule(
     fi_state = initial_state.to(torch.float32)
     fi_g = g.to(torch.float32)
     fi_beta = beta.to(torch.float32)
+    if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.to(torch.int64)
     result = chunk_gated_delta_rule_fi(
         q=q,
         k=k,
@@ -491,7 +502,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
         self.gdn_decode_kernel = envs.VLLM_GDN_DECODE_KERNEL.strip().lower()
-        if self.gdn_decode_kernel == "cuda":
+        if self.gdn_decode_kernel == "cuda" and current_platform.is_cuda_alike():
             reason = self._fused_gdn_decode_unsupported_reason(vllm_config)
             if reason is not None:
                 if "VLLM_GDN_DECODE_KERNEL" in os.environ:
@@ -502,6 +513,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     "Falling back to the Triton GDN decode path: %s", reason
                 )
                 self.gdn_decode_kernel = "triton"
+        elif current_platform.is_cpu():
+            self.gdn_decode_kernel = "CPU"
+
         self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
         logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
 
@@ -518,7 +532,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.gqa_interleaved_layout
             or self.head_k_dim != 128
             or self.head_v_dim != 128
-            or self.norm.activation != "silu"
+            or self.norm.activation not in ("silu", "sigmoid")
             or vllm_config.model_config.dtype != torch.bfloat16
             or conv_state_dtype != torch.bfloat16
             or recurrent_state_dtype not in FUSED_GDN_STATE_DTYPES
@@ -526,9 +540,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ):
             return (
                 "the fused CUDA kernel requires a BF16 GDN model with "
-                "K=V=128, SiLU gating, non-interleaved GQA layout, BF16 "
-                "convolution cache, BF16 or FP32 recurrent state, and a "
-                "GPU with compute capability 8.0+"
+                "K=V=128, SiLU or sigmoid gating, non-interleaved GQA "
+                "layout, BF16 convolution cache, BF16 or FP32 recurrent "
+                "state, and a GPU with compute capability 8.0+"
             )
         if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
@@ -1203,13 +1217,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
-        if attn_metadata_raw is None:
+        attn_metadata = None
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is None:
             v_dim = core_attn_out.shape[-1] * core_attn_out.shape[-2]
             self._warmup_prefill_kernels(qkvz, v_dim)
             return
 
-        assert isinstance(attn_metadata_raw, dict)
-        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
         if (
@@ -1256,12 +1271,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
-        if attn_metadata_raw is None:
+        attn_metadata = None
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is None:
             self._warmup_prefill_kernels(mixed_qkv, 0)
             return
 
-        assert isinstance(attn_metadata_raw, dict)
-        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
         if (
@@ -1760,6 +1776,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             out=core_attn_out,
             scale=self.head_k_dim**-0.5,
             norm_eps=self.layer_norm_epsilon,
+            output_gate_activation=self.norm.activation,
         )
 
     def _forward_core_fused_norm_packed(
@@ -1771,12 +1788,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
         qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-        if attn_metadata_raw is None:
+        attn_metadata = None
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is None:
             self._warmup_prefill_kernels(mixed_qkvz[:, :qkv_size], 0)
             return
 
-        assert isinstance(attn_metadata_raw, dict)
-        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         mixed_qkv, output_gate_flat = mixed_qkvz.split(
             [qkv_size, self.value_dim // self.tp_size], dim=-1
@@ -1854,12 +1872,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
-        if attn_metadata_raw is None:
+        attn_metadata = None
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is None:
             self._warmup_prefill_kernels(mixed_qkv, 0)
             return
 
-        assert isinstance(attn_metadata_raw, dict)
-        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         if (
             self._can_use_fused_gdn_mtp_decode(attn_metadata)

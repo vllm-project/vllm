@@ -79,7 +79,11 @@ def server(request):
             else [str(extra_args)]
         )
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        args,
+        env_dict={"VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1"},
+    ) as remote_server:
         yield remote_server
 
 
@@ -181,6 +185,30 @@ async def test_generate_defaults_max_tokens_when_omitted(client):
         f"expected server-side default to exceed the legacy 16-token cap, "
         f"got {completion_tokens}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="parallel sampling (n > 1) is not supported by the Rust frontend",
+)
+async def test_generate_returns_all_choices_when_n_greater_than_one(client):
+    """Regression: ``n > 1`` must return ``n`` choices.
+
+    Non-streaming requests kept ``SamplingParams``' default output kind,
+    ``CUMULATIVE``, so only the sequences updated during the last engine step
+    reached the response and the others were silently dropped.
+    """
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 1.0, "n": 4},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+    assert sorted(choice["index"] for choice in data["choices"]) == [0, 1, 2, 3]
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# shellcheck disable=SC2329  # Every function in this file is only ever reached
+# transitively through handle_amd_runner_exit, the EXIT trap handler - shellcheck's
+# unused-function check doesn't do full reachability analysis from an indirectly
+# invoked entry point, so it flags the whole diagnostic-collection call chain as
+# dead code even though it runs live on every nonzero exit.
+
 # This script runs ROCm tests either directly in a native CI pod or inside the
 # corresponding Docker container. Multi-node tests continue to use Docker.
 #
@@ -52,6 +58,7 @@ amd_diagnostics_collected=0
 amd_diagnostics_memory_events_path=""
 amd_diagnostics_probe_budget_seconds=25
 amd_diagnostics_command_timeout_seconds=5
+amd_diagnostics_upload_timeout_seconds=20
 if [[ " ${PYTEST_ADDOPTS:-} " != *" --color"* ]]; then
   PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--color=yes"
 fi
@@ -76,6 +83,8 @@ export PYTHONFAULTHANDLER
 # tests set this to /vllm-workspace below so spawned Python processes do not
 # depend on their current working directory.
 export PYTHONPATH="${PYTHONPATH:-..}"
+
+ci_started_at=$SECONDS
 
 ###############################################################################
 # Helper Functions
@@ -122,6 +131,66 @@ cleanup_network() {
   if docker network ls | grep -q docker-net; then
     docker network rm docker-net || true
   fi
+}
+
+amd_ci_teardown_log() {
+  local event=$1
+  shift
+
+  printf '[amd-ci-teardown] event=%s' "${event}" >&2
+  if (($#)); then
+    printf ' %s' "$@" >&2
+  fi
+  printf '\n' >&2
+}
+
+run_docker_with_ci_timeout() {
+  local raw_timeout=${CONTAINER_TIMEOUT_S:-0}
+  local configured_timeout=0
+  local elapsed=0
+  local remaining_timeout=0
+  local status=0
+
+  if [[ ! "${raw_timeout}" =~ ^(0|[1-9][0-9]{0,5})$ ]]; then
+    amd_ci_teardown_log configuration_error \
+      "reason=invalid_timeout" "expected=integer_0_to_604800"
+    return 2
+  fi
+  configured_timeout=$((10#${raw_timeout}))
+  if ((configured_timeout > 604800)); then
+    amd_ci_teardown_log configuration_error \
+      "reason=invalid_timeout" "expected=integer_0_to_604800"
+    return 2
+  fi
+
+  remaining_timeout=${configured_timeout}
+  if ((configured_timeout > 0)); then
+    if ! command -v timeout >/dev/null 2>&1; then
+      amd_ci_teardown_log configuration_error \
+        "reason=timeout_command_not_found"
+      return 127
+    fi
+    elapsed=$((SECONDS - ci_started_at))
+    if ((elapsed >= configured_timeout)); then
+      amd_ci_teardown_log deadline_exhausted \
+        "mode=docker" "configured_s=${configured_timeout}" "elapsed_s=${elapsed}"
+      return 124
+    fi
+    remaining_timeout=$((configured_timeout - elapsed))
+  fi
+
+  amd_ci_teardown_log workload_started \
+    "mode=docker" "timeout_s=${remaining_timeout}"
+  if ((remaining_timeout == 0)); then
+    "$@" || status=$?
+  else
+    # Docker runs interactively, so keep it in the foreground process group.
+    # --verbose records both TERM and any KILL escalation caused by timeout.
+    timeout --verbose --foreground --signal=TERM --kill-after=10s \
+      "${remaining_timeout}s" "$@" || status=$?
+  fi
+  amd_ci_teardown_log workload_finished "mode=docker" "status=${status}"
+  return "${status}"
 }
 
 prepare_artifact_image() {
@@ -637,6 +706,46 @@ run_failure_diagnostic() {
   return 0
 }
 
+upload_failure_diagnostics_artifact() {
+  local upload_root=$1 upload_path=$2 agent_bin=""
+  local agent_upload_help=""
+  local -a upload_options=()
+
+  if [[ -n "${BUILDKITE_BIN_PATH:-}" \
+    && -x "${BUILDKITE_BIN_PATH}/buildkite-agent" ]]; then
+    agent_bin="${BUILDKITE_BIN_PATH}/buildkite-agent"
+  else
+    agent_bin=$(command -v buildkite-agent 2>/dev/null || true)
+  fi
+  if [[ -z "${agent_bin}" && -x /workspace/buildkite-agent ]]; then
+    agent_bin=/workspace/buildkite-agent
+  fi
+  [[ -n "${agent_bin}" && -n "${BUILDKITE_JOB_ID:-}" ]] || return 1
+  command -v timeout >/dev/null 2>&1 || return 1
+
+  # Older AMD runners predate the literal upload options. A restricted path
+  # has no glob or delimiter characters, so it is safe with either agent.
+  if [[ ! "${upload_path}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$ ]]; then
+    agent_upload_help=$("${agent_bin}" artifact upload --help 2>&1 || true)
+    if [[ "${agent_upload_help}" != *"--literal"* \
+      || "${agent_upload_help}" != *"--delimiter"* ]]; then
+      return 1
+    fi
+    upload_options=(--literal --delimiter "")
+  fi
+
+  (
+    cd "${upload_root}" || exit 1
+    BUILDKITE_AGENT_DEBUG=false \
+      BUILDKITE_AGENT_DEBUG_HTTP=false \
+      BUILDKITE_AGENT_TRACE_HTTP=false \
+      BUILDKITE_AGENT_LOG_LEVEL=error \
+      timeout --kill-after=2s "${amd_diagnostics_upload_timeout_seconds}s" \
+      "${agent_bin}" artifact upload \
+        "${upload_options[@]}" "./${upload_path}"
+  ) >/dev/null 2>&1
+}
+
 append_failure_diagnostic_file() {
   local log_file=$1
   local label=$2
@@ -902,6 +1011,9 @@ collect_rocm_failure_diagnostics() {
   local diagnostics_relative_path=""
   local diagnostics_path=""
   local diagnostics_parent=""
+  local diagnostics_fallback_root=""
+  local diagnostics_storage="checkout"
+  local diagnostics_artifact_summary=""
   local checkout_real=""
   local diagnostics_parent_real=""
   local exit_signal=""
@@ -969,6 +1081,23 @@ collect_rocm_failure_diagnostics() {
     || ! mkdir -p "${diagnostics_parent}" \
     || [[ -L "${diagnostics_path}" ]] \
     || ! (set -o noclobber; : > "${diagnostics_path}") 2>/dev/null; then
+    echo "WARNING: unable to create AMD CI diagnostics in the checkout; using temporary storage."
+    diagnostics_path=""
+    if diagnostics_fallback_root=$(mktemp -d -t \
+      vllm-amd-diagnostics.XXXXXX 2>/dev/null); then
+      diagnostics_path="${diagnostics_fallback_root}/${diagnostics_relative_path}"
+      diagnostics_parent=$(dirname "${diagnostics_path}")
+      if (umask 077; mkdir -p "${diagnostics_parent}" \
+        && (set -o noclobber; : > "${diagnostics_path}")) 2>/dev/null; then
+        diagnostics_storage="temporary-fallback"
+      else
+        rm -rf -- "${diagnostics_fallback_root}" || true
+        diagnostics_fallback_root=""
+        diagnostics_path=""
+      fi
+    fi
+  fi
+  if [[ -z "${diagnostics_path}" ]]; then
     echo "WARNING: unable to create AMD CI diagnostics at ${diagnostics_relative_path}."
     printf '\nAMD CI failure summary\n'
     printf '%-22s | %s\n' \
@@ -1000,6 +1129,7 @@ collect_rocm_failure_diagnostics() {
     echo "expected_gpu_count=${amd_diagnostics_expected_gpu_count}"
     echo "probe_budget_seconds=${amd_diagnostics_probe_budget_seconds}"
     echo "command_timeout_seconds=${amd_diagnostics_command_timeout_seconds}"
+    echo "diagnostics_storage=${diagnostics_storage}"
     echo "agent_name=${BUILDKITE_AGENT_NAME:-unknown}"
     echo "container_hostname=${HOSTNAME:-unknown}"
     echo "k8s_pod=${k8s_pod}"
@@ -1114,7 +1244,22 @@ collect_rocm_failure_diagnostics() {
   if [[ -n "${oom_kill_count}" ]]; then
     summary_rows+=("Cgroup OOM kills" "${oom_kill_count}")
   fi
-  summary_rows+=("Diagnostics artifact" "${diagnostics_relative_path}")
+  diagnostics_artifact_summary="${diagnostics_relative_path}"
+  if [[ -n "${diagnostics_fallback_root}" ]]; then
+    if upload_failure_diagnostics_artifact \
+      "${diagnostics_fallback_root}" "${diagnostics_relative_path}"; then
+      echo "Uploaded AMD CI diagnostics artifact from temporary storage: ${diagnostics_relative_path}"
+      diagnostics_artifact_summary="${diagnostics_relative_path} (direct upload)"
+    else
+      echo "WARNING: failed to upload temporary AMD CI diagnostics artifact: ${diagnostics_relative_path}"
+      echo "--- AMD CI diagnostics (artifact upload failed)"
+      cat "${diagnostics_path}" || true
+      diagnostics_artifact_summary="job log only: direct upload failed"
+    fi
+    rm -rf -- "${diagnostics_fallback_root}" || \
+      echo "WARNING: unable to remove temporary AMD CI diagnostics storage."
+  fi
+  summary_rows+=("Diagnostics artifact" "${diagnostics_artifact_summary}")
 
   printf '\nAMD CI failure summary\n'
   printf '%-22s | %s\n' "${summary_rows[@]}"
@@ -1523,13 +1668,15 @@ fi
 clear_ci_orchestration_env
 if is_multi_node "$commands"; then
   echo "--- Multi-node job detected"
-  export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
+  DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
+  export DCKR_VER
 
   # Parse the bracket syntax:  prefix ; [node0_cmds] && [node1_cmds]
   #   BASH_REMATCH[1] = prefix (everything before first bracket)
   #   BASH_REMATCH[2] = comma-separated node0 commands
   #   BASH_REMATCH[3] = comma-separated node1 commands
   if [[ "$commands" =~ ^(.*)\[(.*)"] && ["(.*)\]$ ]]; then
+    # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
     prefix=$(echo "${BASH_REMATCH[1]}" | sed 's/;//g')
     echo "PREFIX: ${prefix}"
 
@@ -1545,7 +1692,9 @@ if is_multi_node "$commands"; then
     fi
 
     for i in "${!node0[@]}"; do
+      # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
       command_node_0=$(echo "${node0[i]}" | sed 's/\"//g')
+      # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
       command_node_1=$(echo "${node1[i]}" | sed 's/\"//g')
 
       step_cmd="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
@@ -1581,15 +1730,17 @@ else
     ulimit_core_hard="-1"
   fi
    # Disable core dumps in the ROCm test container unless the ROCm debug agent is enabled
-  coredump_flags="--ulimit core=0:$ulimit_core_hard"
+  coredump_flags=(--ulimit "core=0:$ulimit_core_hard")
   if [[ "$commands" == *"ROCm debug agent enabled"* ]]; then
     # Works around https://github.com/rocm/rocm-systems/issues/6206
-    coredump_flags='-e HSA_COREDUMP_PATTERN="/tmp/gpucore.%p"'
+    coredump_flags=(-e 'HSA_COREDUMP_PATTERN="/tmp/gpucore.%p"')
   else
     echo "ROCm debug agent not enabled, coredumps are disabled in the test container."
   fi
 
-  docker run \
+  exit_code=0
+  # shellcheck disable=SC2086  # word splitting is intentional: both hold multiple docker flags
+  run_docker_with_ci_timeout docker run \
     "${docker_run_terminal_args[@]}" \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
@@ -1597,7 +1748,7 @@ else
     --shm-size=16gb \
     --group-add "$render_gid" \
     --rm \
-    $coredump_flags \
+    "${coredump_flags[@]}" \
     -e HF_TOKEN \
     -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
     -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \
@@ -1625,8 +1776,6 @@ else
     "${standalone_merge_base_env[@]}" \
     --name "${container_name}" \
     "${image_name}" \
-    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
-
-  exit_code=$?
-  handle_pytest_exit "$exit_code"
+    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}" || exit_code=$?
+  handle_pytest_exit "${exit_code}"
 fi
