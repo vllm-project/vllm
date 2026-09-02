@@ -795,3 +795,35 @@ def test_aligned_block_table_matches_shared_gdn():
     )
 
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_non_spec_cudagraph_aliases_precomputed_aligned_state_indices():
+    device = torch.device("cuda")
+    batch = BatchSpec(seq_lens=[40, 30], query_lens=[1, 1])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device
+    ).replace(is_prefilling=torch.tensor([False, False]))
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=True,
+        mamba_cache_mode="align",
+        device=device,
+    )
+    assert isinstance(builder, KimiK3KDAMetadataBuilder)
+    precomputed_indices = torch.tensor(
+        [[101], [201], [301]], dtype=torch.int32, device=device
+    )
+    builder.mamba_aligned_state_indices = precomputed_indices
+
+    metadata = builder.build(0, common_attn_metadata)
+
+    state_indices = metadata.non_spec_state_indices_tensor
+    assert state_indices is not None
+    assert state_indices.is_contiguous()
+    assert state_indices.data_ptr() == precomputed_indices.data_ptr()
+    torch.testing.assert_close(
+        state_indices,
+        precomputed_indices[: batch.batch_size, 0],
+    )

@@ -673,15 +673,21 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
-            self.non_spec_state_indices_tensor[:num_decodes].copy_(
-                non_spec_state_indices_tensor, non_blocking=True
+            can_alias_aligned_state_indices = (
+                not self.use_spec_decode
+                and self.mamba_aligned_state_indices is not None
+                and num_decodes == batch_size
             )
-            self.non_spec_state_indices_tensor[num_decodes:batch_size].fill_(
-                NULL_BLOCK_ID
-            )
-            non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
-                :batch_size
-            ]
+            if not can_alias_aligned_state_indices:
+                self.non_spec_state_indices_tensor[:num_decodes].copy_(
+                    non_spec_state_indices_tensor, non_blocking=True
+                )
+                self.non_spec_state_indices_tensor[num_decodes:batch_size].fill_(
+                    NULL_BLOCK_ID
+                )
+                non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
+                    :batch_size
+                ]
 
         recoverssm_commit = None
         if self.use_recoverssm and num_spec_decodes > 0:
