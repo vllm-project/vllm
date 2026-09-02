@@ -576,10 +576,7 @@ def qsa_select_paged_prefill(
         compress_ratio: Number of logical tokens represented by a cache row.
         max_query_len: Maximum number of query tokens in one request.
         block_indices: Compressed-index output buffer.
-        max_seq_len: Longest context length in the batch this step (host
-            scalar from the metadata builder; an upper bound is safe). The
-            temporary logits buffer is sized to the compressed-column bound
-            derived from it instead of the full page-table width.
+        max_seq_len: Longest context length in the batch this step.
     """
 
     assert token_topk % compress_ratio == 0
@@ -587,8 +584,7 @@ def qsa_select_paged_prefill(
     rows = q.shape[0]
     # No row scores beyond cdiv(max_seq_len, compress_ratio) compressed
     # columns. Round up to 64 to keep the logits row stride
-    # cooperative_topk-compatible (stride % 4 == 0); stores are masked by
-    # visible_blocks regardless.
+    # cooperative_topk-compatible.
     logits_width = triton.cdiv(triton.cdiv(max_seq_len, compress_ratio), 64) * 64
     logits_width = min(max(64, logits_width), page_table.shape[1] * k_cache.shape[1])
 
