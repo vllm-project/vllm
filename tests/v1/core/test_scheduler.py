@@ -385,6 +385,82 @@ def test_schedule_prefills_gating(has_running: bool):
     assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
 
 
+def _make_running_decode(scheduler, req_id: str):
+    (req,) = create_requests(num_requests=1, num_tokens=8, req_ids=[req_id])
+    scheduler.add_request(req)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[req_id],
+            req_id_to_index={req_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    return req
+
+
+def test_has_admittable_prefill():
+    """`has_admittable_prefill` mirrors the head-of-queue admission test: it is
+    True only when a waiting prefill would actually be admitted next step."""
+    scheduler = create_scheduler(max_num_seqs=16, max_num_batched_tokens=8192)
+    # Nothing queued -> nothing admittable.
+    assert scheduler.has_admittable_prefill() is False
+
+    (waiting_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["w0"])
+    scheduler.add_request(waiting_req)
+    # A fresh waiting prefill that fits in the KV cache is admittable.
+    assert scheduler.has_admittable_prefill() is True
+
+    # With no free running slots, the same request is not admittable.
+    scheduler_full = create_scheduler(max_num_seqs=1, max_num_batched_tokens=8192)
+    _make_running_decode(scheduler_full, "run0")
+    (blocked_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["w1"])
+    scheduler_full.add_request(blocked_req)
+    assert len(scheduler_full.running) == 1
+    assert scheduler_full.has_admittable_prefill() is False
+
+
+def test_running_decode_count_and_inflight_prefill():
+    """`running_decode_count` counts only decodes; `has_inflight_prefill`
+    reflects chunked prefills still in flight."""
+    scheduler = create_scheduler(max_num_seqs=16, max_num_batched_tokens=8192)
+    _make_running_decode(scheduler, "d0")
+    assert scheduler.running_decode_count() == 1
+    assert scheduler.has_inflight_prefill() is False
+
+    # A long prompt with a small token budget stays a prefill chunk after one
+    # step, so it is a running request that is not a decode.
+    chunked = create_scheduler(max_num_seqs=16, max_num_batched_tokens=16)
+    (long_req,) = create_requests(num_requests=1, num_tokens=64, req_ids=["p0"])
+    chunked.add_request(long_req)
+    output = chunked.schedule()
+    assert "p0" in output.num_scheduled_tokens
+    assert len(chunked.running) == 1
+    assert chunked.has_inflight_prefill() is True
+    assert chunked.running_decode_count() == 0
+
+
+def test_throttled_step_admits_zero_prefill_tokens():
+    """A throttled (defer_prefills) step with running decode work admits no new
+    prefill tokens, so the step is genuinely pure decode."""
+    scheduler = create_scheduler(max_num_seqs=16, max_num_batched_tokens=8192)
+    _make_running_decode(scheduler, "run0")
+
+    (new_req,) = create_requests(num_requests=1, num_tokens=32, req_ids=["new0"])
+    scheduler.add_request(new_req)
+    output = scheduler.schedule(throttle_prefills=True)
+
+    assert "new0" not in output.num_scheduled_tokens
+    assert not output.scheduled_new_reqs
+    assert new_req.status == RequestStatus.WAITING
+    # The running decode still advances (one token), so the step is not wasted.
+    assert output.num_scheduled_tokens.get("run0") == 1
+
+
 def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
     """Drive a remote-KV request `r2` to the resume point (async load complete)
     while another request `r1` is already decoding, so the step is throttle-

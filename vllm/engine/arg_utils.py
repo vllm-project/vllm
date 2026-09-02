@@ -637,6 +637,20 @@ class EngineArgs:
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
+    enable_prefill_delayer: bool = SchedulerConfig.enable_prefill_delayer
+    prefill_delayer_target_fill: float = SchedulerConfig.prefill_delayer_target_fill
+    prefill_delayer_ttft_max_ticks: int = SchedulerConfig.prefill_delayer_ttft_max_ticks
+    prefill_delayer_partial_max_ticks: int = (
+        SchedulerConfig.prefill_delayer_partial_max_ticks
+    )
+    prefill_delayer_stall_ticks: int = SchedulerConfig.prefill_delayer_stall_ticks
+    prefill_delayer_kv_high_watermark: float = (
+        SchedulerConfig.prefill_delayer_kv_high_watermark
+    )
+    prefill_delayer_kv_low_watermark: float = (
+        SchedulerConfig.prefill_delayer_kv_low_watermark
+    )
+    prefill_delayer_max_queue_ms: float = SchedulerConfig.prefill_delayer_max_queue_ms
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1600,6 +1614,40 @@ class EngineArgs:
             "--prefill-schedule-interval",
             **scheduler_kwargs["prefill_schedule_interval"],
         )
+        # Only applicable to data-parallel deployments (data_parallel_size > 1);
+        # a no-op otherwise since the delayer is only built by the DP engine core.
+        scheduler_group.add_argument(
+            "--enable-prefill-delayer",
+            **scheduler_kwargs["enable_prefill_delayer"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-target-fill",
+            **scheduler_kwargs["prefill_delayer_target_fill"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-ttft-max-ticks",
+            **scheduler_kwargs["prefill_delayer_ttft_max_ticks"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-partial-max-ticks",
+            **scheduler_kwargs["prefill_delayer_partial_max_ticks"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-stall-ticks",
+            **scheduler_kwargs["prefill_delayer_stall_ticks"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-kv-high-watermark",
+            **scheduler_kwargs["prefill_delayer_kv_high_watermark"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-kv-low-watermark",
+            **scheduler_kwargs["prefill_delayer_kv_low_watermark"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-max-queue-ms",
+            **scheduler_kwargs["prefill_delayer_max_queue_ms"],
+        )
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
@@ -2377,6 +2425,14 @@ class EngineArgs:
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
+            enable_prefill_delayer=self.enable_prefill_delayer,
+            prefill_delayer_target_fill=self.prefill_delayer_target_fill,
+            prefill_delayer_ttft_max_ticks=self.prefill_delayer_ttft_max_ticks,
+            prefill_delayer_partial_max_ticks=(self.prefill_delayer_partial_max_ticks),
+            prefill_delayer_stall_ticks=self.prefill_delayer_stall_ticks,
+            prefill_delayer_kv_high_watermark=(self.prefill_delayer_kv_high_watermark),
+            prefill_delayer_kv_low_watermark=(self.prefill_delayer_kv_low_watermark),
+            prefill_delayer_max_queue_ms=self.prefill_delayer_max_queue_ms,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,

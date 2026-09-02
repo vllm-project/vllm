@@ -239,6 +239,34 @@ class SchedulerInterface(ABC):
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return 0.0
 
+    def get_pending_prefill_tokens(self) -> int:
+        """Returns queued prefill tokens, capped at one forward's token budget.
+
+        Used by the DP PrefillDelayer for its cross-rank fill signal. Defaults
+        to 0 for schedulers that do not track this.
+        """
+        return 0
+
+    def has_admittable_prefill(self) -> bool:
+        """Whether a queued prefill would be admitted on the next step.
+
+        Used by the DP PrefillDelayer to count prefill-ready ranks. Defaults to
+        False for schedulers that do not track this.
+        """
+        return False
+
+    def running_decode_count(self) -> int:
+        """Returns the number of running requests that are decoding."""
+        return 0
+
+    def has_inflight_prefill(self) -> bool:
+        """Whether any running request is still prefilling a prompt chunk."""
+        return False
+
+    def oldest_waiting_prefill_age_ms(self) -> float:
+        """Returns the age in ms of the oldest waiting request, or 0.0."""
+        return 0.0
+
     @abstractmethod
     def make_stats(self) -> "SchedulerStats | None":
         """Make a SchedulerStats object for logging.

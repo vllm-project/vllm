@@ -176,6 +176,50 @@ class SchedulerConfig:
     once every N engine steps, aligned across DP ranks, to better balance
     per-step forward-pass times."""
 
+    enable_prefill_delayer: bool = True
+    """For data-parallel deployments, enable the content-aware PrefillDelayer:
+    hold new prefills on a rank until sibling DP ranks are also ready, so dense
+    prefills fire together (all ranks prefill the same step) and the other steps
+    stay pure decode on every rank (fast CUDA graph). A no-op unless
+    data_parallel_size > 1; the default matches ATOM."""
+
+    prefill_delayer_target_fill: float = Field(default=0.9, ge=0.0, le=1.0)
+    """Coalescing target for the PrefillDelayer. Once all DP ranks are
+    prefillable, keep holding until the queued prefill tokens fill this fraction
+    of an aligned forward's aggregate token budget
+    (prefillable_ranks times max_num_batched_tokens), then fire. Higher values
+    pack denser prefill forwards at the cost of a little extra queueing; the tick
+    bounds below cap the worst case."""
+
+    prefill_delayer_ttft_max_ticks: int = Field(default=200, ge=1)
+    """Max consecutive engine steps the PrefillDelayer will hold a prefill
+    before force-firing, to bound worst-case TTFT."""
+
+    prefill_delayer_partial_max_ticks: int = Field(default=100, ge=1)
+    """Tighter hold bound (in engine steps) applied while some rank already has
+    an in-flight chunked prefill, so a partially prefilled request is finished
+    promptly."""
+
+    prefill_delayer_stall_ticks: int = Field(default=10, ge=1)
+    """Fire the PrefillDelayer once the aggregate queued prefill tokens stop
+    growing for this many consecutive holds (the coalescing queue has drained,
+    so waiting no longer packs a denser forward)."""
+
+    prefill_delayer_kv_high_watermark: float = Field(default=0.9, ge=0.0, le=1.0)
+    """When any rank's KV-cache usage reaches this fraction the system cannot
+    accumulate more, so the PrefillDelayer fires immediately (holding would only
+    add TTFT)."""
+
+    prefill_delayer_kv_low_watermark: float = Field(default=0.0, ge=0.0, le=1.0)
+    """When a prefillable rank's KV-cache usage is below this fraction the
+    system is underutilized, so the PrefillDelayer fires immediately. 0.0 (the
+    default) disables the low-watermark override."""
+
+    prefill_delayer_max_queue_ms: float = Field(default=0.0, ge=0.0)
+    """Request-age SLA for the PrefillDelayer: fire immediately once a rank's
+    oldest waiting request has waited this many milliseconds. 0.0 (the default)
+    disables the SLA."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.

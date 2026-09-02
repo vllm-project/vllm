@@ -72,6 +72,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.prefill_delayer import PrefillDelayer
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -2022,6 +2023,18 @@ class DPEngineCoreProc(EngineCoreProc):
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
 
+        # Content-aware cross-DP prefill alignment. Constructed after
+        # super().__init__ sets self.dp_size; its decision is refreshed once per
+        # busy-loop iteration in lockstep across ranks.
+        self._prefill_delayer: PrefillDelayer | None = None
+        self._prefill_delayer_kv_high = (
+            scheduler_config.prefill_delayer_kv_high_watermark
+        )
+        self._prefill_delayer_kv_low = scheduler_config.prefill_delayer_kv_low_watermark
+        self._prefill_delayer_max_queue_ms = (
+            scheduler_config.prefill_delayer_max_queue_ms
+        )
+
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
         self.step_counter = 0
@@ -2051,6 +2064,17 @@ class DPEngineCoreProc(EngineCoreProc):
             engine_index=dp_rank,
             tensor_queue=tensor_queue,
         )
+
+        if scheduler_config.enable_prefill_delayer:
+            # Runs after _init_data_parallel has set self.dp_size.
+            self._prefill_delayer = PrefillDelayer(
+                dp_size=self.dp_size,
+                prefill_token_budget=scheduler_config.max_num_batched_tokens,
+                target_fill=scheduler_config.prefill_delayer_target_fill,
+                ttft_max_ticks=scheduler_config.prefill_delayer_ttft_max_ticks,
+                partial_max_ticks=scheduler_config.prefill_delayer_partial_max_ticks,
+                stall_ticks=scheduler_config.prefill_delayer_stall_ticks,
+            )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
@@ -2176,6 +2200,10 @@ class DPEngineCoreProc(EngineCoreProc):
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
     def _should_throttle_prefills(self) -> bool:
+        if self._prefill_delayer is not None:
+            # Content-aware path: apply the decision computed from the previous
+            # iteration's DP sync (see _has_global_unfinished_reqs).
+            return self._prefill_delayer.should_throttle
         # Throttle new prefills to cadence-aligned steps for DP balancing.
         # step_counter is identical across DP ranks. On a fresh wave the
         # counter is 0, so prefills are admitted immediately after idle.
@@ -2252,6 +2280,10 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Increment wave count and reset step counter.
                 self.current_wave += 1
                 self.step_counter = 0
+                if self._prefill_delayer is not None:
+                    # Clear any in-flight hold so a stale decision does not carry
+                    # across the idle gap into the next wave.
+                    self._prefill_delayer.reset()
             elif (
                 not was_running
                 and self.has_coordinator
@@ -2270,15 +2302,73 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Optimization - only perform finish-sync all-reduce every 32 steps.
+        # With the PrefillDelayer active we sync every step instead, so its
+        # cross-DP signals ride this same collective rather than needing their
+        # own; the hold decision is stored on the delayer and applied on the
+        # next iteration's schedule().
         self.step_counter += 1
-        if self.step_counter % 32 != 0:
+        delayer = self._prefill_delayer
+        if delayer is None and self.step_counter % 32 != 0:
             return True
 
-        has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
+        local_prefillable = False
+        local_pending_tokens = 0
+        local_running_decode = 0
+        local_kv_high = False
+        local_kv_low = False
+        local_has_partial = False
+        local_queue_hot = False
+        if delayer is not None:
+            local_prefillable = self.scheduler.has_admittable_prefill()
+            local_pending_tokens = self.scheduler.get_pending_prefill_tokens()
+            local_running_decode = self.scheduler.running_decode_count()
+            usage = self.scheduler.get_kv_cache_usage()
+            local_kv_high = usage >= self._prefill_delayer_kv_high
+            local_kv_low = (
+                local_prefillable
+                and self._prefill_delayer_kv_low > 0.0
+                and usage < self._prefill_delayer_kv_low
+            )
+            local_has_partial = self.scheduler.has_inflight_prefill()
+            local_queue_hot = (
+                self._prefill_delayer_max_queue_ms > 0.0
+                and self.scheduler.oldest_waiting_prefill_age_ms()
+                >= self._prefill_delayer_max_queue_ms
+            )
+
+        (
+            has_unfinished,
+            pause_consensus,
+            prefillable,
+            pending_tokens,
+            running_decode,
+            kv_high,
+            kv_low,
+            has_partial,
+            queue_hot,
+        ) = ParallelConfig.sync_dp_state(
             self.dp_group,
             has_unfinished=local_unfinished,
             pending_pause=self.pending_pause,
+            local_prefillable=local_prefillable,
+            local_pending_tokens=local_pending_tokens,
+            local_running_decode=local_running_decode,
+            local_kv_high=local_kv_high,
+            local_kv_low=local_kv_low,
+            local_has_partial=local_has_partial,
+            local_queue_hot=local_queue_hot,
         )
+
+        if delayer is not None:
+            delayer.update_throttle(
+                prefillable,
+                pending_tokens,
+                running_decode,
+                kv_high,
+                kv_low,
+                has_partial,
+                queue_hot,
+            )
 
         if pause_consensus:
             self.ignore_start_dp_wave = True

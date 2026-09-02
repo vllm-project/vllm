@@ -768,30 +768,77 @@ class ParallelConfig:
 
     @staticmethod
     def sync_dp_state(
-        dp_group: ProcessGroup, has_unfinished: bool, pending_pause: bool
-    ) -> tuple[bool, bool]:
+        dp_group: ProcessGroup,
+        has_unfinished: bool,
+        pending_pause: bool,
+        local_prefillable: bool = False,
+        local_pending_tokens: int = 0,
+        local_running_decode: int = 0,
+        local_kv_high: bool = False,
+        local_kv_low: bool = False,
+        local_has_partial: bool = False,
+        local_queue_hot: bool = False,
+    ) -> tuple[bool, bool, int, int, int, int, int, int, int]:
         """Combined all-reduce for DP state synchronization.
 
-        Uses a single SUM all-reduce on a 2-element tensor:
+        Uses a single SUM all-reduce on a 9-element tensor:
           [0] = 1 if this rank has unfinished work, else 0.
-                SUM > 0 ≡ logical OR across ranks → any rank has work.
+                SUM > 0 is a logical OR across ranks (any rank has work).
           [1] = 1 if this rank has a pending pause request, else 0.
-                SUM == dp_size ≡ all ranks reached pause consensus.
+                SUM == dp_size means all ranks reached pause consensus.
+          [2] = 1 if this rank would admit a prefill next step, else 0.
+                SUM is the number of prefillable ranks (PrefillDelayer
+                alignment gate).
+          [3] = this rank's pending prefill tokens, capped at the token budget.
+                SUM is the total queued prefill tokens across ranks.
+          [4] = this rank's running decode request count.
+                SUM is the aggregate decode batch.
+          [5] = 1 if this rank's KV-cache usage is at the high watermark.
+                SUM > 0 means some rank cannot accumulate more.
+          [6] = 1 if this rank (prefillable) is under the KV low watermark.
+                SUM > 0 means some rank is underutilized.
+          [7] = 1 if this rank has an in-flight chunked prefill.
+                SUM > 0 means some rank is mid-prefill.
+          [8] = 1 if this rank's oldest waiting request breached the age SLA.
+                SUM > 0 means some rank's queue is hot.
 
         has_unfinished_global is true if any rank has unfinished work,
         or if some ranks are waiting for a pause consensus.
 
         Returns:
-            (has_unfinished_global, pause_consensus)
+            (has_unfinished_global, pause_consensus, prefillable, pending_tokens,
+             running_decode, kv_high, kv_low, has_partial, queue_hot)
         """
         tensor = torch.tensor(
-            [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
+            [
+                int(has_unfinished),
+                int(pending_pause),
+                int(local_prefillable),
+                int(local_pending_tokens),
+                int(local_running_decode),
+                int(local_kv_high),
+                int(local_kv_low),
+                int(local_has_partial),
+                int(local_queue_hot),
+            ],
+            dtype=torch.int32,
+            device="cpu",
         )
         torch.distributed.all_reduce(tensor, op=ReduceOp.SUM, group=dp_group)
         dp_size = dp_group.size()
         pause_count = tensor[1].item()
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
-        return has_unfinished_global, pause_count == dp_size
+        return (
+            has_unfinished_global,
+            pause_count == dp_size,
+            tensor[2].item(),
+            tensor[3].item(),
+            tensor[4].item(),
+            tensor[5].item(),
+            tensor[6].item(),
+            tensor[7].item(),
+            tensor[8].item(),
+        )
 
     @staticmethod
     def sync_kv_cache_memory_size(dp_group: ProcessGroup, kv_cache_memory: int) -> int:

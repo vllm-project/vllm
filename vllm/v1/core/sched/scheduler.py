@@ -2390,6 +2390,118 @@ class Scheduler(SchedulerInterface):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting) + len(self.skipped_waiting)
 
+    def get_pending_prefill_tokens(self) -> int:
+        """Unprocessed prompt (prefill) tokens queued on this rank, capped at
+        one forward's token budget.
+
+        Sums remaining prompt tokens over waiting requests and in-flight
+        chunked prefills. The DP PrefillDelayer reduces this across ranks to
+        gauge how dense a coalesced, cross-rank-aligned prefill forward would
+        be. The per-rank cap mirrors the fact that a single forward cannot
+        exceed the token budget, so an already-saturated rank contributes at
+        most a full batch.
+
+        Returns:
+            Pending prefill tokens, in ``[0, max_num_scheduled_tokens]``.
+        """
+        budget = self.max_num_scheduled_tokens
+        pending = 0
+        for request in itertools.chain(
+            self.waiting, self.skipped_waiting, self.running
+        ):
+            remaining = request.num_prompt_tokens - request.num_computed_tokens
+            if remaining > 0:
+                pending += remaining
+                if pending >= budget:
+                    return budget
+        return pending
+
+    def has_admittable_prefill(self) -> bool:
+        """Whether this rank would admit a new prefill on the next step.
+
+        Mirrors the head-of-queue admission test in ``schedule()``: there must
+        be a running slot free and the KV-cache manager must be able to allocate
+        the head waiting request's first chunk (after prefix-cache hits and the
+        admission watermark). Read-only, so it can feed the cross-DP prefill
+        alignment signal without mutating scheduler state.
+
+        Returns:
+            True if a queued prefill would actually be admitted next step.
+        """
+        if self._pause_state != PauseState.UNPAUSED:
+            return False
+        if (
+            len(self.running) + self.num_waiting_for_streaming_input
+            >= self.max_num_running_reqs
+        ):
+            return False
+
+        queue = self._select_waiting_queue_for_scheduling()
+        if queue is None:
+            return False
+        request = queue.peek_request()
+        if self._is_blocked_waiting_status(request.status):
+            return False
+
+        if request.num_computed_tokens == 0:
+            new_computed_blocks, num_new_local_computed_tokens, _, _ = (
+                self._get_local_prefix_cache_hit(request)
+            )
+        else:
+            new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
+            num_new_local_computed_tokens = 0
+        num_computed_tokens = (
+            request.num_computed_tokens + num_new_local_computed_tokens
+        )
+
+        num_new_tokens = request.num_tokens - num_computed_tokens
+        threshold = self.scheduler_config.long_prefill_token_threshold
+        if 0 < threshold < num_new_tokens:
+            num_new_tokens = threshold
+        num_new_tokens = min(num_new_tokens, self.max_num_scheduled_tokens)
+        if num_new_tokens <= 0:
+            return False
+
+        num_tokens_main_model = num_computed_tokens + num_new_tokens
+        num_tokens_need_slot = min(
+            num_tokens_main_model + self.num_lookahead_tokens, self.max_model_len
+        )
+        num_blocks_to_allocate = (
+            self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+                request_id=request.request_id,
+                num_tokens=num_tokens_need_slot,
+                new_computed_blocks=new_computed_blocks.blocks,
+                num_encoder_tokens=0,
+                total_computed_tokens=num_computed_tokens,
+                num_local_computed_tokens=num_computed_tokens,
+                num_tokens_main_model=num_tokens_main_model,
+            )
+        )
+        watermark_blocks = self.kv_cache_manager.watermark_blocks if self.running else 0
+        available_blocks = self.kv_cache_manager.block_pool.get_num_free_blocks()
+        return num_blocks_to_allocate + watermark_blocks <= available_blocks
+
+    def running_decode_count(self) -> int:
+        """Number of running requests that are decoding (not prefilling)."""
+        return sum(1 for r in self.running if not r.is_prefill_chunk)
+
+    def has_inflight_prefill(self) -> bool:
+        """Whether any running request is still prefilling a prompt chunk."""
+        return any(r.is_prefill_chunk for r in self.running)
+
+    def oldest_waiting_prefill_age_ms(self) -> float:
+        """Age in milliseconds of the oldest waiting request's arrival.
+
+        Returns:
+            The oldest waiting request's age, or 0.0 if no request is waiting.
+        """
+        arrivals = [
+            r.arrival_time for r in itertools.chain(self.waiting, self.skipped_waiting)
+        ]
+        if not arrivals:
+            return 0.0
+        return (time.time() - min(arrivals)) * 1000.0
+
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage
