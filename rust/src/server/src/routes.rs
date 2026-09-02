@@ -26,7 +26,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use tower_http::trace::TraceLayer;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
 use crate::middleware;
@@ -45,12 +45,33 @@ fn runtime_lora_updating_enabled() -> bool {
         .is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
 }
 
+fn parse_scale_out_endpoints_flag(value: Option<&str>) -> Result<bool, String> {
+    let Some(value) = value else {
+        return Ok(false);
+    };
+    if value.is_empty() {
+        return Ok(false);
+    }
+
+    match value.trim() {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err("VLLM_ENABLE_SCALE_OUT_ENDPOINTS must be 0 or 1".to_string()),
+    }
+}
+
+fn scale_out_endpoints_enabled() -> bool {
+    let value = std::env::var("VLLM_ENABLE_SCALE_OUT_ENDPOINTS").ok();
+    parse_scale_out_endpoints_flag(value.as_deref()).unwrap_or_else(|message| panic!("{message}"))
+}
+
 /// Build the minimal OpenAI-compatible router for one configured model.
 pub fn build_router(state: Arc<AppState>) -> Router {
     build_router_with_options(
         state,
         server_dev_mode_enabled(),
         runtime_lora_updating_enabled(),
+        scale_out_endpoints_enabled(),
     )
 }
 
@@ -65,13 +86,22 @@ fn build_router_with_dev_mode_and_lora(
     dev_mode_enabled: bool,
     runtime_lora_updating_enabled: bool,
 ) -> Router {
-    build_router_with_options(state, dev_mode_enabled, runtime_lora_updating_enabled)
+    build_router_with_options(state, dev_mode_enabled, runtime_lora_updating_enabled, true)
+}
+
+#[cfg(test)]
+fn build_router_with_scale_out_endpoints(
+    state: Arc<AppState>,
+    scale_out_endpoints_enabled: bool,
+) -> Router {
+    build_router_with_options(state, false, false, scale_out_endpoints_enabled)
 }
 
 fn build_router_with_options(
     state: Arc<AppState>,
     dev_mode_enabled: bool,
     runtime_lora_updating_enabled: bool,
+    scale_out_endpoints_enabled: bool,
 ) -> Router {
     let mut router = Router::new()
         // Health & monitoring
@@ -85,8 +115,16 @@ fn build_router_with_options(
         .route("/v1/chat/completions", post(openai::chat_completions))
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
-        .route("/detokenize", post(tokenize::detokenize))
-        .route("/inference/v1/generate", post(inference::generate));
+        .route("/detokenize", post(tokenize::detokenize));
+
+    if scale_out_endpoints_enabled {
+        router = router.route("/inference/v1/generate", post(inference::generate));
+    } else {
+        info!(
+            "scale-out endpoints are disabled; set \
+             VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 to enable them"
+        );
+    }
 
     if runtime_lora_updating_enabled {
         router = router
