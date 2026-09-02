@@ -229,7 +229,13 @@ def init_kv_cache(
         in ("longcat_flash", "longcat_flash_ngram")
         else 1
     )
-    bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
+    bind_kv_cache(
+        kv_caches,
+        forward_context,
+        runner_kv_caches,
+        num_attn_module,
+        kv_cache_groups=kv_cache_config.kv_cache_groups,
+    )
     return kv_caches
 
 
