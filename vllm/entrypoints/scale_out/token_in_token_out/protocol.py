@@ -11,6 +11,7 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionRequest,
@@ -20,7 +21,7 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionStreamResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
@@ -124,6 +125,7 @@ class GenerateRequest(BaseModel):
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -202,7 +204,7 @@ class GenerateResponseChoice(BaseModel):
     token_ids: list[int] | None = None
     # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
     # (numpy serialization). Shape after decode:
-    #   (num_tokens - 1, num_layers, num_experts_per_tok)  dtype uint8/uint16
+    #   (num_tokens - 1, num_layers, num_experts_per_tok) dtype uint8/uint16/int32
     # ``num_tokens - 1`` because the last sampled token has not been
     # forwarded yet and therefore has no routing data.
     # Decode:
@@ -210,6 +212,7 @@ class GenerateResponseChoice(BaseModel):
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
+    sampling_mask: list[list[int]] | None = None
 
     @field_validator("token_ids")
     @classmethod
@@ -225,6 +228,7 @@ class GenerateResponseStreamChoice(BaseModel):
     finish_reason: str | None = None
     token_ids: list[int] | None = None
     routed_experts: str | None = None
+    sampling_mask: list[list[int]] | None = None
 
 
 class GenerateStreamResponse(BaseModel):

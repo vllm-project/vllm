@@ -21,6 +21,7 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
+from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
     _masked_mha_workspace_fits,
@@ -39,6 +40,9 @@ if not current_platform.is_cuda():
         allow_module_level=True,
     )
 
+from vllm.model_executor.layers.attention.mla_attention import (
+    _canonicalize_sparse_mla_kv_cache_dtype,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseTRTLLMBackend,
@@ -183,13 +187,89 @@ def _quantize_dequantize_fp8_ds_mla(
     return dequant_kv_c, dequant_k_pe
 
 
+_E2M1_TABLE = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+def _quantize_dequantize_nvfp4_ds_mla(
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    block_size: int,
+    kv_cache_dtype: str,
+    scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Round-trip kv_c/k_pe through the nvfp4_ds_mla cache layout.
+
+    Layout (per token, uint8): [e2m1-packed NoPE | unscaled e4m3 RoPE |
+    per-16 e4m3 NoPE SFs]. The SF bytes are stored permuted (an 8x4 -> 4x8
+    transpose: the scale for element block s lives at byte 8 * (s & 3) +
+    (s >> 2)) so that the 8 scales one FlashMLA dequant thread needs are
+    contiguous. Dequant: x = value * float(sf), which is exact in bf16, so
+    this python dequant matches the kernels bit-for-bit.
+    """
+    if kv_c.numel() == 0:
+        return kv_c.clone(), k_pe.clone()
+
+    kv_lora_rank = kv_c.shape[-1]
+    rope_dim = k_pe.shape[-1]
+    num_tokens = kv_c.shape[0]
+    num_blocks = max(1, math.ceil(num_tokens / block_size))
+    entry_size = (
+        math.ceil((kv_lora_rank // 2 + rope_dim + kv_lora_rank // 16) / 16) * 16
+    )
+    sf_nope_off = kv_lora_rank // 2 + rope_dim
+
+    tmp_cache = torch.zeros(
+        num_blocks, block_size, entry_size, dtype=torch.uint8, device=kv_c.device
+    )
+    slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=kv_c.device)
+    ops.concat_and_cache_mla(
+        kv_c, k_pe, tmp_cache, slot_mapping, kv_cache_dtype=kv_cache_dtype, scale=scale
+    )
+
+    tokens = tmp_cache.view(-1, entry_size)[:num_tokens]
+    table = torch.tensor(
+        _E2M1_TABLE + [-v for v in _E2M1_TABLE],
+        dtype=torch.float32,
+        device=kv_c.device,
+    )
+
+    def unpack_e2m1(packed: torch.Tensor) -> torch.Tensor:
+        lo = (packed & 0xF).long()
+        hi = (packed >> 4).long()
+        return table[torch.stack([lo, hi], dim=-1).flatten(-2)]
+
+    nope_vals = unpack_e2m1(tokens[:, : kv_lora_rank // 2])
+    num_nope_sf = kv_lora_rank // 16
+    nope_sf = (
+        # undo the on-wire SF permutation -> element-block order
+        tokens[:, sf_nope_off : sf_nope_off + num_nope_sf]
+        .unflatten(-1, (4, num_nope_sf // 4))
+        .transpose(-1, -2)
+        .flatten(-2)
+        .view(torch.float8_e4m3fn)
+        .float()
+    )
+    dequant_kv_c = (
+        (nope_vals.unflatten(-1, (-1, 16)) * nope_sf.unsqueeze(-1)).flatten(-2)
+    ).to(kv_c.dtype)
+
+    # RoPE: plain e4m3, no scale factor
+    rope_raw = tokens[:, kv_lora_rank // 2 : sf_nope_off]
+    dequant_k_pe = rope_raw.view(torch.float8_e4m3fn).to(k_pe.dtype)
+
+    return dequant_kv_c, dequant_k_pe
+
+
 @pytest.mark.parametrize(
     "backend_cls",
     [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend],
     ids=["FlashMLA", "FlashInferTRTLLM"],
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_ds_mla"])
+@pytest.mark.parametrize(
+    "kv_cache_dtype",
+    ["auto", "fp8", "fp8_ds_mla", "nvfp4_ds_mla"],
+)
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 @pytest.mark.parametrize("block_size", [32, 64])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
@@ -218,6 +298,17 @@ def test_sparse_backend_decode_correctness(
             "fp8_ds_mla kv-cache dtype"
         )
 
+    if kv_cache_dtype == "nvfp4_ds_mla":
+        # Unlike "fp8" (an alias canonicalized to "fp8_ds_mla" above), the
+        # NVFP4 DS-MLA dtype must reach the backend unchanged.
+        assert (
+            _canonicalize_sparse_mla_kv_cache_dtype(backend_cls, kv_cache_dtype)
+            == kv_cache_dtype
+        )
+        device_capability = current_platform.get_device_capability()
+        if device_capability is None or device_capability.major != 10:
+            pytest.skip("The NVFP4 DS-MLA kv-cache dtype requires SM 10.x")
+
     supported_block_sizes = backend_cls.get_supported_kernel_block_sizes()
     if block_size not in supported_block_sizes:
         pytest.skip(
@@ -237,6 +328,7 @@ def test_sparse_backend_decode_correctness(
 
     batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
     use_fp8_ds_mla_quantization = kv_cache_dtype == "fp8_ds_mla"
+    use_nvfp4_ds_mla_quantization = kv_cache_dtype == "nvfp4_ds_mla"
 
     device = torch.device(DEVICE_TYPE)
     dtype = torch.bfloat16
@@ -378,6 +470,15 @@ def test_sparse_backend_decode_correctness(
                 block_size=block_size,
                 scale=kv_cache_scale,
                 simulate_sm100_e8m0_scales=is_sm100,
+            )
+            k_pe_full = k_pe_squeezed.unsqueeze(1)
+        elif use_nvfp4_ds_mla_quantization:
+            kv_c_full, k_pe_squeezed = _quantize_dequantize_nvfp4_ds_mla(
+                kv_c_full,
+                k_pe_full.squeeze(1),
+                block_size=block_size,
+                kv_cache_dtype=kv_cache_dtype,
+                scale=kv_cache_scale,
             )
             k_pe_full = k_pe_squeezed.unsqueeze(1)
 
@@ -813,7 +914,7 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
     assert attn_metadata.req_id_per_token.shape[0] == num_batch_tokens
 
     q = torch.zeros(num_mqa_tokens, 4, 576, dtype=torch.bfloat16, device=device)
-    kv_cache = torch.zeros(40 * block_size, 576, dtype=torch.bfloat16, device=device)
+    kv_cache = torch.zeros(40, block_size, 576, dtype=torch.bfloat16, device=device)
     topk_indices = torch.randint(
         0,
         block_size * 10,
@@ -824,18 +925,20 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
 
     captured = {}
 
-    def _stub_kernel(q, kv, indices, lengths):
+    def _stub_kernel(q, kv, indices, lengths, actual_num_heads):
         captured["indices"] = indices
+        captured["actual_num_heads"] = actual_num_heads
         return torch.zeros(q.shape[0], q.shape[1], 512, dtype=q.dtype, device=q.device)
 
     stub_impl = SimpleNamespace(_bf16_flash_mla_kernel=_stub_kernel)
 
     out = FlashMLASparseImpl._forward_bf16_kv(
-        stub_impl, q, kv_cache, topk_indices, attn_metadata
+        stub_impl, q, kv_cache, topk_indices, attn_metadata, q.shape[1]
     )
 
     assert out.shape[0] == num_mqa_tokens
     assert captured["indices"].shape[0] == num_mqa_tokens
+    assert captured["actual_num_heads"] == q.shape[1]
     reference = _triton_convert_reference_impl(
         attn_metadata.req_id_per_token[:num_mqa_tokens],
         attn_metadata.block_table,
@@ -882,6 +985,35 @@ def test_masked_mha_workspace_fits_single_request_boundary(max_query_len, expect
     )
 
 
+@pytest.mark.parametrize(
+    ("backend_name", "tensor_parallel_size", "query_len"),
+    [
+        ("FLASHMLA_SPARSE", 4, 48 * 1024),
+        ("FLASHMLA_SPARSE", 8, 112 * 1024),
+        ("FLASHINFER_MLA_SPARSE", 4, 36 * 1024),
+        ("FLASHINFER_MLA_SPARSE", 8, 64 * 1024),
+    ],
+)
+def test_masked_mha_workspace_guards_long_routing_policy(
+    backend_name, tensor_parallel_size, query_len
+):
+    assert _use_masked_mha(
+        backend_name=backend_name,
+        tensor_parallel_size=tensor_parallel_size,
+        qk_head_dim=256,
+        v_head_dim=256,
+        query_len=query_len,
+        seq_len=query_len,
+        has_context=False,
+    )
+    assert not _masked_mha_workspace_fits(
+        batch_size=1,
+        max_query_len=query_len,
+        max_context_chunk_seq_len=0,
+        workspace_numel=GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
+    )
+
+
 def test_masked_mha_workspace_fits_accounts_for_batch_and_context():
     """Request count and context chunk length are independent multipliers."""
     base = dict(batch_size=2, max_query_len=2048, max_context_chunk_seq_len=2048)
@@ -910,14 +1042,25 @@ PREFILL_BATCH_SPECS = {
 )
 @pytest.mark.parametrize("batch_name", list(PREFILL_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", ["auto"])
+@pytest.mark.parametrize(
+    ("num_heads", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"),
+    [
+        pytest.param(128, 128, 64, 128, id="deepseek_hd192_v128"),
+        pytest.param(64, 192, 64, 256, id="glm5_hd256_v256"),
+    ],
+)
 def test_sparse_backend_prefill_correctness(
     default_vllm_config,
     dist_init,
     batch_name,
     kv_cache_dtype,
+    num_heads,
+    qk_nope_head_dim,
+    qk_rope_head_dim,
+    v_head_dim,
     workspace_init,
 ):
-    """Test single-pass dense and masked MHA for sparse MLA prefill."""
+    """Test dense and masked MHA across supported sparse MLA dimensions."""
     backend_cls = FlashMLASparseBackend
     batch_spec = PREFILL_BATCH_SPECS[batch_name]
 
@@ -925,11 +1068,7 @@ def test_sparse_backend_prefill_correctness(
     dtype = torch.bfloat16
     block_size = 64
 
-    num_heads = 128
     kv_lora_rank = 512
-    qk_nope_head_dim = 128
-    qk_rope_head_dim = 64
-    v_head_dim = 128
     head_size = kv_lora_rank + qk_rope_head_dim
     masked_mha = batch_name.startswith("masked_mha")
     topk_tokens = 200 if masked_mha else 512
@@ -1157,7 +1296,8 @@ def test_sparse_backend_prefill_correctness(
             q=query_cat,
             kv_c_normed=kv_c_cat,
             k_pe=k_pe_cat,
-            kv_c_and_k_pe_cache=kv_cache,
+            # Impls see the bind-time-squeezed [B, N, C] cache; mirror bind_kv_cache.
+            kv_c_and_k_pe_cache=kv_cache.squeeze(1),
             attn_metadata=metadata,
             k_scale=torch.tensor(1.0, device=device),
             output=out_buffer,
@@ -1492,6 +1632,8 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
         topk_indices_buffer=topk_indices,
         num_heads=2,
         kv_lora_rank=1,
+        dcp_world_size=1,
+        need_to_return_lse_for_decode=False,
         _fp8_flash_mla_kernel=run_kernel,
     )
     impl._forward_fp8_kv_mixed_batch = MethodType(
@@ -1512,3 +1654,155 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
     assert kernel_q_shapes == [(1, num_decode_tokens, 2, 3)]
     assert output.shape == (num_decode_tokens, 2, 1)
     assert lse is None
+
+
+def _build_sparse_dcp_vllm_config(
+    local_heads: int,
+    dcp_world_size: int,
+    comm_backend: str = "ag_rs",
+):
+    """Minimal sparse-MLA VllmConfig for the FlashMLASparse DCP head-envelope
+    guard. TP is simulated by mocking ``get_num_attention_heads`` to return the
+    per-rank head count, as the decode-correctness test above does.
+    """
+    kv_lora_rank = 512
+    qk_nope_head_dim = 128
+    qk_rope_head_dim = 64
+    v_head_dim = 128
+    head_size = kv_lora_rank + qk_rope_head_dim
+    topk_tokens = 128
+
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
+        tensor_parallel_size=1,
+        max_model_len=4096,
+        block_size=64,
+        hf_config_override={
+            "index_topk": topk_tokens,
+            "attn_module_list_cfg": [{"topk_tokens": topk_tokens}],
+        },
+    )
+    model_config = vllm_config.model_config
+    model_config.dtype = torch.bfloat16
+    model_config.hf_text_config = SimpleNamespace(
+        q_lora_rank=None,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        model_type="deepseek_v2",
+    )
+    model_config.get_num_attention_heads = MethodType(
+        lambda self, parallel_config: local_heads, model_config
+    )
+    model_config.get_num_kv_heads = MethodType(
+        lambda self, parallel_config: 1, model_config
+    )
+    model_config.get_head_size = MethodType(lambda self: head_size, model_config)
+    model_config.get_sliding_window = MethodType(lambda self: None, model_config)
+
+    vllm_config.cache_config.cache_dtype = "fp8_ds_mla"
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_world_size
+    vllm_config.parallel_config.dcp_comm_backend = comm_backend
+    # The base builder clones the layer's dense-MHA prefill backend from
+    # static_forward_context; the guard tests never run prefill.
+    vllm_config.compilation_config.static_forward_context["placeholder"] = (
+        SimpleNamespace(prefill_backend=None)
+    )
+    return vllm_config
+
+
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
+)
+@pytest.mark.parametrize(
+    "local_heads,dcp_world_size,should_raise",
+    [
+        (16, 8, True),
+        (24, 4, True),
+        (16, 4, False),
+        (16, 1, False),
+    ],
+)
+def test_fp8_dcp_head_envelope_guard(local_heads, dcp_world_size, should_raise):
+    """The fp8 decode envelope (head padding + tile-scheduler metadata) is
+    sized from the local head count while the kernel runs on the DCP-gathered
+    heads, so the builder must reject configs where the two pad differently.
+    """
+    device = torch.device(DEVICE_TYPE)
+    vllm_config = _build_sparse_dcp_vllm_config(local_heads, dcp_world_size)
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    builder_cls = FlashMLASparseBackend.get_builder_cls()
+
+    if should_raise:
+        with pytest.raises(NotImplementedError, match="envelope"):
+            builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+    else:
+        builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+        gathered_heads = local_heads * dcp_world_size
+        local_pad = 64 if local_heads <= 64 else 128
+        gathered_pad = 64 if gathered_heads <= 64 else 128
+        assert builder.fp8_decode_padded_heads == local_pad
+        assert local_pad == gathered_pad
+
+
+def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
+    """A decode row whose top-k shard holds no local candidates (all -1) has
+    undefined kernel out/lse; it must come back as (0, -inf), the identity of
+    the cross-rank LSE merge, or a NaN would survive the merge even at zero
+    weight (0 * NaN = NaN)."""
+    num_tokens, num_heads, head_dim = 3, 2, 3
+    q = torch.empty(num_tokens, num_heads, head_dim, device=DEVICE_TYPE)
+    local_indices = torch.tensor(
+        [[0, 1, -1, -1], [-1, -1, -1, -1], [2, -1, 3, -1]],
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    )
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse."
+        "triton_filter_and_convert_dcp_index",
+        lambda *args, **kwargs: local_indices,
+    )
+
+    def run_kernel(**kwargs):
+        out = torch.full(
+            (1, num_tokens, num_heads, 1), float("nan"), device=DEVICE_TYPE
+        )
+        lse = torch.full((1, num_heads, num_tokens), float("nan"), device=DEVICE_TYPE)
+        for token_id in (0, 2):  # rows with local candidates get real values
+            out[0, token_id] = float(token_id + 1)
+            lse[0, :, token_id] = float(token_id + 1)
+        return out, lse
+
+    metadata = SimpleNamespace(
+        fp8_extra_metadata=FlashMLASparseMetadata.FP8KernelMetadata(
+            scheduler_metadata=object(),  # type: ignore[arg-type]
+            dummy_block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+            cache_lens=torch.empty(1, dtype=torch.int32, device=DEVICE_TYPE),
+        ),
+        req_id_per_token=torch.empty(num_tokens, dtype=torch.int32, device=DEVICE_TYPE),
+        block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        block_size=64,
+        cp_kv_cache_interleave_size=1,
+    )
+    impl = SimpleNamespace(
+        dcp_world_size=2,
+        dcp_rank=0,
+        need_to_return_lse_for_decode=True,
+        _fp8_flash_mla_kernel=run_kernel,
+    )
+
+    out, lse = FlashMLASparseImpl._forward_fp8_kv_mixed_batch(
+        impl, q, torch.empty(0, device=DEVICE_TYPE), local_indices, metadata
+    )
+
+    assert torch.equal(out[1], torch.zeros_like(out[1]))
+    assert torch.isneginf(lse[1]).all()
+    for token_id in (0, 2):
+        assert torch.equal(out[token_id], torch.full_like(out[token_id], token_id + 1))
+        assert torch.equal(lse[token_id], torch.full_like(lse[token_id], token_id + 1))
+    assert out.is_contiguous()
+    assert not out.isnan().any()
+    assert not lse.isnan().any()

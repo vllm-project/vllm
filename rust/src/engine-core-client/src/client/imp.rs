@@ -118,6 +118,11 @@ impl ClientInner {
         self.utility_reg.lock().unregister_many(call_ids);
     }
 
+    #[cfg(test)]
+    pub fn pending_utility_call_count(&self) -> usize {
+        self.utility_reg.lock().len()
+    }
+
     /// Undo a request registration when `add_request()` fails.
     pub fn rollback_request(&self, request_id: &str) {
         let _ = self.request_reg.lock().remove(request_id);

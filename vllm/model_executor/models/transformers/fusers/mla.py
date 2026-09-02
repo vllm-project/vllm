@@ -22,7 +22,6 @@ from vllm.model_executor.models.transformers.fx_utils import (
     replace_expr,
     returned_linear,
     single_self_call,
-    trace,
     upstream_linear,
 )
 from vllm.model_executor.models.transformers.utils import (
@@ -57,8 +56,10 @@ def _norm_size(norm: nn.Module) -> int:
 
 def _is_rms_norm(module: nn.Module) -> bool:
     """Whether `module` computes an RMSNorm, verified by `RMSNormFuser`'s matcher."""
-    graph = trace(module)
-    return graph is not None and RMSNormFuser.match(graph, module) is not None
+    # Go via `get_fuser` because it caches
+    from vllm.model_executor.models.transformers.fuser import get_fuser
+
+    return isinstance(get_fuser(module), RMSNormFuser)
 
 
 def _top_level_index(funcdef: ast.FunctionDef, node: ast.AST) -> int:

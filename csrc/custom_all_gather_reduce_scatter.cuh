@@ -104,6 +104,38 @@ DINLINE P sanitize_lamport_payload(P packed) {
   return value.packed;
 }
 
+__host__ __device__ constexpr int mnnvl_lamport_dirty_stage(int current_stage) {
+  return (current_stage + 2) % 3;
+}
+
+__host__ __device__ constexpr int mnnvl_lamport_next_stage(int current_stage) {
+  return (current_stage + 1) % 3;
+}
+
+template <typename P>
+DINLINE void store_multimem_lamport_payload(P* ptr, P packed) {
+  static_assert(sizeof(P) == 16);
+  // multimem was introduced in PTX 8.1 (CUDA 12.1) for SM90 and newer.
+#if !defined(USE_ROCM) && CUDA_VERSION >= 12010 && defined(__CUDA_ARCH__) && \
+    (__CUDA_ARCH__ >= 900)
+  LamportPack<P> value{.packed = packed};
+  // The local alias remains sentinel until the multicast payload becomes
+  // observable; readers reject prior or partial values and retry.
+  asm volatile("multimem.st.relaxed.sys.global.v4.f32 [%0], {%1,%2,%3,%4};"
+               :
+               : "l"(ptr), "r"(value.words[0]), "r"(value.words[1]),
+                 "r"(value.words[2]), "r"(value.words[3])
+               : "memory");
+#elif defined(USE_ROCM)
+  __builtin_trap();
+#else
+  // Multicast mappings do not exist before SM90. Fail closed if this kernel is
+  // ever dispatched for an unsupported target instead of issuing an undefined
+  // ordinary store to a multicast address.
+  asm volatile("trap;");
+#endif
+}
+
 template <typename P>
 DINLINE P wait_lamport_payload(const P* ptr) {
   auto value = load_lamport_pack(ptr);
@@ -199,7 +231,9 @@ __global__ void __launch_bounds__(kMnnvlLamportAgThreads, 1)
   int stride = gridDim.x * blockDim.x;
   uint32_t epoch = epochs[0];
   int current_stage = epoch % 3;
-  int dirty_stage = (epoch + 1) % 3;
+  // A peer may start the next epoch after we publish but before we finish.
+  // Clean the previous stage, which cannot be reused until two epochs later.
+  int dirty_stage = mnnvl_lamport_dirty_stage(current_stage);
   int dirty_size = epochs[2 + dirty_stage];
   auto local_buffer = reinterpret_cast<P*>(const_cast<void*>(dp.ptrs[rank]));
   auto current_local = local_buffer + current_stage * stage_size;
@@ -213,8 +247,11 @@ __global__ void __launch_bounds__(kMnnvlLamportAgThreads, 1)
   P local_value;
   if (tid < size_per_rank) {
     local_value = packed_input[tid];
-    current_multicast[rank * size_per_rank + tid] =
-        sanitize_lamport_payload(local_value);
+    // A CUDA multicast mapping may only be accessed with multimem PTX;
+    // ordinary global loads and stores have undefined behavior.
+    store_multimem_lamport_payload(
+        current_multicast + rank * size_per_rank + tid,
+        sanitize_lamport_payload(local_value));
   }
 #if !defined(USE_ROCM) && CUDA_VERSION >= 12000 && defined(__CUDA_ARCH__) && \
     (__CUDA_ARCH__ >= 900)
@@ -241,7 +278,7 @@ __global__ void __launch_bounds__(kMnnvlLamportAgThreads, 1)
   if (tid == 0) {
     while (*reinterpret_cast<volatile uint32_t*>(&epochs[1]) < gridDim.x);
     epochs[2 + current_stage] = total_size;
-    epochs[0] = epoch + 1;
+    epochs[0] = mnnvl_lamport_next_stage(current_stage);
     epochs[1] = 0;
   }
 }
@@ -267,7 +304,9 @@ __global__ void __launch_bounds__(kMnnvlLamportRsThreads, 1)
   int stride = gridDim.x * blockDim.x;
   uint32_t epoch = epochs[0];
   int current_stage = epoch % 3;
-  int dirty_stage = (epoch + 1) % 3;
+  // A peer may start the next epoch after we publish but before we finish.
+  // Clean the previous stage, which cannot be reused until two epochs later.
+  int dirty_stage = mnnvl_lamport_dirty_stage(current_stage);
   int dirty_size = epochs[2 + dirty_stage];
   auto local_buffer = reinterpret_cast<P*>(const_cast<void*>(dp.ptrs[rank]));
   auto current_local = local_buffer + current_stage * stage_size;
@@ -319,7 +358,7 @@ __global__ void __launch_bounds__(kMnnvlLamportRsThreads, 1)
   if (tid == 0) {
     while (*reinterpret_cast<volatile uint32_t*>(&epochs[1]) < gridDim.x);
     epochs[2 + current_stage] = size_per_rank * ngpus;
-    epochs[0] = epoch + 1;
+    epochs[0] = mnnvl_lamport_next_stage(current_stage);
     epochs[1] = 0;
   }
 }

@@ -1,0 +1,5 @@
+Qwen3.5-35B-A3B-FP8-humming.yaml
+NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4-humming.yaml
+Qwen3-30B-A3B-MXFP4A16-humming.yaml
+Qwen3-30B-A3B-NVFP4-humming.yaml
+Qwen2-1.5B-Instruct-FP8W8-humming.yaml

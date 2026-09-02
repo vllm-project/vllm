@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import torch
 from regex import escape as regex_escape
 
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -186,22 +187,27 @@ def validate_structured_output_request_outlines(params: SamplingParams):
                 json.loads(so_params.json)
                 schema = so_params.json
             except json.JSONDecodeError as e:
-                raise ValueError("Invalid JSON grammar specification.") from e
+                raise VLLMValidationError("Invalid JSON grammar specification.") from e
         else:
             try:
                 schema = json.dumps(so_params.json)
             except Exception as e:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Error serializing structured outputs jsonschema: {e}"
                 ) from e
-        pattern = json_schema.build_regex_from_schema(schema)
+        try:
+            pattern = json_schema.build_regex_from_schema(schema)
+        except Exception as e:
+            raise VLLMValidationError(
+                f"Failed to transform json schema into a regex: {e}"
+            ) from e
         validate_regex_is_buildable(pattern)
     elif so_params.choice:
         choices = [regex_escape(str(choice)) for choice in so_params.choice]
         regex = "(" + "|".join(choices) + ")"
         validate_regex_is_buildable(regex)
     elif so_params.grammar:
-        raise ValueError(
+        raise VLLMValidationError(
             "Outlines structured outputs backend "
             "does not support grammar specifications"
         )
@@ -315,19 +321,19 @@ def validate_regex_is_buildable(pattern: str) -> None:
         parsed = sre_parse.parse(pattern)
 
     except sre_constants.error as e:
-        raise ValueError(f"Error parsing regex: {e}") from e
+        raise VLLMValidationError(f"Error parsing regex: {e}") from e
 
     try:
         _check_unsupported(parsed)
     except ValueError as e:
-        raise ValueError(
+        raise VLLMValidationError(
             f"Regex uses unsupported feature for structured outputs: {e}. "
             "Only basic matching constructs are supported—lookarounds, "
             "backreferences, and unicode boundaries are not."
         ) from e
 
     if _prefix_needs_context(parsed):
-        raise ValueError(
+        raise VLLMValidationError(
             "Regex does not have a anchored universal start state"
             "This means that the Regex uses anchors (^) or look-arounds "
             "in a way which requires context before any token is matched."

@@ -10,17 +10,16 @@ from pydantic import Field, model_validator
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
-    OpenAIBaseModel,
-    PerRequestTimingMetrics,
+    PerRequestMetrics,
     StopParam,
     StreamOptions,
-    UsageInfo,
     structured_outputs_from_response_format,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -175,6 +174,11 @@ class CompletionRequest(OpenAIBaseModel):
             "need to map generated text back to input tokens."
         ),
     )
+    routed_experts_prompt_start: int = Field(
+        default=0,
+        ge=0,
+        description="Skip the first N prompt tokens from returned routed-expert data.",
+    )
     return_token_offsets: bool | None = Field(
         default=False,
         description=(
@@ -194,6 +198,7 @@ class CompletionRequest(OpenAIBaseModel):
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -394,6 +399,7 @@ class CompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             thinking_token_budget=self.thinking_token_budget,
+            routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
 
     @model_validator(mode="before")
@@ -407,6 +413,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_response_format(cls, data):
+        if not isinstance(data, dict):
+            return data
         response_format = data.get("response_format")
         if response_format is None:
             return data
@@ -438,6 +446,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_structured_outputs_count(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("structured_outputs", None) is None:
             return data
 
@@ -466,6 +476,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_logprobs(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("logprob_token_ids") and data.get("use_beam_search"):
             raise VLLMValidationError(
                 "`logprob_token_ids` is not supported with beam search.",
@@ -514,9 +526,13 @@ class CompletionRequest(OpenAIBaseModel):
                     parameter="prompt_logprobs",
                     value=prompt_logprobs,
                 )
-        if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
+        if (
+            (logprobs := data.get("logprobs")) is not None
+            and logprobs < 0
+            and logprobs != -1
+        ):
             raise VLLMValidationError(
-                "`logprobs` must be a positive value.",
+                "`logprobs` must be a positive value or -1.",
                 parameter="logprobs",
                 value=logprobs,
             )
@@ -526,6 +542,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_stream_options(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("stream_options") and not data.get("stream"):
             raise VLLMValidationError(
                 "Stream options can only be defined when `stream=True`.",
@@ -537,6 +555,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt_and_prompt_embeds(cls, data):
+        if not isinstance(data, dict):
+            return data
         prompt = data.get("prompt")
         prompt_embeds = data.get("prompt_embeds")
 
@@ -556,6 +576,8 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt_list_length(cls, data):
+        if not isinstance(data, dict):
+            return data
         max_prompts = envs.VLLM_MAX_COMPLETION_PROMPTS
 
         prompt = data.get("prompt")
@@ -611,7 +633,7 @@ class CompletionResponseChoice(OpenAIBaseModel):
     prompt_token_ids: list[int] | None = None  # For prompt
     # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
     # (numpy serialization). Shape after decode:
-    #   (num_tokens - 1, num_layers, num_experts_per_tok)  dtype uint8/uint16
+    #   (num_tokens - 1, num_layers, num_experts_per_tok) dtype uint8/uint16/int32
     # ``num_tokens - 1`` because the last sampled token has not been
     # forwarded yet and therefore has no routing data.
     # Decode:
@@ -638,7 +660,7 @@ class CompletionResponse(OpenAIBaseModel):
     ec_transfer_params: dict[str, Any] | None = Field(
         default=None, description="ECTransfer parameters."
     )
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -670,4 +692,4 @@ class CompletionStreamResponse(OpenAIBaseModel):
     # Set only on the final chunk of a stream to mirror non-streaming responses
     # without the per-chunk serialization overhead.
     system_fingerprint: str | None = None
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None

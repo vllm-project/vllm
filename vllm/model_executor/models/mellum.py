@@ -92,24 +92,30 @@ class MellumAttention(Qwen3MoeAttention):
             rope_parameters=rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            per_layer_sliding_window=per_layer_sliding_window,
-            prefix=f"{prefix}.attn",
-            **(
-                {
-                    "layer_idx": extract_layer_index(prefix),
-                    "dual_chunk_attention_config": dual_chunk_attention_config,
-                }
-                if dual_chunk_attention_config
-                else {}
-            ),
-        )
+        if dual_chunk_attention_config:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                per_layer_sliding_window=per_layer_sliding_window,
+                prefix=f"{prefix}.attn",
+                layer_idx=extract_layer_index(prefix),
+                dual_chunk_attention_config=dual_chunk_attention_config,
+            )
+        else:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                per_layer_sliding_window=per_layer_sliding_window,
+                prefix=f"{prefix}.attn",
+            )
 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -221,7 +227,7 @@ class MellumForCausalLM(Qwen3MoeForCausalLM):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

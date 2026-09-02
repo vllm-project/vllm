@@ -11,12 +11,13 @@
 /vllm/model_executor/layers/mamba @tdoublep @tomeras91
 /vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
 /vllm/model_executor/model_loader @22quinn
-/vllm/model_executor/layers/batch_invariant.py @yewentao256
+/vllm/model_executor/determinism/ @yewentao256
 /vllm/model_executor/custom_op.py @shen-shanshan
 /vllm/ir @ProExpertProg
 /vllm/kernels/ @ProExpertProg @tjtanaa
 /vllm/kernels/helion @ProExpertProg @zou3519
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa @shen-shanshan
+/vllm/multimodal/media @Isotr0py
 /vllm/vllm_flash_attn @LucasWilkinson @MatthewBonanni
 /CMakeLists.txt @tlrmchlsmth @LucasWilkinson @Harry-Chen
 /cmake @tlrmchlsmth @LucasWilkinson @Harry-Chen
@@ -104,8 +105,8 @@
 /tests/kernels/ir @ProExpertProg @tjtanaa
 /tests/models @DarkLight1337 @ywang96 @AndreasKaratzas
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche @shen-shanshan
+/tests/multimodal/media @Isotr0py
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye @AndreasKaratzas
-/tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
 /tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
@@ -126,6 +127,7 @@
 /tests/models/transformers @hmellor
 
 # Docs
+/docs/features/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety @zyongye
 /docs/mkdocs @hmellor
 /docs/**/*.yml @hmellor
 /requirements/docs.txt @hmellor
@@ -217,6 +219,6 @@ mkdocs.yaml @hmellor
 /vllm/model_executor/layers/pooler @noooop
 
 # Security guide and policies
-/docs/usage/security.md @russellb
-/SECURITY.md @russellb
-/docs/contributing/vulnerability_management.md @russellb
+/docs/usage/security.md @russellb @jperezdealgaba
+/SECURITY.md @russellb @jperezdealgaba
+/docs/contributing/vulnerability_management.md @russellb @jperezdealgaba

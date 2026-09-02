@@ -95,6 +95,7 @@ class AnthropicToolChoice(BaseModel):
 
     type: Literal["auto", "any", "tool", "none"]
     name: str | None = None
+    disable_parallel_tool_use: bool | None = None
 
     @model_validator(mode="after")
     def validate_name_required_for_tool(self) -> "AnthropicToolChoice":
@@ -140,6 +141,7 @@ class AnthropicMessagesRequest(BaseModel):
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -157,6 +159,13 @@ class AnthropicMessagesRequest(BaseModel):
         default=None,
         description=(
             "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
+    )
+    vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
+        default=None,
+        description=(
+            "Additional request parameters with (list of) string or "
+            "numeric values, used by custom extensions."
         ),
     )
     chat_template_kwargs: dict[str, Any] | None = Field(

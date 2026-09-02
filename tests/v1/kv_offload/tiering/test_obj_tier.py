@@ -74,6 +74,8 @@ def _make_offloading_config(
             pcp_size=1,
             dcp_size=1,
             data_parallel_index=0,
+            data_parallel_size=1,
+            data_parallel_rank_local=None,
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
@@ -111,7 +113,7 @@ def make_job(
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids, dtype=np.int64),
+        block_ids=np.array(block_ids, dtype=np.int32),
         is_promotion=False,
         req_context=_CTX,
     )
