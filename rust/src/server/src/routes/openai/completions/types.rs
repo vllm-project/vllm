@@ -2,16 +2,17 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
-use vllm_text::Prompt;
+use vllm_text::{Prompt, TruncationSide};
 
 use crate::routes::openai::utils::types::{
-    LogProbs, Normalizable, PromptLogprobs, StreamOptions, StringOrArray, Usage, default_true,
-    deserialize_request_top_k, validate_stop,
+    LogProbs, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope, StringOrArray,
+    Usage, default_true, deserialize_request_top_k, validate_stop,
 };
 
 /// Serde default for `CompletionRequest::max_tokens`, matching the Python vLLM
@@ -137,6 +138,9 @@ pub struct CompletionRequest {
     /// Truncate prompt tokens to this length
     pub truncate_prompt_tokens: Option<i64>,
 
+    /// Which side to truncate from when truncate_prompt_tokens is active
+    pub truncation_side: Option<TruncationSide>,
+
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,
 
@@ -241,22 +245,17 @@ pub(super) struct CompletionChoice {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CompletionStreamResponse {
-    pub id: String,
-    pub object: String,
-    pub created: u64,
-    pub model: String,
+    #[serde(flatten)]
+    pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<CompletionStreamChoice>,
     pub usage: Option<Usage>,
 }
 
 impl CompletionStreamResponse {
     /// Create a stream response with the standard envelope fields pre-filled.
-    pub fn new(id: &str, model: &str, created: u64) -> Self {
+    pub fn new(envelope: &Arc<StreamResponseEnvelope>) -> Self {
         Self {
-            id: id.to_string(),
-            object: "text_completion".to_string(),
-            created,
-            model: model.to_string(),
+            envelope: Arc::clone(envelope),
             choices: Vec::new(),
             usage: None,
         }

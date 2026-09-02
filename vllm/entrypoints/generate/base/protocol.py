@@ -1,0 +1,340 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Adapted from
+# https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
+import json
+from typing import Annotated, Any, Literal, TypeAlias
+
+import regex as re
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_serializer,
+)
+
+import vllm.envs as envs
+from vllm.config.utils import replace
+from vllm.entrypoints.chat_utils import make_tool_call_id
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.exceptions import VLLMValidationError
+from vllm.logger import init_logger
+from vllm.sampling_params import StructuredOutputsParams
+from vllm.utils.import_utils import resolve_obj_by_qualname
+
+logger = init_logger(__name__)
+
+StopParam: TypeAlias = (
+    str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
+)
+
+
+class SpeculativeDecodingMetrics(OpenAIBaseModel):
+    """Per-request speculative-decoding acceptance metrics.
+
+    Experimental, subject to change. Only populated for single-sequence requests
+    (`n == 1`); `null` for `n > 1`, mirroring the timing metrics.
+    """
+
+    mean_acceptance_length: float
+    draft_acceptance_rate: float
+    # Dense histogram: index j holds the number of verify steps that accepted
+    # exactly j draft tokens (length num_spec_tokens + 1). Excludes the
+    # always-accepted bonus token.
+    acceptance_histogram: list[int]
+    num_spec_steps: int
+    num_accepted_draft_tokens: int
+    num_draft_tokens: int
+    num_spec_tokens: int
+    # Ordered per-verify-step arrays; populated only at the `detailed` level.
+    per_step_accepted: list[int] | None = None
+    per_step_drafted: list[int] | None = None
+
+
+class PerRequestMetrics(OpenAIBaseModel):
+    time_to_first_token_ms: float | None = None
+    generation_time_ms: float | None = None
+    queue_time_ms: float | None = None
+    mean_itl_ms: float | None = None
+    tokens_per_second: float | None = None
+    # Experimental, subject to change.
+    speculative_decoding: SpeculativeDecodingMetrics | None = None
+
+
+class RequestResponseMetadata(BaseModel):
+    request_id: str
+    final_usage_info: UsageInfo | None = None
+
+
+class JsonSchemaResponseFormat(OpenAIBaseModel):
+    name: str
+    description: str | None = None
+    # schema is the field in openai but that causes conflicts with pydantic so
+    # instead use json_schema with an alias
+    json_schema: dict[str, Any] | None = Field(default=None, alias="schema")
+    strict: bool | None = None
+
+
+class LegacyStructuralTag(OpenAIBaseModel):
+    begin: str
+    # schema is the field, but that causes conflicts with pydantic so
+    # instead use structural_tag_schema with an alias
+    structural_tag_schema: dict[str, Any] | None = Field(default=None, alias="schema")
+    end: str
+
+
+class LegacyStructuralTagResponseFormat(OpenAIBaseModel):
+    type: Literal["structural_tag"]
+    structures: list[LegacyStructuralTag]
+    triggers: list[str]
+
+
+class StructuralTagResponseFormat(OpenAIBaseModel):
+    type: Literal["structural_tag"]
+    format: Any
+
+
+AnyStructuralTagResponseFormat: TypeAlias = (
+    LegacyStructuralTagResponseFormat | StructuralTagResponseFormat
+)
+
+
+class ResponseFormat(OpenAIBaseModel):
+    # type must be "json_schema", "json_object", or "text"
+    type: Literal["text", "json_object", "json_schema"]
+    json_schema: JsonSchemaResponseFormat | None = None
+
+
+AnyResponseFormat: TypeAlias = (
+    ResponseFormat | StructuralTagResponseFormat | LegacyStructuralTagResponseFormat
+)
+
+
+def structured_outputs_from_response_format(
+    structured_outputs: StructuredOutputsParams | None,
+    response_format: AnyResponseFormat | None,
+) -> StructuredOutputsParams | None:
+    """Apply ``response_format`` overrides to ``structured_outputs``."""
+    if response_format is None or response_format.type == "text":
+        return structured_outputs
+
+    overrides: dict[str, Any]
+    if response_format.type == "json_object":
+        overrides = {"json_object": True}
+    elif response_format.type == "json_schema":
+        json_schema = response_format.json_schema
+        assert json_schema is not None
+        overrides = {"json": json_schema.json_schema}
+    else:
+        assert isinstance(
+            response_format,
+            (
+                LegacyStructuralTagResponseFormat,
+                StructuralTagResponseFormat,
+            ),
+        )
+        overrides = {
+            "structural_tag": json.dumps(response_format.model_dump(by_alias=True))
+        }
+
+    if structured_outputs is None:
+        return StructuredOutputsParams(**overrides)
+
+    return replace(structured_outputs, **overrides)
+
+
+def validate_structural_tag_response_format(
+    response_format: AnyStructuralTagResponseFormat | dict[str, Any],
+) -> None:
+    """Validate structural tags before they are sent to the engine.
+
+    Engine-side validation reports malformed structural tags as generation
+    failures. OpenAI request parsing should classify them as bad requests.
+    """
+    from pydantic import TypeAdapter, ValidationError
+
+    if isinstance(response_format, dict):
+        try:
+            response_format = TypeAdapter(
+                AnyStructuralTagResponseFormat
+            ).validate_python(response_format)
+        except ValidationError as exc:
+            raise VLLMValidationError(
+                "Invalid response_format structural_tag specification.",
+                parameter="response_format",
+            ) from exc
+
+    try:
+        payload = json.dumps(response_format.model_dump(by_alias=True))
+        validate_structural_tag_payload(payload, parameter="response_format")
+    except (TypeError, ValueError) as exc:
+        raise VLLMValidationError(
+            "Invalid response_format structural_tag specification.",
+            parameter="response_format",
+        ) from exc
+
+
+def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
+    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+
+    if isinstance(payload, str) and not payload:
+        raise VLLMValidationError(
+            f"Invalid {parameter} structural_tag specification.",
+            parameter=parameter,
+        )
+
+    try:
+        validate_xgrammar_grammar(
+            SamplingParams(
+                structured_outputs=StructuredOutputsParams(structural_tag=payload)
+            )
+        )
+    except (TypeError, ValueError, VLLMValidationError) as exc:
+        raise VLLMValidationError(
+            f"Invalid {parameter} structural_tag specification.",
+            parameter=parameter,
+        ) from exc
+
+
+def validate_structured_outputs_structural_tag(
+    structured_outputs: Any,
+) -> None:
+    from vllm.sampling_params import StructuredOutputsParams
+
+    if isinstance(structured_outputs, StructuredOutputsParams):
+        structural_tag = structured_outputs.structural_tag
+    elif isinstance(structured_outputs, dict):
+        structural_tag = structured_outputs.get("structural_tag")
+    else:
+        return
+    if structural_tag is not None:
+        validate_structural_tag_payload(
+            structural_tag,
+            parameter="structured_outputs",
+        )
+
+
+class StreamOptions(OpenAIBaseModel):
+    include_usage: bool | None = False
+    continuous_usage_stats: bool | None = False
+
+
+class FunctionDefinition(OpenAIBaseModel):
+    name: str
+    description: str | None = None
+    parameters: dict[str, Any] | None = None
+    strict: bool | None = None
+    defer_loading: bool | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        data = {k: v for k, v in data.items() if k in type(self).model_fields}
+        if self.strict is None:
+            data.pop("strict", None)
+        if self.defer_loading is None:
+            data.pop("defer_loading", None)
+        return data
+
+
+# extra="forbid" is a workaround to have kwargs as a field,
+# see https://github.com/pydantic/pydantic/issues/3125
+class LogitsProcessorConstructor(BaseModel):
+    qualname: str
+    args: list[Any] | None = None
+    kwargs: dict[str, Any] | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+LogitsProcessors = list[str | LogitsProcessorConstructor]
+
+
+def get_logits_processors(
+    processors: LogitsProcessors | None, pattern: str | None
+) -> list[Any] | None:
+    if processors and pattern:
+        logits_processors = []
+        for processor in processors:
+            qualname = processor if isinstance(processor, str) else processor.qualname
+            if not re.match(pattern, qualname):
+                raise ValueError(
+                    f"Logits processor '{qualname}' is not allowed by this "
+                    "server. See --logits-processor-pattern engine argument "
+                    "for more information."
+                )
+            try:
+                logits_processor = resolve_obj_by_qualname(qualname)
+            except Exception as e:
+                raise ValueError(
+                    f"Logits processor '{qualname}' could not be resolved: {e}"
+                ) from e
+            if isinstance(processor, LogitsProcessorConstructor):
+                logits_processor = logits_processor(
+                    *processor.args or [], **processor.kwargs or {}
+                )
+            logits_processors.append(logits_processor)
+        return logits_processors
+    elif processors:
+        raise ValueError(
+            "The `logits_processors` argument is not supported by this "
+            "server. See --logits-processor-pattern engine argument "
+            "for more information."
+        )
+    return None
+
+
+class FunctionCall(OpenAIBaseModel):
+    # Internal field to preserve native tool call ID from tool parser.
+    # Excluded from serialization to maintain OpenAI API compatibility
+    # (function object should only contain 'name' and 'arguments').
+    id: str | None = Field(default=None, exclude=True)
+    name: str
+    arguments: str
+
+
+class ToolCall(OpenAIBaseModel):
+    id: str = Field(default_factory=make_tool_call_id)
+    type: Literal["function"] = "function"
+    function: FunctionCall
+
+
+class DeltaFunctionCall(BaseModel):
+    name: str | None = None
+    arguments: str | None = None
+
+
+# a tool call delta where everything is optional
+class DeltaToolCall(OpenAIBaseModel):
+    id: str | None = None
+    type: Literal["function"] | None = None
+    index: int
+    function: DeltaFunctionCall | None = None
+
+
+class ExtractedToolCallInformation(BaseModel):
+    # indicate if tools were called
+    tools_called: bool
+
+    # extracted tool calls
+    tool_calls: list[ToolCall]
+
+    # content - per OpenAI spec, content AND tool calls can be returned rarely
+    # But some models will do this intentionally
+    content: str | None = None
+
+
+class DeltaMessage(OpenAIBaseModel):
+    role: str | None = None
+    content: str | None = None
+    reasoning: str | None = None
+    tool_calls: list[DeltaToolCall] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if len(data.get("tool_calls", [])) == 0:
+            data.pop("tool_calls", None)
+        return data
