@@ -39,6 +39,7 @@ def _make_stream_chunk(
     finish_reason: str | None = None,
     request_id: str = "test-req",
     usage: dict | None = None,
+    logprobs: dict | None = None,
 ) -> GenerateStreamResponse:
     """Build a GenerateStreamResponse SSE chunk."""
 
@@ -49,10 +50,27 @@ def _make_stream_chunk(
                 index=index,
                 token_ids=token_ids,
                 finish_reason=finish_reason,
+                logprobs=logprobs,
             )
         ],
         usage=UsageInfo(**usage) if usage else None,
     )
+
+
+def _placeholder_logprobs(token_ids: list[int]) -> dict:
+    """Per-token logprob entries using token_id:N placeholders, as sent by
+    the generate worker."""
+    return {
+        "content": [
+            {
+                "token": f"token_id:{tid}",
+                "logprob": -0.5,
+                "bytes": None,
+                "top_logprobs": [],
+            }
+            for tid in token_ids
+        ]
+    }
 
 
 def _make_usage_chunk(
@@ -329,6 +347,115 @@ class TestDerenderCompletionStream:
             generate_chunk=_make_stream_chunk(token_ids, finish_reason="length"),
         )
         assert chunk.choices[0].finish_reason == "length"
+
+
+class TestStreamLogprobs:
+    """Streaming derender must carry per-chunk logprobs with placeholders
+    resolved, matching what the generate streaming path emits."""
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_logprobs_resolved_per_chunk(self, derenderer, tokenizer):
+        """Each streamed chunk carries logprobs with token_id:N resolved."""
+        token_ids = tokenizer.encode("hello world")[:6]
+        mid = len(token_ids) // 2
+
+        state = None
+        for part in (token_ids[:mid], token_ids[mid:]):
+            chunk, state = await derenderer.derender_chat_stream(
+                model=MODEL_NAME,
+                generate_chunk=_make_stream_chunk(
+                    part, logprobs=_placeholder_logprobs(part)
+                ),
+                state=state,
+            )
+            logprobs = chunk.choices[0].logprobs
+            assert logprobs is not None and logprobs.content is not None
+            assert len(logprobs.content) == len(part)
+            for entry in logprobs.content:
+                assert not entry.token.startswith("token_id:"), (
+                    f"placeholder not resolved: {entry.token!r}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_logprobs_multibyte_across_chunks(
+        self, derenderer, tokenizer
+    ):
+        """Byte-fallback correction works when a multi-byte character's
+        tokens are split across chunks (context carried in stream_state)."""
+        token_ids = tokenizer.encode("👍", add_special_tokens=False)
+        if len(token_ids) < 2 or "�" not in tokenizer.decode([token_ids[-1]]):
+            pytest.skip("Tokenizer does not byte-split this character")
+
+        state = None
+        last_chunk = None
+        # One token per chunk: every entry after the first needs cross-chunk
+        # context to resolve without U+FFFD.
+        for i, tid in enumerate(token_ids):
+            last_chunk, state = await derenderer.derender_chat_stream(
+                model=MODEL_NAME,
+                generate_chunk=_make_stream_chunk(
+                    [tid], logprobs=_placeholder_logprobs([tid])
+                ),
+                state=state,
+            )
+
+        assert last_chunk is not None
+        final_entry = last_chunk.choices[0].logprobs.content[0]
+        assert not final_entry.token.endswith("�"), (
+            "byte-fallback correction failed across chunk boundary: "
+            f"{final_entry.token!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_completion_stream_logprobs_text_offset_absolute(
+        self, derenderer, tokenizer
+    ):
+        """text_offset continues across chunks instead of restarting at 0."""
+        token_ids = tokenizer.encode("hello world")[:6]
+        mid = len(token_ids) // 2
+
+        chunk1, state = await derenderer.derender_completion_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                token_ids[:mid], logprobs=_placeholder_logprobs(token_ids[:mid])
+            ),
+        )
+        chunk2, _ = await derenderer.derender_completion_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                token_ids[mid:], logprobs=_placeholder_logprobs(token_ids[mid:])
+            ),
+            state=state,
+        )
+
+        assert chunk1.choices[0].logprobs.text_offset[0] == 0
+        assert chunk2.choices[0].logprobs.text_offset[0] == len(chunk1.choices[0].text)
+
+    @pytest.mark.asyncio
+    async def test_stream_logprob_state_stays_bounded(self, derenderer, tokenizer):
+        """Carried logprob context never exceeds the 4-token window."""
+        token_ids = tokenizer.encode("the quick brown fox jumps over the lazy dog")
+        state = None
+        for tid in token_ids:
+            _, state = await derenderer.derender_chat_stream(
+                model=MODEL_NAME,
+                generate_chunk=_make_stream_chunk(
+                    [tid], logprobs=_placeholder_logprobs([tid])
+                ),
+                state=state,
+            )
+        assert state is not None
+        assert len(state.logprob_context_token_ids) <= 4
+
+    @pytest.mark.asyncio
+    async def test_stream_without_logprobs_unchanged(self, derenderer, tokenizer):
+        """Chunks without logprobs keep logprobs=None on the output choice."""
+        token_ids = tokenizer.encode("hello")[:3]
+        chunk, _ = await derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(token_ids),
+        )
+        assert chunk.choices[0].logprobs is None
 
 
 class TestDerenderChatStream:
