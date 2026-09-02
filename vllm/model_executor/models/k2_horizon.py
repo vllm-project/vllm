@@ -136,7 +136,9 @@ def calc_router_weights(
 
     selection_scores = routing_scores
     if e_score_correction_bias is not None:
-        selection_scores = selection_scores + e_score_correction_bias.to(selection_scores)
+        selection_scores = selection_scores + e_score_correction_bias.to(
+            selection_scores
+        )
 
     selected_indices = torch.topk(selection_scores, top_k, dim=-1).indices
     routing_weights = torch.gather(routing_scores, dim=-1, index=selected_indices)
@@ -703,7 +705,9 @@ class K2HorizonMoVAAttention(nn.Module):
             prefix=f"{prefix}.v_router",
         )
         if self.v_router.bias is not None:
-            self.v_router.bias = nn.Parameter(self.v_router.bias.float(), requires_grad=False)
+            self.v_router.bias = nn.Parameter(
+                self.v_router.bias.float(), requires_grad=False
+            )
 
         self.v_experts = nn.ModuleList(
             [
@@ -1215,10 +1219,12 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                         num_kv_heads = self.config.num_key_value_heads
                         if num_kv_heads < tp_size:
                             num_kv_head_replicas = tp_size // num_kv_heads
-                            loaded_weight = loaded_weight.reshape(
-                                num_kv_heads, -1, *loaded_weight.shape[1:]
-                            ).repeat_interleave(num_kv_head_replicas, dim=0).reshape(
-                                -1, *loaded_weight.shape[1:]
+                            loaded_weight = (
+                                loaded_weight.reshape(
+                                    num_kv_heads, -1, *loaded_weight.shape[1:]
+                                )
+                                .repeat_interleave(num_kv_head_replicas, dim=0)
+                                .reshape(-1, *loaded_weight.shape[1:])
                             )
 
                     param = params_dict[qk_name]
