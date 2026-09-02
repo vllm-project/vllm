@@ -37,6 +37,20 @@ MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
 # ---------------------------------------------------------------------------
 
 
+def _pack_zp_rows_for_kernel(zp_nkg: torch.Tensor) -> torch.Tensor:
+    """Pack raw uint4 zero points along N: [N, G] int32 -> [N//8, G] int32.
+
+    Row n's nibble lands in word[n//8] at bits 4*(n%8).
+    """
+    assert zp_nkg.dtype == torch.int32
+    N, G = zp_nkg.shape
+    assert N % 8 == 0
+    shifts = (torch.arange(8, device=zp_nkg.device, dtype=torch.int32) * 4)[:, None]
+    return torch.sum(
+        (zp_nkg.view(N // 8, 8, G) & 0xF) << shifts, dim=1, dtype=torch.int32
+    ).contiguous()
+
+
 def _rdna_hybrid_w4a16_reference(
     x_mk: torch.Tensor,
     w_int4_nk: torch.Tensor,
@@ -50,8 +64,8 @@ def _rdna_hybrid_w4a16_reference(
     x_mk: [M, K] fp16/bf16
     w_int4_nk: [N, K] int32 with raw uint4 values in [0, 15]
     scales_nkg: [N, K//G] fp16/bf16
-    zp_nkg: [N, K//G] fp16/bf16 raw zero points (already in act dtype),
-            or None for symmetric (uint4b8, dequant subtracts 8)
+    zp_nkg: [N, K//G] int32 raw zero points in [0, 15], or None for
+            symmetric (uint4b8, dequant subtracts 8)
     """
     G = group_size
     N, K = w_int4_nk.shape
@@ -110,13 +124,16 @@ def test_rdna_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M)
         0.05 * torch.rand((N, K // group_size), device=device, dtype=torch.float32)
     ).to(dtype)
 
-    # Optional raw zero points [N, K//G] in act dtype.
+    # Optional raw zero points, [N, K//G] int32 for the reference and packed
+    # along N for the op.
     if has_zp:
         zp_nkg = torch.randint(
             0, 16, (N, K // group_size), device=device, dtype=torch.int32
-        ).to(dtype)
+        )
+        w_zp = _pack_zp_rows_for_kernel(zp_nkg)
     else:
         zp_nkg = None
+        w_zp = None
 
     from vllm.utils.platform_utils import num_compute_units
 
@@ -124,7 +141,7 @@ def test_rdna_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M)
         x_mk,
         w_q,
         scales_nkg,
-        zp_nkg,
+        w_zp,
         None,  # bias
         num_compute_units(),
         group_size,
@@ -334,7 +351,7 @@ def test_rdna_hybrid_w4a16_process_weights_symmetric_repack(group_size, dist_ini
 
 @pytest.mark.parametrize("group_size", SUPPORTED_GROUP_SIZES)
 def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_init):
-    """uint4 (asymmetric): zero points unpacked to raw values in act dtype."""
+    """uint4 (asymmetric): zero points are packed [N//8, K//G] int32."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
 
@@ -378,10 +395,11 @@ def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_in
     )
     kernel.process_weights_after_loading(layer)
 
-    # Zero-points: unpacked to [N, K//G], cast to act dtype, raw values [0..15].
-    assert layer.weight_zero_point.dtype == torch.float16
-    assert tuple(layer.weight_zero_point.shape) == (N, K // G)
-    expected_zp = zeros_int4_gn.t().to(torch.float16)  # [N, K//G]
+    # Zero-points: [N//8, K//G] int32, row n's nibble at word[n//8]
+    # bits 4*(n%8).
+    assert layer.weight_zero_point.dtype == torch.int32
+    assert tuple(layer.weight_zero_point.shape) == (N // 8, K // G)
+    expected_zp = _pack_zp_rows_for_kernel(zeros_int4_gn.t().contiguous())
     torch.testing.assert_close(layer.weight_zero_point, expected_zp)
 
     # Quantized weights match symmetric path's layout regardless of zp.
@@ -523,3 +541,30 @@ def test_rdna_hybrid_w4a16_dispatch(dtype, M, K, N, G):
     ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_bias=8)
 
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.skipif(
+    not hasattr(torch.ops, "_rocm_C")
+    or not hasattr(torch.ops._rocm_C, "wvSplitK_int4_g"),
+    reason="wvSplitK_int4_g not built",
+)
+def test_wvsplitk_int4_g_rejects_unpacked_zero_points():
+    """Act-dtype zero points raise instead of being read as packed words.
+
+    Both layouts are 2D with compatible extents, so only the dtype separates
+    them; misreading one as the other returns wrong numbers silently.
+    """
+    import vllm._custom_ops as ops
+    from vllm.utils.platform_utils import num_compute_units
+
+    K, N, G, M = 256, 64, 128, 1
+    a = torch.randn((M, K), device=device, dtype=torch.float16)
+    w = torch.randint(0, 255, (N, K // 2), device=device, dtype=torch.uint8).view(
+        torch.int8
+    )
+    scales = torch.rand((N, K // G), device=device, dtype=torch.float16)
+    zp_unpacked = torch.zeros((N, K // G), device=device, dtype=torch.float16)
+
+    with pytest.raises(RuntimeError, match="Zero points must be int32 or uint32"):
+        ops.wvSplitK_int4_g(w, a, scales, num_compute_units(), G, zp_unpacked, None)
