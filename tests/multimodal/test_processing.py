@@ -10,10 +10,13 @@ import pytest
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing.context import (
     InputProcessingContext,
     overlay_modality_mm_kwargs,
 )
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     PlaceholderFeaturesInfo,
@@ -1262,3 +1265,22 @@ def test_mm_processor_kwargs_merge_then_overlay_preserves_scoping():
     assert overlay_modality_mm_kwargs(merged, "video")["size"] == size
     assert "size" not in overlay_modality_mm_kwargs(merged, "image")
     assert "size" not in overlay_modality_mm_kwargs(merged, None)
+
+
+def test_processor_inputs_hashes_partial_uuids():
+    rng = np.random.RandomState(0)
+    images = [random_image(rng, min_wh=8, max_wh=9) for _ in range(2)]
+    inputs = ProcessorInputs(
+        prompt=[],
+        mm_data_items=MultiModalDataParser().parse_mm_data({"image": images}),
+        mm_uuid_items={"image": ["image-uuid", None]},
+    )
+
+    assert inputs.get_mm_hashes("test-model", "blake3") == {
+        "image": [
+            "image-uuid",
+            MultiModalHasher.hash_kwargs(
+                "blake3", model_id="test-model", image=images[1]
+            ),
+        ]
+    }

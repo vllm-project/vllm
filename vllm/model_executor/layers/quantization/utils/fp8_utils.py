@@ -38,6 +38,11 @@ from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = init_logger(__name__)
 
+# Pre-fill value for scale parameters whose shards load independently. The
+# shards are combined with .max(), so an unloaded shard must never win; the
+# smallest representable float32 guarantees that.
+FP8_SCALE_SENTINEL = torch.finfo(torch.float32).min
+
 
 def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
     if isinstance(x, torch.Tensor):
