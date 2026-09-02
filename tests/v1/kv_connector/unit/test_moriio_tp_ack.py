@@ -17,6 +17,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
     resolve_moriio_transfer_ack,
     validate_moriio_heterogeneous_tp_kv_heads,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+    MoRIIOWrapper,
+)
 
 
 def test_remote_tp_rank_same_tp_maps_to_self():
@@ -277,6 +280,9 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
             self.lock = threading.Lock()
             self.sent = []
 
+        # Exercise the real batch verdict rather than restating it here.
+        poll_transfer_batch = MoRIIOWrapper.poll_transfer_batch
+
         def send_notify(
             self,
             transfer_id,
@@ -299,6 +305,9 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
     }
     # Transfer-timeout reaping state consulted by _pop_done_transfers.
     worker._recving_transfers_start = {}
+    # Load-error bookkeeping cleared alongside a completed transfer.
+    worker._recving_local_blocks = {}
+    worker._invalid_block_ids = set()
 
     assert worker._pop_done_transfers() == {"tx-release"}
     assert worker.moriio_wrapper.sent == [
