@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import math
 import os
 import threading
 import time
@@ -42,6 +43,13 @@ EngineId = str
 ReqId = str
 TransferId = str
 TransferOffsetsKey = tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype]
+
+
+def _positive_finite_timeout(name: str, value: Any) -> float:
+    timeout = float(value)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(f"{name} must be finite and greater than zero")
+    return timeout
 
 
 class MoRIIOTransferAck(NamedTuple):
@@ -159,6 +167,20 @@ class MoRIIOMode(Enum):
     WRITE = "write"
 
 
+class TransferBatchState(Enum):
+    """Verdict for a group of transfer statuses that belong to one request.
+
+    A request's KV transfer is spread over one status per layer (two for a KDA
+    layer), so a single status never decides the request: PENDING means at
+    least one is still in flight and none has failed, FAILED means at least
+    one failed, DONE means all succeeded.
+    """
+
+    DONE = "done"
+    FAILED = "failed"
+    PENDING = "pending"
+
+
 class MoRIIOError(Exception):
     """Base exception for MoRIIO operations."""
 
@@ -228,6 +250,7 @@ _DEPRECATED_ENV_VARS: dict[str, str] = {
     "VLLM_MORIIO_QP_PER_TRANSFER": "qp_per_transfer",
     "VLLM_MORIIO_POST_BATCH_SIZE": "post_batch_size",
     "VLLM_MORIIO_NUM_WORKERS": "num_workers",
+    "VLLM_MORIIO_TRANSFER_TIMEOUT_S": "recv_abort_timeout",
 }
 
 
@@ -259,6 +282,7 @@ class MoRIIOConfig:
     tp_size: int
     transfer_timeout: float
     defer_timeout: float
+    recv_abort_timeout: float
     read_mode: bool = False
     qp_per_transfer: int = 1
     post_batch_size: int = -1
@@ -283,6 +307,8 @@ class MoRIIOConfig:
         #                     raising TransferError (sec).
         # defer_timeout    -> Timeout before a deferred send with no finished_sending
         #                     notification is reaped and its blocks force-freed (sec).
+        # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
+        #                     completion never arrived is aborted (sec).
 
         # Knobs for RDMA transfers, ignored if on xgmi backend
         # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.
@@ -314,13 +340,21 @@ class MoRIIOConfig:
                 "must be one of 'rdma' or 'xgmi'."
             )
 
-        transfer_timeout = float(
+        transfer_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.transfer_timeout",
             extra_config.get(
                 "transfer_timeout", MoRIIOConstants.DEFAULT_TRANSFER_TIMEOUT
-            )
+            ),
         )
-        defer_timeout = float(
-            extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT)
+        defer_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.defer_timeout",
+            extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT),
+        )
+        recv_abort_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.recv_abort_timeout",
+            extra_config.get(
+                "recv_abort_timeout", MoRIIOConstants.DEFAULT_RECV_ABORT_TIMEOUT
+            ),
         )
 
         return cls(
@@ -346,6 +380,7 @@ class MoRIIOConfig:
             backend=backend,
             transfer_timeout=transfer_timeout,
             defer_timeout=defer_timeout,
+            recv_abort_timeout=recv_abort_timeout,
         )
 
 
@@ -373,6 +408,10 @@ class MoRIIOConstants:
     # notification is reaped and its blocks force-freed.
     # Overridable via kv_connector_extra_config["defer_timeout"].
     DEFAULT_DEFER_TIMEOUT = 60.0
+    # Timeout (seconds) before an in-flight recv whose RDMA completion was lost
+    # is aborted, so the decode worker does not hang on it forever.
+    # Overridable via kv_connector_extra_config["recv_abort_timeout"].
+    DEFAULT_RECV_ABORT_TIMEOUT = 120.0
 
 
 # The router embeds both zmq_addresses in the request_id:
