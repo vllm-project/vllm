@@ -265,6 +265,7 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
     scheduler = HiSparseConnectorScheduler(
         coordinator,
         async_speculative=True,
+        draft_kv_lookahead=4,
     )
     scheduler_output = SimpleNamespace(
         block_table_updates=None,
@@ -281,7 +282,7 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
 
     metadata = scheduler.build_connector_meta(scheduler_output)
 
-    coordinator.build_row_mirrors.assert_called_once_with((("request", 100, 7),))
+    coordinator.build_row_mirrors.assert_called_once_with((("request", 100, 11),))
     assert metadata.row_mirrors_from_resident
 
 

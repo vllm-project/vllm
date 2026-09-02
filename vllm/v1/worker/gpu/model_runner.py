@@ -724,6 +724,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        if isinstance(self.speculator, DraftModelSpeculator):
+            self.speculator.slot_mapping_observer = (
+                self.kv_connector.stage_host_mirror_mapping
+            )
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1663,6 +1667,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output, batch_req_state, batch_desc
             )
             block_tables, slot_mappings = self.prepare_attn(input_batch)
+            self.kv_connector.stage_host_mirror_mapping(
+                slot_mappings, input_batch.num_tokens
+            )
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
