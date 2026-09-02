@@ -15,6 +15,7 @@ from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
@@ -1596,6 +1597,35 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 module.experts.finalize_weights()
 
 
+class KimiK3LogitsProcessor(LogitsProcessor):
+    """LogitsProcessor with a one-shot custom all-gather for the TP logits.
+
+    The NCCL ring all-gather costs ~21us per decode step for K3's
+    vocab-sharded logits on an NVLink mesh; the one-shot custom (or MNNVL
+    Lamport) all-gather does the same rank-order concat in a few
+    microseconds. Falls back to the base collective whenever the custom
+    kernel is unavailable or declines the input.
+    """
+
+    def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        if logits.dim() == 2:
+            comm = getattr(get_tp_group(), "device_communicator", None)
+            custom_all_gather = getattr(comm, "custom_all_gather", None)
+            if custom_all_gather is not None:
+                gathered = custom_all_gather(logits)
+                if gathered is not None:
+                    num_tokens = logits.shape[0]
+                    if num_tokens == 1:
+                        return gathered.view(1, -1)
+                    world_size = gathered.shape[0] // num_tokens
+                    return (
+                        gathered.view(world_size, num_tokens, -1)
+                        .movedim(0, 1)
+                        .reshape(num_tokens, -1)
+                    )
+        return super()._gather_logits(logits)
+
+
 class KimiLinearForCausalLM(
     nn.Module,
     HasInnerState,
@@ -1626,7 +1656,7 @@ class KimiLinearForCausalLM(
             self.lm_head = PPMissingLayer()
         enable_kimi_k3_low_latency_gemm(self, self.model_config.dtype)
         logit_scale = getattr(self.config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
+        self.logits_processor = KimiK3LogitsProcessor(
             self.config.vocab_size, scale=logit_scale
         )
 
