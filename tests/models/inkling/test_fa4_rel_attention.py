@@ -16,6 +16,7 @@ with causal (and optionally sliding-window) masking handled by the backend.
 import importlib
 
 import pytest
+import regex as re
 import torch
 
 from vllm.models.inkling.nvidia.attention import (
@@ -25,6 +26,7 @@ from vllm.models.inkling.nvidia.attention import (
 from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
     INKLING_FA4_REL_ATTENTION_KERNEL,
     _use_sheared_bias,
+    check_inkling_fa4_support,
     inkling_fa4_num_splits,
 )
 from vllm.platforms import current_platform
@@ -96,6 +98,102 @@ def test_sheared_bias_architecture_selection(monkeypatch, major, expected):
         assert _use_sheared_bias() is expected
     finally:
         _use_sheared_bias.cache_clear()
+
+
+@pytest.mark.parametrize("major", [8, 9, 10, 11])
+def test_fa4_support_accepts_paged_kv_architectures(monkeypatch, major):
+    # SM8x is not rejected: it has no paged-KV FA4 forward either, but a
+    # FlexAttention fallback can serve Inkling there, so the guard leaves it
+    # open rather than blocking that path.
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda: DeviceCapability(major=major, minor=0),
+    )
+    check_inkling_fa4_support()
+
+
+def test_fa4_support_allows_unknown_capability(monkeypatch):
+    # NVML can fail to report a capability; that must not block startup.
+    monkeypatch.setattr(current_platform, "get_device_capability", lambda: None)
+    check_inkling_fa4_support()
+
+
+def test_fa4_support_rejects_architectures_without_paged_kv(monkeypatch):
+    # SM12x has no paged-KV path at all, so it must be rejected while the model
+    # is being built, not by an assert inside the first forward pass.
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda: DeviceCapability(major=12, minor=1),
+    )
+    monkeypatch.setattr(current_platform, "get_device_name", lambda: "TestGPU")
+    with pytest.raises(ValueError, match=re.escape("capability 12.1")):
+        check_inkling_fa4_support()
+
+
+def test_attention_layer_checks_fa4_support(monkeypatch):
+    # The guard is only useful if the attention layer actually invokes it, and
+    # the constructor is the single chokepoint for backbone and MTP layers.
+    def _reject():
+        raise RuntimeError("guard invoked")
+
+    monkeypatch.setattr(
+        "vllm.models.inkling.nvidia.attention.check_inkling_fa4_support", _reject
+    )
+    # config=None: reaching any attribute of it raises AttributeError instead,
+    # so RuntimeError also proves the guard runs before the rest of __init__.
+    with pytest.raises(RuntimeError, match="guard invoked"):
+        InklingAttention(
+            None,
+            num_heads=1,
+            num_kv_heads=1,
+            head_dim=HEAD_DIM,
+            rel_extent=128,
+            local_extent=128,
+            is_local=False,
+            prefix="test",
+            conv_owner=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "model_arch",
+    [
+        "InklingForCausalLM",
+        "InklingForConditionalGeneration",
+        "InklingMTPModel",
+    ],
+)
+@pytest.mark.parametrize(("major", "rejected"), [(8, False), (9, False), (12, True)])
+def test_platform_rejects_inkling_before_engine_start(
+    monkeypatch, model_arch, major, rejected
+):
+    # verify_model_arch runs during architecture resolution in the front end,
+    # so an unsupported GPU never reaches worker startup or weight loading.
+    from vllm.platforms.cuda import CudaPlatformBase
+
+    monkeypatch.setattr(
+        CudaPlatformBase,
+        "get_device_capability",
+        classmethod(lambda cls, device_id=0: DeviceCapability(major=major, minor=0)),
+    )
+    if rejected:
+        with pytest.raises(ValueError, match=re.escape(f"'{model_arch}'")):
+            CudaPlatformBase.verify_model_arch(model_arch)
+    else:
+        CudaPlatformBase.verify_model_arch(model_arch)
+
+
+def test_platform_ignores_unrestricted_architectures(monkeypatch):
+    from vllm.platforms.cuda import CudaPlatformBase
+
+    monkeypatch.setattr(
+        CudaPlatformBase,
+        "get_device_capability",
+        classmethod(lambda cls, device_id=0: DeviceCapability(major=12, minor=0)),
+    )
+    CudaPlatformBase.verify_model_arch("LlamaForCausalLM")
 
 
 @pytest.fixture

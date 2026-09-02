@@ -1084,6 +1084,30 @@ def test_draft_runner(model_id, expected_runner_type, expected_convert_type):
     assert config.convert_type == expected_convert_type
 
 
+def test_platform_rejects_unsupported_arch_during_config(monkeypatch):
+    """Architectures the platform cannot run are rejected in the front end.
+
+    `_try_load_model_cls` checks this as well, but only once a worker is
+    already up and loading the model.
+
+    `ModelConfig` is a pydantic dataclass, so the `ValueError` reaches the
+    caller wrapped in a `ValidationError`. That subclasses `ValueError` and
+    keeps the original message, which is what `match` asserts on.
+    """
+    rejected = []
+
+    def verify_model_arch(model_arch: str) -> None:
+        rejected.append(model_arch)
+        raise ValueError(f"Model architecture '{model_arch}' is not supported")
+
+    monkeypatch.setattr(current_platform, "verify_model_arch", verify_model_arch)
+
+    with pytest.raises(ValueError, match="Qwen3ForCausalLM"):
+        ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048)
+
+    assert rejected == ["Qwen3ForCausalLM"]
+
+
 MODEL_IDS_EXPECTED = [
     ("Qwen/Qwen1.5-7B", 32768),
     ("mistralai/Mistral-7B-v0.1", 4096),

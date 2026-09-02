@@ -37,6 +37,7 @@ from .layernorm import InklingRMSNorm
 from .ops.fa4_rel_attention import (
     INKLING_FA4_REL_ATTENTION_KERNEL,
     bucket_max_seqlen_q,
+    check_inkling_fa4_support,
     inkling_fa4_num_splits,
 )
 from .ops.qkvr_prep import fused_qkvr_prep
@@ -81,6 +82,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         conv_owner: InklingConvState,
     ) -> None:
         super().__init__()
+        check_inkling_fa4_support()
         self.prefix = prefix
         self.is_local = is_local
         self.hidden_size = config.hidden_size

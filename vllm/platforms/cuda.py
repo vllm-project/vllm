@@ -205,6 +205,24 @@ def _get_wsl_kernel_version() -> tuple[int, ...] | None:
         return None
 
 
+# Model architectures with no working kernel on some compute capability
+# families, keyed to the majors they cannot run on. Checked during
+# architecture resolution so an unsupported GPU is rejected in the front end
+# instead of inside a worker.
+#
+# Inkling: the FA4 relative-attention forward vendored by
+# cmake/external_projects/tml_fa4.cmake has no paged-KV forward on SM12x, and
+# vLLM always attends over the paged KV cache (vllm-project/vllm#51405).
+# Must stay in sync with `_NO_PAGED_KV_MAJORS` in
+# vllm/models/inkling/nvidia/ops/fa4_rel_attention.py, which cannot be imported
+# here without pulling a model module into platform import.
+_CAPABILITY_RESTRICTED_MODELS: dict[str, tuple[int, ...]] = {
+    "InklingForCausalLM": (12,),
+    "InklingForConditionalGeneration": (12,),
+    "InklingMTPModel": (12,),
+}
+
+
 class CudaPlatformBase(Platform):
     _enum = PlatformEnum.CUDA
     device_name: str = "cuda"
@@ -281,6 +299,28 @@ class CudaPlatformBase(Platform):
     @classmethod
     def is_fully_connected(cls, device_ids: list[int]) -> bool:
         raise NotImplementedError
+
+    @classmethod
+    def verify_model_arch(cls, model_arch: str) -> None:
+        unsupported_majors = _CAPABILITY_RESTRICTED_MODELS.get(model_arch)
+        if unsupported_majors is None:
+            return
+        try:
+            capability = cls.get_device_capability()
+        except RuntimeError:
+            # Without NVML this queries torch, which initializes CUDA -- not
+            # always possible in the process that resolves architectures.
+            return
+        # A None capability means the device could not be queried; defer to the
+        # model's own check, which runs once the device is really in use.
+        if capability is None or capability.major not in unsupported_majors:
+            return
+        families = " / ".join(f"{major}.x" for major in unsupported_majors)
+        raise ValueError(
+            f"Model architecture '{model_arch}' has no working kernel on "
+            f"compute capability {families}; this device is "
+            f"{capability.major}.{capability.minor}."
+        )
 
     @classmethod
     def log_warnings(cls):
