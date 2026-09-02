@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeAlias
 
@@ -91,6 +92,43 @@ def register_vllm_structural_tag(
     return decorator
 
 
+class ToolStrictLevel(enum.IntEnum):
+    """Server-side floor for tool-call structural tags.
+
+    OFF:       only tools the client marked ``strict`` constrain an "auto"
+               request (historical behaviour).
+    FUNCTION:  constrain the tool-call envelope for every request with tools.
+    PARAMETER: additionally pin argument schemas, as if every tool were
+               ``strict``.
+    """
+
+    OFF = 0
+    FUNCTION = 1
+    PARAMETER = 2
+
+
+def _tool_strict_level() -> ToolStrictLevel:
+    from vllm import envs
+
+    try:
+        return ToolStrictLevel(envs.VLLM_TOOL_STRICT_LEVEL)
+    except ValueError:
+        return ToolStrictLevel.OFF
+
+
+def _force_tool_strict(
+    tool: ChatCompletionToolsParam | ResponsesTool,
+) -> ChatCompletionToolsParam | ResponsesTool:
+    """Return a copy of *tool* marked strict, leaving the caller's copy alone."""
+    if isinstance(tool, FunctionTool):
+        return tool.model_copy(update={"strict": True})
+    if isinstance(tool, ChatCompletionToolsParam):
+        return tool.model_copy(
+            update={"function": tool.function.model_copy(update={"strict": True})}
+        )
+    return tool
+
+
 def _any_tool_strict(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
 ) -> bool:
@@ -114,8 +152,16 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
-    if tool_choice == "auto" and not _any_tool_strict(tools):
+    strict_level = _tool_strict_level()
+    if (
+        tool_choice == "auto"
+        and not _any_tool_strict(tools)
+        and strict_level < ToolStrictLevel.FUNCTION
+    ):
         return None
+
+    if strict_level >= ToolStrictLevel.PARAMETER:
+        tools = [_force_tool_strict(tool) for tool in tools]
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
     dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)

@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+
+from vllm import envs
 from xgrammar import Grammar, StructuralTag
 from xgrammar.testing import _is_grammar_accept_string
 
@@ -33,6 +35,7 @@ from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
     VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS,
+    ToolStrictLevel,
     get_function_parameters,
     get_model_structural_tag,
 )
@@ -694,3 +697,39 @@ def test_kimi_k3_forced_tool_choice_builds_single_mandatory_call():
     response_only = _k3_response("no call here")
     assert _is_grammar_accept_string(grammar, ok)
     assert not _is_grammar_accept_string(grammar, response_only)
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_tool_strict_level_function_constrains_auto_without_strict(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """FUNCTION lifts the auto + non-strict gate without touching schemas."""
+    monkeypatch.setattr(
+        envs, "VLLM_TOOL_STRICT_LEVEL", int(ToolStrictLevel.FUNCTION), raising=False
+    )
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+
+
+def test_tool_strict_level_off_is_the_default(
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    """Default behaviour is unchanged: auto + non-strict still gets no tag."""
+    assert envs.VLLM_TOOL_STRICT_LEVEL == int(ToolStrictLevel.OFF)
+    assert (
+        get_model_structural_tag(
+            model="deepseek_v4",
+            tools=sample_tools,
+            tool_choice="auto",
+            reasoning=False,
+        )
+        is None
+    )
