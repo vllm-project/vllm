@@ -372,22 +372,25 @@ def _prefill_logits(
     query_start_loc: torch.Tensor,
     visible_blocks: torch.Tensor,
     max_query_len: int,
+    logits_width: int,
     query_offset: int,
     num_queries: int,
 ) -> torch.Tensor:
     assert query_start_loc.shape == (page_table.shape[0] + 1,)
     assert visible_blocks.shape == (q.shape[0],)
     assert 0 <= query_offset <= query_offset + num_queries <= q.shape[0]
+    assert 0 < logits_width <= page_table.shape[1] * k_cache.shape[1]
 
-    columns = page_table.shape[1] * k_cache.shape[1]
-    logits = torch.empty((num_queries, columns), dtype=torch.float32, device=q.device)
+    logits = torch.empty(
+        (num_queries, logits_width), dtype=torch.float32, device=q.device
+    )
     TILE_R = 64
     BLOCK_N = 64
     K_TILES = 16
     grid = (
         page_table.shape[0],
         triton.cdiv(min(num_queries, max_query_len), TILE_R),
-        triton.cdiv(columns, BLOCK_N * K_TILES),
+        triton.cdiv(logits_width, BLOCK_N * K_TILES),
     )
     _qsa_mqa_paged_prefill_kernel[grid](
         q,
@@ -557,6 +560,7 @@ def qsa_select_paged_prefill(
     compress_ratio: int,
     max_query_len: int,
     block_indices: torch.Tensor,
+    max_seq_len: int,
 ) -> None:
     """Score and select compressed prefill blocks in bounded chunks.
 
@@ -572,16 +576,25 @@ def qsa_select_paged_prefill(
         compress_ratio: Number of logical tokens represented by a cache row.
         max_query_len: Maximum number of query tokens in one request.
         block_indices: Compressed-index output buffer.
+        max_seq_len: Longest context length in the batch this step (host
+            scalar from the metadata builder; an upper bound is safe). The
+            temporary logits buffer is sized to the compressed-column bound
+            derived from it instead of the full page-table width.
     """
 
     assert token_topk % compress_ratio == 0
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     rows = q.shape[0]
-    columns = page_table.shape[1] * k_cache.shape[1]
+    # No row scores beyond cdiv(max_seq_len, compress_ratio) compressed
+    # columns. Round up to 64 to keep the logits row stride
+    # cooperative_topk-compatible (stride % 4 == 0); stores are masked by
+    # visible_blocks regardless.
+    logits_width = triton.cdiv(triton.cdiv(max_seq_len, compress_ratio), 64) * 64
+    logits_width = min(max(64, logits_width), page_table.shape[1] * k_cache.shape[1])
 
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
     max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-    rows_per_chunk = max(1, max_logits_bytes // (columns * 4))
+    rows_per_chunk = max(1, max_logits_bytes // (logits_width * 4))
     topk_workspace = torch.empty(
         (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
     )
@@ -596,6 +609,7 @@ def qsa_select_paged_prefill(
             query_start_loc,
             visible_blocks,
             max_query_len,
+            logits_width,
             query_offset=query_start,
             num_queries=query_end - query_start,
         )
