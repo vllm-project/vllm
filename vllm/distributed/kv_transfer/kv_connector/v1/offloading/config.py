@@ -56,9 +56,23 @@ def build_offloading_config(
     )
 
     _, tokens_per_hash = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
-    for group in groups:
-        assert group.tokens_per_block % tokens_per_hash == 0, (
-            f"tokens_per_block={group.tokens_per_block} not divisible by "
+    # E23 fix (upstream bug): non-participating groups (GLM5Next KpoolTail — a
+    # 1-block/req transient scratch buffer that opts out of prefix caching by
+    # design) never have block hashes computed over them, so their block size
+    # must not be constrained by the hash granularity. Asserting on them makes
+    # native KV offloading unbootable on any hybrid model with a scratch tail
+    # (tokens_per_block=4 vs tokens_per_hash=1152). Skip non-participating
+    # groups here, mirroring resolve_kv_cache_block_sizes() which already
+    # excludes them from the GCD and its own divisibility check; fall back to
+    # asserting on all groups only if nothing participates.
+    offload_groups = [
+        (spec_group, offload_group)
+        for spec_group, offload_group in zip(kv_cache_config.kv_cache_groups, groups)
+        if spec_group.kv_cache_spec.participates_in_prefix_caching
+    ] or list(zip(kv_cache_config.kv_cache_groups, groups))
+    for spec_group, offload_group in offload_groups:
+        assert offload_group.tokens_per_block % tokens_per_hash == 0, (
+            f"tokens_per_block={offload_group.tokens_per_block} not divisible by "
             f"tokens_per_hash={tokens_per_hash}. "
             f"Hybrid models (e.g. Mamba+Attention) need "
             f"--enable-prefix-caching to align block sizes."
