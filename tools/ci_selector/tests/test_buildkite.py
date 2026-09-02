@@ -284,7 +284,11 @@ def test_no_orphan_step_shaped_yaml(vllm_repo, loaded):
     convention landed: extend load_pipeline_configs or classify the file.
     Allowlisted files are consumed by Buildkite directly, not the PR generator."""
     import yaml as _yaml
-    from ci_selector.handwritten import INERT_CI_PREFIXES, LEGACY_CI_FILES
+    from ci_selector.handwritten import (
+        INERT_CI_PREFIXES,
+        LEGACY_CI_FILES,
+        RELEASE_PIPELINE_FILES,
+    )
 
     configs, _steps, _report = loaded
     known_dirs = tuple(
@@ -294,9 +298,14 @@ def test_no_orphan_step_shaped_yaml(vllm_repo, loaded):
         for c in configs
         for d in c.job_dirs
     )
-    allow = {".buildkite/release-pipeline.yaml"}
+    allow = set(RELEASE_PIPELINE_FILES)
     orphans = []
-    for path in sorted((vllm_repo / ".buildkite").rglob("*.yaml")):
+    unreadable = []
+    scanned = 0
+    candidates = sorted(
+        (vllm_repo / ".buildkite").rglob("*.yaml"),
+    ) + sorted((vllm_repo / ".buildkite").rglob("*.yml"))
+    for path in candidates:
         rel = path.relative_to(vllm_repo).as_posix()
         if (
             rel.startswith(known_dirs)
@@ -306,9 +315,11 @@ def test_no_orphan_step_shaped_yaml(vllm_repo, loaded):
             or any(rel == c.config_file for c in configs)
         ):
             continue
+        scanned += 1
         try:
             data = _yaml.safe_load(path.read_text())
-        except _yaml.YAMLError:
+        except _yaml.YAMLError as exc:
+            unreadable.append(f"{rel}: {exc.__class__.__name__}")
             continue
         steps = data.get("steps") if isinstance(data, dict) else None
         if not isinstance(steps, list):
@@ -318,6 +329,20 @@ def test_no_orphan_step_shaped_yaml(vllm_repo, loaded):
             for s in steps
         ):
             orphans.append(rel)
+    # Floor the scan's REACH, not the files it happened to parse: everything
+    # that survives the exclusions at HEAD is an lm-eval config that can never
+    # be step-shaped, so flooring `scanned` would be satisfied by content this
+    # check does not look at.
+    assert len(candidates) >= 40 and not unreadable, drift_message(
+        f"The orphan scan reached {len(candidates)} yaml files under "
+        f".buildkite/ ({scanned} after exclusions)"
+        + (f" and could not parse {unreadable}" if unreadable else "")
+        + ".",
+        "A scan that reaches nothing finds no orphans, which reads exactly "
+        "like a tree with none.",
+        "the CI tree moved: fix the scan root here",
+        "a file is genuinely malformed: fix it upstream in .buildkite/",
+    )
     assert not orphans, drift_message(
         f"These look like Buildkite step definitions but no pipeline config "
         f"consumes them: {orphans}",
@@ -367,3 +392,28 @@ def test_a_declared_mirror_label_is_modelled_rather_than_flagged():
     assert variant.mirror_label == declared
     assert variant.label == "Basic Correctness (amd)"
     assert variant.step_id == "vllm_ci:basic-correctness-amd:amd"
+
+
+@pytest.mark.drift
+def test_pr_pipeline_is_what_the_pr_config_calls_itself(vllm_repo):
+    """PR_PIPELINE prefixes every step id we emit and every row we look up.
+
+    It is the `name:` of vLLM's own PR pipeline config, copied by hand. Renamed
+    upstream, it matches nothing: `--emit-keys` names steps the generator
+    cannot resolve and the crosscheck filters every job away, both quietly.
+    """
+    from ci_selector.codemap.pipeline.buildkite import load_pipeline_configs
+    from ci_selector.handwritten import PR_PIPELINE
+
+    configs = load_pipeline_configs(vllm_repo)
+    named = {c.config_file: c.name for c in configs}
+    assert named, "no pipeline configs loaded; the scan, not PR_PIPELINE, is wrong"
+    assert named.get(".buildkite/ci_config.yaml") == PR_PIPELINE, drift_message(
+        f"PR_PIPELINE is {PR_PIPELINE!r}, but .buildkite/ci_config.yaml calls "
+        f"itself {named.get('.buildkite/ci_config.yaml')!r}. Configs at HEAD: "
+        f"{named}.",
+        "Every step id we emit and every coverage row we read is prefixed with "
+        "it. A wrong prefix selects nothing and matches nothing, and both "
+        "failures look like an empty result rather than an error.",
+        f"vLLM renamed its PR pipeline: update PR_PIPELINE in {HW}",
+    )

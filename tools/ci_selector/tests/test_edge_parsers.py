@@ -83,7 +83,12 @@ def test_lazy_parser_tables_counted_per_table(fg):
     """Every lazy table must parse entries of its own. The merged
     parser_entries dict cannot show this: parser names collide across the four
     tables, so it is last-wins and a dead tokenizers anchor leaves its size
-    unchanged."""
+    unchanged.
+
+    Only the empty-table check answers to upstream. The count and collision
+    asserts around it are floors on our own derivation, kept because an empty
+    table and a table we stopped reading look the same from here.
+    """
     counts = fg.factories.parser_table_counts
     assert len(counts) >= 4, counts
     assert not [a for a, n in counts.items() if not n], drift_message(

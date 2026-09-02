@@ -51,22 +51,6 @@ def test_new_site_under_former_blanket_is_unclassified(vllm_repo):
     assert classified.unclassified == [site]
 
 
-@pytest.mark.drift
-def test_hand_listed_entries_exist(vllm_repo):
-    """Stale-entry guard: every hand-listed path still exists."""
-    from ci_selector.handwritten import DYNAMIC_IMPORT_FILES
-
-    missing = [p for p in DYNAMIC_IMPORT_FILES if not (vllm_repo / p).is_file()]
-    assert not missing, drift_message(
-        f"DYNAMIC_IMPORT_FILES names files that no longer exist: {missing}",
-        "Each entry vouches for one file's dynamic import. Pointing at a deleted "
-        "path vouches for nothing, and the next import added to whatever replaced "
-        "it is pre-approved without anyone looking.",
-        "the file moved: update the path in DYNAMIC_IMPORT_FILES in " + HW,
-        "the file is gone for good: delete the entry from ci_selector/handwritten.py",
-    )
-
-
 def test_reverse_gate_flags_entries_with_no_live_import(vllm_repo):
     """Not vacuous: with no live sites every hand-listed entry is flagged. An
     entry that outlives its import pre-approves the next one to land there,
@@ -83,11 +67,12 @@ def test_no_unused_hand_list_entries_at_head(vllm_repo, full):
 
     dead = unused_external_entries(full.graph.dynamic_sites)
     assert dead == [], drift_message(
-        "These are listed in DYNAMIC_IMPORT_FILES but no longer contain a "
-        f"dynamic import: {dead}",
+        "These are listed in DYNAMIC_IMPORT_FILES but hold no dynamic import "
+        f"any more, or no longer exist: {dead}",
         "A listed file is exempt from the unclassified check. One that outlived "
         "its import silently exempts the next import added to it.",
-        "delete the entry from DYNAMIC_IMPORT_FILES in ci_selector/handwritten.py",
+        f"the file moved: update the path in DYNAMIC_IMPORT_FILES in {HW}",
+        f"the import is gone for good: delete the entry from {HW}",
     )
 
 

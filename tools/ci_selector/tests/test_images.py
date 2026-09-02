@@ -10,7 +10,11 @@ than satisfy an emptiness check.
 import pytest
 import regex as re
 from ci_selector.codemap.classify import select
-from ci_selector.codemap.pipeline.images import build_artifact_graph
+from ci_selector.codemap.pipeline.images import (
+    _DOCKERFILE_TOKEN,
+    _resolve,
+    build_artifact_graph,
+)
 from helpers import drift_message
 
 # `- key` under a depends_on block, and the inline `depends_on: key` form.
@@ -94,13 +98,33 @@ def test_every_producer_resolves_a_dockerfile_at_head(state, vllm_repo):
     )
 
 
-@pytest.mark.drift
-def test_every_built_dockerfile_has_a_producer_at_head(state, vllm_repo):
-    """The reverse direction, so a Dockerfile joining the build surfaces.
+def _statically_named(token: str) -> bool:
+    """Whether a Dockerfile token is a path we can check at all.
 
-    Scoped to Dockerfiles some producer actually builds: `docker/` also holds
-    files no CI step consumes (the gfx1250 variants), and those are correctly
-    absent rather than a drift signal.
+    Commands also build interpolated paths (`${REPO}/Dockerfile.rocm`), which
+    arrive as a fragment and can never resolve. Demanding those resolve would
+    fail at HEAD, so only whole repo-relative paths are checked.
+
+    Strip the shell punctuation first, exactly as `_resolve` does. Testing the
+    raw token rejected `-docker/Dockerfile.rocm_base` (the `-` comes from a
+    `${VAR:-default}`), which resolves fine and is the ONLY token two producers
+    have, so a rename of that Dockerfile passed this guard green.
+    """
+    candidate = token.lstrip("-$:{").rstrip("}\"'")
+    return (
+        "/" in candidate and not candidate.startswith("/") and candidate[:1].isalnum()
+    )
+
+
+@pytest.mark.drift
+def test_every_dockerfile_a_build_names_still_exists(state, vllm_repo):
+    """The reverse direction: a Dockerfile leaving the build surfaces.
+
+    A producer that names several keeps routing on the ones that survive, so a
+    rename is invisible to `unresolved`, which only fires when a producer
+    resolves none at all. Scoped to whole repo-relative paths: `docker/` also
+    holds files no CI step consumes (the gfx1250 variants), and interpolated
+    paths arrive as fragments that can never resolve.
     """
     graph = build_artifact_graph(vllm_repo, state.pipelines)
     built = {f for files in graph.defined_by.values() for f in files}
@@ -112,21 +136,46 @@ def test_every_built_dockerfile_has_a_producer_at_head(state, vllm_repo):
         "the Dockerfile scan in ci_selector/codemap/pipeline/images.py stopped "
         "matching: check it against docker/ at HEAD",
     )
-    for path in sorted(built):
-        assert graph.producers_of.get(path), drift_message(
-            f"{path} is built by no producer.",
-            "Nothing connects edits to this Dockerfile to the jobs that build "
-            "it, so those jobs stop being selected on it.",
-            "a new image build was added: teach "
-            "ci_selector/codemap/pipeline/images.py to read its command",
-        )
-        assert (vllm_repo / path).is_file(), drift_message(
-            f"A producer builds {path}, which does not exist at HEAD.",
-            "The producer's image inputs resolve to nothing, so the step loses "
-            "its image-input coverage entirely.",
-            "the Dockerfile was renamed: the producer's command still names the "
-            "old path, so fix it upstream in the job yaml",
-        )
+    # Read back from the commands, not from the graph. `built` is the union of
+    # defined_by, so asking whether its members have a producer inverts a dict
+    # against itself, and _resolve already applied is_file() to every one.
+    named = {}
+    for pdata in state.pipelines:
+        for producer in graph.defined_by:
+            haystack = getattr(pdata.targets.get(producer), "haystack", "") or ""
+            for token in _DOCKERFILE_TOKEN.findall(haystack):
+                if _statically_named(token):
+                    named.setdefault(producer, set()).add(token)
+    unchecked = sorted(set(graph.defined_by) - set(named))
+    assert not unchecked, drift_message(
+        f"These image producers name no checkable Dockerfile path: {unchecked}",
+        "A producer contributing no token is invisible to the check below, so "
+        "a Dockerfile only it builds can be renamed away in silence. That is "
+        "how this guard was blind to docker/Dockerfile.rocm_base.",
+        "the command interpolates the whole path: teach _statically_named the "
+        "new shape, or resolve the variable here",
+    )
+    checked = sum(len(t) for t in named.values())
+    assert checked >= 10, drift_message(
+        f"Only {checked} Dockerfile paths could be read back out of the build "
+        "commands, so this guard is checking almost nothing.",
+        "It is the only thing that notices a renamed Dockerfile while the "
+        "producer still builds another one, which is silent everywhere else.",
+        "the commands changed shape: check _DOCKERFILE_TOKEN in "
+        "ci_selector/codemap/pipeline/images.py against .buildkite/ at HEAD",
+    )
+    stale = {
+        producer: sorted(t for t in tokens if _resolve(vllm_repo, t) is None)
+        for producer, tokens in named.items()
+    }
+    stale = {k: v for k, v in stale.items() if v}
+    assert not stale, drift_message(
+        f"Build commands name Dockerfiles that do not exist at HEAD: {stale}",
+        "A producer naming several Dockerfiles keeps routing on the ones that "
+        "survive, so the renamed file reaches no step and nothing goes red.",
+        "the Dockerfile was renamed: fix the path in the job yaml upstream",
+        "the Dockerfile is gone: drop it from the build command upstream",
+    )
 
 
 def test_self_building_steps_are_derived_and_scoped(state, vllm_repo):

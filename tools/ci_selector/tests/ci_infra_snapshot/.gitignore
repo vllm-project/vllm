@@ -1,6 +1,11 @@
-# Everything `pytest tests --sync` downloads from vllm-project/ci-infra. All of
-# it is regenerable, so none of it is carried in the repo; a fresh clone syncs
-# once and the offline tests skip until it does.
+# What `pytest tests --sync` downloads from vllm-project/ci-infra. It is all
+# regenerable, so a fresh clone syncs once and the offline checks skip until it
+# does.
 *.py.txt
 manifest.json
 values.json
+
+# Except the two anchors nothing executes. A sync that changes either has no
+# test to fail, so a git diff is the only signal they have. Keep them tracked.
+!select_steps_and_dependencies.py.txt
+!read_steps_from_job_dir.py.txt

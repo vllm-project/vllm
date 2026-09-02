@@ -2532,20 +2532,6 @@ def test_the_site_file_itself_still_fails_open(state):
     assert _selected(sel) > _selected(select(state, [site]))
 
 
-@pytest.mark.drift
-def test_no_site_is_unclassified_at_head(state):
-    """The saving is the default, and stays there as long as every dynamic
-    import is either read by a parser or on the hand list."""
-    assert not state.preflight.unclassified_sites, drift_message(
-        "Preflight found dynamic imports the graph cannot follow: "
-        f"{sorted(state.preflight.unclassified_sites)}",
-        "While any exist, the file holding one runs the whole pipeline when it "
-        "changes, and tests reached only through that import are not selected.",
-        "see test_no_unclassified_dynamic_sites_at_head, which reports the "
-        "exact lines and how to fix them",
-    )
-
-
 def test_selected_by_file_covers_every_attributable_step(state):
     """The per-file inverse of `selected`, and its completeness contract.
 
@@ -2710,11 +2696,17 @@ def test_rust_reaches_hardware_image_consumers(state):
 # ---- requirements Phase A --------------------------------------------------
 
 
+@pytest.mark.drift
 def test_requirements_family_map_pins_the_tree(state):
     """Drift pin for every requirements/ file's derived family, including the
     cuda mapping PATH_TOKEN_FAMILIES cannot carry: a global cuda token would
     misfire on vllm/ paths and on the generic Dockerfile. An unknown-token new
-    file maps to None and keeps the image widening, which fails safe."""
+    file maps to None and keeps the image widening, which fails safe.
+
+    The paths are checked against the tree as well as the tokenizer. Without
+    that this pinned a pure string function and a renamed requirements file
+    moved nothing, despite the name.
+    """
     from ci_selector.codemap.hardware import requirements_family_of_path
 
     expected = {
@@ -2734,6 +2726,16 @@ def test_requirements_family_map_pins_the_tree(state):
     }
     got = {f: requirements_family_of_path(f) for f in expected}
     assert got == expected
+    gone = sorted(f for f in expected if not (state.repo / f).is_file())
+    assert not gone, drift_message(
+        f"These requirements files no longer exist: {gone}",
+        "Each one is here because its name is what gives it a hardware "
+        "family. A path that is gone pins a spelling nothing uses, and the "
+        "file that replaced it is untested.",
+        "the file moved or was renamed: update the path in this test",
+        f"a family lost its requirements file: check REQUIREMENTS_EXTRA_TOKEN_"
+        f"FAMILIES in {HW} still earns its place",
+    )
 
 
 def test_requirements_cuda_token_stays_inside_requirements():
@@ -2761,13 +2763,21 @@ def test_requirements_build_validated_files_select_the_floor(state):
         assert len(sel.selected) < 20, (path, len(sel.selected))
 
 
+@pytest.mark.drift
 def test_requirements_build_validated_members_exist(state):
     from ci_selector.handwritten import REQUIREMENTS_BUILD_VALIDATED
 
     missing = [
         p for p in REQUIREMENTS_BUILD_VALIDATED if not (state.repo / p).is_file()
     ]
-    assert not missing, f"dead entries: {missing}"
+    assert not missing, drift_message(
+        f"REQUIREMENTS_BUILD_VALIDATED names files that no longer exist: {missing}",
+        "Listed files skip the docker-image widening because no test imports "
+        "them. An entry naming nothing exempts nothing, and the next "
+        "tooling-only requirements file added is widened instead.",
+        f"the file moved: update the path in REQUIREMENTS_BUILD_VALIDATED in {HW}",
+        f"the file is gone for good: delete the entry from {HW}",
+    )
 
 
 def test_requirements_cuda_keeps_unlabeled_consumers(state):

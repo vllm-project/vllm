@@ -4,7 +4,7 @@ def select_steps_and_dependencies(steps: List[Step], requested_step_keys: Option
     steps_by_key = {}
     for step in steps:
         if not step.key:
-            continue
+            step.key = _generate_step_key(step.label)
         if step.key in steps_by_key:
             raise ValueError(f'Duplicate CI step key: {step.key}')
         steps_by_key[step.key] = step

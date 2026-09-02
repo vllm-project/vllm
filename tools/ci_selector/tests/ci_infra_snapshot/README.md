@@ -25,14 +25,15 @@ moves for unrelated reasons. Fetching that sha reproduces this snapshot.
 
 Two of the functions cannot be executed: `select_steps_and_dependencies`, which
 we depend on rather than reproduce, and `read_steps_from_job_dir`, which is here
-only for the working-dir default it assigns. A sync that changes either shows up
-as a git diff to read.
+only for the working-dir default it assigns. Neither has a test that can fail,
+so those two are kept tracked and a sync that changes either shows up as a git
+diff to read. That is weaker than a test and is the honest residual.
 
 Do not hand-edit. To refresh:
 
     uv run pytest tests --sync -q     # download, then run the checks
     uv run python tests/ci_infra.py   # download only
 
-Nothing in this directory is checked in. It is all gitignored and rebuilt by
-`--sync`; until you run that once, the offline tests skip with a message saying
-so rather than failing.
+Everything here is gitignored and rebuilt by `--sync`, except the two
+unexecutable functions named above. Until you sync once the offline checks skip,
+and `test_the_snapshot_is_armed` fails so an unarmed suite is never green.

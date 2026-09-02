@@ -23,6 +23,13 @@ def test_every_device_at_head_has_a_family(vllm_repo):
         for step in load_steps(vllm_repo, config, report):
             if step.device:
                 devices.add(step.device)
+    assert len(devices) >= 10, drift_message(
+        f"Only {len(devices)} devices were read out of the job yaml.",
+        "Family routing keys off these. Reading none maps none, and an empty "
+        "set satisfies the check below exactly like a fully mapped one.",
+        "the yaml moved or changed shape: check load_pipeline_configs and "
+        "load_steps against .buildkite/ at HEAD",
+    )
     unmapped = {
         d
         for d in devices
@@ -66,7 +73,6 @@ def test_exclusive_namespaces_still_match_files_at_head(vllm_repo):
     )
 
 
-@pytest.mark.drift
 def test_path_token_families_cover_every_device_family():
     """Cross-check the unguarded table against the guarded one.
 
@@ -243,7 +249,15 @@ def test_exclusive_import_exception_guards_still_present(vllm_repo):
             cost,
             f"cite the actual runtime check, not a comment, in {HW}",
         )
-        src = (vllm_repo / importer).read_text()
+        source = vllm_repo / importer
+        assert source.is_file(), drift_message(
+            f"{importer} no longer exists, so the exception it carries for "
+            f"{member} vouches for nothing.",
+            cost,
+            f"the file moved: update the key in EXCLUSIVE_IMPORT_EXCEPTIONS in {HW}",
+            f"the file is gone for good: delete the entry from {HW}",
+        )
+        src = source.read_text()
         assert call.group(0) in src, drift_message(
             f"{importer} no longer contains {call.group(0)!r}, the guard that "
             f"made its import of {member} safe.",
@@ -290,3 +304,45 @@ def test_mirror_runs_on_its_own_hardware_whatever_device_it_lists():
     assert excluded(rocm, cuda.device, cuda)
     # and the mirror IS excluded from a family that is not its own
     assert excluded("vllm/v1/worker/xpu_worker.py", inherited.device, inherited)
+
+
+@pytest.mark.drift
+def test_device_tables_still_match_devices_at_head(vllm_repo):
+    """Dead-entry side of the device tables, which every sibling list has.
+
+    `test_every_device_at_head_has_a_family` only asks that each live device
+    finds a row. A row matching no device is the other direction: harmless on
+    its own, but it is how a table drifts into naming hardware CI retired.
+
+    Exact names only. `FAMILY_DEVICE_PREFIXES` is a rule for whatever queue
+    names a family may use, not a claim that one exists today, so an unmatched
+    prefix is not dead: `tpu` matches nothing at HEAD and should still be there
+    the day a tpu queue comes back.
+    """
+    from ci_selector.handwritten import FAMILY_DEVICE_EXACT, INFRA_DEVICES
+
+    report = LoadReport()
+    devices = {
+        step.device
+        for config in load_pipeline_configs(vllm_repo)
+        for step in load_steps(vllm_repo, config, report)
+        if step.device
+    }
+    dead = [f"INFRA_DEVICES: {d}" for d in sorted(INFRA_DEVICES) if d not in devices]
+    dead += [
+        f"FAMILY_DEVICE_EXACT[{family}]: {d}"
+        for family, exact in sorted(FAMILY_DEVICE_EXACT.items())
+        for d in sorted(exact)
+        if d not in devices
+    ]
+    assert not dead, drift_message(
+        f"Device table entries match no device in the job yaml: {dead}",
+        "Each entry exists to tag a real queue. One that tags nothing is "
+        "carrying a name CI stopped using, and it hides the day that name "
+        "comes back meaning different hardware.",
+        f"the device was renamed: update the entry in {HW}",
+        "the hardware is retired FOR GOOD: delete the entry from "
+        + HW
+        + ". A queue that is only paused should keep its row, or it comes back "
+        "with no family and nothing says so",
+    )

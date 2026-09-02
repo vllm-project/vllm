@@ -281,10 +281,12 @@ PYTEST_VALUE_FLAGS = {
 # 4. WHAT CI-INFRA'S GENERATOR DOES
 # What ci-infra's pipeline generator does. Every entry is a hand copy, so it
 # can only be checked against that repo. Update when: it changes.
-# Guard: each value below is compared against what ci-infra's generator
-# actually assigns, offline, using the copy `pytest tests --sync` downloads.
-# The two field sets have a second guard as well: they fail when vLLM's yaml
-# uses a name we do not model.
+# Guard: the values down to ONLY_STEP_KEYS_ENV are compared against what
+# ci-infra's generator actually assigns, offline, using the copy
+# `pytest tests --sync` downloads. The two field sets have a second guard as
+# well: they fail when vLLM's yaml uses a name we do not model. Everything
+# below ONLY_STEP_KEYS_ENV is a vLLM-tree or own-policy fact, not a generator
+# copy, and carries its own Guard: line.
 # =========================================================================
 
 # Where the generator mounts the checkout inside the test container. Step
@@ -427,6 +429,8 @@ REQUIREMENTS_BUILD_VALIDATED = frozenset(
 # repo's webhooks themselves, and the key variable is set per build on one named
 # pipeline, so a mirror build never sees ours. We scope here because it is the
 # only pipeline we emit for, not because the others never run.
+# Update when: vLLM renames its PR pipeline in .buildkite/ci_config.yaml.
+# Guard: tests/test_buildkite.py::test_pr_pipeline_is_what_the_pr_config_calls_itself.
 PR_PIPELINE = "vllm_ci"
 
 # =========================================================================

@@ -49,10 +49,13 @@ def test_parser_flag_re_flags_exist_in_vllm(vllm_repo):
         "edge and fall back to broader matching."
     )
     body = _PARSER_FLAG_RE.removeprefix("(?:").removesuffix(")")
-    flags = [a for a in body.split("|") if a.startswith("--")]
-    assert flags, drift_message(
-        "No `--` flags could be read out of _PARSER_FLAG_RE, so this guard is "
-        "checking an empty list.",
+    # Every alternative, not just the `--` spellings. The snake_case forms are
+    # what match config and env contexts, and filtering them out left half the
+    # pattern unchecked: a renamed config field moved nothing.
+    flags = [a for a in body.split("|") if a]
+    assert len(flags) >= 4, drift_message(
+        f"Only {len(flags)} alternatives could be read out of _PARSER_FLAG_RE, "
+        "so this guard is checking almost nothing.",
         cost,
         "the pattern changed shape: update the split in this test to match "
         "_PARSER_FLAG_RE in ci_selector/codemap/registered_names.py",
@@ -333,4 +336,53 @@ def test_tool_parser_key_routing_floor(state):
     assert len(routed) >= 30, (
         f"only {len(routed)}/{len(entries)} parser keys reach any step; "
         "the key-routing belt has collapsed"
+    )
+
+
+# A flag whose name ends in `parser`, and the trailing character that proves it
+# ended there. --tool-parser-plugin names a plugin module, not a parser.
+PARSER_FLAG_SHAPE = r"--[a-z0-9-]*parser([^a-z0-9-]|$)"
+
+
+@pytest.mark.drift
+def test_no_parser_selecting_flag_is_unwatched(vllm_repo):
+    """The other direction, which the rot guard above cannot see.
+
+    A flag we watch that vLLM dropped matches nothing and is caught above. A
+    flag vLLM added that we do not watch is the expensive one: those jobs never
+    get a typed edge to the parser they name, so a change to that parser stops
+    selecting them and nothing anywhere goes red.
+    """
+    import subprocess
+
+    import regex as re
+    from ci_selector.codemap.registered_names import PARSER_SELECTING_FLAGS
+
+    # The whole tree, not just cli_args.py: only --tool-call-parser is spelled
+    # there, so scanning that one file left the other flags unwatched by this.
+    # `parser` must end the flag, since --tool-parser-plugin names a plugin
+    # module rather than selecting a parser.
+    hits = subprocess.run(
+        # -e, or grep reads the pattern's leading -- as an unknown option and
+        # exits 2 with no output. The floor below is what would actually catch
+        # that; -e keeps the failure from being a confusing one.
+        ["grep", "-rhoE", "-e", PARSER_FLAG_SHAPE, str(vllm_repo / "vllm")],
+        capture_output=True,
+        text=True,
+    ).stdout
+    found = {re.sub(r"[^a-z-]+$", "", line) for line in hits.split() if line}
+    assert len(found) >= 2, drift_message(
+        f"Only {len(found)} parser-selecting flags were found in vllm/: {found}.",
+        "This guard reads the tree to notice a flag we do not watch. Finding "
+        "none finds no gaps, which looks exactly like watching all of them.",
+        "the flags moved or changed shape: update the pattern in this test",
+    )
+    unwatched = sorted(found - set(PARSER_SELECTING_FLAGS))
+    assert not unwatched, drift_message(
+        f"vLLM has parser-selecting flags we do not watch: {unwatched}",
+        "Typed matching is how `--reasoning-parser qwen3` in a job command "
+        "routes that job to the parser it names. An unwatched flag leaves "
+        "those jobs unrouted, so editing the parser stops selecting them.",
+        "add the flag, and its snake_case config spelling, to "
+        "PARSER_SELECTING_FLAGS in ci_selector/codemap/registered_names.py",
     )

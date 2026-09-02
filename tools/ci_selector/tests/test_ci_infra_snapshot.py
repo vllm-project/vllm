@@ -21,9 +21,9 @@ moving goes red and fixing our code goes green, with nothing in between.
 
 Two anchored functions are not executable: `select_steps_and_dependencies`,
 which we depend on rather than reproduce, and `read_steps_from_job_dir`, which
-is here only for the working-dir default it assigns. The snapshot is committed,
-so a `--sync` that changes either shows up as a git diff to read. That is a
-weaker signal than a test and is the honest residual.
+is here only for the working-dir default it assigns. Those two files alone are
+committed, so a `--sync` that changes either shows up as a git diff to read.
+That is a weaker signal than a test and is the honest residual.
 """
 
 import ci_infra
@@ -33,10 +33,31 @@ from helpers import HW, drift_message
 SIGN_OFF = "uv run python tests/ci_infra.py"
 SYNC = "uv run pytest tests --sync -q"
 
-# Every check here reads the downloaded snapshot, which is gitignored. Skip as
-# a module rather than let each one raise FileNotFoundError from a fixture.
+# Every check below reads the downloaded snapshot, which is gitignored. Gate
+# them rather than let each raise FileNotFoundError from a fixture. Not a
+# module-level pytestmark: that would gate the arming check too, and a suite
+# that skipped every check would then report exactly like one that ran them.
 _ABSENT = ci_infra.absent()
-pytestmark = pytest.mark.skipif(bool(_ABSENT), reason=f"{_ABSENT}; run `{SYNC}`")
+needs_snapshot = pytest.mark.skipif(bool(_ABSENT), reason=f"{_ABSENT}; run `{SYNC}`")
+
+
+@pytest.mark.drift
+def test_the_snapshot_is_armed():
+    """The one check here that is never gated on the snapshot being present.
+
+    Everything else skips without it, and a skip exits zero, so an unarmed
+    suite reports the same green as one that checked all fourteen.
+    """
+    assert not _ABSENT, drift_message(
+        f"The ci-infra snapshot is not usable: {_ABSENT}. Every check in this "
+        "file skipped, so nothing compared our copy of the generator against "
+        "the real one.",
+        "Section 4 of handwritten.py is a hand copy of ci-infra's generator "
+        "and is only ever checked here. Unchecked, it can go stale silently "
+        "and we model a generator that no longer exists.",
+        f"download it: `{SYNC}`",
+    )
+
 
 # Ours -> the constant ci-infra assigns the same value to. Names differ where
 # upstream chose a different one for the same fact.
@@ -69,6 +90,7 @@ def theirs(value):
     return [value] if isinstance(value, str) else sorted(value)
 
 
+@needs_snapshot
 @pytest.mark.drift
 @pytest.mark.parametrize("const", sorted(SAME_VALUE))
 def test_our_constant_equals_the_value_ci_infra_assigns(const):
@@ -96,6 +118,7 @@ def test_our_constant_equals_the_value_ci_infra_assigns(const):
     )
 
 
+@needs_snapshot
 @pytest.mark.drift
 def test_the_image_build_prefix_matches_the_generators_own_test():
     """Upstream grants always-run by key prefix, written inline as a
@@ -121,6 +144,7 @@ def test_the_image_build_prefix_matches_the_generators_own_test():
     )
 
 
+@needs_snapshot
 @pytest.mark.drift
 def test_the_default_working_dir_matches_the_generators_own():
     """Upstream sets it inline while reading a job dir, so there is no
@@ -145,6 +169,7 @@ def test_the_default_working_dir_matches_the_generators_own():
     )
 
 
+@needs_snapshot
 @pytest.mark.drift
 def test_the_docs_only_rule_uses_exactly_our_three_values():
     """All three of ours are the string literals of one upstream function, so
@@ -165,10 +190,16 @@ def test_the_docs_only_rule_uses_exactly_our_three_values():
     )
 
 
+@needs_snapshot
 @pytest.mark.drift
 def test_the_snapshot_still_holds_something_to_check():
-    """Guard the guard. Every test above passes against an empty snapshot by
-    having nothing to disagree with."""
+    """Guard the guard, for the half the value checks cannot cover.
+
+    An empty snapshot fails those already: `constant()` raises LookupError and
+    they convert it to a failure. What passes empty is a partial extraction
+    that happens to keep the five constants they read, and an anchor file that
+    survives as an empty one.
+    """
     values = ci_infra.read_values()
     found = sum(len(v) for v in values.values())
     assert found >= 50, drift_message(
@@ -227,22 +258,7 @@ def upstream():
     return ci_infra.upstream_callables()
 
 
-@pytest.mark.drift
-def test_the_upstream_functions_actually_loaded(upstream):
-    """Guard the guard. Every behaviour check below compares against these, and
-    an empty namespace would agree with anything."""
-    missing = [n for n in ci_infra.SELF_CONTAINED if not callable(upstream.get(n))]
-    assert not missing, drift_message(
-        f"These ci-infra functions could not be executed from the snapshot: {missing}",
-        "The behaviour checks compare our functions against these. Without "
-        "them they compare against nothing and pass.",
-        "upstream gave them a dependency they did not have: they may no longer "
-        "be self-contained, so drop them from SELF_CONTAINED in "
-        "tests/ci_infra.py and find another way to watch them",
-        f"the snapshot is stale or partial: re-download with `{SYNC}`",
-    )
-
-
+@needs_snapshot
 @pytest.mark.drift
 def test_our_dep_match_behaves_like_ci_infras(upstream):
     """One dep against one path. This decides what every declared-dep step
@@ -268,6 +284,7 @@ def test_our_dep_match_behaves_like_ci_infras(upstream):
             )
 
 
+@needs_snapshot
 @pytest.mark.drift
 def test_our_declaration_matching_behaves_like_ci_infras(upstream):
     """A whole declaration against a whole diff, so the include/exclude split
@@ -294,6 +311,7 @@ def test_our_declaration_matching_behaves_like_ci_infras(upstream):
                 )
 
 
+@needs_snapshot
 @pytest.mark.drift
 def test_our_docs_only_behaves_like_ci_infras_apart_from_empty_paths(upstream):
     """One deliberate difference, pinned so it cannot grow.
@@ -335,6 +353,7 @@ def test_our_docs_only_behaves_like_ci_infras_apart_from_empty_paths(upstream):
     )
 
 
+@needs_snapshot
 @pytest.mark.drift
 def test_our_replica_behaves_like_the_generators_own_rule():
     """The `_step_should_run` replica, against upstream's real code.
@@ -422,6 +441,7 @@ AMD_LABELS = (
 AMD_DEVICES = (None, "", "mi300_1", "mi355_8", "mi250_1")
 
 
+@needs_snapshot
 @pytest.mark.drift
 def test_our_amd_label_behaves_like_ci_infras(upstream):
     """The mirror label is the status context, so a difference here is not
@@ -461,6 +481,19 @@ STEP_KEY_LABELS = (
 )
 
 
+def key_corpus():
+    """The shapes above, plus one label per character upstream names.
+
+    The hand-picked labels are airtight for a change to a rule that already
+    exists and blind to a new one: upstream has been accumulating characters as
+    labels gained vendor emoji and shard tokens, and adding a rule for one we
+    never spell fires nothing. Reading its literals keeps that automatic.
+    """
+    chars = sorted(ci_infra.literals_in("_generate_step_key"))
+    return (*STEP_KEY_LABELS, *(f"Alpha{c}Beta" for c in chars), "x".join(chars))
+
+
+@needs_snapshot
 @pytest.mark.drift
 def test_our_derived_key_behaves_like_ci_infras(upstream):
     """The key a keyless step gets, which we both emit and look rows up by.
@@ -472,7 +505,7 @@ def test_our_derived_key_behaves_like_ci_infras(upstream):
     from ci_selector.codemap.pipeline.step import derive_step_key
 
     theirs = upstream["_generate_step_key"]
-    for label in STEP_KEY_LABELS:
+    for label in key_corpus():
         assert theirs(label) == derive_step_key(label), drift_message(
             "Our derive_step_key disagrees with ci-infra's _generate_step_key "
             f"on {label!r}: they say {theirs(label)!r}, we say "
@@ -486,6 +519,7 @@ def test_our_derived_key_behaves_like_ci_infras(upstream):
         )
 
 
+@needs_snapshot
 @pytest.mark.drift
 def test_every_mirror_key_the_generator_reads_is_modelled():
     """Upstream types a mirror override as `Dict[str, Any]`, so its `amd[...]`
@@ -516,6 +550,7 @@ def test_every_mirror_key_the_generator_reads_is_modelled():
     )
 
 
+@needs_snapshot
 @pytest.mark.drift
 def test_every_step_field_the_generator_declares_is_modelled():
     """The top-level half of the mirror check above. This model really is

@@ -211,7 +211,8 @@ def absent() -> str:
 
     The downloaded files are gitignored, so a fresh clone has none of them.
     That has to read as "not run yet", never as a pass and never as an error
-    about a missing path.
+    about a missing path. Not running is not the same as being fine, so
+    `test_the_snapshot_is_armed` fails on a non-empty return.
     """
     if not MANIFEST.is_file() or not VALUES.is_file():
         return "no ci-infra snapshot on disk"

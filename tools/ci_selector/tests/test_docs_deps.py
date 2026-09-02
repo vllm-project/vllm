@@ -284,3 +284,39 @@ def test_docs_infra_files_still_exist(vllm_repo):
         f"the file was renamed in vLLM: update DOCS_INFRA_FILES in {HW}",
         f"it is gone: delete the entry from {HW}",
     )
+
+
+@pytest.mark.drift
+def test_no_docs_build_config_is_unlisted(vllm_repo):
+    """The other direction, which the dead-entry check above cannot see.
+
+    These files are listed precisely because nothing references them, so a new
+    one is reached by no rule at all: editing it changes every rendered page
+    and selects no docs job. A dead entry over-selects; a missing one is the
+    silent under-selection.
+    """
+    from ci_selector.handwritten import DOCS_INFRA_FILES
+
+    found = {
+        p.relative_to(vllm_repo).as_posix()
+        for pattern in ("mkdocs*.yaml", "mkdocs*.yml", ".readthedocs*.yaml")
+        for p in vllm_repo.glob(pattern)
+    } | {
+        p.relative_to(vllm_repo).as_posix()
+        for p in (vllm_repo / "requirements").glob("docs*")
+    }
+    assert found, drift_message(
+        "No docs-build config was found at HEAD at all.",
+        "This guard reads the tree to notice a config we do not list. Finding "
+        "none lists none, which reads exactly like listing them all.",
+        "the docs build moved: update the patterns in this test",
+    )
+    unlisted = sorted(found - set(DOCS_INFRA_FILES))
+    assert not unlisted, drift_message(
+        f"Docs-build config that DOCS_INFRA_FILES does not name: {unlisted}",
+        "Nothing in the repo references build config, so an unlisted file "
+        "reaches the docs job through no rule. An edit to it re-renders every "
+        "page and selects nothing to check that.",
+        f"add it to DOCS_INFRA_FILES in {HW}",
+        "it does not affect the rendered docs: leave it, and say why here",
+    )

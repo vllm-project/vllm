@@ -97,17 +97,30 @@ def test_curated_values_not_forked_under_new_names():
 def test_rust_gate_env_vars_exist(vllm_repo):
     """The rust rule's env-key leg searches step text for these gates; a
     renamed gate matches nothing and the e2e steps silently lose the leg."""
+    from ci_selector.codemap.pipeline.buildkite import load_pipeline_configs
     from ci_selector.handwritten import RUST_GATE_ENV_VARS
 
     envs = (vllm_repo / "vllm" / "envs.py").read_text()
     missing = [v for v in RUST_GATE_ENV_VARS if v not in envs]
+    # Scoped to live job dirs. Counting the whole tree let .buildkite/test-amd
+    # .yaml carry the floor on its own, and LEGACY_CI_FILES says no pipeline
+    # reads it, so the gate could leave every live step without a word.
+    job_dirs = tuple(
+        (d if d.startswith(".buildkite") else f".buildkite/{d}").rstrip("/") + "/"
+        for c in load_pipeline_configs(vllm_repo)
+        for d in c.job_dirs
+    )
     buildkite_hits = sum(
         p.read_text().count("VLLM_USE_RUST_FRONTEND")
         for p in (vllm_repo / ".buildkite").rglob("*.yaml")
+        if p.relative_to(vllm_repo).as_posix().startswith(job_dirs)
     )
+    # All 5 live hits are in .buildkite/test_areas/rust_frontend.yaml, so the
+    # floor is deliberately exact: there is no second file to absorb a loss,
+    # and a step quietly dropping the gate is the whole point of the check.
     assert not missing and buildkite_hits >= 5, drift_message(
         f"Gate vars missing from envs.py: {missing}; "
-        f"VLLM_USE_RUST_FRONTEND appears {buildkite_hits}x in .buildkite/.",
+        f"VLLM_USE_RUST_FRONTEND appears {buildkite_hits}x in live job dirs.",
         "Steps that opt into the rust frontend are found by these names; "
         "without them a rust change stops selecting the e2e suites that "
         "exist to catch rust regressions.",

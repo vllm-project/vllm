@@ -298,6 +298,20 @@ def test_lowering_the_threshold_bought_no_new_ambiguity(vllm_repo):
     steps = [s for c in configs for s in load_steps(vllm_repo, c, report)]
     here = _ambiguous_groups(steps, TRUNC_MIN)
     stricter = _ambiguous_groups(steps, TRUNC_MIN + 1)
+    # A ceiling, not a pin: comparing the two thresholds says nothing about how
+    # many groups there are, so a seventh could appear in silence. Two of the
+    # six are genuinely distinct jobs (api-server-openai part-1 vs part-2), so
+    # this is a bound on a known cost, not a clean bill.
+    assert len(here) <= 6, drift_message(
+        f"Truncated step contexts are ambiguous in {len(here)} groups, above "
+        f"the 6 at the time TRUNC_MIN was set: {[sorted(g) for g in here]}",
+        "A job reported under a truncated name is attributed to whichever "
+        "member was visited first; the others score as never run, which reads "
+        "as a recall miss we did not have.",
+        "two steps were given labels sharing a long prefix: give one a more "
+        "distinctive label in .buildkite/test_areas",
+        f"the ambiguity is real and accepted: raise the ceiling here and in {MATCH}",
+    )
     assert here == stricter, drift_message(
         "Lowering TRUNC_MIN made these steps indistinguishable: "
         f"{[sorted(g) for g in here - stricter]}",

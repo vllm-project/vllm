@@ -14,9 +14,12 @@ from ci_selector.codemap import unions
 from ci_selector.codemap.build_map import ALL_FAMILIES, ENV_VAR, BuildMap, mode
 from ci_selector.codemap.classify import select
 from ci_selector.codemap.step_refs import _source_dep_steps
-from helpers import drift_message
+from helpers import HW, drift_message
 
 CUDA_TU = "csrc/libtorch_stable/quantization/machete/machete_pytorch.cu"
+# Outside csrc/rocm/ on purpose, so this anchors the HIP grammar leg rather
+# than repeating what the exclusive-namespace check already covers.
+HIP_TU = "csrc/custom_quickreduce.cu"
 SHARED_TU = "csrc/libtorch_stable/cache_kernels.cu"
 
 
@@ -292,6 +295,7 @@ def test_the_walker_still_reads_the_real_guards(live_map):
         CUDA_TU: frozenset({"cuda"}),  # named inside the CUDA-only block
         "cmake/cpu_extension.cmake": frozenset({"cpu"}),  # forward block
         "cmake/external_projects/flashkda.cmake": frozenset({"cuda"}),
+        HIP_TU: frozenset({"amd"}),  # bare HIP block, no CUDA arm
     }
     wrong = {
         p: (sorted(live_map.families.get(p, set())) or "UNMAPPED", sorted(want))
@@ -312,32 +316,52 @@ def test_the_walker_still_reads_the_real_guards(live_map):
 def test_the_map_has_not_collapsed(live_map):
     """A walker that maps nothing fails open everywhere and reads as clean."""
     got = sum(1 for p in live_map.families if p.startswith("csrc/"))
-    assert got >= 100, drift_message(
-        f"the build map holds {got} csrc entries, below the 100 floor",
+    assert got >= 250, drift_message(
+        f"the build map holds {got} csrc entries, below the 250 floor",
         "Below the floor the narrowing has stopped and every csrc change "
         "selects every step on every image again.",
         "CMakeLists.txt was restructured: extend the walker grammar in "
         "ci_selector/codemap/build_map.py",
     )
     assert live_map.error is None, live_map.error
+    # Floors sit near the live numbers on purpose: at 100 csrc entries the
+    # largest single leg could vanish whole, and at 20% dark headers thirty
+    # could go unmapped, both without a word.
     assert live_map.total_headers and (
-        live_map.unresolved_headers / live_map.total_headers <= 0.2
+        live_map.unresolved_headers / live_map.total_headers <= 0.05
     ), f"{live_map.unresolved_headers}/{live_map.total_headers} headers dark"
 
 
 @pytest.mark.drift
 def test_the_map_agrees_with_the_exclusive_namespaces(live_map):
-    """csrc/cpu and csrc/rocm are pinned in handwritten.py, so the derived
-    map must agree. Headers only widen, so check source files."""
-    bad = {
-        p: sorted(f)
-        for p, f in live_map.families.items()
-        if p.endswith((".cu", ".cpp", ".cc", ".c", ".hip"))
-        and (
-            (p.startswith("csrc/cpu/") and f != frozenset({"cpu"}))
-            or (p.startswith("csrc/rocm/") and f != frozenset({"amd"}))
-        )
+    """The csrc namespaces pinned in handwritten.py, against the derived map.
+
+    Read out of EXCLUSIVE_NAMESPACES rather than spelled here: a namespace
+    added to the table would otherwise never be checked, and one renamed would
+    leave this comparing a pair that no longer exists. Headers only widen, so
+    check source files.
+    """
+    from ci_selector.handwritten import EXCLUSIVE_NAMESPACES
+
+    scoped = {
+        prefix: family
+        for prefixes, _exact, family in EXCLUSIVE_NAMESPACES
+        for prefix in prefixes
+        if prefix.startswith("csrc/")
     }
+    assert scoped, drift_message(
+        "EXCLUSIVE_NAMESPACES names no csrc prefix, so this check compares nothing.",
+        "It is the only cross-check between the two mechanisms that scope a "
+        "kernel to one platform. With no pair to compare it passes always.",
+        f"a csrc namespace was dropped: confirm that is intended in {HW}",
+    )
+    bad = {}
+    for path, fams in live_map.families.items():
+        if not path.endswith((".cu", ".cpp", ".cc", ".c", ".hip")):
+            continue
+        for prefix, family in scoped.items():
+            if path.startswith(prefix) and fams != frozenset({family}):
+                bad[path] = sorted(fams)
     assert not bad, drift_message(
         f"derived families disagree with EXCLUSIVE_NAMESPACES: {bad}",
         "Two mechanisms now claim different scopes for the same tree; one of "
@@ -347,19 +371,44 @@ def test_the_map_agrees_with_the_exclusive_namespaces(live_map):
     )
 
 
+def _runs(haystack: str, rel: str) -> bool:
+    """Whether a job command runs `rel`, naming it or a directory above it.
+
+    Substring matching would let a step running kernels/attention claim a file
+    under kernels/quantization, so compare whole command tokens. Exclusions
+    count too: kernels-root-misc runs `kernels/` and then --ignores
+    kernels/quantization, and treating that as a runner let a dropped step hide
+    behind one that never ran the file.
+
+    Only the `--ignore=path` form is handled; the space-separated form does not
+    occur at HEAD.
+    """
+
+    def covers(token: str) -> bool:
+        token = token.split("=", 1)[-1].split("::")[0].rstrip("/")
+        return bool(token) and (token == rel or rel.startswith(token + "/"))
+
+    runs, skips = [], []
+    for token in haystack.split():
+        (skips if token.startswith(("--ignore", "--deselect")) else runs).append(token)
+    return any(map(covers, runs)) and not any(map(covers, skips))
+
+
 @pytest.mark.drift
 def test_csrc_data_readers_keep_their_steps(vllm_repo, state, live_map):
     """Two tests read csrc files as data at runtime. Who compiles a file
     says nothing about who reads it, so those steps have to survive."""
+    # Keyed working-dir relative: jobs run from tests/, so that is the only
+    # spelling their commands ever use.
     readers = {
-        "tests/kernels/test_bf16_skinny_gemm.py": (
+        "kernels/test_bf16_skinny_gemm.py": (
             "csrc/libtorch_stable/dsv3_fused_a_gemm.cu"
         ),
-        "tests/kernels/quantization/test_rdna3_compile_guards.py": (
+        "kernels/quantization/test_rdna3_compile_guards.py": (
             "csrc/rocm/torch_bindings.cpp"
         ),
     }
-    live = {t: p for t, p in readers.items() if (vllm_repo / t).is_file()}
+    live = {t: p for t, p in readers.items() if (vllm_repo / "tests" / t).is_file()}
     assert len(live) >= 2, drift_message(
         f"only {len(live)} of the pinned csrc data-reader tests still exist",
         "The reader pins are the only guard against family scoping dropping "
@@ -368,24 +417,26 @@ def test_csrc_data_readers_keep_their_steps(vllm_repo, state, live_map):
     )
     for test_file, csrc_path in live.items():
         sel = select(state, [csrc_path])
-        holders = {
-            s.step_id
+        runners = {
+            s.step_id: s.step_id in sel.selected
             for p in state.pipelines
             for s in p.steps
             if s.step_id in state.auto_step_ids
-            and s.step_id in sel.selected
-            and test_file in (getattr(p.targets.get(s.step_id), "haystack", "") or "")
+            and _runs(
+                getattr(p.targets.get(s.step_id), "haystack", "") or "", test_file
+            )
         }
-        covered = {
-            s.step_id
-            for p in state.pipelines
-            for s in p.steps
-            if s.step_id in state.auto_step_ids
-            and test_file in (getattr(p.targets.get(s.step_id), "haystack", "") or "")
-        }
-        assert not covered or holders, (
+        assert runners, drift_message(
+            f"No step runs {test_file} any more, so this reader pin checks nothing.",
+            "The pin is the only guard against family scoping dropping a step "
+            "whose test parses csrc content as data. One that matches no step "
+            "reads exactly like a passing check.",
+            "the test moved or its job stopped running it: update the reader "
+            "table here",
+        )
+        assert any(runners.values()), (
             f"{csrc_path} no longer selects any step running {test_file}, "
-            f"which parses it as data ({sorted(covered)[:3]} dropped)"
+            f"which parses it as data ({sorted(runners)[:3]} dropped)"
         )
 
 
