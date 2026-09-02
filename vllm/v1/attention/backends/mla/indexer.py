@@ -232,7 +232,7 @@ def split_indexer_prefill_chunks(
 
 # Below this row count the TP all-gather latency is larger than the saved
 # replicated indexer work on Hopper.  Keep the threshold conservative so small
-#/medium prefills retain the zero-communication path.
+# /medium prefills retain the zero-communication path.
 MIN_TP_SHARD_ROWS_PER_RANK = 1024
 
 
@@ -283,9 +283,7 @@ def tp_prefill_row_sharding_supported(
     tp_size: int,
 ) -> bool:
     """Whether replicated prefill rows may be sharded across TP ranks."""
-    cudagraph_mode = (
-        vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
-    )
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
     return (
         current_platform.is_cuda()
         and dcp_world_size == 1
@@ -1220,14 +1218,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # so the cost model uses compressed rows while the trigger stays
             # in token units (matching index_topk semantics).
             prefill_max_seq_len = int(
-                seq_lens_cpu[
-                    num_decodes : num_decodes + num_prefills
-                ].max().item()
+                seq_lens_cpu[num_decodes : num_decodes + num_prefills].max().item()
             )
-            prefill_uses_mqa = (
-                prefill_max_seq_len
-                > self.vllm_config.model_config.hf_config.index_topk
-                or self.vllm_config.attention_config.sparse_mla_force_mqa
+            index_topk = getattr(
+                self.vllm_config.model_config.hf_config, "index_topk", 0
+            )
+            prefill_uses_mqa = prefill_max_seq_len > index_topk or getattr(
+                self.vllm_config.attention_config, "sparse_mla_force_mqa", False
             )
             if self.enable_tp_prefill_row_sharding and prefill_uses_mqa:
                 row_shard_sizes = balanced_prefill_row_shard(
@@ -1238,9 +1235,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
-                max_prefill_seq_len=(
-                    prefill_max_seq_len if num_prefills > 0 else 0
-                ),
+                max_prefill_seq_len=(prefill_max_seq_len if num_prefills > 0 else 0),
                 row_shard_sizes=row_shard_sizes,
             )
 
