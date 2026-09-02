@@ -1420,6 +1420,7 @@ package_data = {
         "libs/*.so*",
         "model_executor/layers/fused_moe/configs/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",
+        "entrypoints/cli/_help/*.txt",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
@@ -1442,7 +1443,6 @@ package_data = {
         "third_party/fmha_sm100/cutlass/tools/util/include/**/*.hpp",
     ]
 }
-package_data["vllm_cli"] = ["_help.json"]
 
 
 def add_vllm_package_data(filename: str) -> None:
@@ -1504,6 +1504,7 @@ setup(
     version=vllm_version,
     ext_modules=ext_modules,
     rust_extensions=rust_extensions,
+    scripts=["tools/vllm"],
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch

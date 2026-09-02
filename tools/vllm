@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""The installed ``vllm`` command.
+
+Stock help and the version are served without importing vLLM; every other
+invocation delegates to ``vllm.entrypoints.cli.main`` unchanged.
+"""
+
+import importlib.metadata
+import importlib.util
+import shutil
+import sys
+from pathlib import Path
+
+# argv tuple -> page rendered by tools/generate_cli_help.py at 80 columns.
+HELP_PAGES = {
+    (): "vllm.txt",
+    ("-h",): "vllm.txt",
+    ("--help",): "vllm.txt",
+    ("serve", "-h"): "vllm-serve.txt",
+    ("serve", "--help"): "vllm-serve.txt",
+}
+# Pages are rendered at 80 columns; narrower terminals get the live parser.
+MIN_COLUMNS = 80
+
+
+def _runtime() -> None:
+    from vllm.entrypoints.cli.main import main
+
+    main()
+
+
+def _page(name: str) -> str | None:
+    try:
+        # find_spec locates the package without executing vllm/__init__.py.
+        spec = importlib.util.find_spec("vllm")
+        if spec is None or spec.origin is None:
+            return None
+        path = Path(spec.origin).parent / "entrypoints" / "cli" / "_help" / name
+        return path.read_text(encoding="utf-8") or None
+    except (ImportError, OSError, UnicodeError):
+        return None
+
+
+def main() -> None:
+    args = tuple(sys.argv[1:])
+    if args in (("-v",), ("--version",)):
+        print(importlib.metadata.version("vllm"))
+        return
+    page = HELP_PAGES.get(args)
+    if page is not None and shutil.get_terminal_size().columns >= MIN_COLUMNS:
+        text = _page(page)
+        if text is not None:
+            sys.stdout.write(text)
+            return
+    _runtime()
+
+
+if __name__ == "__main__":
+    main()

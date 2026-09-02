@@ -1,0 +1,25 @@
+usage: vllm [-h] [-v]
+            {chat,complete,serve,launch,bench,collect-env,run-batch} ...
+
+vLLM CLI
+
+positional arguments:
+  {chat,complete,serve,launch,bench,collect-env,run-batch}
+    chat                Generate chat completions via the running API server.
+    complete            Generate text completions based on the given prompt
+                        via the running API server.
+    serve               Launch a local OpenAI-compatible API server to serve
+                        LLM completions via HTTP.
+    launch              Launch individual vLLM components.
+    bench               vLLM bench subcommand.
+    collect-env         Start collecting environment information.
+    run-batch           Run batch prompts and write results to file.
+
+options:
+  -h, --help            show this help message and exit
+  -v, --version         show program's version number and exit
+
+For full list:            vllm [subcommand] --help=all
+For a section:            vllm [subcommand] --help=ModelConfig    (case-insensitive)
+For a flag:               vllm [subcommand] --help=max-model-len  (_ or - accepted)
+Documentation:            https://docs.vllm.ai

@@ -177,6 +177,14 @@ repos:
     files: ^\.github/mergify\.yml$
     pass_filenames: false
     additional_dependencies: [PyYAML, regex]
+  # Only run locally as Buildkite will cover this; skips when Torch is not installed, like the Rust hooks without cargo.
+  - id: check-cli-help-pages
+    name: Check generated CLI help pages
+    language: system
+    entry: python tools/generate_cli_help.py --check
+    files: ^(vllm/entrypoints/|vllm/config/|vllm/engine/arg_utils\.py$|vllm/utils/argparse_utils\.py$|tools/vllm$|tools/generate_cli_help\.py$|pyproject\.toml$|setup\.py$|MANIFEST\.in$)
+    pass_filenames: false
+    stages: [pre-commit]
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: python tools/pre_commit/mypy.py "3.10"
@@ -222,6 +230,8 @@ repos:
     entry: python tools/pre_commit/check_spdx_header.py
     language: python
     types_or: [python, rust, proto]
+    # tools/vllm carries the header but has no suffix for the checker to key on.
+    exclude: ^tools/vllm$
   - id: check-root-lazy-imports
     name: Check root lazy imports
     entry: python tools/pre_commit/check_init_lazy_imports.py

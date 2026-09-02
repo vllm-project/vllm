@@ -1,17 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.metadata
 import json
 import os
+import runpy
 import subprocess
 import sys
+import sysconfig
+from importlib import metadata, util
 from pathlib import Path
 
 import pytest
+import regex as re
 
 ROOT = Path(__file__).parents[3]
-ARTIFACT = json.loads((ROOT / "vllm_cli/_help.json").read_text())
+LAUNCHER = ROOT / "tools/vllm"
+_SPEC = util.find_spec("vllm")
+assert _SPEC is not None and _SPEC.origin is not None
+# Resolved the way tools/vllm resolves it: beside the importable package.
+PACKAGE = Path(_SPEC.origin).parent
+HELP_DIR = PACKAGE / "entrypoints" / "cli" / "_help"
+PAGES = {"top": "vllm.txt", "serve": "vllm-serve.txt"}
+RUNNER = "import sys; sys.argv[0] = 'vllm'; "
+RUNTIME = RUNNER + "from vllm.entrypoints.cli.main import main; main()"
+RUN_LAUNCHER = RUNNER + (
+    f"import runpy; runpy.run_path({str(LAUNCHER)!r}, run_name='__main__')"
+)
+BLOCK_IMPORTS = """\
+import builtins
+original = builtins.__import__
+def guarded(name, *args, **kwargs):
+    if name.split(".", 1)[0] in {"vllm", "torch"}:
+        raise AssertionError(f"forbidden import: {name}")
+    return original(name, *args, **kwargs)
+builtins.__import__ = guarded
+"""
 CANONICAL_ENV = dict(
     COLUMNS="80",
     LINES="24",
@@ -25,93 +48,186 @@ CANONICAL_ENV = dict(
 )
 
 
-def _run(args, *, entrypoint="vllm_cli", block_imports=False, **env):
-    source = (
-        "import builtins, json, sys\n"
-        "args = json.loads(sys.argv[1])\n"
-        "if sys.argv[2] == 'blocked':\n"
-        "    original = builtins.__import__\n"
-        "    def guarded(name, *args, **kwargs):\n"
-        "        if name.split('.', 1)[0] in {'vllm', 'torch'}:\n"
-        "            raise AssertionError(f'forbidden import: {name}')\n"
-        "        return original(name, *args, **kwargs)\n"
-        "    builtins.__import__ = guarded\n"
-        "    import atexit\n"
-        "    def assert_no_runtime_imports():\n"
-        "        loaded = {name.split('.', 1)[0] for name in sys.modules}\n"
-        "        assert not loaded & {'vllm', 'torch'}\n"
-        "    atexit.register(assert_no_runtime_imports)\n"
-        "sys.argv = ['vllm', *args]\n"
-        f"from {entrypoint} import main\n"
-        "main()\n"
-    )
-    environment = {
-        key: value for key, value in os.environ.items() if not key.startswith("VLLM_")
-    }
-    environment |= CANONICAL_ENV | env
-    environment["PYTHONPATH"] = os.pathsep.join(
-        (str(ROOT), environment.get("PYTHONPATH", ""))
-    )
-    mode = "blocked" if block_imports else "runtime"
+def _page(key):
+    return (HELP_DIR / PAGES[key]).read_text(encoding="utf-8")
+
+
+def _env(pythonpath=ROOT, **overrides):
+    environment = {k: v for k, v in os.environ.items() if not k.startswith("VLLM_")}
+    environment |= CANONICAL_ENV | overrides
+    inherited = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = f"{pythonpath}{os.pathsep}{inherited}"
+    return environment
+
+
+def _run(args, *, runtime=False, block_imports=False, pythonpath=ROOT, **env):
+    source = RUNTIME if runtime else RUN_LAUNCHER
+    if block_imports:
+        source = BLOCK_IMPORTS + source
     return subprocess.run(
-        [sys.executable, "-c", source, json.dumps(args), mode],
+        [sys.executable, "-c", source, *args],
         capture_output=True,
-        cwd=ROOT,
-        env=environment,
+        # cwd lands on sys.path ahead of PYTHONPATH, so it has to move too.
+        cwd=pythonpath,
+        env=_env(pythonpath=pythonpath, **env),
         text=True,
     )
 
 
-@pytest.mark.parametrize(
-    "args, expected",
-    [
-        ([], lambda data: data["help"]["top"]),
-        (["--version"], lambda data: importlib.metadata.version("vllm") + "\n"),
-        (["serve", "-h"], lambda data: data["help"]["serve"]),
-        (["serve", "--help=all"], lambda data: data["help"]["all"]),
-        (["serve", "--help=modelconfig"], lambda data: data["queries"]["modelconfig"]),
-        (
-            ["serve", "--help=max-model-len"],
-            lambda data: data["queries"]["max-model-len"],
-        ),
-    ],
-)
-def test_fast_paths_are_import_light(args, expected):
+FAST_PATHS = {
+    "bare": ([], "top"),
+    "top-h": (["-h"], "top"),
+    "top-help": (["--help"], "top"),
+    "version-v": (["-v"], None),
+    "version-long": (["--version"], None),
+    "serve-h": (["serve", "-h"], "serve"),
+    "serve-help": (["serve", "--help"], "serve"),
+}
+
+
+@pytest.mark.parametrize("args, page", FAST_PATHS.values(), ids=FAST_PATHS)
+def test_fast_paths_match_canonical_without_runtime_imports(args, page):
+    expected = _page(page) if page else metadata.version("vllm") + "\n"
     result = _run(args, block_imports=True)
     assert result.returncode == 0
-    assert result.stdout == expected(ARTIFACT)
     assert result.stderr == ""
-    assert result.stdout == _run(args, entrypoint="vllm.entrypoints.cli.main").stdout
+    assert result.stdout == expected
+    runtime = _run(args, runtime=True)
+    assert result.returncode == runtime.returncode
+    assert result.stdout == runtime.stdout
+    assert result.stderr == runtime.stderr
 
 
-def test_generator_matches_checked_in_snapshot():
-    environment = {
-        "VLLM_TARGET_DEVICE": "cuda",
-        "VLLM_PLUGINS": "bad",
-        "VLLM_TEST_FLAG": "bad",
-        "VLLM_USE_V1": "0",
-    }
+def test_installed_command_is_the_launcher():
+    script = Path(sysconfig.get_path("scripts")) / "vllm"
+    if not script.is_file():
+        pytest.skip("no installed vllm command")
+    # Wheels and PEP 660 editable installs record a RECORD; the egg-info an
+    # editable build leaves in the source tree does not, and would otherwise
+    # shadow the real install on PYTHONPATH.
+    dists = [
+        dist
+        for dist in metadata.distributions()
+        if dist.metadata["Name"] == "vllm" and dist.read_text("RECORD")
+    ]
+    if not dists:
+        pytest.skip("no installed vllm distribution")
+    dist = dists[0]
+    # setup.py appends a platform suffix to the distribution version, so compare
+    # locations instead: a wheel whose package is the importable one, or an
+    # editable install of this tree.
+    direct_url = json.loads(dist.read_text("direct_url.json") or "{}")
+    wheel = (
+        Path(str(dist.locate_file("vllm/__init__.py"))).resolve()
+        == (PACKAGE / "__init__.py").resolve()
+    )
+    editable = direct_url.get("dir_info", {}).get("editable") and (
+        direct_url.get("url") == ROOT.resolve().as_uri()
+    )
+    if not (wheel or editable):
+        pytest.skip("installed vllm is not the importable checkout")
+
+    source = LAUNCHER.read_text(encoding="utf-8").splitlines()[:4]
+    spdx = [line for line in source if line.startswith("# SPDX")]
+    assert len(spdx) == 2
+    # pip can replace the shebang with a multi-line sh trampoline, so match the
+    # header anywhere in the installed script rather than at a fixed offset.
+    installed = script.read_text(encoding="utf-8").splitlines()
+    assert all(line in installed for line in spdx)
+
+    assert not [
+        entry
+        for entry in dist.entry_points
+        if entry.group == "console_scripts" and entry.name == "vllm"
+    ]
+
     result = subprocess.run(
-        [sys.executable, str(ROOT / "tools/generate_cli_help.py"), "--check"],
+        [sys.executable, "-X", "importtime", str(script), "--help"],
+        capture_output=True,
         cwd=ROOT,
-        env=os.environ | environment | {"COLUMNS": "200", "PYTHONHASHSEED": "2"},
+        env=_env(),
+        text=True,
     )
     assert result.returncode == 0
-    assert "/en/latest/" in json.dumps(ARTIFACT) and "/en/v" not in json.dumps(ARTIFACT)
+    assert result.stdout == _page("top")
+    assert not [
+        line
+        for line in result.stderr.splitlines()
+        if re.match(r"^import time:.*\|\s+(torch|vllm)(\.|$)", line)
+    ]
 
 
-@pytest.mark.parametrize(
-    "args",
-    [
-        ["--omni"],
-        ["bench", "--help"],
-        ["serve", "--help=model-"],
-        ["--", "--help"],
-    ],
-)
+def test_generator_check_pins_its_environment():
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "tools/generate_cli_help.py"), "--check"],
+        capture_output=True,
+        cwd=ROOT,
+        env=os.environ
+        | dict(
+            VLLM_TARGET_DEVICE="cuda",
+            VLLM_PLUGINS="bad",
+            VLLM_USE_V1="0",
+            COLUMNS="200",
+            PYTHONHASHSEED="2",
+        ),
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    # Prove the pages were compared rather than the Torch-absent skip firing.
+    assert "skipped" not in result.stderr
+
+
+def test_generator_check_fails_on_stale_page(tmp_path):
+    if util.find_spec("torch") is None:
+        pytest.skip("the generator needs Torch to render")
+    for name in PAGES.values():
+        (tmp_path / name).write_bytes((HELP_DIR / name).read_bytes())
+    stale = tmp_path / PAGES["top"]
+    stale.write_bytes(stale.read_bytes() + b"x")
+    generator = runpy.run_path(
+        str(ROOT / "tools/generate_cli_help.py"), run_name="generate_cli_help"
+    )
+    with pytest.raises(SystemExit, match=PAGES["top"]):
+        generator["_check"](tmp_path)
+
+
+def test_pages_serve_at_generation_width_or_wider():
+    top = _page("top")
+    assert _run(["--help"], block_imports=True, COLUMNS="120").stdout == top
+    narrow = _run(["--help"], COLUMNS="60")
+    assert narrow.stdout == _run(["--help"], runtime=True, COLUMNS="60").stdout
+    assert narrow.stdout != top
+
+
+@pytest.mark.parametrize("content", [None, ""], ids=["missing", "empty"])
+def test_missing_or_empty_page_delegates(tmp_path, content):
+    # A stand-in vllm package whose CLI prints instead of importing the engine.
+    package = tmp_path / "vllm"
+    cli = package / "entrypoints" / "cli"
+    (cli / "_help").mkdir(parents=True)
+    for directory in (package, package / "entrypoints", cli):
+        (directory / "__init__.py").write_text("")
+    (cli / "main.py").write_text('def main():\n    print("delegated")\n')
+    if content is not None:
+        (cli / "_help" / PAGES["top"]).write_text(content)
+    result = _run(["--help"], pythonpath=tmp_path, COLUMNS="80")
+    assert result.returncode == 0
+    assert result.stdout == "delegated\n"
+
+
+NON_FAST_PATHS = {
+    "omni": ["--omni"],
+    "serve-help-all": ["serve", "--help=all"],
+    "serve-help-query": ["serve", "--help=model-"],
+    "after-separator": ["--", "--help"],
+    "unknown-subcommand": ["bogus"],
+}
+
+
+@pytest.mark.parametrize("args", NON_FAST_PATHS.values(), ids=NON_FAST_PATHS)
 def test_non_fast_paths_preserve_runtime_behavior(args):
     result = _run(args)
-    runtime = _run(args, entrypoint="vllm.entrypoints.cli.main")
+    runtime = _run(args, runtime=True)
     assert result.returncode == runtime.returncode
     assert result.stdout == runtime.stdout
     assert result.stderr == runtime.stderr

@@ -11,17 +11,12 @@ steps:
   - vllm/entrypoints
   - vllm/config
   - vllm/engine/arg_utils.py
-  - vllm/platforms
-  - vllm/plugins
   - vllm/utils/argparse_utils.py
-  - vllm/envs.py
-  - vllm/tool_parsers
-  - vllm/model_executor/layers/quantization/__init__.py
-  - vllm_cli
+  - tools/vllm
   - tools/generate_cli_help.py
   - pyproject.toml
   - setup.py
-  - requirements
+  - MANIFEST.in
   - tests/entrypoints/unit_tests
   - tests/entrypoints/weight_transfer
   - tests/entrypoints/launchers
