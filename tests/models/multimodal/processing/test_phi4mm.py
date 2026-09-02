@@ -87,7 +87,7 @@ class _StubModel:
     exercise both paths without constructing the full `nn.Module`
     (vision tower, audio tower, language model, etc.)."""
 
-    vision_encoder = None
+    vision_encoder: "_StubVisionEncoder | None" = None
 
 
 def _get_mm_lora_token_counts():
