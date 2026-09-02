@@ -567,3 +567,37 @@ class TestNoneStringPreservation:
         assert len(tc) == 1
         parsed = json.loads(tc[0]["arguments"])
         assert parsed["value"] == "nil"
+
+
+class TestParameterWhitespace:
+    """Parameter values must preserve surrounding whitespace."""
+
+    def test_whitespace_preserved(self, parser):
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="echo">'
+                '<parameter name="msg"> hi </parameter>'
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+        tc = _collect_tool_calls(results)
+        assert len(tc) == 1
+        assert json.loads(tc[0]["arguments"]) == {"msg": " hi "}
+
+    def test_whitespace_preserved_across_chunks(self, parser):
+        """Value split before </parameter> arrives, i.e. the partial path."""
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="write">'
+                '<parameter name="content">    def foo():\n',
+                "        return 1\n",
+                "</parameter></invoke></minimax:tool_call>",
+            ],
+        )
+        tc = _collect_tool_calls(results)
+        assert len(tc) == 1
+        assert json.loads(tc[0]["arguments"]) == {
+            "content": "    def foo():\n        return 1\n"
+        }

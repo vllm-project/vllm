@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 mod array;
 #[cfg(test)]
 mod tests;
@@ -5,6 +8,7 @@ mod wire;
 
 use std::ops::{Deref, DerefMut};
 
+use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -159,10 +163,7 @@ impl Serialize for MaybeWireLogprobs {
 impl MaybeWireLogprobs {
     /// Resolve the wire representation into decoded logprobs by looking up aux
     /// frames and decoding raw views as needed.
-    pub(super) fn resolve<Frame>(self, frames: &[Frame], field_prefix: &str) -> Result<Self>
-    where
-        Frame: AsRef<[u8]>,
-    {
+    pub(super) fn resolve(self, frames: &[Bytes], field_prefix: &str) -> Result<Self> {
         match self {
             Self::Direct(value) => Ok(Self::Direct(value)),
             Self::Wire(value) => value.resolve(frames, field_prefix).map(Self::Direct),
@@ -206,33 +207,40 @@ impl WireLogprobs {
             logprob_token_ids: WireNdArray {
                 dtype: "<i8".to_string(),
                 shape: vec![rows, cols],
-                data: WireArrayData::RawView(token_ids),
+                data: WireArrayData::RawView(token_ids.into()),
             },
             logprobs: WireNdArray {
                 dtype: "<f4".to_string(),
                 shape: vec![rows, cols],
-                data: WireArrayData::RawView(logprobs),
+                data: WireArrayData::RawView(logprobs.into()),
             },
             token_ranks: WireNdArray {
                 dtype: "<i8".to_string(),
                 shape: vec![rows],
-                data: WireArrayData::RawView(token_ranks),
+                data: WireArrayData::RawView(token_ranks.into()),
             },
             cu_num_generated_tokens: None,
+            cu_num_generated_tokens_tensor: None,
         })
     }
 
     /// Resolve the wire-format logprobs into semantic [`Logprobs`] records by
     /// looking up aux frames, decoding raw views, and grouping each row
     /// into one [`PositionLogprobs`].
-    fn resolve<Frame>(self, frames: &[Frame], field_prefix: &str) -> Result<Logprobs>
-    where
-        Frame: AsRef<[u8]>,
-    {
+    fn resolve(self, frames: &[Bytes], field_prefix: &str) -> Result<Logprobs> {
         if let Some(indices) = self.cu_num_generated_tokens {
             bail_ext_value_decode!(
                 "{field_prefix}.cu_num_generated_tokens: \
                  expected None for per-request engine-core logprobs payload, got {indices:?}"
+            );
+        }
+
+        // Unlike the sibling check above, don't Debug-print the payload:
+        // an opaque non-None value here may embed a full tensor blob.
+        if self.cu_num_generated_tokens_tensor.is_some() {
+            bail_ext_value_decode!(
+                "{field_prefix}.cu_num_generated_tokens_tensor: \
+                 expected None for per-request engine-core logprobs payload"
             );
         }
 
@@ -262,6 +270,19 @@ impl WireLogprobs {
             bail_ext_value_decode!(
                 "{field_prefix}: token_ranks length {} does not match row count {}",
                 token_ranks.len(),
+                token_ids.rows
+            );
+        }
+
+        // Empty position lists may be encoded as either [0, 0] or [0, k + 1].
+        if token_ids.rows == 0 {
+            return Ok(Logprobs {
+                positions: Vec::new(),
+            });
+        }
+        if token_ids.cols == 0 {
+            bail_ext_value_decode!(
+                "{field_prefix}: zero-column logprobs payload with {} rows",
                 token_ids.rows
             );
         }

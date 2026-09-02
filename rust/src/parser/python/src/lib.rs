@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Thin PyO3 bindings for `vllm_parser::tool`.
 //!
 //! This crate exposes the Rust tool parser trait and data shapes to Python

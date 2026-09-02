@@ -16,7 +16,7 @@ from vllm.cute_utils import (
     _tcgen05,
     cvt,
     fence_before_tma_store,
-    mma_bf16,
+    mma_sync,
     simple_tma_copy,
 )
 
@@ -536,14 +536,16 @@ class Sm100ChunkUWKernel:
                 zeros_f32.fill(0.0)
 
                 Ai_bf16 = cute.make_rmem_tensor(8, BFloat16)
-                mma_B_bf16 = cute.make_rmem_tensor(8, BFloat16)
-                M_bf16 = cute.make_rmem_tensor(8, BFloat16)
+                mma_B_bf16 = cute.make_rmem_tensor((4, 2), BFloat16)
+                M_bf16 = cute.make_rmem_tensor((4, 2), BFloat16)
                 acc = cute.make_rmem_tensor((4, 2), Float32)
 
-                # share the same storage
+                # ldmatrix copies require rank-1 destination views.
+                mma_B_bf16_ldsm = cute.group_modes(mma_B_bf16, 0, 2)
+
+                # Packed aliases for BF16x2 arithmetic.
                 Ai = cute.recast_tensor(Ai_bf16, Uint32)
-                mma_B = cute.logical_divide(cute.recast_tensor(mma_B_bf16, Uint32), 2)
-                M = cute.logical_divide(cute.recast_tensor(M_bf16, Uint32), 2)
+                M = cute.recast_tensor(M_bf16, Uint32)
 
                 # construct rmem-backed identity matrix
                 eye = cute.make_rmem_tensor(4, Uint32)
@@ -563,7 +565,11 @@ class Sm100ChunkUWKernel:
                 Ai_f32 = cute.logical_divide(cvt.bf16x2_to_fp32x2(Ai), 4)
 
                 # M is holding -(I+A), stay constant throughout the iterations
-                cute.copy(ldsm_trans_atom, sA_ldsm[None, (warp_id_, warp_id_)], M_bf16)
+                cute.copy(
+                    ldsm_trans_atom,
+                    sA_ldsm[None, (warp_id_, warp_id_)],
+                    cute.group_modes(M_bf16, 0, 2),
+                )
                 for i in cutlass.range_constexpr(4):
                     M[i] = _bf16x2_sub(_bf16x2_neg(eye[i]), M[i])
 
@@ -572,8 +578,8 @@ class Sm100ChunkUWKernel:
                     # First MMA: -AiM = Ai @ (-M)
                     cute.copy(stsm_atom, Ai_bf16, sA_ldsm[None, (warp_id_, warp_id_)])
                     cute.arch.sync_warp()
-                    acc[None, 0] = mma_bf16(Ai, M[None, 0], zeros_f32)
-                    acc[None, 1] = mma_bf16(Ai, M[None, 1], zeros_f32)
+                    acc[None, 0] = mma_sync(Ai_bf16, M_bf16[None, 0], zeros_f32)
+                    acc[None, 1] = mma_sync(Ai_bf16, M_bf16[None, 1], zeros_f32)
                     Ai_bf16.store(acc.load().to(BFloat16))
 
                     # Second MMA: Ai_new = 2Ai + (-AiM) @ Ai
@@ -582,10 +588,14 @@ class Sm100ChunkUWKernel:
                     cute.copy(
                         ldsm_trans_atom,
                         sA_ldsm[None, (warp_id_, warp_id_)],
-                        mma_B_bf16,
+                        mma_B_bf16_ldsm,
                     )
-                    Ai_f32[None, 0] = mma_bf16(Ai, mma_B[None, 0], Ai_f32[None, 0])
-                    Ai_f32[None, 1] = mma_bf16(Ai, mma_B[None, 1], Ai_f32[None, 1])
+                    Ai_f32[None, 0] = mma_sync(
+                        Ai_bf16, mma_B_bf16[None, 0], Ai_f32[None, 0]
+                    )
+                    Ai_f32[None, 1] = mma_sync(
+                        Ai_bf16, mma_B_bf16[None, 1], Ai_f32[None, 1]
+                    )
                     Ai_bf16.store(Ai_f32.load().to(BFloat16))
 
                 cute.copy(stsm_atom, Ai_bf16, sAi_ldsm[None, (warp_id_, warp_id_)])
@@ -613,23 +623,24 @@ class Sm100ChunkUWKernel:
                     neg_Ai = cute.make_rmem_tensor(4, Uint32)
                     for i in cutlass.range_constexpr(4):
                         neg_Ai[i] = _bf16x2_neg(Ai[i])
+                    neg_Ai_bf16 = cute.recast_tensor(neg_Ai, BFloat16)
 
                     cute.copy(
                         ldsm_trans_atom,
                         sA_ldsm[None, (warp_id_, warp_id_ - 1)],
-                        mma_B_bf16,
+                        mma_B_bf16_ldsm,
                     )
-                    acc[None, 0] = mma_bf16(neg_Ai, mma_B[None, 0], zeros_f32)
-                    acc[None, 1] = mma_bf16(neg_Ai, mma_B[None, 1], zeros_f32)
+                    acc[None, 0] = mma_sync(neg_Ai_bf16, mma_B_bf16[None, 0], zeros_f32)
+                    acc[None, 1] = mma_sync(neg_Ai_bf16, mma_B_bf16[None, 1], zeros_f32)
                     Ai_bf16.store(acc.load().to(BFloat16))
 
                     cute.copy(
                         ldsm_trans_atom,
                         sAi_ldsm[None, (warp_id_ - 1, warp_id_ - 1)],
-                        mma_B_bf16,
+                        mma_B_bf16_ldsm,
                     )
-                    acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
-                    acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], zeros_f32)
+                    acc[None, 0] = mma_sync(Ai_bf16, mma_B_bf16[None, 0], zeros_f32)
+                    acc[None, 1] = mma_sync(Ai_bf16, mma_B_bf16[None, 1], zeros_f32)
                     Ai_bf16.store(acc.load().to(BFloat16))
                     store_ab_abg(
                         acc,
@@ -660,10 +671,10 @@ class Sm100ChunkUWKernel:
                     cute.copy(
                         ldsm_trans_atom,
                         sAi_ldsm[None, (tile_col, tile_col)],
-                        mma_B_bf16,
+                        mma_B_bf16_ldsm,
                     )
-                    acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
-                    acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], zeros_f32)
+                    acc[None, 0] = mma_sync(Ai_bf16, mma_B_bf16[None, 0], zeros_f32)
+                    acc[None, 1] = mma_sync(Ai_bf16, mma_B_bf16[None, 1], zeros_f32)
 
                     cute.copy(
                         ldsm_atom, sA_ldsm[None, (warp_id_, tile_col + 1)], Ai_bf16
@@ -671,10 +682,10 @@ class Sm100ChunkUWKernel:
                     cute.copy(
                         ldsm_trans_atom,
                         sAi_ldsm[None, (tile_col + 1, tile_col)],
-                        mma_B_bf16,
+                        mma_B_bf16_ldsm,
                     )
-                    acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], acc[None, 0])
-                    acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], acc[None, 1])
+                    acc[None, 0] = mma_sync(Ai_bf16, mma_B_bf16[None, 0], acc[None, 0])
+                    acc[None, 1] = mma_sync(Ai_bf16, mma_B_bf16[None, 1], acc[None, 1])
 
                     tmp = cute.make_rmem_tensor(8, BFloat16)
                     tmp.store(acc.load().to(BFloat16))
@@ -687,10 +698,10 @@ class Sm100ChunkUWKernel:
                     cute.copy(
                         ldsm_trans_atom,
                         sAi_ldsm[None, (warp_id_, tile_col)],
-                        mma_B_bf16,
+                        mma_B_bf16_ldsm,
                     )
-                    acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
-                    acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], zeros_f32)
+                    acc[None, 0] = mma_sync(Ai_bf16, mma_B_bf16[None, 0], zeros_f32)
+                    acc[None, 1] = mma_sync(Ai_bf16, mma_B_bf16[None, 1], zeros_f32)
                     tmp.store(acc.load().to(BFloat16))
                     cute.copy(stsm_atom, tmp, sAi_ldsm[None, (warp_id_, tile_col)])
                     store_ab_abg(
@@ -708,15 +719,27 @@ class Sm100ChunkUWKernel:
                 # warp3: Ai30 = -Ai33 @ (A30 @ Ai00 + A31 @ Ai10 + A32 @ Ai20)
                 if warp_id_ == 3:
                     cute.copy(ldsm_atom, sA_ldsm[None, (3, 0)], Ai_bf16)
-                    cute.copy(ldsm_trans_atom, sAi_ldsm[None, (0, 0)], mma_B_bf16)
-                    acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
-                    acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], zeros_f32)
+                    cute.copy(
+                        ldsm_trans_atom,
+                        sAi_ldsm[None, (0, 0)],
+                        mma_B_bf16_ldsm,
+                    )
+                    acc[None, 0] = mma_sync(Ai_bf16, mma_B_bf16[None, 0], zeros_f32)
+                    acc[None, 1] = mma_sync(Ai_bf16, mma_B_bf16[None, 1], zeros_f32)
 
                     for i in cutlass.range_constexpr(1, 3):
                         cute.copy(ldsm_atom, sA_ldsm[None, (3, i)], Ai_bf16)
-                        cute.copy(ldsm_trans_atom, sAi_ldsm[None, (i, 0)], mma_B_bf16)
-                        acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], acc[None, 0])
-                        acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], acc[None, 1])
+                        cute.copy(
+                            ldsm_trans_atom,
+                            sAi_ldsm[None, (i, 0)],
+                            mma_B_bf16_ldsm,
+                        )
+                        acc[None, 0] = mma_sync(
+                            Ai_bf16, mma_B_bf16[None, 0], acc[None, 0]
+                        )
+                        acc[None, 1] = mma_sync(
+                            Ai_bf16, mma_B_bf16[None, 1], acc[None, 1]
+                        )
 
                     tmp = cute.make_rmem_tensor(8, BFloat16)
                     tmp.store(acc.load().to(BFloat16))
@@ -726,9 +749,13 @@ class Sm100ChunkUWKernel:
                     cute.copy(ldsm_atom, sAi_ldsm[None, (3, 3)], Ai_bf16)
                     for i in cutlass.range_constexpr(4):
                         Ai[i] = _bf16x2_neg(Ai[i])
-                    cute.copy(ldsm_trans_atom, sAi_ldsm[None, (3, 0)], mma_B_bf16)
-                    acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
-                    acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], zeros_f32)
+                    cute.copy(
+                        ldsm_trans_atom,
+                        sAi_ldsm[None, (3, 0)],
+                        mma_B_bf16_ldsm,
+                    )
+                    acc[None, 0] = mma_sync(Ai_bf16, mma_B_bf16[None, 0], zeros_f32)
+                    acc[None, 1] = mma_sync(Ai_bf16, mma_B_bf16[None, 1], zeros_f32)
                     tmp.store(acc.load().to(BFloat16))
                     cute.copy(stsm_atom, tmp, sAi_ldsm[None, (3, 0)])
                     store_ab_abg(

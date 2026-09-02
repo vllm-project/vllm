@@ -2,21 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
+)
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -31,11 +36,45 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
 )
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
+
+_PA_GLUON_MAX_QUERY_LEN = 4
+_PA_GLUON_MAX_QUERY_GROUP_SIZE = 64
+# Query group sizes the gluon paged-attention decode kernel is validated for: 8, 16
+_PA_GLUON_QUERY_GROUP_SIZES = (8, 16)
+
+# The kernel is only validated for this head size and kernel block size.
+_PA_GLUON_HEAD_SIZE = 128
+_PA_GLUON_BLOCK_SIZE = 128
+
+
+def _pa_gluon_supports(num_heads_q: int, num_heads_kv: int, head_size: int) -> bool:
+    """Whether the head config can use the PA decode gluon kernel.
+
+    Requires the shuffle KV cache layout (the kernel reads K/V in that layout)
+    plus a head config the kernel is validated for. Both the advertised kernel
+    block sizes and the decode dispatch go through this, so a config can never
+    be offered a 128-token page that gluon will then decline to serve.
+    """
+    return (
+        rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        and num_heads_kv > 0
+        and num_heads_q % num_heads_kv == 0
+        and num_heads_q // num_heads_kv in _PA_GLUON_QUERY_GROUP_SIZES
+        and head_size == _PA_GLUON_HEAD_SIZE
+    )
+
 
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 if current_platform.is_rocm():
+    from aiter.ops.triton.gluon.pa_decode_gluon import (
+        get_recommended_splits,
+    )
+    from aiter.ops.triton.gluon.pa_decode_gluon import (
+        pa_decode_gluon as _pa_decode_gluon,
+    )
+
     from vllm.triton_utils import tl, triton
 
     def block_size(x, head_dim):
@@ -125,15 +164,17 @@ if current_platform.is_rocm():
             # for kv cache layout as
             # K: [num_blocks, num_head, head_dim // x, page_size, x]
             # V: [num_blocks, num_head, page_size // x, head_dim, x]
+            # The sides only sit a dense page apart when they are separate
+            # planes (H outermost), so take the block stride from the tensor.
             key_cache_ptr_offset = (
                 key_cache_ptr
-                + block_id * num_heads * head_size * PAGE_SIZE
+                + block_id * k_cache_stride0
                 + head_id * head_size * PAGE_SIZE
                 + slot_id * x
             )
             value_cache_ptr_offset = (
                 value_cache_ptr
-                + block_id * num_heads * head_size * PAGE_SIZE
+                + block_id * v_cache_stride0
                 + head_id * head_size * PAGE_SIZE
                 + (slot_id // x) * head_size * x
                 + slot_id % x
@@ -318,6 +359,7 @@ logger = init_logger(__name__)
 @dataclass
 class AiterFlashAttentionDecodeMetadata:
     max_query_len: int
+    uniform_query_len: int | None
 
 
 @dataclass
@@ -474,10 +516,11 @@ class AiterFlashAttentionMetadataBuilder(
             and self.scale.numel() == 1
             and is_quantized_kv_cache(self.vllm_config.cache_config.cache_dtype)
         ):
-            layers = get_layers_from_vllm_config(self.vllm_config, Attention)
-            first_layer_name = [k for k in layers][0]
+            # Size the scales from a layer this builder owns. The draft model
+            # runs its own builder over its own KV cache, so the first layer of
+            # the whole config can carry an unrelated block count.
             kv_cache_shape = self.vllm_config.compilation_config.static_forward_context[
-                first_layer_name
+                self.layer_names[0]
             ].kv_cache.shape
             num_blocks = kv_cache_shape[0]
             self.scale = torch.ones(
@@ -496,20 +539,28 @@ class AiterFlashAttentionMetadataBuilder(
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
-        # Only copy seq_lens to CPU when prefill or extend is present to avoid a
-        # blocking device→host transfer.
-        seq_lens = (
-            common_attn_metadata.seq_lens.cpu()
-            if num_prefills > 0 or num_extends > 0
-            else None
-        )
+        with gpu_sync_allowed():
+            # Only copy seq_lens to CPU when prefill or extend is present to avoid a
+            # blocking device→host transfer.
+            seq_lens = (
+                common_attn_metadata.seq_lens.cpu()
+                if num_prefills > 0 or num_extends > 0
+                else None
+            )
 
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
         decode_metadata = None
         if num_decodes > 0:
+            decode_max_query_len = query_lens_cpu[:num_decodes].max().item()
+            uniform_query_len = (
+                decode_max_query_len
+                if num_decode_tokens == num_decodes * decode_max_query_len
+                else None
+            )
             decode_metadata = AiterFlashAttentionDecodeMetadata(
-                max_query_len=query_lens_cpu[:num_decodes].max().item(),
+                max_query_len=decode_max_query_len,
+                uniform_query_len=uniform_query_len,
             )
 
         prefill_metadata = None
@@ -593,9 +644,8 @@ class AiterFlashAttentionMetadataBuilder(
             chunk_ends = torch.min(
                 computed_kv_lens.unsqueeze(0), chunk_starts + max_context_chunk
             )
-            chunk_seq_lens = (chunk_ends - chunk_starts).clamp(
-                min=0
-            )  # [num_chunks, num_extends]
+            chunk_seq_lens = chunk_ends - chunk_starts
+            chunk_seq_lens.clamp_(min=0)  # [num_chunks, num_extends]
             cu_seq_lens_cpu = torch.zeros(
                 [num_chunks, num_extends + 1], dtype=torch.int32, pin_memory=True
             )
@@ -681,9 +731,27 @@ class AiterFlashAttentionMetadataBuilder(
         """
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
+
+        # Uniform-decode assumption does not hold for the
+        # drafter's first forward after a target step: it inherits the target's
+        # per-request query lengths, so rows can be longer than gluon's limit or
+        # ragged. Those batches need the real split, which costs a sync.
+        # _PA_GLUON_MAX_QUERY_LEN only binds when gluon is the decode consumer,
+        # so test that rather than the shuffle layout alone.
+        if _pa_gluon_supports(self.num_heads_q, self.num_heads_kv, self.headdim) and (
+            max_query_len > _PA_GLUON_MAX_QUERY_LEN
+            or num_tokens != num_reqs * max_query_len
+        ):
+            return self.build(
+                common_prefix_len=0, common_attn_metadata=common_attn_metadata
+            )
 
         decode_metadata = AiterFlashAttentionDecodeMetadata(
-            max_query_len=common_attn_metadata.max_query_len,
+            max_query_len=max_query_len,
+            uniform_query_len=(
+                max_query_len if num_tokens == num_reqs * max_query_len else None
+            ),
         )
 
         return AiterFlashAttentionMetadata(
@@ -738,6 +806,21 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        if not rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+            return [16, 32]
+        # Only gluon serves 128-token pages; the pa_fwd_asm/ll4mi decode
+        # fallback is limited to 16 and 32. Advertise 128 only when gluon can
+        # run so selection never picks a page we cannot serve.
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None and vllm_config.model_config is not None:
+            mc = vllm_config.model_config
+            pc = vllm_config.parallel_config
+            if _pa_gluon_supports(
+                mc.get_num_attention_heads(pc),
+                mc.get_num_kv_heads(pc),
+                mc.get_head_size(),
+            ):
+                return [16, 32, 128]
         return [16, 32]
 
     @classmethod
@@ -750,6 +833,10 @@ class AiterFlashAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "FLASH_ATTN"
 
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
     @staticmethod
     def get_impl_cls() -> type["AiterFlashAttentionImpl"]:
         return AiterFlashAttentionImpl
@@ -758,26 +845,51 @@ class AiterFlashAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["AiterFlashAttentionMetadataBuilder"]:
         return AiterFlashAttentionMetadataBuilder
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """Validate the block size the ROCm gather kernels require, and under
+        the shuffle layout publish K and V as two head slots.
+
+        The shuffle read/write kernels rearrange a whole ``head_size x
+        block_size`` tile per side, so each side needs its own contiguous run
+        in the page. Packed into the content dim they interleave per token
+        instead, which no layout can undo.
+        """
+        # block_size == 1 is the per-token page-size probe (see
+        # Platform.get_page_size_bytes); real blocks must be gatherable in
+        # 16-token units by the ROCm kernel.
+        if spec.block_size != 1 and spec.block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+        if not rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+            return spec
+        if spec.state_content_bytes is not None:
+            return spec
+        assert spec.head_size == spec.head_size_v, (
+            "Separate K/V head slots require symmetric K/V head sizes."
+        )
+        return replace(
+            spec,
+            num_head_slots=2,
+            state_content_bytes=spec.num_kv_heads
+            * spec.head_size
+            * get_dtype_size(spec.dtype),
+        )
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # K and V come out of the content dim as transposed views rather than
+        # copies, so the head dim may sit on either side of the block dim, but
+        # the layer must stay outermost.
+        return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        from vllm.platforms.rocm import on_mi3xx
+        from vllm.platforms.rocm import get_cdna_version
 
         # DeviceCapability is currently created using torch.cuda.get_device_capability()
-        # which is known to be buggy on rocm systems. on_mi3xx uses amd-smi which is
+        # which is known to be buggy on rocm systems. on CDNA uses amd-smi which is
         # more reliable.
-        return on_mi3xx()
+        return get_cdna_version() > 2
 
     @classmethod
     def supports_non_causal(cls) -> bool:
@@ -1061,8 +1173,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # Whenever making a change in this method, please benchmark the
         # performance to make sure it does not introduce any overhead.
         num_actual_tokens = attn_metadata.num_actual_tokens
-        key_cache, value_cache = kv_cache.unbind(1)
 
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
@@ -1150,11 +1262,25 @@ class AiterFlashAttentionImpl(AttentionImpl):
             if num_decodes > 0:
                 assert attn_metadata.decode_metadata is not None
                 decode_max_query_len = attn_metadata.decode_metadata.max_query_len
+                decode_query_len = attn_metadata.decode_metadata.uniform_query_len
 
-                # Use unified_attention for speculative decoding (multi-token),
-                # sliding window, or sinks
-                # (pa_fwd_asm and paged_attention_v1 don't support sinks)
-                if (
+                # check if we can use the gluon paged-attention decode kernel
+                use_gluon = (
+                    _pa_gluon_supports(
+                        self.num_heads, self.num_kv_heads, self.head_size
+                    )
+                    and key_cache.shape[1] == _PA_GLUON_BLOCK_SIZE
+                    and decode_query_len is not None
+                    and decode_query_len <= _PA_GLUON_MAX_QUERY_LEN
+                    and decode_query_len * (self.num_heads // self.num_kv_heads)
+                    <= _PA_GLUON_MAX_QUERY_GROUP_SIZE
+                    and (decode_query_len == 1 or attn_metadata.causal)
+                )
+                # Use unified_attention for the decodes the paged kernels can't
+                # take: sliding window, sinks, or a multi-token batch that gluon
+                # declined (pa_fwd_asm and paged_attention_v1 don't support
+                # sinks).
+                if not use_gluon and (
                     self.sliding_window[0] != -1
                     or decode_max_query_len > 1
                     or self.sinks is not None
@@ -1277,21 +1403,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     )
                 elif rocm_aiter_ops.is_shuffle_kv_cache_enabled():
                     _, num_heads, head_size = query.shape
-                    num_seqs = attn_metadata.seq_lens.shape[0]
-                    max_num_partitions = (
-                        attn_metadata.max_seq_len + _PARTITION_SIZE_ROCM - 1
-                    ) // _PARTITION_SIZE_ROCM
-                    tmp_out = torch.empty(
-                        (num_seqs, num_heads, max_num_partitions, head_size),
-                        dtype=query.dtype,
-                        device=query.device,
-                    )
-                    exp_sums = torch.empty(
-                        (num_seqs, num_heads, max_num_partitions),
-                        dtype=torch.float32,
-                        device=query.device,
-                    )
-                    max_logits = torch.empty_like(exp_sums)
                     num_blocks, block_size, num_kv_heads, _ = key_cache.shape
                     x = 16 // key_cache.element_size()
                     new_key_cache = key_cache.reshape(
@@ -1300,37 +1411,146 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     new_value_cache = value_cache.reshape(
                         num_blocks, num_kv_heads, block_size // x, head_size, x
                     )
-                    k_qscale = (
-                        layer._k_scale
-                        if attn_metadata.k_scale is None
-                        else attn_metadata.k_scale
-                    )
-                    v_qscale = (
-                        layer._v_scale
-                        if attn_metadata.v_scale is None
-                        else attn_metadata.v_scale
-                    )
-                    rocm_aiter_ops.paged_attention_common(
-                        Q=query[:num_decode_tokens],
-                        K=new_key_cache,
-                        V=new_value_cache,
-                        tmp_out=tmp_out,
-                        max_logits=max_logits,
-                        exp_sums=exp_sums,
-                        max_seq_len=attn_metadata.max_seq_len,
-                        block_tables=attn_metadata.block_table[:num_decodes],
-                        context_lens=attn_metadata.seq_lens[:num_decodes],
-                        block_tables_stride0=attn_metadata.block_table[
-                            :num_decodes
-                        ].stride(0),
-                        scale=self.scale,
-                        K_QScale_hip=k_qscale,
-                        V_QScale_hip=v_qscale,
-                        K_QScale_asm=k_qscale,
-                        V_QScale_asm=v_qscale,
-                        out_=output[:num_decode_tokens],
-                        kv_cache_dtype=self.kv_cache_dtype,
-                    )
+
+                    if use_gluon:
+                        is_fp8_kv = is_quantized_kv_cache(self.kv_cache_dtype)
+                        # Per-tensor descale, as a float32 [1] tensor.
+                        k_scale_gluon = (
+                            layer._k_scale.reshape(1).to(torch.float32)
+                            if is_fp8_kv
+                            else None
+                        )
+                        v_scale_gluon = (
+                            layer._v_scale.reshape(1).to(torch.float32)
+                            if is_fp8_kv
+                            else None
+                        )
+                        compute_type = (
+                            current_platform.fp8_dtype() if is_fp8_kv else query.dtype
+                        )
+                        # The kernel folds the query positions into the group
+                        # dim, so the intermediate buffers are sized by the
+                        # combined extent.
+                        query_group_size = decode_query_len * (
+                            num_heads // num_kv_heads
+                        )
+
+                        sliding_window_int = (
+                            self.sliding_window[0] + 1
+                            if self.sliding_window[0] > 0
+                            else 0
+                        )
+                        if sliding_window_int > 0:
+                            max_context_partition_num = 1
+                            context_partition_size = 128
+                        else:
+                            max_context_partition_num = get_recommended_splits(
+                                num_decodes, num_kv_heads
+                            )
+                            context_partition_size = _PARTITION_SIZE_ROCM
+
+                        intermediate_shape = (
+                            num_decodes,
+                            num_kv_heads,
+                            max_context_partition_num,
+                            query_group_size,
+                        )
+                        exp_sums = torch.empty(
+                            intermediate_shape,
+                            dtype=torch.float32,
+                            device=query.device,
+                        )
+                        max_logits = torch.empty_like(exp_sums)
+                        temporary_output = torch.empty(
+                            (*intermediate_shape, head_size),
+                            dtype=output.dtype,
+                            device=query.device,
+                        )
+
+                        _pa_decode_gluon(
+                            output=output[:num_decode_tokens],
+                            query=query[:num_decode_tokens],
+                            key_cache=new_key_cache,
+                            value_cache=new_value_cache,
+                            context_lengths=attn_metadata.seq_lens[:num_decodes].to(
+                                torch.int32
+                            ),
+                            block_tables=attn_metadata.block_table[:num_decodes].to(
+                                torch.int32
+                            ),
+                            softmax_scale=self.scale,
+                            query_length=decode_query_len,
+                            max_context_partition_num=max_context_partition_num,
+                            context_partition_size=context_partition_size,
+                            compute_type=compute_type,
+                            query_scale=None,
+                            key_scale=k_scale_gluon,
+                            value_scale=v_scale_gluon,
+                            exp_sums=exp_sums,
+                            max_logits=max_logits,
+                            temporary_output=temporary_output,
+                            alibi_slopes=self.alibi_slopes,
+                            sinks=self.sinks,
+                            sliding_window=sliding_window_int,
+                            ps=True,
+                        )
+                    else:
+                        # Unlike gluon, this kernel derives block addresses
+                        # arithmetically, so it only reads the right bytes when
+                        # each side is a dense plane of pages.
+                        assert new_key_cache.stride(0) == (
+                            num_kv_heads * head_size * block_size
+                        ), (
+                            "paged_attention_common needs the K/V sides as "
+                            "dense planes; the resolved KV cache layout "
+                            "interleaves them within a block."
+                        )
+                        num_seqs = attn_metadata.seq_lens.shape[0]
+                        max_num_partitions = (
+                            attn_metadata.max_seq_len + _PARTITION_SIZE_ROCM - 1
+                        ) // _PARTITION_SIZE_ROCM
+                        tmp_out = torch.empty(
+                            (num_seqs, num_heads, max_num_partitions, head_size),
+                            dtype=query.dtype,
+                            device=query.device,
+                        )
+                        exp_sums = torch.empty(
+                            (num_seqs, num_heads, max_num_partitions),
+                            dtype=torch.float32,
+                            device=query.device,
+                        )
+                        max_logits = torch.empty_like(exp_sums)
+                        k_qscale = (
+                            layer._k_scale
+                            if attn_metadata.k_scale is None
+                            else attn_metadata.k_scale
+                        )
+                        v_qscale = (
+                            layer._v_scale
+                            if attn_metadata.v_scale is None
+                            else attn_metadata.v_scale
+                        )
+                        rocm_aiter_ops.paged_attention_common(
+                            Q=query[:num_decode_tokens],
+                            K=new_key_cache,
+                            V=new_value_cache,
+                            tmp_out=tmp_out,
+                            max_logits=max_logits,
+                            exp_sums=exp_sums,
+                            max_seq_len=attn_metadata.max_seq_len,
+                            block_tables=attn_metadata.block_table[:num_decodes],
+                            context_lens=attn_metadata.seq_lens[:num_decodes],
+                            block_tables_stride0=attn_metadata.block_table[
+                                :num_decodes
+                            ].stride(0),
+                            scale=self.scale,
+                            K_QScale_hip=k_qscale,
+                            V_QScale_hip=v_qscale,
+                            K_QScale_asm=k_qscale,
+                            V_QScale_asm=v_qscale,
+                            out_=output[:num_decode_tokens],
+                            kv_cache_dtype=self.kv_cache_dtype,
+                        )
                 else:
                     _, num_heads, head_size = query.shape
                     nbytes_per_qo_elem = torch.finfo(query.dtype).bits // 8
@@ -1380,6 +1600,20 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         return output
 
+    def _split_kv_cache(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+            # (B, 2, N, H*hs) -> one (B, N, H, hs) per side, which is what the
+            # shuffle read/write kernels reinterpret in place. The heads are
+            # folded into the content dim by customize_spec.
+            key_cache, value_cache = kv_cache.unflatten(
+                -1, (self.num_kv_heads, self.head_size)
+            ).unbind(1)
+            return key_cache, value_cache
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+
     def do_kv_cache_update(
         self,
         layer: AttentionLayer,
@@ -1388,7 +1622,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ):
-        key_cache, value_cache = kv_cache.unbind(1)
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
 
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
@@ -1442,6 +1676,52 @@ class AiterFlashAttentionImpl(AttentionImpl):
             and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
         )
 
+    def fused_qk_norm_rope_kvcache_supported(self):
+        # Only fuse when shuffle layout is off; the shuffle write path uses a
+        # dedicated cache update, mirroring fused_rope_kvcache_supported.
+        return (
+            rocm_aiter_ops.is_enabled()
+            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        )
+
+    def do_qk_norm_rope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
+        rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=self.num_heads,
+            num_heads_k=self.num_kv_heads,
+            head_dim=self.head_size,
+            is_neox=is_neox,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            k_out=k_out,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=layer_slot_mapping,
+            k_scale=layer._k_scale_cpu,
+            v_scale=layer._v_scale_cpu,
+            kv_cache_dtype=self.kv_cache_dtype,
+            use_shuffle_layout=rocm_aiter_ops.is_shuffle_kv_cache_enabled(),
+        )
+
     def do_rope_and_kv_cache_update(
         self,
         layer: AttentionLayer,
@@ -1454,7 +1734,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        key_cache, value_cache = kv_cache.unbind(1)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)

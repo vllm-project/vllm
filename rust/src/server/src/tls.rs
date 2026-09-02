@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! OpenSSL server-config construction for TLS termination.
 //!
 //! Builds an OpenSSL [`SslContext`] from the uvicorn-style `ssl_*` arguments

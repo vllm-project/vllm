@@ -16,6 +16,7 @@ from torch.distributed import ProcessGroup, all_gather
 from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.logger import init_logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
 
@@ -590,8 +591,11 @@ def rearrange_expert_weights_inplace(
 
     weights_buffer = list(expert_buffer)
 
-    old_global_expert_indices_cpu = old_global_expert_indices.cpu().numpy()
-    new_global_expert_indices_cpu = new_global_expert_indices.cpu().numpy()
+    # The per-layer transfer plan is built in Python, so both maps have to
+    # come back to the host. Once per rearrangement.
+    with gpu_sync_allowed():
+        old_global_expert_indices_cpu = old_global_expert_indices.cpu().numpy()
+        new_global_expert_indices_cpu = new_global_expert_indices.cpu().numpy()
 
     for layer_idx in range(num_moe_layers):
         transfer_metadata = move_to_buffer(

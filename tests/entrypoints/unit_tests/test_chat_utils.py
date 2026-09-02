@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import warnings
 from collections.abc import Mapping
 from typing import Literal
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -13,11 +15,14 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    MEDIA_CONNECTOR_REGISTRY,
+    AsyncMultiModalItemTracker,
     ConversationMessage,
     _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (
     encode_audio_url,
@@ -89,6 +94,16 @@ def qwen25omni_model_config_image_embeds():
         QWEN25OMNI_MODEL_ID,
         runner="generate",
         limit_mm_per_prompt={"image": 2},
+        enable_mm_embeds=True,
+    )
+
+
+@pytest.fixture(scope="function")
+def qwen25omni_model_config_video_embeds():
+    return ModelConfig(
+        QWEN25OMNI_MODEL_ID,
+        runner="generate",
+        limit_mm_per_prompt={"video": 2},
         enable_mm_embeds=True,
     )
 
@@ -706,6 +721,29 @@ def test_parse_chat_messages_empty_system(
 
 
 @pytest.mark.asyncio
+async def test_text_only_chat_does_not_initialize_media_connector(
+    mistral_model_config,
+    monkeypatch,
+):
+    load_connector = MagicMock()
+    monkeypatch.setattr(MEDIA_CONNECTOR_REGISTRY, "load", load_connector)
+    messages = [{"role": "user", "content": "Who are you?"}]
+
+    parse_chat_messages(
+        messages,
+        mistral_model_config,
+        content_format="string",
+    )
+    await parse_chat_messages_async(
+        messages,
+        mistral_model_config,
+        content_format="string",
+    )
+
+    load_connector.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_parse_chat_messages_single_image_async(
     phi3v_model_config,
     image_url,
@@ -939,6 +977,133 @@ async def test_parse_chat_messages_audio_embeds_async(
     assert mm_uuids is not None
     assert "audio" in mm_uuids
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[None])
+
+
+def test_parse_chat_messages_empty_video_embeds_with_uuid(
+    qwen25omni_model_config_video_embeds,
+):
+    """Test video_embeds with UUID (no actual embeds data)."""
+    uuid = "test-video-uuid-123"
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this video"},
+                    {"type": "video_embeds", "video_embeds": None, "uuid": uuid},
+                ],
+            }
+        ],
+        qwen25omni_model_config_video_embeds,
+        content_format="string",
+    )
+
+    # Should have video in mm_data as None (UUID provided)
+    assert mm_data is not None
+    assert "video" in mm_data
+    assert isinstance(mm_data["video"], list)
+    assert len(mm_data["video"]) == 1
+    assert mm_data["video"][0] is None
+
+    # UUID should be recorded
+    _assert_mm_uuids(mm_uuids, 1, modality="video", expected_uuids=[uuid])
+
+
+def test_parse_chat_messages_video_embeds_with_string(
+    qwen25omni_model_config_video_embeds,
+):
+    """Test video_embeds with base64 string embedding data."""
+    hidden_size = qwen25omni_model_config_video_embeds.get_inputs_embeds_size()
+    video_embedding = torch.randn(1, 128, hidden_size)
+
+    base64_video_embedding = tensor2base64(video_embedding)
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this video"},
+                    {
+                        "type": "video_embeds",
+                        "video_embeds": base64_video_embedding,
+                    },
+                ],
+            }
+        ],
+        qwen25omni_model_config_video_embeds,
+        content_format="string",
+    )
+
+    # Should have video embedding in mm_data (single tensor, not a list)
+    assert mm_data is not None
+    assert "video" in mm_data
+    assert isinstance(mm_data["video"], torch.Tensor)
+    assert mm_data["video"].shape == video_embedding.shape
+    # No UUID provided
+    assert mm_uuids is not None
+    assert "video" in mm_uuids
+    _assert_mm_uuids(mm_uuids, 1, modality="video", expected_uuids=[None])
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_video_embeds_async(
+    qwen25omni_model_config_video_embeds,
+):
+    """Test video_embeds with async futures."""
+    hidden_size = qwen25omni_model_config_video_embeds.get_inputs_embeds_size()
+    video_embedding = torch.randn(1, 128, hidden_size)
+
+    base64_video_embedding = tensor2base64(video_embedding)
+
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this video"},
+                    {
+                        "type": "video_embeds",
+                        "video_embeds": base64_video_embedding,
+                    },
+                ],
+            }
+        ],
+        qwen25omni_model_config_video_embeds,
+        content_format="string",
+    )
+
+    # Should have video embedding in mm_data (single tensor, not a list)
+    assert mm_data is not None
+    assert "video" in mm_data
+    assert isinstance(mm_data["video"], torch.Tensor)
+    assert mm_data["video"].shape == video_embedding.shape
+    # No UUID provided
+    assert mm_uuids is not None
+    assert "video" in mm_uuids
+    _assert_mm_uuids(mm_uuids, 1, modality="video", expected_uuids=[None])
+
+
+def test_parse_chat_messages_video_and_video_embeds_mixed(
+    qwen25omni_model_config_video_embeds,
+    video_url,
+):
+    """Test that mixing raw video and video_embeds is rejected."""
+    with pytest.raises(VLLMValidationError, match="Mixing raw video"):
+        parse_chat_messages(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video_url", "video_url": {"url": video_url}},
+                        {"type": "video_embeds", "video_embeds": None, "uuid": "x"},
+                    ],
+                }
+            ],
+            qwen25omni_model_config_video_embeds,
+            content_format="string",
+        )
 
 
 def test_parse_chat_messages_multiple_image_embeds(
@@ -1501,7 +1666,7 @@ def test_parse_chat_messages_rejects_too_many_images_in_one_message(
             "ignore",
             message="coroutine 'async_get_and_parse_image' was never awaited",
         )
-        with pytest.raises(ValueError, match="At most"):
+        with pytest.raises(VLLMValidationError, match="At most"):
             parse_chat_messages(
                 [
                     {
@@ -1537,7 +1702,7 @@ def test_parse_chat_messages_rejects_too_many_images_across_messages(
             "ignore",
             message="coroutine 'async_get_and_parse_image' was never awaited",
         )
-        with pytest.raises(ValueError, match="At most"):
+        with pytest.raises(VLLMValidationError, match="At most"):
             parse_chat_messages(
                 [
                     {
@@ -1633,6 +1798,30 @@ def test_parse_chat_messages_multiple_images_interleave(
     ]
     _assert_mm_data_is_image_input(mm_data, 2)
     _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
+
+
+def test_parse_chat_messages_interleave_placeholder_overcount_raises(
+    phi3v_model_config_mm_interleaved,
+    image_url,
+):
+    # Only one image is supplied, but the user's text also contains the internal
+    # image sentinel, so the interleaved prompt references more image
+    # placeholders than actual images. This must surface as a clear validation
+    # error rather than an IndexError from popping an empty list.
+    with pytest.raises(VLLMValidationError, match="placeholders in input prompt"):
+        parse_chat_messages(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": "<##IMAGE##>"},
+                    ],
+                }
+            ],
+            phi3v_model_config_mm_interleaved,
+            content_format="string",
+        )
 
 
 @pytest.mark.asyncio
@@ -2064,7 +2253,7 @@ def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
     image_url,
 ):
     with pytest.raises(
-        ValueError,
+        VLLMValidationError,
         match=r"Found more '<|image_1|>' placeholders in input prompt "
         "than actual multimodal data items.",
     ):
@@ -2742,3 +2931,210 @@ def test_postprocess_messages_null_arguments_string():
     tool_calls = messages[0]["tool_calls"]
     assert tool_calls is not None
     assert tool_calls[0]["function"]["arguments"] == {}
+
+
+@pytest.mark.asyncio
+async def test_resolve_items_runs_modalities_concurrently_and_preserves_order():
+    """Media fetches overlap while modality and item order are preserved."""
+
+    active_fetches = 0
+    max_active_fetches = 0
+
+    async def _fetch(name: str, delay: float):
+        nonlocal active_fetches, max_active_fetches
+        active_fetches += 1
+        max_active_fetches = max(max_active_fetches, active_fetches)
+        try:
+            await asyncio.sleep(delay)
+            return name, f"{name}-uuid"
+        finally:
+            active_fetches -= 1
+
+    tracker = AsyncMultiModalItemTracker(MagicMock())
+    tracker._model_config.is_multimodal_model = True
+    tracker.__dict__["mm_processor"] = MagicMock()
+    tracker._items_by_modality["video"] = [
+        lambda: _fetch("video-0", 0.02),
+        lambda: _fetch("video-1", 0.01),
+    ]
+    tracker._items_by_modality["image"] = [
+        lambda: _fetch("image-0", 0.02),
+        lambda: _fetch("image-1", 0.01),
+    ]
+    tracker._items_by_modality["audio"] = [
+        lambda: _fetch("audio-0", 0.02),
+        lambda: _fetch("audio-1", 0.01),
+    ]
+
+    mm_data, mm_uuids = await tracker.resolve_items()
+
+    assert mm_data is not None
+    assert mm_uuids is not None
+    assert max_active_fetches == 6
+    assert list(mm_data) == ["image", "audio", "video"]
+    assert list(mm_uuids) == ["image", "audio", "video"]
+    assert mm_data == {
+        "image": ["image-0", "image-1"],
+        "audio": ["audio-0", "audio-1"],
+        "video": ["video-0", "video-1"],
+    }
+    assert mm_uuids == {
+        "image": ["image-0-uuid", "image-1-uuid"],
+        "audio": ["audio-0-uuid", "audio-1-uuid"],
+        "video": ["video-0-uuid", "video-1-uuid"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
+    """Regression test: one failing media fetch must not abandon the other
+    still-in-flight fetches across modality batches.
+
+    Before the fix, `resolve_items` gathered per-modality fetches with plain
+    `asyncio.gather`, so the first exception propagated immediately while
+    sibling fetches (real network/thread-pool work in production) kept
+    running detached, with nothing left to await or cancel them.
+    """
+
+    async def _fetch(should_fail: bool, delay: float):
+        if should_fail:
+            await asyncio.sleep(0.01)
+            raise ValueError("simulated fetch failure")
+        await asyncio.sleep(delay)
+        return ("decoded", None)
+
+    tracker = AsyncMultiModalItemTracker(MagicMock())
+    tracker._items_by_modality["image"] = [
+        lambda: _fetch(True, 0),
+        lambda: _fetch(False, 0.2),
+        lambda: _fetch(False, 0.2),
+    ]
+    tracker._items_by_modality["audio"] = [lambda: _fetch(False, 0.2)]
+    tracker._items_by_modality["video"] = [lambda: _fetch(False, 0.2)]
+
+    tasks_before = asyncio.all_tasks()
+    with pytest.raises(ValueError, match="simulated fetch failure"):
+        await tracker.resolve_items()
+
+    leaked_tasks = asyncio.all_tasks() - tasks_before
+    assert not leaked_tasks, (
+        f"resolve_items left {len(leaked_tasks)} task(s) running after "
+        f"raising: {leaked_tasks}"
+    )
+
+
+def _assistant_tool_call(arguments, name="write"):
+    return [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }
+            ],
+        }
+    ]
+
+
+def _assistant_tool_calls(calls):
+    return [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": calls,
+        }
+    ]
+
+
+def test_tool_call_arguments_dict_passthrough(caplog):
+    messages = _assistant_tool_call({"a": 1})
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {"a": 1}
+    assert not caplog.records
+
+
+def test_tool_call_arguments_valid_object_string(caplog):
+    messages = _assistant_tool_call('{"a": 1}')
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {"a": 1}
+    assert not caplog.records
+
+
+def test_tool_call_arguments_malformed_json_small(caplog):
+    bad = '{"cmd": "mkdir -p /tmp/mmadtest && cat > /tmp/mmadtest'
+    messages = _assistant_tool_call(bad, name="exec")
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}
+
+    assert len(caplog.records) == 1
+    assert "exec" in caplog.records[0].message
+    assert "coercing to an empty object" in caplog.records[0].message
+
+
+def test_tool_call_arguments_malformed_json_large(caplog):
+    bad = '{"filepath": "src/main.py", "contents": "' + ("x" * 18000)
+    messages = _assistant_tool_call(bad, name="write")
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}
+
+    assert len(caplog.records) == 1
+    assert "write" in caplog.records[0].message
+    assert "coercing to an empty object" in caplog.records[0].message
+
+
+@pytest.mark.parametrize("non_obj", ["[]", "42", "true", '"hello"', "null"])
+def test_tool_call_arguments_valid_json_non_object(caplog, non_obj):
+    messages = _assistant_tool_call(non_obj, name="bad_tool")
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}
+
+    if non_obj == "null":
+        # null parses to None, so no warning is emitted according to requirements
+        assert not caplog.records
+    else:
+        assert len(caplog.records) == 1
+        assert "bad_tool" in caplog.records[0].message
+        assert "not a JSON object" in caplog.records[0].message
+
+
+@pytest.mark.parametrize("missing", [None, ""])
+def test_tool_call_arguments_missing_or_empty(caplog, missing):
+    messages = _assistant_tool_call(missing)
+    if missing is None:
+        del messages[0]["tool_calls"][0]["function"]["arguments"]
+    _postprocess_messages(messages)
+    args = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == {}
+    assert not caplog.records
+
+
+def test_tool_call_arguments_multiple_independent(caplog):
+    calls = [
+        {
+            "id": "call_0",
+            "type": "function",
+            "function": {"name": "good", "arguments": '{"a": 1}'},
+        },
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bad", "arguments": '{"cmd": "'},
+        },
+    ]
+    messages = _assistant_tool_calls(calls)
+    _postprocess_messages(messages)
+
+    tool_calls = messages[0]["tool_calls"]
+    assert tool_calls[0]["function"]["arguments"] == {"a": 1}
+    assert tool_calls[1]["function"]["arguments"] == {}
+
+    assert len(caplog.records) == 1
+    assert "bad" in caplog.records[0].message

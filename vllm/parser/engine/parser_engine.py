@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import regex as re
 
 from vllm.entrypoints.chat_utils import get_tool_call_id_type, make_tool_call_id
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -110,6 +110,8 @@ class ParserEngine(Parser):
 
         self._has_reasoning = (
             "THINK_END" in parser_engine_config.token_id_terminals
+            or "THINK_START" in parser_engine_config.terminals
+            or "THINK_END" in parser_engine_config.terminals
             or parser_engine_config.initial_state == ParserState.REASONING
         )
         self._reasoning_ended: bool = not self._has_reasoning
@@ -145,6 +147,11 @@ class ParserEngine(Parser):
             self._reasoning_start_token_id = vocab.get(start_text)
         if end_text:
             self._reasoning_end_token_id = vocab.get(end_text)
+        self._turn_boundary_token_ids: frozenset[int] = frozenset(
+            token_id
+            for token in parser_engine_config.turn_boundary_tokens
+            if (token_id := vocab.get(token)) is not None
+        )
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -167,6 +174,14 @@ class ParserEngine(Parser):
     @skip_tool_parsing.setter
     def skip_tool_parsing(self, value: bool) -> None:
         self._engine.skip_tool_parsing = value
+
+    @property
+    def skip_reasoning_parsing(self) -> bool:
+        return self._engine.skip_reasoning_parsing
+
+    @skip_reasoning_parsing.setter
+    def skip_reasoning_parsing(self, value: bool) -> None:
+        self._engine.skip_reasoning_parsing = value
 
     @property
     def reasoning_ended(self) -> bool:
@@ -394,6 +409,9 @@ class ParserEngine(Parser):
             return True
         return find_tool_name(self._tools, name)
 
+    def _accept_tool_name(self, name: str) -> bool:
+        return bool(name) and self._is_valid_tool_name(name)
+
     # ── Private helpers ─────────────────────────────────────────────
 
     def _check_skip_tool_parsing(
@@ -596,11 +614,17 @@ class ParserEngine(Parser):
         if end_id is not None:
             if not input_ids:
                 return self.parser_engine_config.initial_state != ParserState.REASONING
+            boundary_ids = self._turn_boundary_token_ids
             for i in range(len(input_ids) - 1, -1, -1):
-                if input_ids[i] == end_id:
+                token_id = input_ids[i]
+                if token_id == end_id:
                     return True
-                if start_id is not None and input_ids[i] == start_id:
+                if start_id is not None and token_id == start_id:
                     return False
+                if token_id in boundary_ids:
+                    return (
+                        self.parser_engine_config.initial_state != ParserState.REASONING
+                    )
             return False
         return self._reasoning_ended
 
@@ -620,23 +644,8 @@ class ParserEngine(Parser):
         return None
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        start_id = self._reasoning_start_token_id
-        end_id = self._reasoning_end_token_id
-        if start_id is None or end_id is None:
-            return 0
-        count = 0
-        depth = 0
-        for token_id in token_ids:
-            if token_id == start_id:
-                depth += 1
-                continue
-            if token_id == end_id:
-                if depth > 0:
-                    depth -= 1
-                continue
-            if depth > 0:
-                count += 1
-        return count
+        """Return reasoning tokens observed by the parser engine so far."""
+        return self._engine.reasoning_token_count
 
     # ── Single-pass parse helper ────────────────────────────────────────
 
@@ -713,6 +722,7 @@ class ParserEngine(Parser):
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
 
+        carried_deferred = self._deferred_content
         seen_tool_event = False
         suppress = self._suppress_tool_calls
         for event in events:
@@ -749,7 +759,14 @@ class ParserEngine(Parser):
             tool_call_deltas = self._coalesce_tool_call_deltas(tool_call_deltas)
 
         if self._deferred_content and (not seen_tool_event or not tool_call_deltas):
-            content_parts.insert(0, self._deferred_content)
+            # Deferred content carried in from a previous delta precedes this
+            # delta's content; content deferred during this call (text after
+            # an unpromoted tool event) follows it.
+            deferred_now = self._deferred_content[len(carried_deferred) :]
+            if carried_deferred:
+                content_parts.insert(0, carried_deferred)
+            if deferred_now:
+                content_parts.append(deferred_now)
             self._deferred_content = ""
 
         content_str = "".join(content_parts)
@@ -805,7 +822,7 @@ class ParserEngine(Parser):
         deltas: list[DeltaToolCall],
         name: str | None,
     ) -> None:
-        if not name or not self._is_valid_tool_name(name):
+        if name is None or not self._accept_tool_name(name):
             return
         slot = self._tool_slots[idx]
         slot.name = name
@@ -864,8 +881,8 @@ class ParserEngine(Parser):
         slot = self._tool_slots[idx]
 
         if not slot.name_sent:
-            name = slot.name or self._try_extract_name(idx)
-            if name and self._is_valid_tool_name(name):
+            name = slot.name or self._try_extract_name(idx) or ""
+            if self._accept_tool_name(name):
                 slot.name = name
                 slot.name_sent = True
                 slot.string_keys = self._streamable_string_keys(
@@ -1040,7 +1057,7 @@ class ParserEngine(Parser):
             else:
                 args_json = "{}"
 
-            if name and self._is_valid_tool_name(name):
+            if self._accept_tool_name(name):
                 self._ensure_tool_id(slot, name)
                 args_json = self._fix_arg_types(args_json, name)
                 tool_calls.append(

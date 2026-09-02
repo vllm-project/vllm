@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Native Harmony chat renderer for `gpt_oss`.
 
 pub(crate) mod encoding;
@@ -213,7 +216,7 @@ fn preamble_tool_descriptions(
 ) -> Vec<ToolDescription> {
     let mut tools = Vec::new();
     if request.tool_parsing_enabled() {
-        tools.extend(to_tool_descriptions(&request.tools));
+        tools.extend(to_tool_descriptions(request.initial_tools()));
     }
     if let Some(leading_developer_tools) = leading_developer_tools {
         tools.extend(to_tool_descriptions(leading_developer_tools));
