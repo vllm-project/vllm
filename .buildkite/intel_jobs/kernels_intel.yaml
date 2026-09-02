@@ -18,9 +18,12 @@ steps:
   source_file_dependencies:
     - vllm/ir
     - vllm/kernels
+    - tests/kernels/core/test_uva.py
+    - vllm/utils/torch_utils.py
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       pytest -v -s ir &&
-      pytest -v -s kernels/ir'
+      pytest -v -s kernels/ir &&
+      pytest -v -s kernels/core/test_uva.py'
