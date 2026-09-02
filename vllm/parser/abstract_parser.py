@@ -563,9 +563,18 @@ class DelegatingParser(Parser):
         if not need_tool_calling:
             return request
 
+        # The two grammars are not interchangeable: with reasoning=False the
+        # free-text span carries excludes=['<think>', '</think>'], so a model
+        # whose prompt ends inside an open thinking block can never close it;
+        # with reasoning=True the grammar opens with a span terminated by
+        # '</think>', which a non-thinking request never emits and EOS stays
+        # masked. Ask the reasoning parser which shape this request needs.
         structure_tag = self._tool_parser.get_structural_tag(
             request,
-            reasoning=False,
+            reasoning=(
+                self._reasoning_parser is not None
+                and self._reasoning_parser.emits_reasoning_span
+            ),
         )
         if structure_tag is None:
             return request

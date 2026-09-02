@@ -66,6 +66,10 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     # token references instead of building full-sequence copies per step.
     reasoning_end_delta_only = True
 
+    @property
+    def emits_reasoning_span(self) -> bool:
+        return self._parser_engine.emits_reasoning_span
+
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser_engine.is_reasoning_end(list(input_ids))
 

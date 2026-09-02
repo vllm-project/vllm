@@ -608,6 +608,12 @@ class ParserEngine(Parser):
 
     # ── Reasoning state queries ───────────────────────────────────────
 
+    @property
+    def emits_reasoning_span(self) -> bool:
+        # initial_state is derived per request from chat_template_kwargs, so
+        # this tracks the thinking/no-thinking distinction of *this* request.
+        return self.parser_engine_config.initial_state == ParserState.REASONING
+
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         end_id = self._reasoning_end_token_id
         start_id = self._reasoning_start_token_id
