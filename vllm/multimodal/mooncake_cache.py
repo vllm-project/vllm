@@ -32,6 +32,9 @@ P0 has just published is not that yet -- its write is still in flight on the
 writer thread -- so entries carry a publish state and only satisfy a lookup
 once the write is confirmed.
 
+Connection and behavior settings come from `--mm-mooncake-cache-config`
+([`MooncakeProcessorCacheConfig`][vllm.config.multimodal.MooncakeProcessorCacheConfig]).
+
 Prompt updates are encoded through an explicit schema rather than `pickle`,
 both because vLLM forbids `pickle` and because this data crosses a network. An
 update whose `is_embed` or target is an opaque callable cannot be expressed in
@@ -39,8 +42,6 @@ that schema, so such items are kept local instead of being published.
 """
 
 import enum
-import json
-import os
 import struct
 import threading
 import time
@@ -67,55 +68,11 @@ from .cache import (
 from .inputs import MultiModalKwargsItem
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, MooncakeProcessorCacheConfig
 
     from .processing.processor import ResolvedPromptUpdate
 
 logger = init_logger(__name__)
-
-DEFAULT_KEY_PREFIX = "vllm/mm-processor-cache"
-DEFAULT_SHADOW_TTL_S = 30.0
-
-
-@dataclass
-class MooncakeProcessorCacheOptions:
-    """Options read from the optional `mm_processor_cache` section of the JSON
-    file pointed to by `MOONCAKE_CONFIG_PATH`.
-
-    The remaining connection settings are shared with the Mooncake KV
-    connector and come from `MooncakeStoreConfig`.
-    """
-
-    key_prefix: str = DEFAULT_KEY_PREFIX
-    shadow_ttl_s: float = DEFAULT_SHADOW_TTL_S
-    global_segment_size: int = 0
-    """Bytes this process contributes to the cluster. Defaults to 0: the
-    frontend and engine processes are clients, and capacity is expected to come
-    from the ranks (or the standalone `mooncake_client`) that already host the
-    pool."""
-    tenant_id: str | None = None
-    """Overrides the KV connector's tenant so that multi-modal objects can be
-    accounted for, and evicted, separately from KV blocks."""
-
-    @staticmethod
-    def load() -> "MooncakeProcessorCacheOptions":
-        config_path = os.getenv("MOONCAKE_CONFIG_PATH")
-        if not config_path:
-            raise ValueError(
-                "mm_processor_cache_type='mooncake' requires the environment "
-                "variable 'MOONCAKE_CONFIG_PATH' to be set."
-            )
-
-        with open(config_path) as f:
-            section: dict[str, Any] = json.load(f).get("mm_processor_cache", {})
-
-        return MooncakeProcessorCacheOptions(
-            key_prefix=section.get("key_prefix", DEFAULT_KEY_PREFIX),
-            shadow_ttl_s=float(section.get("shadow_ttl_s", DEFAULT_SHADOW_TTL_S)),
-            global_segment_size=int(section.get("global_segment_size", 0)),
-            tenant_id=section.get("tenant_id"),
-        )
-
 
 _META_VERSION = 1
 
@@ -211,23 +168,24 @@ class MooncakeProcessorStore:
     _instance_lock = threading.Lock()
 
     @classmethod
-    def get_or_create(cls) -> "MooncakeProcessorStore":
+    def get_or_create(
+        cls,
+        config: "MooncakeProcessorCacheConfig",
+    ) -> "MooncakeProcessorStore":
         with cls._instance_lock:
             if cls._instance is None:
-                cls._instance = cls()
+                cls._instance = cls(config=config)
 
             return cls._instance
 
     def __init__(
         self,
+        config: "MooncakeProcessorCacheConfig",
         store: Any | None = None,
-        options: MooncakeProcessorCacheOptions | None = None,
     ) -> None:
         from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
-        self.options = (
-            options if options is not None else (MooncakeProcessorCacheOptions.load())
-        )
+        self.config = config
         # Two clients, not one. The buffers `get_batch` returns are not stable
         # against concurrent operations on the same client: a multi-key
         # `get_batch` racing a write comes back short or shifted for some of its
@@ -261,24 +219,19 @@ class MooncakeProcessorStore:
             ) from e
 
         from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
-        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
-            MooncakeStoreConfig,
-        )
         from vllm.utils.network_utils import get_ip
 
-        store_config = MooncakeStoreConfig.load_from_config()
-        tenant_id = self.options.tenant_id or store_config.tenant_id
-
+        config = self.config
         store = MooncakeDistributedStore()
         ret = store.setup(
             rdma_utils.get_requester_local_hostname(get_ip()),
-            store_config.metadata_server,
-            self.options.global_segment_size if role == "read" else 0,
-            store_config.local_buffer_size,
-            store_config.protocol,
-            store_config.device_name,
-            store_config.master_server_address,
-            tenant_id=tenant_id,
+            config.metadata_server,
+            config.global_segment_size if role == "read" else 0,
+            config.local_buffer_size,
+            config.protocol,
+            config.device_name,
+            config.master_server_address,
+            tenant_id=config.tenant_id,
         )
         if ret != 0:
             raise RuntimeError(
@@ -291,23 +244,23 @@ class MooncakeProcessorStore:
             "(%s client, key_prefix=%s, shadow_ttl_s=%s, "
             "global_segment_size=%d, tenant_id=%s)",
             role,
-            self.options.key_prefix,
-            self.options.shadow_ttl_s,
-            self.options.global_segment_size,
-            tenant_id,
+            config.key_prefix,
+            config.shadow_ttl_s,
+            config.global_segment_size,
+            config.tenant_id,
         )
 
         return store
 
     @property
     def shadow_ttl_s(self) -> float:
-        return self.options.shadow_ttl_s
+        return self.config.shadow_ttl_s
 
     def _meta_key(self, mm_hash: str) -> str:
-        return f"{self.options.key_prefix}/meta/{mm_hash}"
+        return f"{self.config.key_prefix}/meta/{mm_hash}"
 
     def _kwargs_key(self, mm_hash: str) -> str:
-        return f"{self.options.key_prefix}/kwargs/{mm_hash}"
+        return f"{self.config.key_prefix}/kwargs/{mm_hash}"
 
     def probe(
         self,
@@ -624,7 +577,9 @@ class MooncakeProcessorSenderCache(BaseMultiModalProcessorCache):
 
         mm_config = model_config.get_multimodal_config()
 
-        self._store = store or MooncakeProcessorStore.get_or_create()
+        self._store = store or MooncakeProcessorStore.get_or_create(
+            mm_config.get_mooncake_cache_config()
+        )
         self._shadow = LRUCache[str, _ShadowEntry](
             GiB_bytes * mm_config.mm_processor_cache_gb,
             getsizeof=lambda entry: entry.item_size,
@@ -805,7 +760,9 @@ class MooncakeProcessorReceiverCache(BaseMultiModalReceiverCache):
 
         mm_config = model_config.get_multimodal_config()
 
-        self._store = store or MooncakeProcessorStore.get_or_create()
+        self._store = store or MooncakeProcessorStore.get_or_create(
+            mm_config.get_mooncake_cache_config()
+        )
         self._cache = MultiModalCache.get_lru_cache(
             mm_config.mm_processor_cache_gb,
             MultiModalKwargsItem,

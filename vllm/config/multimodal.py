@@ -14,6 +14,7 @@ from vllm.config.ec_transfer import ECTransferConfig
 from vllm.config.utils import config, get_from_deprecated_env_if_set
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
@@ -94,6 +95,44 @@ The built-in modalities are defined by
 """
 
 
+@dataclass(config=ConfigDict(extra="forbid"))
+class MooncakeProcessorCacheConfig:
+    """Settings for the Mooncake backend of the multi-modal processor cache,
+    used when `mm_processor_cache_type` is `"mooncake"`.
+
+    Every process pointed at the same master, tenant and key prefix shares the
+    processed items it caches.
+    """
+
+    master_server_address: str = ""
+    """`host:port` of the Mooncake master. Required."""
+    metadata_server: str = ""
+    """Metadata server used to exchange transfer handles, e.g.
+    `http://host:8080/metadata`, or `P2PHANDSHAKE`. Required."""
+    protocol: str = "tcp"
+    """Transfer protocol. `rdma` is supported by the store but untested for
+    this cache."""
+    device_name: str = ""
+    """Comma-separated RDMA devices. Only used when `protocol` is `rdma`."""
+    local_buffer_size: int = Field(default=GiB_bytes, gt=0)
+    """Bytes of local staging buffer this process registers with the store."""
+    global_segment_size: int = Field(default=0, ge=0)
+    """Bytes this process contributes to the cluster. Defaults to 0: frontend
+    and engine processes are clients, and capacity is expected to come from the
+    processes that already host the pool."""
+    tenant_id: str = "default"
+    """Tenant the objects are written under. Point this at a tenant of its own
+    to keep multi-modal objects accounted for, and evicted, separately from KV
+    blocks sharing the same cluster."""
+    key_prefix: str = "vllm/mm-processor-cache"
+    """Prefix of every key written by this cache. Deployments that must not
+    share processed items need different prefixes."""
+    shadow_ttl_s: float = Field(default=30.0, ge=0)
+    """How long a locally shadowed item is trusted before it is re-checked
+    against the store, which is what stops an evicted item from being promised
+    to the engine. `0` re-checks on every lookup."""
+
+
 @config
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
@@ -165,8 +204,11 @@ class MultiModalConfig:
     """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
     use shared memory FIFO cache. If `lru`, use mirrored LRU cache. If
     `mooncake`, use a Mooncake object store shared across processes and nodes,
-    configured through the `mm_processor_cache` section of the JSON file named
-    by `MOONCAKE_CONFIG_PATH`."""
+    configured by `mm_mooncake_cache_config`."""
+    mm_mooncake_cache_config: MooncakeProcessorCacheConfig | None = None
+    """Settings for the Mooncake store backing the multi-modal processor cache.
+    Only effective, and required, when `mm_processor_cache_type` is
+    `"mooncake"`."""
     mm_hasher_algorithm: MMHasherAlgorithm = Field(
         default_factory=_get_mm_hasher_algorithm
     )
@@ -320,6 +362,27 @@ class MultiModalConfig:
             raise ValueError(
                 "'mm_shm_cache_max_object_size_mb' should only be set when "
                 "'mm_processor_cache_type' is 'shm'."
+            )
+        if self.mm_processor_cache_type == "mooncake":
+            if self.mm_mooncake_cache_config is None:
+                raise ValueError(
+                    "'mm_processor_cache_type' is 'mooncake' but "
+                    "'mm_mooncake_cache_config' is not set."
+                )
+            missing = [
+                name
+                for name in ("master_server_address", "metadata_server")
+                if not getattr(self.mm_mooncake_cache_config, name)
+            ]
+            if missing:
+                raise ValueError(
+                    f"'mm_mooncake_cache_config' is missing {missing}, which "
+                    "the Mooncake client needs to reach the cluster."
+                )
+        elif self.mm_mooncake_cache_config is not None:
+            raise ValueError(
+                "'mm_mooncake_cache_config' should only be set when "
+                "'mm_processor_cache_type' is 'mooncake'."
             )
         # Validate FP8 scale path combinations.
         if self.mm_encoder_attn_dtype != "fp8" and (
@@ -489,6 +552,18 @@ class MultiModalConfig:
         ]
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
+
+    def get_mooncake_cache_config(self) -> MooncakeProcessorCacheConfig:
+        """
+        Get the settings of the Mooncake processor cache backend.
+
+        Raises:
+            ValueError: If that backend is not selected.
+        """
+        if self.mm_mooncake_cache_config is None:
+            raise ValueError("The Mooncake processor cache backend is not in use.")
+
+        return self.mm_mooncake_cache_config
 
     def get_limit_per_prompt(self, modality: str) -> int:
         """

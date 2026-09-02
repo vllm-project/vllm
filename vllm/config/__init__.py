@@ -26,7 +26,7 @@ from vllm.config.model import (
     str_dtype_to_torch_dtype,
     try_match_architecture_defaults,
 )
-from vllm.config.multimodal import MultiModalConfig
+from vllm.config.multimodal import MooncakeProcessorCacheConfig, MultiModalConfig
 from vllm.config.observability import ObservabilityConfig
 from vllm.config.offload import (
     OffloadBackend,
@@ -99,6 +99,7 @@ __all__ = [
     "str_dtype_to_torch_dtype",
     "try_match_architecture_defaults",
     # From vllm.config.multimodal
+    "MooncakeProcessorCacheConfig",
     "MultiModalConfig",
     # From vllm.config.observability
     "ObservabilityConfig",

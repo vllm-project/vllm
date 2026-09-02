@@ -10,7 +10,9 @@ import threading
 
 import pytest
 import torch
+from pydantic import ValidationError
 
+from vllm.config.multimodal import MooncakeProcessorCacheConfig, MultiModalConfig
 from vllm.multimodal.cache import MultiModalCacheMissError
 from vllm.multimodal.inputs import (
     MultiModalFieldElem,
@@ -18,7 +20,6 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
 )
 from vllm.multimodal.mooncake_cache import (
-    MooncakeProcessorCacheOptions,
     MooncakeProcessorReceiverCache,
     MooncakeProcessorSenderCache,
     MooncakeProcessorStore,
@@ -137,8 +138,8 @@ def _updates(seq: list[int]) -> list[ResolvedPromptUpdate]:
 def _make_store(shadow_ttl_s: float = 30.0, backend=None):
     backend = backend if backend is not None else FakeMooncakeStore()
     store = MooncakeProcessorStore(
+        config=MooncakeProcessorCacheConfig(shadow_ttl_s=shadow_ttl_s),
         store=backend,
-        options=MooncakeProcessorCacheOptions(shadow_ttl_s=shadow_ttl_s),
     )
     return backend, store
 
@@ -500,3 +501,23 @@ def test_sender_republishes_after_a_failed_write():
 
     assert sender.is_cached(["h"]) == [True]
     assert sender.get_and_update_item(None, "h")[0] is None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # Selected without the settings needed to reach a cluster.
+        {"mm_processor_cache_type": "mooncake"},
+        {
+            "mm_processor_cache_type": "mooncake",
+            "mm_mooncake_cache_config": MooncakeProcessorCacheConfig(
+                master_server_address="host:50051"
+            ),
+        },
+        # Settings given for a backend that will not use them.
+        {"mm_mooncake_cache_config": MooncakeProcessorCacheConfig()},
+    ],
+)
+def test_config_rejects_incomplete_mooncake_settings(kwargs):
+    with pytest.raises(ValidationError):
+        MultiModalConfig(**kwargs)
