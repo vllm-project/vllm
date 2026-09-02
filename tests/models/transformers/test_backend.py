@@ -5,7 +5,6 @@
 import contextlib
 import os
 import tempfile
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,6 +15,8 @@ from transformers import AutoConfig, AutoModel
 from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.fusers import AttentionFuser
+from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.utils import StageMissingLayer
 
@@ -537,26 +538,8 @@ def test_marking_skipped_without_tokenizer():
 NUM_LAYERS = 4
 
 
-class AttentionStub(nn.Module):
-    """Just enough of the backend to exercise attention module discovery."""
-
-    _attention_module_prefixes = Base._attention_module_prefixes
-
-    def __init__(
-        self,
-        model: nn.Module,
-        layer_prefix: str = "layers",
-        num_layers: int = NUM_LAYERS,
-    ):
-        super().__init__()
-        self.model = model
-        # As `recursive_replace` records them: rooted at `self.model`, so "model."
-        # stripped.
-        self._layer_names = {i: f"{layer_prefix}.{i}" for i in range(num_layers)}
-
-
-def build_text_stack(model_type: str) -> nn.Module:
-    """A tiny HF decoder stack of `NUM_LAYERS` layers, built on the meta device."""
+def build_model(model_type: str, **overrides) -> nn.Module:
+    """A tiny HF model of `NUM_LAYERS` layers, built on the meta device."""
     try:
         config = AutoConfig.for_model(
             model_type,
@@ -567,6 +550,7 @@ def build_text_stack(model_type: str) -> nn.Module:
             num_key_value_heads=2,
             head_dim=16,
             vocab_size=VOCAB_SIZE,
+            **overrides,
         )
     except ValueError:
         pytest.skip(f"The installed transformers has no {model_type!r} model")
@@ -574,151 +558,81 @@ def build_text_stack(model_type: str) -> nn.Module:
         return AutoModel.from_config(config)
 
 
-@pytest.mark.parametrize(
-    "model_type",
-    [
-        "llama",
-        # Fuses no QKV at all, so it is only found by `layer_idx` and class name
-        "gemma4_text",
-        # MLA
-        "deepseek_v3",
-    ],
-)
-def test_attention_modules_found(model_type: str):
-    """Every decoder layer's attention module is located, so `attn` can be attached."""
-    stub = AttentionStub(build_text_stack(model_type))
-    assert stub._attention_module_prefixes() == {
-        i: f"model.layers.{i}.self_attn" for i in range(NUM_LAYERS)
-    }
+ATTENTION_MODEL_TYPES = [
+    # The default `head_size**-0.5` happens to be right here
+    "llama",
+    # Scales the query by a learnable per-dim weight, so it declares 1.0
+    "gemma4_text",
+    # MLA, and declares yarn's `mscale`
+    "deepseek_v3",
+]
 
 
-def test_attention_modules_found_when_nested():
-    """A text stack under a multimodal wrapper is reached through its own prefix."""
-    wrapper = nn.Module()
-    wrapper.add_module("language_model", build_text_stack("llama"))
-    stub = AttentionStub(wrapper, layer_prefix="language_model.layers")
-    assert stub._attention_module_prefixes() == {
-        i: f"model.language_model.layers.{i}.self_attn" for i in range(NUM_LAYERS)
-    }
+@pytest.mark.parametrize("model_type", ATTENTION_MODEL_TYPES)
+def test_attention_dispatch_is_matched(model_type: str):
+    """Exactly the decoder layers' attention modules match an `AttentionFuser`.
 
-
-class FakeAttention(nn.Module):
-    """Mirrors an HF attention module: dispatches by `layer_idx`, named `*Attention`."""
-
-    def __init__(self, layer_idx: int):
-        super().__init__()
-        self.layer_idx = layer_idx
-
-
-class FakeCrossAttention(FakeAttention):
-    """A second dispatcher in the same layer, sharing its `layer_idx`."""
-
-
-class FakeMixer(nn.Module):
-    """A Mamba-style layer: carries a `layer_idx`, but is not attention."""
-
-    def __init__(self, layer_idx: int):
-        super().__init__()
-        self.layer_idx = layer_idx
-
-
-def test_only_unambiguous_attention_modules_are_found():
-    """Layers that cannot be resolved to one module are left on the dict lookup.
-
-    A layer with no attention at all, and one whose sibling shares its `layer_idx`,
-    are both skipped; a vision tower numbering its own layers from 0 is never scanned,
-    because only the decoder stack in `_layer_names` is.
+    That match is what `recursive_replace` records, and so what
+    `create_attention_instances` attaches vLLM's attention layer to.
     """
-    layers = nn.ModuleList()
-    for children in [
-        {"self_attn": FakeAttention(0)},
-        {"mixer": FakeMixer(1)},
-        {"self_attn": FakeAttention(2), "cross_attn": FakeCrossAttention(2)},
-    ]:
-        layer = nn.Module()
-        for name, child in children.items():
-            layer.add_module(name, child)
-        layers.append(layer)
-
-    tower_layers = nn.ModuleList(FakeAttention(i) for i in range(len(layers)))
-    tower = nn.Module()
-    tower.add_module("layers", tower_layers)
-
-    model = nn.Module()
-    model.add_module("layers", layers)
-    model.add_module("vision_tower", tower)
-
-    stub = AttentionStub(model, num_layers=len(layers))
-    assert stub._attention_module_prefixes() == {0: "model.layers.0.self_attn"}
+    model = build_model(model_type)
+    matched = {
+        name
+        for name, module in model.named_modules()
+        if AttentionFuser.match(None, module) is not None
+    }
+    assert matched == {f"layers.{i}.self_attn" for i in range(NUM_LAYERS)}
 
 
-@pytest.mark.parametrize(
-    ("attrs", "expected"),
-    [
-        ({"scaling": 0.5}, 0.5),
-        # A few older HF modules call it `scale`
-        ({"scale": 0.5}, 0.5),
-        ({"scaling": 0.5, "scale": 0.25}, 0.5),
-        # Nothing usable declared, so the caller falls back to `head_size**-0.5`
-        ({}, None),
-        ({"scaling": None}, None),
-        # `bool` is an `int`, but a flag is not a softmax scale
-        ({"scale": True}, None),
-        ({"scaling": "auto"}, None),
-    ],
-)
-def test_declared_attn_scale(attrs: dict[str, Any], expected: float | None):
-    """The scale is read off the HF module once, at construction."""
-    from vllm.model_executor.models.transformers.utils import declared_attn_scale
+def test_attention_layer_index_is_the_modules_own():
+    """The layer served comes from the module, not from its position in the stack.
 
-    module = nn.Module()
-    for name, value in attrs.items():
-        setattr(module, name, value)
-
-    assert declared_attn_scale(module) == expected
-    assert declared_attn_scale(None) is None
-
-
-CONSTRUCTION_SCALE = 0.125
-HF_SCALE = 0.25
-
-
-class DummyAttention(nn.Module):
-    """Stands in for a vLLM `Attention`, recording the scale it is asked to use."""
-
-    def __init__(self, scale: float):
-        super().__init__()
-        self.impl = SimpleNamespace(scale=scale)
-
-    def forward(self, query, key, value):
-        return query
-
-
-@pytest.mark.parametrize("attach", [False, True])
-def test_attached_attention_keeps_its_construction_scale(attach: bool):
-    """Only the dict path writes `impl.scale` per forward; an attached layer keeps its.
-
-    The write is what one compiled artifact shared across layers would drop: only the
-    first layer's Python frame runs, leaving layers 1..N on the scale they were built
-    with. Attached layers take the scale from the HF module at construction instead.
+    LongCat Flash gives each decoder layer two attention sublayers numbered
+    `2i` and `2i + 1`, so `num_hidden_layers` is twice the length of the stack
+    and the enclosing layer's position is not the index the KV cache is keyed by.
+    A vision tower is excluded separately, by `validate`: only the text config is
+    patched to dispatch to vLLM, so a tower's attention is left to Transformers.
     """
-    from vllm.model_executor.models.transformers import vllm_attention_forward
-    from vllm.model_executor.models.transformers.utils import VLLM_ATTN_ATTR
+    model = build_model("longcat_flash", num_layers=2)
+    text_config = model.config.get_text_config()
+    assert len(model.layers) * 2 == text_config.num_hidden_layers
 
-    attn = DummyAttention(CONSTRUCTION_SCALE)
-    module = FakeAttention(layer_idx=0)
-    if attach:
-        setattr(module, VLLM_ATTN_ATTR, attn)
+    attentions = [
+        model.get_submodule(f"layers.{i}.self_attn.{j}") for i in (0, 1) for j in (0, 1)
+    ]
+    fusers = [AttentionFuser.match(None, attn) for attn in attentions]
+    assert all(fuser is not None for fuser in fusers)
+    assert [f.layer_index(a) for f, a in zip(fusers, attentions)] == [0, 1, 2, 3]
 
-    query = key = value = torch.zeros(1, 4, 2, 16)
-    vllm_attention_forward(
-        module,
-        query,
-        key,
-        value,
-        None,
-        scaling=HF_SCALE,
-        attention_instances={0: attn},
-    )
+    # Not dispatching to vLLM yet, as a vision tower never would be. The vLLM
+    # config is not consulted, only the one the module was built with.
+    assert not any(f.validate(a, None) for f, a in zip(fusers, attentions))
+    text_config._attn_implementation = VLLM_ATTN_IMPL
+    assert all(f.validate(a, None) for f, a in zip(fusers, attentions))
 
-    assert attn.impl.scale == (CONSTRUCTION_SCALE if attach else HF_SCALE)
+
+@pytest.mark.parametrize("model_type", ATTENTION_MODEL_TYPES)
+def test_attention_scale_is_the_declared_one(model_type: str):
+    """The scale comes off the module, not from the `head_size**-0.5` default.
+
+    Two of the three model types declare something the default would silently
+    replace, so they are what makes this more than a tautology.
+    """
+    attention = build_model(model_type).layers[0].self_attn
+    fuser = AttentionFuser.match(None, attention)
+    assert fuser is not None
+    assert fuser.scale(attention) == attention.scaling
+
+
+def test_attention_scale_is_the_argument_not_the_attribute():
+    """OPT applies the scale to the query itself, then declares a literal 1.0.
+
+    Its `self.scaling` is the `head_size**-0.5` it has already applied, so
+    reading the attribute rather than the argument the module hands the
+    interface would scale twice.
+    """
+    model = build_model("opt", ffn_dim=128, word_embed_proj_dim=64)
+    attention = model.get_submodule("decoder.layers.0.self_attn")
+    fuser = AttentionFuser.match(None, attention)
+    assert fuser is not None
+    assert fuser.scale(attention) == 1.0 != attention.scaling
