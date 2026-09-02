@@ -36,6 +36,8 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.linear_base import OnlineLinearBase
+from vllm.model_executor.layers.quantization.online.moe_base import OnlineMoEMethodBase
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineLinearMethod,
     Mxfp4OnlineMoEMethod,
@@ -46,6 +48,10 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
 )
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
+)
+from vllm.model_executor.layers.quantization.online.utils import (
+    get_linear_activation_quant_key,
+    get_moe_activation_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -141,8 +147,24 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"keys: {sorted(str(k) for k in table)}"
             )
         if isinstance(layer, RoutedExperts):
-            return cls(layer=layer)
-        return cls()
+            assert issubclass(cls, OnlineMoEMethodBase)
+            activation_quant_key = get_moe_activation_quant_key(
+                cls.default_activation_quant_key
+            )
+            return cls(
+                layer=layer,
+                activation_quant_key=activation_quant_key,
+            )
+        elif isinstance(layer, LinearBase):
+            assert issubclass(cls, OnlineLinearBase)
+            activation_quant_key = get_linear_activation_quant_key(
+                cls.default_activation_quant_key
+            )
+            return cls(
+                activation_quant_key=activation_quant_key,
+            )
+        else:
+            return None
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str

@@ -15,6 +15,7 @@ if TYPE_CHECKING:
         FusedMoEQuantConfig,
         RoutedExperts,
     )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
@@ -26,15 +27,11 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     mxfp4_round_up_hidden_size_and_intermediate_size,
     select_mxfp4_moe_backend,
 )
-from vllm.model_executor.layers.quantization.online.fp8 import (
-    _Fp8OnlineLinearBase,
+from vllm.model_executor.layers.quantization.online.linear_base import (
+    OnlineLinearBase,
 )
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
-)
-from vllm.model_executor.layers.quantization.online.utils import (
-    get_linear_activation_quant_key,
-    get_moe_activation_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mxfp4_quantize,
@@ -77,7 +74,7 @@ def _quantize_mxfp4_moe_weight(
     return w_quant, w_scales
 
 
-class Mxfp4OnlineLinearMethod(_Fp8OnlineLinearBase):
+class Mxfp4OnlineLinearMethod(OnlineLinearBase):
     """Online MXFP4 linear method.
     Loads bf16/fp16 checkpoints and quantizes weights to MXFP4 (microscaling
     FP4 with block-32 scales) during weight loading.
@@ -85,11 +82,11 @@ class Mxfp4OnlineLinearMethod(_Fp8OnlineLinearBase):
 
     default_activation_quant_key = kMxfp4Dynamic
 
-    def __init__(self):
-        super().__init__()
-        self.activation_quant_key = get_linear_activation_quant_key(
-            self.default_activation_quant_key
-        )
+    def __init__(
+        self,
+        activation_quant_key: "QuantKey | None",
+    ):
+        super().__init__(activation_quant_key)
         self.kernel = init_mxfp4_linear_kernel(
             activation_quant_key=self.activation_quant_key
         )
@@ -151,14 +148,14 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
     experts_cls: "type[mk.FusedMoEExperts] | None"
     default_activation_quant_key = kMxfp4Dynamic
 
-    def __init__(self, *, layer: torch.nn.Module):
-        super().__init__(layer.moe_config)
+    def __init__(
+        self,
+        layer: torch.nn.Module,
+        activation_quant_key: "QuantKey | None",
+    ):
+        super().__init__(layer=layer, activation_quant_key=activation_quant_key)
         self.weight_block_size: list[int] = [1, MXFP4_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
-
-        self.activation_quant_key = get_moe_activation_quant_key(
-            self.default_activation_quant_key
-        )
 
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
             config=self.moe, activation_key=self.activation_quant_key

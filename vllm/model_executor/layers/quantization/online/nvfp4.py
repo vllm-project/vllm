@@ -16,13 +16,11 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
-from vllm.model_executor.layers.quantization.online.utils import (
-    get_moe_activation_quant_key,
-)
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     FLOAT4_E2M1_MAX,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     amax_for_moe_weight_quant,
     kNvfp4Dynamic,
     kNvfp4Static,
@@ -91,20 +89,18 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
 
     def __init__(
         self,
-        *,
         layer: torch.nn.Module,
+        activation_quant_key: "QuantKey | None",
     ):
         if not current_platform.is_device_capability_family(100):
             raise ValueError(
                 "nvfp4_per_token online quantization requires a Blackwell (SM100) GPU."
             )
-        super().__init__(layer.moe_config)
+        super().__init__(layer=layer, activation_quant_key=activation_quant_key)
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
-            activation_key=get_moe_activation_quant_key(
-                self.default_activation_quant_key
-            ),
+            activation_key=activation_quant_key,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
