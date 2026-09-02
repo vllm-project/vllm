@@ -5,9 +5,7 @@ for manipulating the input / output of HF & vLLM test runners, which are
 typically specific to a small subset of models.
 """
 
-import logging
 import types
-import warnings
 from pathlib import PosixPath
 
 import numpy as np
@@ -34,8 +32,6 @@ from vllm.utils.collection_utils import is_list_of
 from .....conftest import HfRunner, ImageAsset, ImageTestAssets
 from .types import RunnerOutput
 
-logger = logging.getLogger(__name__)
-
 
 ####### vLLM output processors functions
 def blip2_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
@@ -50,15 +46,6 @@ def blip2_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutp
     hf_output_ids = hf_output_ids[1:]
 
     return hf_output_ids, hf_output_str, out_logprobs
-
-
-def fuyu_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
-    """Sanitize vllm output [fuyu models] to be comparable with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
-
-    hf_output_str = output_str.lstrip() + "|ENDOFTEXT|"
-
-    return output_ids, hf_output_str, out_logprobs
 
 
 def qwen_vllm_to_hf_output(
@@ -165,15 +152,6 @@ def llava_onevision_vllm_to_hf_output(
         hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
 
     return hf_output_ids, hf_output_str, out_logprobs
-
-
-def mantis_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
-    """Sanitize vllm output [mantis] to compare with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
-
-    hf_output_str = output_str + "<|eot_id|>"
-
-    return output_ids, hf_output_str, out_logprobs
 
 
 def phi3v_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
@@ -577,32 +555,6 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     # ----------------------------
     isaac_model = hf_model.model.model
 
-    # [ROCm] Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
-    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
-    # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
-    # ----------------------------
-    from ...conftest import patch_hf_vision_attn_for_rocm
-
-    try:
-        patch_hf_vision_attn_for_rocm(hf_model.model)
-    except AttributeError as e:
-        if "vision_config" in str(e):
-            warnings.warn(
-                f"Skipping ROCm vision attention patch for Isaac model: {e}. "
-                "This is expected for models without vision_config in "
-                "attention layers (e.g., Siglip2VariableLengthAttention).",
-                stacklevel=2,
-            )
-        else:
-            logger.error(
-                "Unexpected AttributeError during ROCm vision attention patch: %s. "
-                "Model type: %s. Inner model type: %s.",
-                e,
-                type(hf_model.model).__name__,
-                type(getattr(hf_model.model, "model", None)).__name__,
-            )
-            raise
-
     def patched_forward(
         self,
         input_ids=None,
@@ -940,27 +892,20 @@ def _internvl_generate(
     return outputs
 
 
-def mantis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    from mantis.models.mllava import MLlavaProcessor
+def _restore_resampler_pos_cache(hf_model: HfRunner) -> None:
+    """Recompute the resampler's 2D sin/cos position cache after loading.
 
-    hf_model.processor = MLlavaProcessor.from_pretrained(hf_model.model_name)
-
-    orig_generate = hf_model.model.generate
-    tokenizer = hf_model.processor.tokenizer
-
-    def _generate(self, *args, **kwargs):
-        return orig_generate(
-            *args,
-            **kwargs,
-            eos_token_id=[
-                tokenizer.eos_token_id,
-                tokenizer.convert_tokens_to_ids("<|eot_id|>"),
-            ],
-        )
-
-    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
-
-    return hf_model
+    `from_pretrained` materializes non-persistent buffers as uninitialized
+    memory, leaving `pos_embed` as zeros or NaN instead of the values computed
+    in `__init__`.
+    """
+    restored = 0
+    for module in hf_model.model.modules():
+        if not hasattr(module, "_set_2d_pos_cache"):
+            continue
+        module._set_2d_pos_cache(module.max_size, module.pos_embed.device)
+        restored += 1
+    assert restored, "no resampler pos cache found to restore"
 
 
 def minicpmv_25_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
@@ -1006,6 +951,8 @@ def minicpmo_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 
 def minicpmv_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    _restore_resampler_pos_cache(hf_model)
+
     orig_generate = hf_model.model.generate
 
     def _generate(self, *args, image_sizes=None, **kwargs):
@@ -1217,18 +1164,6 @@ def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         )
 
     hf_model.processor = processor
-    return hf_model
-
-
-def tarsier_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    from vllm.model_executor.models.tarsier import get_vision_encoder_info
-
-    vision_encoder_info = get_vision_encoder_info(hf_model.config)
-
-    hf_processor = hf_model.processor
-    if hf_processor.patch_size is None:
-        hf_processor.patch_size = vision_encoder_info.get_patch_size()
-
     return hf_model
 
 
@@ -1535,95 +1470,4 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             return sequences
 
     hf_model.model.generate = types.MethodType(_generate, hf_model.model)
-    return hf_model
-
-
-def qianfan_ocr_hf_model_kwargs(model_name: str) -> dict:
-    """Return hf_model_kwargs with a patched config for QianfanOCR."""
-    from vllm.transformers_utils.configs.qianfan_ocr import QianfanOCRConfig
-
-    config = QianfanOCRConfig.from_pretrained(model_name)
-    vc = config.vision_config
-    if isinstance(vc.image_size, int):
-        vc.image_size = (vc.image_size, vc.image_size)
-    if isinstance(vc.patch_size, int):
-        vc.patch_size = (vc.patch_size, vc.patch_size)
-    return {"config": config}
-
-
-def qianfan_ocr_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    """Patches an HfRunner instance to run QianfanOCR model inference.
-
-    QianfanOCR shares the same architecture as InternVLChatModel, so the
-    patching logic mirrors ``internvl_patch_hf_runner``.  The only difference
-    is that we load the config via vllm's registered ``QianfanOCRConfig``
-    instead of relying on ``trust_remote_code``.
-    """
-
-    class QianfanOCRProcessor:
-        def __init__(self, hf_runner: HfRunner):
-            self.tokenizer = hf_runner.tokenizer
-
-            from vllm.transformers_utils.configs.qianfan_ocr import QianfanOCRConfig
-
-            self.config = QianfanOCRConfig.from_pretrained(hf_runner.model_name)
-            self.vision_config = self.config.vision_config
-            self.use_thumbnail = self.config.use_thumbnail
-            self.min_num = self.config.min_dynamic_patch
-            self.max_num = self.config.max_dynamic_patch
-            self.image_size = self.vision_config.image_size
-
-            # Compute num_image_token from config instead of model attribute,
-            # since the transformers-native model doesn't expose it.
-            image_size = self.config.force_image_size or self.vision_config.image_size
-            patch_size = self.vision_config.patch_size
-            downsample_ratio = self.config.downsample_ratio
-            self.num_image_token = int(
-                (image_size // patch_size) ** 2 * (downsample_ratio**2)
-            )
-
-        def __call__(
-            self,
-            text: str,
-            images: PIL.Image.Image | list[PIL.Image.Image] = None,
-            **kwargs,
-        ):
-            from vllm.transformers_utils.processors.internvl import (
-                image_to_pixel_values_internvl,
-            )
-
-            IMG_START = "<img>"
-            IMG_END = "</img>"
-            IMG_CONTEXT = "<IMG_CONTEXT>"
-
-            images = [images] if isinstance(images, PIL.Image.Image) else images
-            pixel_values_list = [
-                image_to_pixel_values_internvl(
-                    image,
-                    input_size=self.image_size,
-                    min_num=self.min_num,
-                    max_num=self.max_num,
-                    use_thumbnail=self.use_thumbnail,
-                )
-                for image in images
-            ]
-            num_patches_list = [pv.shape[0] for pv in pixel_values_list]
-            pixel_values = torch.cat(pixel_values_list, dim=0)
-
-            for num_patches in num_patches_list:
-                context_tokens = IMG_CONTEXT * self.num_image_token * num_patches
-                image_tokens = IMG_START + context_tokens + IMG_END
-                text = text.replace("<image>", image_tokens, 1)
-
-            prompt = self.tokenizer(text, return_tensors="pt")
-            prompt.update({"pixel_values": pixel_values})
-            return prompt
-
-    img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
-    hf_model.model.img_context_token_id = img_context_token_id
-    hf_model.processor = QianfanOCRProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
-    )
-    hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model

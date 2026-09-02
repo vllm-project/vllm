@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
@@ -183,11 +183,19 @@ def _make_request_output(
 
 
 def _make_context(parser_cls, **overrides):
+    # ParsableContext no longer lazily builds a parser from ``parser_cls``;
+    # the caller (here, the serving layer in production) must supply one.
+    request = overrides.get("request", _make_request())
+    response_parser = overrides.pop("response_parser", None)
+    if response_parser is None and parser_cls is not None:
+        response_parser = parser_cls(MagicMock(), request.tools)
+
     defaults = dict(
         tokenizer=MagicMock(),
         parser_cls=parser_cls,
+        response_parser=response_parser,
         response_messages=[],
-        request=_make_request(),
+        request=request,
         available_tools=None,
         chat_template=None,
         chat_template_content_format="auto",

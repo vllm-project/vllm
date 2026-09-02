@@ -8,7 +8,6 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.logger import init_logger
 from vllm.tokenizers.deepseek_v4 import DeepseekV4Tokenizer
 from vllm.utils.async_utils import make_async
 
@@ -16,8 +15,6 @@ from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
-
-logger = init_logger(__name__)
 
 
 class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):

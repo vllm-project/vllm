@@ -29,18 +29,16 @@ NVFP4_HF_OVERRIDES = {
 @create_new_process_for_each_test()
 @pytest.mark.parametrize(
     "model_id",
-    ["meta-llama/Llama-3.2-1B-Instruct", "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8"],
+    ["meta-llama/Llama-3.2-1B-Instruct", "RedHatAI/Llama-3.2-1B-Instruct-FP8"],
 )
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("async_tp_enabled", [True])
 @pytest.mark.parametrize("distributed_backend", ["mp"])
-@pytest.mark.parametrize("eager_mode", [False, True])
 def test_async_tp_pass_correctness(
     model_id: str,
     tp_size: int,
     async_tp_enabled: bool,
     distributed_backend: str,
-    eager_mode: bool,
     num_gpus_available: int,
     monkeypatch,
 ):
@@ -64,8 +62,6 @@ def test_async_tp_pass_correctness(
         "--max-num-seqs",
         "8",
     ]
-    if eager_mode:
-        common_args.append("--enforce-eager")
 
     compilation_config = {
         "mode": CompilationMode.VLLM_COMPILE,

@@ -180,7 +180,7 @@ bool cutlass_group_gemm_supported(int64_t cuda_device_capability) {
 
 #if defined CUDA_VERSION
   #if defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100
-  if (cuda_device_capability >= 100 && cuda_device_capability < 110) {
+  if (cuda_device_capability >= 100 && cuda_device_capability < 120) {
     return CUDA_VERSION >= 12080;
   }
   #endif

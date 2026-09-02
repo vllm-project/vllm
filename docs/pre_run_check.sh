@@ -1,3 +1,4 @@
+# shellcheck disable=SC2317  # code after the exit/exit-183 gate below is intentionally dead pending re-enablement (see line comment)
 if [ "$READTHEDOCS_VERSION_TYPE" != "external" ]; then
   echo "Not a PR build (version type=$READTHEDOCS_VERSION_TYPE); skipping pre-run-check gate."
   exit 0
@@ -28,7 +29,7 @@ DOCS_PATHS=(
   docs/                       # Actual docs content
   examples/                   # Examples are rendered in docs
   vllm/                       # API & CLI reference
-  requirements/test/cuda.txt  # CLI reference (see docs/mkdocs/hooks/generate_argparse.py)
+  requirements/test/cuda.txt  # CLI reference (see docs/mkdocs/gen_files/generate_argparse.py)
   mkdocs.yaml                 # Affects build process
   .readthedocs.yaml           # Affects build process
   requirements/docs.txt       # Affects build process

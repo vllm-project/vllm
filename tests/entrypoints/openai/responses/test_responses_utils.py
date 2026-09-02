@@ -20,7 +20,6 @@ from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
-    convert_tool_responses_to_completions_format,
     should_continue_final_message,
 )
 
@@ -116,27 +115,7 @@ def make_function_call_output(
 
 
 class TestResponsesUtils:
-    """Tests for convert_tool_responses_to_completions_format function."""
-
-    def test_convert_tool_responses_to_completions_format(self):
-        """Test basic conversion of a flat tool schema to nested format."""
-        input_tool = {
-            "type": "function",
-            "name": "get_weather",
-            "description": "Get the current weather in a given location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string"},
-                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
-                },
-                "required": ["location", "unit"],
-            },
-        }
-
-        result = convert_tool_responses_to_completions_format(input_tool)
-
-        assert result == {"type": "function", "function": input_tool}
+    """Tests for Responses API utils."""
 
     def test_construct_chat_messages_with_tool_call(self):
         """Test construction of chat messages with tool calls."""

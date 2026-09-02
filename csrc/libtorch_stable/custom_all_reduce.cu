@@ -18,14 +18,14 @@ fptr_t init_custom_ar(const std::vector<fptr_t>& fake_ipc_ptrs,
                       torch::stable::Tensor& rank_data, int64_t rank,
                       bool fully_connected) {
   int world_size = fake_ipc_ptrs.size();
-  if (world_size > 8)
-    throw std::invalid_argument("world size > 8 is not supported");
+  if (world_size > vllm::kMaxCustomCollectiveRanks)
+    throw std::invalid_argument("world size > 16 is not supported");
   if (world_size % 2 != 0)
     throw std::invalid_argument("Odd num gpus is not supported for now");
   if (rank < 0 || rank >= world_size)
     throw std::invalid_argument("invalid rank passed in");
 
-  vllm::Signal* ipc_ptrs[8];
+  vllm::Signal* ipc_ptrs[vllm::kMaxCustomCollectiveRanks];
   for (int i = 0; i < world_size; i++) {
     ipc_ptrs[i] = reinterpret_cast<vllm::Signal*>(fake_ipc_ptrs[i]);
   }
@@ -124,7 +124,7 @@ int64_t meta_size() { return sizeof(vllm::Signal); }
 void register_buffer(fptr_t _fa, const std::vector<fptr_t>& fake_ipc_ptrs) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
   STD_TORCH_CHECK(fake_ipc_ptrs.size() == fa->world_size_);
-  void* ipc_ptrs[8];
+  void* ipc_ptrs[vllm::kMaxCustomCollectiveRanks];
   for (int i = 0; i < fake_ipc_ptrs.size(); i++) {
     ipc_ptrs[i] = reinterpret_cast<void*>(fake_ipc_ptrs[i]);
   }

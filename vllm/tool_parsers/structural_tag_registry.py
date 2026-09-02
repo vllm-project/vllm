@@ -19,7 +19,12 @@ from xgrammar.structural_tag import (
     AnyTextFormat,
     ConstStringFormat,
     JSONSchemaFormat,
+    OptionalFormat,
+    OrFormat,
+    PlusFormat,
+    RegexFormat,
     SequenceFormat,
+    StarFormat,
     TagFormat,
     TagsWithSeparatorFormat,
     TriggeredTagsFormat,
@@ -44,6 +49,7 @@ StructuralTagBuilder: TypeAlias = Callable[
         list[BuiltinToolParam],
         SimplifiedToolChoice,
         bool,
+        str,
     ],
     StructuralTag,
 ]
@@ -60,13 +66,12 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "qwen_3_5",
         "qwen_3_coder",
         "qwen_3",
-        "harmony",
         "deepseek_v3_2",
         "glm_4_7",
         "deepseek_v4",
     }
 )
-VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes"})
+VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes", "hy_v4", "kimi_k3"})
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 )
@@ -74,7 +79,9 @@ SUPPORTED_STRUCTURAL_TAG_MODELS = (
 _VLLM_STRUCTURAL_TAG_REGISTRY: dict[str, StructuralTagBuilder] = {}
 
 
-def register_vllm_structural_tag(model: str):
+def register_vllm_structural_tag(
+    model: str,
+) -> Callable[[StructuralTagBuilder], StructuralTagBuilder]:
     """Register a vLLM-owned structural tag builder."""
 
     def decorator(func: StructuralTagBuilder) -> StructuralTagBuilder:
@@ -100,6 +107,7 @@ def get_model_structural_tag(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool] | None,
     tool_choice: ToolChoice,
     reasoning: bool,
+    token_suffix: str = "",
 ) -> StructuralTag | None:
     """Build a structural tag with xgrammar's builtin model templates."""
 
@@ -122,11 +130,18 @@ def get_model_structural_tag(
             builtin_tools,
             simplified_tool_choice,
             reasoning,
+            token_suffix,
         )
 
     if model not in XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS:
         supported = sorted(SUPPORTED_STRUCTURAL_TAG_MODELS)
         raise ValueError(f"Unknown format type: {model}, supported types: {supported}")
+
+    if token_suffix:
+        raise ValueError(
+            f"Structural tag model {model!r} is an xgrammar builtin with fixed "
+            f"tokens and cannot apply token_suffix={token_suffix!r}"
+        )
 
     return get_xgrammar_model_structural_tag(
         model=model,
@@ -204,7 +219,7 @@ def _dump_allowed_tool_ref_for_xgrammar(tool_ref: AllowedToolRef) -> AllowedTool
     return tool_ref
 
 
-def _get_function_parameters(function) -> dict[str, Any] | bool:
+def get_function_parameters(function) -> dict[str, Any] | bool:
     if getattr(function, "strict", None) is False:
         return True
     return function.parameters if function.parameters is not None else True
@@ -225,7 +240,7 @@ def _hermes_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
         TagFormat(
             begin=begin + tool.function.name + arguments_field_prefix,
             content=JSONSchemaFormat(
-                json_schema=_get_function_parameters(tool.function)
+                json_schema=get_function_parameters(tool.function)
             ),
             end=end,
         )
@@ -240,8 +255,9 @@ def get_hermes_structural_tag(
     builtin_tools: list[BuiltinToolParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
+    token_suffix: str = "",
 ) -> StructuralTag:
-    del builtin_tools, reasoning
+    del builtin_tools, reasoning, token_suffix
 
     tool_call_trigger = "<tool_call>"
 
@@ -274,7 +290,7 @@ def _minimax_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
         TagFormat(
             begin=f'<invoke name="{tool.function.name}">\n',
             content=JSONSchemaFormat(
-                json_schema=_get_function_parameters(tool.function),
+                json_schema=get_function_parameters(tool.function),
                 style="minimax_xml",
             ),
             end="</invoke>\n",
@@ -289,8 +305,9 @@ def get_minimax_structural_tag(
     builtin_tools: list[BuiltinToolParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
+    token_suffix: str = "",
 ) -> StructuralTag:
-    del builtin_tools, reasoning
+    del builtin_tools, reasoning, token_suffix
 
     tool_call_begin = "<minimax:tool_call>\n"
     tool_call_end = "</minimax:tool_call>"
@@ -345,3 +362,405 @@ def get_minimax_structural_tag(
         )
 
     return StructuralTag(format=suffix_tag)
+
+
+# ---------------------------------------------------------------------------
+# Kimi K3 (XTML channel format)
+# ---------------------------------------------------------------------------
+# K3 assistant output after the reasoning gate (``<|close|>think<|sep|>``):
+#   <|open|>response<|sep|> <content> <|close|>response<|sep|>
+#   [ <|open|>tools<|sep|>
+#       <|open|>call tool="NAME" index="1"<|sep|>
+#         <|open|>argument key="K" type="TYPE"<|sep|>VALUE<|close|>argument<|sep|>
+#       <|close|>call<|sep|> ...
+#     <|close|>tools<|sep|> ]
+# See ``encoding_k3.py`` (_render_assistant_segments / _open_tag / _attr) and
+# ``kimi_k3_tool_parser.py`` for the exact byte-level encoding this mirrors.
+_K3_OPEN = "<|open|>"
+_K3_CLOSE = "<|close|>"
+_K3_SEP = "<|sep|>"
+_K3_RESPONSE_OPEN = f"{_K3_OPEN}response{_K3_SEP}"
+_K3_RESPONSE_CLOSE = f"{_K3_CLOSE}response{_K3_SEP}"
+_K3_TOOLS_OPEN = f"{_K3_OPEN}tools{_K3_SEP}"
+_K3_TOOLS_CLOSE = f"{_K3_CLOSE}tools{_K3_SEP}"
+_K3_CALL_CLOSE = f"{_K3_CLOSE}call{_K3_SEP}"
+_K3_ARG_CLOSE = f"{_K3_CLOSE}argument{_K3_SEP}"
+# The model closes the assistant turn with <|close|>message<|sep|> right before
+# the end-of-message token. It is generated (not part of the prompt prefix), so
+# the tag must permit it or the FSM would mask the model's natural terminator.
+_K3_MESSAGE_CLOSE = f"{_K3_CLOSE}message{_K3_SEP}"
+_K3_END_OF_MSG = "<|end_of_msg|>"
+
+# JSON-schema type -> K3 XTML ``type=`` attribute value. Mirrors
+# ``encoding_k3._xtml_type`` (integer collapses onto number).
+_K3_JSON_TO_XTML_TYPE = {
+    "string": "string",
+    "integer": "number",
+    "number": "number",
+    "boolean": "boolean",
+    "null": "null",
+    "object": "object",
+    "array": "array",
+}
+
+
+def _k3_escape_attr(value: str) -> str:
+    """Mirror ``encoding_k3._escape_attr_value`` (``&`` then ``"``)."""
+    return str(value).replace("&", "&amp;").replace('"', "&quot;")
+
+
+_K3_STRING_ATOM = r"(?:[^<]|<[^|])"
+"""One raw-string character: anything but the ambiguous "<|" marker prefix.
+Allows '<' inside values (e.g. HTML snippets); a value *ending* in '<' or
+containing a literal "<|" is not expressible and falls back to AnyText via
+the pattern checks below never matching those cases at build time (schemas
+cannot know values, so the only build-time effect is the length bound)."""
+
+
+def _k3_bounded_string_regex(prop: dict[str, Any]) -> str | None:
+    """Length/pattern constraint for the raw string channel, if expressible.
+
+    The XTML string channel emits values raw (not JSON-quoted), so
+    JSONSchemaFormat cannot enforce string constraints there; unconstrained
+    AnyText lets maxLength/pattern violations through (observed on the walle
+    verifier: over-long junk strings pass the grammar and fail validation).
+    xgrammar's regex engine has no lookahead, so the close marker is kept
+    unambiguous by excluding the "<|" prefix from value characters.
+
+    Returns a regex for the value, or None to keep permissive AnyText.
+    """
+    max_len = prop.get("maxLength")
+    min_len = prop.get("minLength", 0)
+    if not isinstance(max_len, int) or max_len < 0 or max_len > 4096:
+        return None
+    if not isinstance(min_len, int) or min_len < 0 or min_len > max_len:
+        min_len = 0
+    return _K3_STRING_ATOM + f"{{{min_len},{max_len}}}"
+
+
+def _k3_argument_tag(
+    key: str,
+    schema: dict[str, Any],
+    root_defs: dict[str, Any] | None = None,
+) -> TagFormat | None:
+    """Build one ``argument`` XTML tag for property ``key``.
+
+    ``string`` values are emitted raw (bounded by the close marker); every other
+    JSON type is emitted as JSON and validated against the property schema. A
+    property whose type is a union / missing is left permissive (any XTML type,
+    raw value) so a valid call is never rejected.
+
+    ``root_defs`` carries the tool parameters' root-level ``$defs`` /
+    ``definitions``: slicing a property out of the parameters document orphans
+    its ``#/$defs/...`` references, so those tables must be re-attached to keep
+    the embedded schema self-contained.
+    """
+    prop = schema if isinstance(schema, dict) else {}
+    json_type = prop.get("type")
+    xtml_type = (
+        _K3_JSON_TO_XTML_TYPE.get(json_type) if isinstance(json_type, str) else None
+    )
+    if xtml_type is None:
+        # Unknown / union type: constrain the key but keep the value permissive.
+        return None
+    begin = (
+        f'{_K3_OPEN}argument key="{_k3_escape_attr(key)}" type="{xtml_type}"{_K3_SEP}'
+    )
+    if xtml_type == "string":
+        # Raw string channel: JSONSchemaFormat can't apply (values are not
+        # JSON-quoted), but an enum/const of strings is a finite set that can
+        # be enforced exactly with const-string alternation. Enum semantics
+        # are exclusive, so this never over-rejects. Fall back to permissive
+        # AnyText for open-ended strings or non-representable enums.
+        enum_values = prop.get("enum")
+        if enum_values is None and isinstance(prop.get("const"), str):
+            enum_values = [prop["const"]]
+        if (
+            isinstance(enum_values, list)
+            and enum_values
+            and len(enum_values) <= 256
+            and all(isinstance(v, str) for v in enum_values)
+            and not any("<|" in v for v in enum_values)
+        ):
+            branches = [ConstStringFormat(value=v) for v in enum_values]
+            content: Any = (
+                branches[0] if len(branches) == 1 else OrFormat(elements=branches)
+            )
+        elif (bounded := _k3_bounded_string_regex(prop)) is not None:
+            content = RegexFormat(pattern=bounded)
+        else:
+            content = AnyTextFormat(excludes=[_K3_CLOSE])
+    else:
+        embedded = prop
+        if root_defs:
+            embedded = dict(prop)
+            for defs_key, defs_value in root_defs.items():
+                embedded.setdefault(defs_key, defs_value)
+        content = JSONSchemaFormat(json_schema=embedded)
+    return TagFormat(begin=begin, content=content, end=_K3_ARG_CLOSE)
+
+
+def _k3_permissive_argument_tag() -> TagFormat:
+    """A key/type-agnostic ``argument`` tag: any attributes, raw value.
+
+    Used as a fallback so tools with union/loose schemas still get the XTML
+    skeleton constrained without over-rejecting the value.
+    """
+    return TagFormat(
+        begin=_K3_OPEN + "argument ",
+        content=SequenceFormat(
+            elements=[
+                RegexFormat(pattern=r"[^<]*" + _K3_SEP.replace("|", r"\|")),
+                AnyTextFormat(excludes=[_K3_CLOSE]),
+            ]
+        ),
+        end=_K3_ARG_CLOSE,
+    )
+
+
+def _k3_arguments_block(parameters: dict[str, Any] | bool) -> Any:
+    """Build ``argument`` tags for a tool's parameter schema.
+
+    Require at least one tag when the root schema declares required properties.
+    Otherwise, keep accepting zero-or-more tags. Arguments remain order-agnostic
+    and non-unique.
+    """
+    if not isinstance(parameters, dict):
+        return StarFormat(content=_k3_permissive_argument_tag())
+    props = parameters.get("properties")
+    if not isinstance(props, dict) or not props:
+        # No declared properties: allow any argument blocks (or none).
+        return StarFormat(content=_k3_permissive_argument_tag())
+    root_defs = {
+        defs_key: parameters[defs_key]
+        for defs_key in ("$defs", "definitions")
+        if isinstance(parameters.get(defs_key), dict)
+    }
+    tags: list[TagFormat] = []
+    for key, prop in props.items():
+        tag = _k3_argument_tag(key, prop, root_defs)
+        tags.append(tag if tag is not None else _k3_permissive_argument_tag())
+    inner = tags[0] if len(tags) == 1 else OrFormat(elements=list(tags))
+    required = parameters.get("required")
+    if isinstance(required, list) and required:
+        return PlusFormat(content=inner)
+    return StarFormat(content=inner)
+
+
+def _k3_call_tag(tool: FunctionToolParam) -> TagFormat:
+    """One ``call`` tag: ``<|open|>call tool="N" index="<digits>"<|sep|> args``."""
+    function = tool.function
+    parameters = get_function_parameters(function)
+    begin = f'{_K3_OPEN}call tool="{_k3_escape_attr(function.name)}" index="'
+    return TagFormat(
+        begin=begin,
+        content=SequenceFormat(
+            elements=[
+                RegexFormat(pattern=r"[0-9]+"),
+                ConstStringFormat(value=f'"{_K3_SEP}'),
+                _k3_arguments_block(parameters),
+            ]
+        ),
+        end=_K3_CALL_CLOSE,
+    )
+
+
+def _k3_response_prefix() -> list[Any]:
+    """The response channel that always precedes the tools channel.
+
+    ``response`` is generated in thinking mode (prefix ends at
+    ``<|open|>think<|sep|>``) but is part of the generation prefix in
+    non-thinking mode, so its open marker is optional. Excluding the reserved
+    marker heads commits ``<|close|>`` to the response-close branch immediately
+    and prevents a nested channel from starting inside response text.
+    """
+    return [
+        OptionalFormat(content=ConstStringFormat(value=_K3_RESPONSE_OPEN)),
+        TagFormat(
+            begin="",
+            content=AnyTextFormat(excludes=[_K3_OPEN, _K3_CLOSE, _K3_END_OF_MSG]),
+            end=_K3_RESPONSE_CLOSE,
+        ),
+    ]
+
+
+def _k3_tools_channel(tools: list[FunctionToolParam]) -> TagFormat:
+    return TagFormat(
+        begin=_K3_TOOLS_OPEN,
+        content=TagsWithSeparatorFormat(
+            tags=[_k3_call_tag(tool) for tool in tools],
+            separator="",
+            at_least_one=True,
+        ),
+        end=_K3_TOOLS_CLOSE,
+    )
+
+
+@register_vllm_structural_tag("kimi_k3")
+def get_kimi_k3_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    del builtin_tools, reasoning, token_suffix
+
+    trailer = OptionalFormat(content=ConstStringFormat(value=_K3_MESSAGE_CLOSE))
+
+    if not tools:
+        return StructuralTag(
+            format=SequenceFormat(elements=[*_k3_response_prefix(), trailer])
+        )
+
+    if tool_choice == "auto":
+        tools_part: Any = OptionalFormat(content=_k3_tools_channel(tools))
+    elif tool_choice == "forced":
+        # K3 rejects named tool choice upstream; treat defensively as a single
+        # mandatory call of the first tool.
+        tools_part = _k3_tools_channel(tools[:1])
+    else:  # required
+        tools_part = _k3_tools_channel(tools)
+
+    return StructuralTag(
+        format=SequenceFormat(elements=[*_k3_response_prefix(), tools_part, trailer])
+    )
+
+
+# ---------------------------------------------------------------------------
+# HYV4 (<tool_calls>/<tool_call>/<arg_key>/<arg_value> structural tokens)
+# ---------------------------------------------------------------------------
+# HYV4 assistant output after the reasoning gate (``</think:SUF>``):
+#   <tool_calls:SUF>
+#     <tool_call:SUF>NAME
+#       <arg_key:SUF>K</arg_key:SUF><arg_value:SUF>V</arg_value:SUF>
+#     </tool_call:SUF>
+#   </tool_calls:SUF>
+# Adjacent <tool_call> blocks have no separator, and argument values are emitted
+# verbatim (no surrounding quotes), so the value body cannot be described by
+# JSONSchemaFormat. Only the skeleton (tool names, argument keys, tag order) is
+# constrained; each <arg_value> body stays free text.
+
+
+def _hy_v4_argument_keys(parameters: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Split a tool's argument keys into ``(required, optional)``.
+
+    Both lists keep declaration order. Required keys missing from
+    ``properties`` are still treated as required.
+    """
+    properties = parameters.get("properties") or {}
+    required = parameters.get("required") or []
+    required_set = set(required)
+    required_keys = [k for k in properties if k in required_set]
+    required_keys += [k for k in required if k not in properties]
+    optional_keys = [k for k in properties if k not in required_set]
+    return required_keys, optional_keys
+
+
+@register_vllm_structural_tag("hy_v4")
+def get_hy_v4_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    """Build HYV4 <tool_calls>/<tool_call>/<arg_key>/<arg_value> structural tags.
+
+    Args:
+        tools: Normalized function tools the model may call.
+        builtin_tools: Unused; HYV4 has no builtin tools.
+        tool_choice: Simplified tool choice.
+        reasoning: Whether the grammar also covers the reasoning phase.
+        token_suffix: Per-checkpoint structural-token suffix including the
+            leading colon (e.g. ``":6124c78e"``), or ``""`` when the checkpoint
+            uses unsuffixed tokens. The HYV4 tool parser reads it off the
+            tokenizer vocab and passes it to ``get_model_structural_tag``.
+    """
+    del builtin_tools
+
+    think_end = f"</think{token_suffix}>"
+    tool_calls_begin = f"<tool_calls{token_suffix}>"
+    tool_calls_end = f"</tool_calls{token_suffix}>"
+    tool_call_begin = f"<tool_call{token_suffix}>"
+    tool_call_end = f"</tool_call{token_suffix}>"
+    arg_key_begin = f"<arg_key{token_suffix}>"
+    arg_key_end = f"</arg_key{token_suffix}>"
+    arg_value_begin = f"<arg_value{token_suffix}>"
+    arg_value_end = f"</arg_value{token_suffix}>"
+
+    def arg_pair(key: str) -> SequenceFormat:
+        return SequenceFormat(
+            elements=[
+                ConstStringFormat(value=arg_key_begin),
+                ConstStringFormat(value=key),
+                ConstStringFormat(value=arg_key_end),
+                ConstStringFormat(value=arg_value_begin),
+                AnyTextFormat(),
+                ConstStringFormat(value=arg_value_end),
+            ]
+        )
+
+    def single_tool_call(tool: FunctionToolParam) -> TagFormat:
+        function = tool.function
+        parameters = (
+            function.parameters if isinstance(function.parameters, dict) else {}
+        )
+        required_keys, optional_keys = _hy_v4_argument_keys(parameters)
+        elements: list[Any] = [arg_pair(k) for k in required_keys]
+        if optional_keys:
+            # Optional keys may appear in any order, or not at all.
+            optional_pairs = [arg_pair(k) for k in optional_keys]
+            elements.append(
+                StarFormat(
+                    content=optional_pairs[0]
+                    if len(optional_pairs) == 1
+                    else OrFormat(elements=optional_pairs)
+                )
+            )
+        content: Any = (
+            SequenceFormat(elements=elements) if elements else AnyTextFormat()
+        )
+        return TagFormat(
+            begin=tool_call_begin + function.name,
+            content=content,
+            end=tool_call_end,
+        )
+
+    tags = [single_tool_call(tool) for tool in tools]
+
+    if tool_choice == "auto":
+        block = TagFormat(
+            begin=tool_calls_begin,
+            content=TagsWithSeparatorFormat(
+                tags=tags,
+                separator="",
+                at_least_one=True,
+            ),
+            end=tool_calls_end,
+        )
+        suffix_tag: Any = TriggeredTagsFormat(triggers=[tool_calls_begin], tags=[block])
+    else:
+        # HYV4 places tool_call blocks back-to-back with no separator. "forced"
+        # has already been filtered down to the single named tool and must emit
+        # exactly one block.
+        suffix_tag = SequenceFormat(
+            elements=[
+                ConstStringFormat(value=tool_calls_begin),
+                TagsWithSeparatorFormat(
+                    tags=tags,
+                    separator="",
+                    at_least_one=True,
+                    stop_after_first=tool_choice == "forced",
+                ),
+                ConstStringFormat(value=tool_calls_end),
+            ]
+        )
+
+    if not reasoning:
+        return StructuralTag(format=suffix_tag)
+
+    # The reasoning phase is constrained too, so the tag must explicitly skip
+    # the ``<think>...</think:SUF>`` prefix.
+    prefix_tag = TagFormat(begin="", content=AnyTextFormat(), end=think_end)
+    return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
