@@ -426,7 +426,10 @@ class Qwen3NextAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
+        qkv, _ = self.qkv_proj(
+            hidden_states,
+            sequence_parallel_unpadded_size=positions.shape[-1],
+        )
         q, k, v, gate = self._project_qkv_gate(qkv, positions)
         attn_output = self.attn(q, k, v)
         if gate is not None:
@@ -539,7 +542,10 @@ class Qwen3NextDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         if self.layer_type == "linear_attention":
-            hidden_states = self.linear_attn(hidden_states=hidden_states)
+            hidden_states = self.linear_attn(
+                hidden_states=hidden_states,
+                sequence_parallel_unpadded_size=positions.shape[-1],
+            )
         elif self.layer_type == "full_attention":
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,

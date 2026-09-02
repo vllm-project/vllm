@@ -836,8 +836,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        sequence_parallel_unpadded_size: int | None = None,
     ) -> torch.Tensor:
-        return self._forward_method(hidden_states)
+        return self._forward_method(hidden_states, sequence_parallel_unpadded_size)
 
     def _output_projection(
         self,
@@ -861,12 +862,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward_hip(
         self,
         hidden_states: torch.Tensor,
+        sequence_parallel_unpadded_size: int | None = None,
     ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
         if GDN_AITER_TRITON_AVAILABLE:
-            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-            projected_states_ba, _ = self.in_proj_ba(hidden_states)
+            projected_states_qkvz, _ = self.in_proj_qkvz(
+                hidden_states,
+                sequence_parallel_unpadded_size=sequence_parallel_unpadded_size,
+            )
+            projected_states_ba, _ = self.in_proj_ba(
+                hidden_states,
+                sequence_parallel_unpadded_size=sequence_parallel_unpadded_size,
+            )
             num_tokens = projected_states_qkvz.size(0)
             projected_states_qkvz = projected_states_qkvz.view(num_tokens, -1)
             projected_states_ba = projected_states_ba.view(num_tokens, -1)
@@ -892,11 +900,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
             return self._output_projection(core_attn_out, z)
         else:
-            return self.forward_cuda(hidden_states)
+            return self.forward_cuda(hidden_states, sequence_parallel_unpadded_size)
 
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
+        sequence_parallel_unpadded_size: int | None = None,
     ) -> torch.Tensor:
         """
         Forward pass with three parts:
@@ -907,8 +916,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        mixed_qkvz, _ = self.in_proj_qkvz(
+            hidden_states,
+            sequence_parallel_unpadded_size=sequence_parallel_unpadded_size,
+        )
+        ba, _ = self.in_proj_ba(
+            hidden_states,
+            sequence_parallel_unpadded_size=sequence_parallel_unpadded_size,
+        )
         num_tokens = mixed_qkvz.size(0)
 
         use_fused_gdn_decode = (
@@ -975,6 +990,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward_xpu(
         self,
         hidden_states: torch.Tensor,
+        sequence_parallel_unpadded_size: int | None = None,
     ) -> torch.Tensor:
         """
         Forward pass with three parts:
@@ -985,8 +1001,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        projected_states_qkvz, _ = self.in_proj_qkvz(
+            hidden_states,
+            sequence_parallel_unpadded_size=sequence_parallel_unpadded_size,
+        )
+        projected_states_ba, _ = self.in_proj_ba(
+            hidden_states,
+            sequence_parallel_unpadded_size=sequence_parallel_unpadded_size,
+        )
         num_tokens = projected_states_qkvz.size(0)
 
         # ============================================================
@@ -1023,11 +1045,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward_cpu(
         self,
         hidden_states: torch.Tensor,
+        sequence_parallel_unpadded_size: int | None = None,
     ) -> torch.Tensor:
         assert not hasattr(self, "in_proj_qkv"), "lora isn't supported on CPU."
 
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        mixed_qkvz, _ = self.in_proj_qkvz(
+            hidden_states,
+            sequence_parallel_unpadded_size=sequence_parallel_unpadded_size,
+        )
+        ba, _ = self.in_proj_ba(
+            hidden_states,
+            sequence_parallel_unpadded_size=sequence_parallel_unpadded_size,
+        )
 
         if self.gqa_interleaved_layout:
             # Qwen3-Next: unpack the interleaved GQA layout

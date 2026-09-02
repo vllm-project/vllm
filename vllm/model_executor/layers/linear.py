@@ -598,8 +598,10 @@ class ColumnParallelLinear(LinearBase):
     def forward(
         self,
         input_,
+        *,
+        sequence_parallel_unpadded_size: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        input_ = self.prepare_input(input_)
+        input_ = self.prepare_input(input_, sequence_parallel_unpadded_size)
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
@@ -616,9 +618,15 @@ class ColumnParallelLinear(LinearBase):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
-    def prepare_input(self, input_: torch.Tensor) -> torch.Tensor:
+    def prepare_input(
+        self,
+        input_: torch.Tensor,
+        unpadded_size: int | None = None,
+    ) -> torch.Tensor:
         if self.sequence_parallel and self.tp_size > 1:
-            return tensor_model_parallel_all_gather(input_, dim=0)
+            input_ = tensor_model_parallel_all_gather(input_, dim=0)
+            if unpadded_size is not None:
+                input_ = input_[:unpadded_size]
         return input_
 
     def extra_repr(self) -> str:
@@ -1798,6 +1806,10 @@ class RowParallelLinear(LinearBase):
         if not self.reduce_results or self.tp_size == 1:
             return output_parallel
         if self.sequence_parallel:
+            padding = (-output_parallel.shape[0]) % self.tp_size
+            if padding:
+                pad = (0, 0) * (output_parallel.ndim - 1) + (0, padding)
+                output_parallel = torch.nn.functional.pad(output_parallel, pad)
             return tensor_model_parallel_reduce_scatter(output_parallel, dim=0)
         return tensor_model_parallel_all_reduce(output_parallel)
 

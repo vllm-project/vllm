@@ -170,9 +170,10 @@ class ParallelConfig:
     When unset (default), the effective value is derived from
     :attr:`all2all_backend`, :attr:`enable_expert_parallel`,
     :attr:`tensor_parallel_size` and :attr:`data_parallel_size` (the legacy
-    heuristic). When set explicitly, it overrides the derived value so that
-    sequence parallelism can be enabled (or disabled) for any model with
-    ``tensor_parallel_size > 1``, dense models included.
+    heuristic). Setting this to ``False`` disables MoE sequence parallelism.
+    Setting it to ``True`` requires the same supported MoE/EP topology as the
+    default heuristic. Dense sequence parallelism is controlled independently
+    by :class:`PassConfig` and its token threshold.
     """
     enable_batch_sharded_sampling: bool | None = None
     """Use sharded sampling across tensor parallel ranks. Each rank samples
@@ -710,10 +711,7 @@ class ParallelConfig:
     # In this case, ensure the input to the experts is sequence parallel
     # to avoid the excess work.
     #
-    @property
-    def use_sequence_parallel_moe(self) -> bool:
-        if self.enable_sequence_parallel_moe is not None:
-            return self.enable_sequence_parallel_moe
+    def _supports_sequence_parallel_moe(self) -> bool:
         return (
             self.all2all_backend
             in (
@@ -728,7 +726,14 @@ class ParallelConfig:
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
             and self.data_parallel_size > 1
+            and self.is_moe_model is not False
         )
+
+    @property
+    def use_sequence_parallel_moe(self) -> bool:
+        if self.enable_sequence_parallel_moe is False:
+            return False
+        return self._supports_sequence_parallel_moe()
 
     @property
     def use_all2all(self) -> bool:
@@ -880,9 +885,14 @@ class ParallelConfig:
             * self.prefill_context_parallel_size
         )
 
-        if self.enable_sequence_parallel_moe and self.tensor_parallel_size == 1:
+        if (
+            self.enable_sequence_parallel_moe
+            and not self._supports_sequence_parallel_moe()
+        ):
             raise ValueError(
-                "enable_sequence_parallel_moe=True requires tensor_parallel_size > 1."
+                "enable_sequence_parallel_moe=True requires a MoE model with "
+                "enable_expert_parallel=True, tensor_parallel_size > 1, "
+                "data_parallel_size > 1, and a supported all2all_backend."
             )
 
         if self.distributed_executor_backend == "external_launcher":
