@@ -37,10 +37,7 @@ def _compact_sampling_mask_kernel(
     max_num_kept,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Per row: write the first ``max_num_kept`` finite-logit token ids in
-    ascending order into ``token_ids[row]``, the full count into
-    ``counts[row]`` and the exact support as a bitmask into ``packed_mask[row]``.
-    """
+    """Per row: first ``max_num_kept`` finite-logit ids, the full count, the bitmask."""
     req_idx = tl.program_id(0)
     is_active = tl.load(num_sampled_tokens_ptr + req_idx) > 0
     count = tl.zeros((), dtype=tl.int32)
@@ -76,19 +73,13 @@ def _compact_sampling_mask_kernel(
     tl.store(counts_ptr + req_idx, count)
 
 
-# Widest compact row the sampler allocates. Requests whose support is larger
-# (a top_k near the vocab size, or top-k ties) fall back to the exact bitmask,
-# so this only bounds GPU/host memory: [max_num_reqs, cap] int32.
+# Bounds the [num_reqs, width] int32 buffer; wider rows use the bitmask instead.
 MAX_COMPACT_SUPPORT = 2048
 
 
 class SamplingMaskTensors(NamedTuple):
-    """Device-side sampling mask data pending async D2H.
-
-    The support is compacted on the GPU so the host normally touches only
-    ``num_reqs * max_num_kept`` ids. The bit-packed mask is kept as the
-    exact fallback for rows whose support exceeds ``max_num_kept``.
-    """
+    """Device-side masks pending async D2H: compact ids, plus the bitmask as
+    the exact fallback for rows wider than ``max_num_kept``."""
 
     # [num_requests, max_num_kept]
     token_ids: torch.Tensor
@@ -105,15 +96,7 @@ class SamplingMaskTensors(NamedTuple):
         num_sampled_tokens: torch.Tensor,
         max_num_kept: int,
     ) -> SamplingMaskTensors:
-        """Capture the finite-logit support of every row that sampled a token.
-
-        Args:
-            logits: Post-processed logits, ``-inf`` outside the support.
-            num_sampled_tokens: Per-request sampled token count; zero skips
-                the row.
-            max_num_kept: Compact row width, normally the largest ``top_k``
-                in the batch; clamped to ``MAX_COMPACT_SUPPORT``.
-        """
+        """Capture the finite-logit support of every row with a sampled token."""
         num_reqs, vocab_size = logits.shape
         max_num_kept = min(max_num_kept, vocab_size, MAX_COMPACT_SUPPORT)
         device = logits.device
@@ -161,8 +144,7 @@ class SamplingMaskTensors(NamedTuple):
         def support(row: int) -> np.ndarray:
             if counts[row] <= width:
                 return token_ids[row, : counts[row]]
-            # Wider than the compact row (top-k ties or a top_k above the
-            # cap): rebuild the exact support from the bitmask.
+            # Wider than the compact row (ties or a huge top_k): use the bitmask.
             bits = np.unpackbits(
                 packed_mask[row], count=self.vocab_size, bitorder="little"
             )

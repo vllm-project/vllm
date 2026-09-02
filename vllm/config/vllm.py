@@ -2703,8 +2703,7 @@ class VllmConfig:
             blockers.append("max_logprobs is -1, allowing vocab-size logprob requests")
 
         if self.model_config is not None and self.model_config.return_sampling_mask:
-            # gather_sampler_output() does not yet forward SamplingMaskTensors,
-            # so masks would silently come back as None.
+            # gather_sampler_output() drops SamplingMaskTensors: masks come back None.
             blockers.append(
                 "return_sampling_mask is set and the batch-sharded gather does "
                 "not forward sampling masks"

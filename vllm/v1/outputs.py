@@ -54,9 +54,7 @@ class LogprobsLists(NamedTuple):
 
 
 class SamplingMaskLists(NamedTuple):
-    """Sampling masks in CSR form: ``token_ids[offsets[i]:offsets[i + 1]]`` is
-    the support of generated position ``i``. A per-request step slice holds a
-    single position and carries ``offsets=None``."""
+    """CSR sampling masks; a step slice holds one position (``offsets=None``)."""
 
     # [num_kept_tokens]
     token_ids: np.ndarray
