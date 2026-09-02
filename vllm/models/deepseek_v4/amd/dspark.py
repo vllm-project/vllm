@@ -9,8 +9,8 @@ ROCm port of ``nvidia/dspark.py``. Follows the same nvidia->amd recipe used for
     attention + MHC CustomOp path) instead of the nvidia one;
   * route the MHC head through the ``HCHeadOp`` CustomOp dispatcher (aiter /
     tilelang / triton / torch) instead of calling the tilelang kernels directly,
-    and gate the trailing ``mhc_post`` on ``use_fused_mhc`` (False on the aiter
-    path, where the decoder layer already applies hc_post in-layer);
+    and gate the trailing ``mhc_post`` on ``use_fused_mhc`` (True when AITER
+    or TileLang fused MHC is available; False only on the torch fallback);
   * drop the mega-MoE weight path (``make_deepseek_v4_expert_params_mapping`` /
     ``use_mega_moe`` / ``finalize_mega_moe_weights`` do not exist in amd/model.py).
 
@@ -290,6 +290,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     # load_dspark_model always aliases the target's.
     has_own_embed_tokens = False
     has_own_lm_head = False
+    # Full-vocab draft: draft ids are target ids, no remapping needed.
+    draft_id_to_target_id = None
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

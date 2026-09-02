@@ -26,6 +26,7 @@ from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layou
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -161,7 +162,7 @@ def triton_w4a16_gemm_kernel(
     tl.store(c_ptrs, c, mask=mask_c)
 
 
-def triton_w4a16_gemm(
+def _triton_w4a16_gemm_impl(
     a: torch.Tensor,  # [M, K] fp16/bf16
     b_q: torch.Tensor,  # [K, N//8] int32
     scales: torch.Tensor,  # [K//G, N] fp16/bf16
@@ -268,6 +269,36 @@ def triton_w4a16_gemm(
         BLOCK_K=BLOCK_K,
     )
     return c
+
+
+def _triton_w4a16_gemm_fake(
+    a: torch.Tensor,
+    b_q: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor | None,
+    group_size: int,
+    zp_bias: int = 8,
+) -> torch.Tensor:
+    return torch.empty((a.size(0), b_q.size(1) * 8), dtype=a.dtype, device=a.device)
+
+
+direct_register_custom_op(
+    op_name="triton_w4a16_gemm",
+    op_func=_triton_w4a16_gemm_impl,
+    mutates_args=[],
+    fake_impl=_triton_w4a16_gemm_fake,
+)
+
+
+def triton_w4a16_gemm(
+    a: torch.Tensor,
+    b_q: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor | None,
+    group_size: int,
+    zp_bias: int = 8,
+) -> torch.Tensor:
+    return torch.ops.vllm.triton_w4a16_gemm(a, b_q, scales, qzeros, group_size, zp_bias)
 
 
 class TritonW4A16LinearKernel(MPLinearKernel):
@@ -400,29 +431,40 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         if self.w_zp_name is not None:
             zp = getattr(layer, self.w_zp_name, None)
             if zp is not None:
-                c = self.config
-                K, N = c.partition_weight_shape
-                group_size = c.group_size if c.group_size != -1 else K
-                expected_shape = (K // group_size, N // 8)
-                transposed_shape = (N // 8, K // group_size)
-
-                if tuple(zp.data.shape) == expected_shape:
-                    # GPTQ/AutoGPTQ already stores qzeros in the kernel layout.
-                    qzeros = zp.data.contiguous()
-                elif tuple(zp.data.shape) == transposed_shape:
-                    # Compressed-tensors stores qzeros transposed from what the
-                    # kernel needs.
-                    qzeros = zp.data.t().contiguous()
+                # Kernel needs [K//G, N//8]:
+                #        input(K) at dim 0, output(N) packed at dim 1.
+                # AutoGPTQ:
+                #        output_dim=1 -> already [K//G, N//8], no transpose.
+                # compressed-tensors:
+                #        output_dim=0 -> [N//8, K//G], needs transpose.
+                # None (unknown):
+                #        infer from shape; if square (ambiguous), default to transpose.
+                zp_output_dim = getattr(zp, "output_dim", None)
+                if zp_output_dim is not None:
+                    needs_transpose = zp_output_dim != 1
                 else:
-                    raise AssertionError(
-                        f"{self.w_zp_name} shape mismatch: {zp.data.shape}; "
-                        f"expected {expected_shape} or {transposed_shape}"
-                    )
-
+                    # in case output_dim is None
+                    c = self.config
+                    K, N = c.partition_weight_shape
+                    group_size = c.group_size if c.group_size != -1 else K
+                    expected_shape = (K // group_size, N // 8)
+                    transposed_shape = (N // 8, K // group_size)
+                    if (
+                        tuple(zp.data.shape) == expected_shape
+                        and expected_shape != transposed_shape
+                    ):
+                        needs_transpose = False
+                    else:
+                        needs_transpose = True
+                zp_data = (
+                    zp.data.t().contiguous()
+                    if needs_transpose
+                    else zp.data.contiguous()
+                )
                 replace_parameter(
                     layer,
                     self.w_zp_name,
-                    torch.nn.Parameter(qzeros, requires_grad=False),
+                    torch.nn.Parameter(zp_data, requires_grad=False),
                 )
 
     def apply_weights(
@@ -437,17 +479,18 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         K = c.partition_weight_shape[0]
         group_size = c.group_size if c.group_size != -1 else K
 
-        # For symmetric types (uint4b8), use the scalar bias; no zeros tensor.
-        # Some checkpoint loaders still register qzeros parameters for GPTQ
-        # layers, but they are not part of the symmetric kernel contract.
-        zp_bias = c.weight_type.bias if c.weight_type.has_bias() else 0
-        qzeros = None if c.weight_type.has_bias() else w_zp
+        # For symmetric types (uint4b8), use the scalar bias; no zeros tensor
+        if c.weight_type.has_bias():
+            zp_bias = c.weight_type.bias
+            w_zp = None  # symmetric: ignore qzeros, use scalar bias instead
+        else:
+            zp_bias = 0
 
         output = triton_w4a16_gemm(
             a=x_2d,
             b_q=w_q,
             scales=w_s,
-            qzeros=qzeros,
+            qzeros=w_zp,
             group_size=group_size,
             zp_bias=zp_bias,
         )

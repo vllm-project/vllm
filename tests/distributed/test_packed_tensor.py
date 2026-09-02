@@ -9,7 +9,6 @@ These utilities enable efficient batched tensor transfer over NCCL.
 import pytest
 import torch
 
-from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferUpdateInfo
 from vllm.distributed.weight_transfer.packed_tensor import (
     pack_tensors,
     packed_ipc_consumer,
@@ -66,32 +65,6 @@ def create_state_dict_info(
 ) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
     """Create state dict info (name -> (shape, dtype)) from params."""
     return {name: (tuple(tensor.shape), tensor.dtype) for name, tensor in params}
-
-
-# --- Unit Tests: NCCLWeightTransferUpdateInfo packed field ---
-
-
-class TestNCCLWeightTransferUpdateInfoPacked:
-    """Test NCCLWeightTransferUpdateInfo dataclass packed field."""
-
-    def test_packed_default_false(self):
-        """Test that packed defaults to False."""
-        info = NCCLWeightTransferUpdateInfo(
-            names=["layer.weight"],
-            dtype_names=["float32"],
-            shapes=[[10, 10]],
-        )
-        assert info.packed is False
-
-    def test_packed_can_be_set_true(self):
-        """Test that packed can be set to True."""
-        info = NCCLWeightTransferUpdateInfo(
-            names=["layer.weight"],
-            dtype_names=["float32"],
-            shapes=[[10, 10]],
-            packed=True,
-        )
-        assert info.packed is True
 
 
 # --- Unit Tests: packed_nccl_broadcast_producer ---

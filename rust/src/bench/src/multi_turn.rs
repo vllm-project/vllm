@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressStyle};
+use thiserror_ext::AsReport as _;
 use tokio::sync::Semaphore;
 
 use crate::backends::{Backend, RequestFuncInput, RequestFuncOutput, get_backend};
@@ -22,6 +23,7 @@ use crate::output::console::print_multi_turn_results;
 use crate::output::json::{
     append_result, build_multi_turn_result_json, compute_result_filename, save_result,
 };
+use crate::ready_checker::{get_first_model, wait_for_endpoint};
 
 /// Output from a single turn within a conversation.
 #[derive(Debug, Clone)]
@@ -72,9 +74,19 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
     let (model_id, model_name) = if let Some(ref m) = config.model {
         (m.clone(), config.model_name.clone())
     } else {
-        println!("Model not specified, fetching first model from server...");
-        let (name, id) = get_first_model(&config.base_url, &client, &config.extra_headers).await?;
-        println!("First model name: {name}, first model id: {id}");
+        tracing::info!(base_url = %config.base_url, "fetching first model from server");
+        let (name, id) = get_first_model(
+            &config.base_url,
+            &client,
+            &config.extra_headers,
+            config.ready_check_timeout_sec,
+        )
+        .await?;
+        tracing::info!(
+            model_name = name,
+            model_id = id,
+            "selected first model from server"
+        );
         (id, Some(name))
     };
 
@@ -83,15 +95,23 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
         None
     } else {
         let tid = config.tokenizer_id.as_deref().unwrap_or(&model_id);
-        println!("Loading tokenizer: {tid}");
-        let server_info = Some((config.base_url.as_str(), model_id.as_str()));
-        let t = crate::tokenizer::load_tokenizer(tid, config.trust_remote_code, server_info)?;
-        println!("Tokenizer loaded successfully.");
+        tracing::info!(tokenizer = tid, "loading tokenizer");
+        let server_info = Some((
+            config.base_url.as_str(),
+            model_id.as_str(),
+            config.ready_check_timeout_sec,
+        ));
+        let t =
+            crate::tokenizer::load_tokenizer(tid, config.trust_remote_code, server_info).await?;
         Some(t)
     };
 
     // Generate/load conversations
-    println!("Generating multi-turn conversations...");
+    tracing::info!(
+        dataset = ?config.dataset_name,
+        conversations = config.num_prompts,
+        "generating multi-turn conversations"
+    );
     let gen_start = Instant::now();
 
     let mut conversations = match config.dataset_name {
@@ -131,7 +151,7 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
             let path = match config.dataset_path.as_deref() {
                 Some(p) => p,
                 None => {
-                    downloaded = crate::datasets::sharegpt::download_sharegpt_dataset()?;
+                    downloaded = crate::datasets::sharegpt::download_sharegpt_dataset().await?;
                     downloaded.as_str()
                 }
             };
@@ -179,8 +199,11 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
         let (filtered_conversations, filtered_turns) =
             filter_turns_by_max_model_len(&mut conversations, max_model_len, no_history);
         if filtered_turns > 0 || filtered_conversations > 0 {
-            println!(
-                "Filtered {filtered_turns} turn(s) and {filtered_conversations} conversation(s) above --max-model-len {max_model_len}."
+            tracing::info!(
+                filtered_turns,
+                filtered_conversations,
+                max_model_len,
+                "filtered conversations above maximum model length"
             );
         }
         if conversations.is_empty() {
@@ -192,11 +215,11 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
 
     let gen_elapsed = gen_start.elapsed();
     let total_turns: usize = conversations.iter().map(|c| c.turns.len()).sum();
-    println!(
-        "Generated {} conversations ({} total turns) in {:.2}s",
-        conversations.len(),
+    tracing::info!(
+        conversations = conversations.len(),
         total_turns,
-        gen_elapsed.as_secs_f64()
+        elapsed_seconds = gen_elapsed.as_secs_f64(),
+        "generated multi-turn conversations"
     );
 
     // Log prefix sharing info
@@ -208,18 +231,15 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
         let conv_tokens =
             (real_input_len as f64 * config.multi_turn_prefix_conversation_ratio).floor() as usize;
         let unique_tokens = real_input_len.saturating_sub(global_tokens + conv_tokens);
-        println!(
-            "User message prefix sharing: {:.0}% global ({} tokens), {:.0}% per-conversation ({} tokens), {:.0}% unique ({} tokens)",
-            config.multi_turn_prefix_global_ratio * 100.0,
+        tracing::info!(
+            global_ratio = config.multi_turn_prefix_global_ratio,
             global_tokens,
-            config.multi_turn_prefix_conversation_ratio * 100.0,
-            conv_tokens,
-            (1.0 - config.multi_turn_prefix_global_ratio
-                - config.multi_turn_prefix_conversation_ratio)
-                * 100.0,
+            conversation_ratio = config.multi_turn_prefix_conversation_ratio,
+            conversation_tokens = conv_tokens,
             unique_tokens,
+            history_accumulation = false,
+            "configured multi-turn prefix sharing"
         );
-        println!("No history accumulation: each turn sends fixed-length prompt only.");
     }
 
     if config.dry_run {
@@ -253,8 +273,8 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
             ..Default::default()
         };
 
-        println!("Starting initial single prompt test run...");
-        let test_output = crate::ready_checker::wait_for_endpoint(
+        tracing::info!("starting initial single-prompt test run");
+        let test_output = wait_for_endpoint(
             config.backend,
             &client,
             &test_input,
@@ -268,7 +288,7 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
                 test_output.error
             )));
         }
-        println!("Initial test run completed.");
+        tracing::info!("initial single-prompt test run completed");
     }
 
     // For random datasets in multi-turn mode, auto-set min_tokens to enforce
@@ -283,9 +303,10 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
                 "min_tokens".to_string(),
                 serde_json::json!(config.random_output_len),
             );
-            println!(
-                "Auto-setting min_tokens={} for multi-turn random dataset (use --extra-body to override)",
-                config.random_output_len
+            tracing::info!(
+                min_tokens = config.random_output_len,
+                dataset = "random",
+                "set minimum output tokens for multi-turn dataset"
             );
         }
         Some(body)
@@ -297,7 +318,7 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
     let spec_decode_before =
         fetch_spec_decode_metrics(&config.base_url, &client, &config.extra_headers).await;
     if spec_decode_before.is_some() {
-        println!("Speculative decoding detected, will collect metrics.");
+        tracing::info!("detected speculative decoding; collecting metrics");
     }
 
     // Start profiler if requested (immediate mode — no batch threshold)
@@ -330,10 +351,13 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
     };
 
     // Main benchmark
-    println!("Starting multi-turn benchmark...");
-    println!("Conversations: {}", conversations.len());
-    println!("Concurrency: {concurrency}");
-    println!("Inter-turn delay: {} ms", config.multi_turn_delay_ms);
+    tracing::info!(
+        conversations = conversations.len(),
+        total_turns,
+        concurrency,
+        inter_turn_delay_ms = config.multi_turn_delay_ms,
+        "starting multi-turn benchmark"
+    );
 
     let max_turn_count = conversations.iter().map(|c| c.turns.len()).max().unwrap_or(0);
 
@@ -364,11 +388,12 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
     );
     if let Some(modules) = config.lora_modules.as_ref() {
         let names: Vec<&str> = modules.iter().map(|s| s.as_ref()).collect();
-        println!(
-            "LoRA adapters ({}): {:?} [assignment={:?}, scope=conversation]",
-            modules.len(),
-            names,
-            config.lora_assignment
+        tracing::info!(
+            adapters = modules.len(),
+            names = ?names,
+            assignment = ?config.lora_assignment,
+            scope = "conversation",
+            "assigned LoRA adapters"
         );
     }
 
@@ -433,7 +458,7 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
         match handle.await {
             Ok(output) => all_outputs.push(output),
             Err(e) => {
-                eprintln!("Conversation task panicked: {e}");
+                tracing::error!(error = %e.as_report(), "conversation task panicked");
             }
         }
     }
@@ -453,7 +478,7 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
     if let Some((cancel_tx, task)) = profile_task {
         let _ = cancel_tx.send(());
         if let Err(e) = task.await {
-            eprintln!("WARNING: Profile background task failed: {e}");
+            tracing::error!(error = %e.as_report(), "profiler background task failed");
         }
     }
 
@@ -732,39 +757,6 @@ async fn run_conversation(
         total_duration_ms,
         all_success,
     }
-}
-
-/// Fetch the first model from the server's /v1/models endpoint.
-async fn get_first_model(
-    base_url: &str,
-    client: &reqwest::Client,
-    extra_headers: &Option<HashMap<String, String>>,
-) -> Result<(String, String)> {
-    let url = format!("{base_url}/v1/models");
-    let mut request = client.get(&url);
-    if let Some(headers) = extra_headers {
-        for (k, v) in headers {
-            request = request.header(k, v);
-        }
-    }
-    if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-        request = request.header("Authorization", format!("Bearer {api_key}"));
-    }
-
-    let response = request.send().await?;
-    let data: serde_json::Value = response.json().await?;
-
-    if let Some(models) = data.get("data").and_then(|d| d.as_array())
-        && let Some(first) = models.first()
-    {
-        let id = first.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let root = first.get("root").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
-        return Ok((id, root));
-    }
-
-    Err(BenchError::Config(format!(
-        "No models found on the server at {base_url}"
-    )))
 }
 
 #[cfg(test)]

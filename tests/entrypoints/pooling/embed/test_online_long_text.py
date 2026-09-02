@@ -16,11 +16,12 @@ import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
-from vllm.platforms import current_platform
 
 
 def _generate_random_text(word_count: int) -> str:
-    """Generate random text with approximately the specified word count."""
+    """Generate deterministic text with approximately the specified word count."""
+    rng = random.Random(word_count)
+
     # Common English words with focus on verbs and nouns for realistic text
     common_words = [
         # Essential articles and pronouns (minimal)
@@ -178,7 +179,7 @@ def _generate_random_text(word_count: int) -> str:
 
     words = []
     for _ in range(word_count):
-        words.append(random.choice(common_words))
+        words.append(rng.choice(common_words))
 
     # Add some punctuation for more realistic text
     text = " ".join(words)
@@ -187,7 +188,7 @@ def _generate_random_text(word_count: int) -> str:
     result = []
     for i, word in enumerate(words_list):
         result.append(word)
-        if (i + 1) % random.randint(10, 20) == 0 and i < len(words_list) - 1:
+        if (i + 1) % rng.randint(10, 20) == 0 and i < len(words_list) - 1:
             result[-1] += "."
 
     return " ".join(result)
@@ -222,10 +223,6 @@ def server_with_chunked_processing():
         "--gpu-memory-utilization",
         "0.8",
     ]
-
-    # ROCm: Use Flex Attention to support encoder-only self-attention.
-    if current_platform.is_rocm():
-        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

@@ -184,7 +184,7 @@ Our online Server provides endpoints that correspond to the offline APIs:
     - [Classification API](classify.md#online-serving)(`/classify`)
 - Corresponding to `LLM.score`:
     - [Score API](scoring.md#score-api) (`/score`, `/v1/score`)
-    - [Cohere Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Cohere Rerank API](scoring.md#cohere-rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 - Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
 
 The following introduces the Pooling API. For other APIs, please refer to the link above.
@@ -292,12 +292,12 @@ classification activation is applied.
 
 | Field | Source precedence | How to override |
 | ----- | ----------------- | --------------- |
-| Pooling method (`pooling_type`) | `--pooler-config` > boolean `pooling_mode_*` fields in the Pooling module referenced by Sentence Transformers `modules.json` > architecture default (`LAST` for sequence pooling and `ALL` for token pooling unless the architecture overrides it) | Set `{"pooling_type": "CLS"}`, or set `seq_pooling_type` / `tok_pooling_type` explicitly. |
+| Pooling method (`pooling_type`) | `--pooler-config` > compact `pooling_mode` or legacy boolean `pooling_mode_*` fields in the Pooling module referenced by Sentence Transformers `modules.json` > architecture default (`LAST` for sequence pooling and `ALL` for token pooling unless the architecture overrides it) | Set `{"pooling_type": "CLS"}`, or set `seq_pooling_type` / `tok_pooling_type` explicitly. |
 | Embedding normalization (`use_activation`) | `--pooler-config` > Sentence Transformers modules (`true` when a Normalize module is present, otherwise `false`) > pooling-task default (`true`) when no Sentence Transformers Pooling module is found | Set `{"use_activation": false}` to return unnormalized embeddings. |
 | Classification activation function | Hugging Face `problem_type` > Sentence Transformers activation metadata > sigmoid or softmax selected from the label count | The function cannot be selected through `--pooler-config`; set `{"use_activation": false}` to return logits instead. |
 
-Sentence Transformers configurations using the newer compact `pooling_mode`
-string are not currently parsed; see [issue #45995](https://github.com/vllm-project/vllm/issues/45995).
+Both compact `pooling_mode` values written by Sentence Transformers 5.4+ and
+legacy boolean `pooling_mode_*` fields are supported.
 
 For converted models and predefined models using the standard DispatchPooler
 adapters, `embed` and `token_embed` construct an L2-normalization head, while

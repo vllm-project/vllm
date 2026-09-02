@@ -24,4 +24,5 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s distributed/test_eplb_algo.py'
+      pytest -v -s distributed/test_eplb_algo.py &&
+      pytest -v -s distributed/test_eplb_utils.py'

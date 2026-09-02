@@ -109,6 +109,8 @@ def test_cached_tokenizer_from_config_registers_local_config(tmp_path: Path):
     try:
 
         def fake_from_pretrained(path_or_repo_id: str, *args, **kwargs):
+            passed_config = kwargs.pop("config")
+            assert isinstance(passed_config, Qwen3_5MoeConfig)
             loaded_config = AutoConfig.from_pretrained(
                 path_or_repo_id,
                 trust_remote_code=False,

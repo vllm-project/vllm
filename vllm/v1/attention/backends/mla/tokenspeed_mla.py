@@ -23,7 +23,6 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -58,6 +57,10 @@ def _get_workspace(
 class TokenspeedMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+    # The kernel accepts an explicit causal mask, so a non-causal DSpark
+    # block can remain fused instead of being flattened to single tokens.
+    supports_non_causal_multi_token_decode: ClassVar[bool] = True
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -104,6 +107,10 @@ class TokenspeedMLABackend(MLACommonBackend):
         return capability.major == 10
 
     @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_combination(
         cls,
         head_size: int,
@@ -143,10 +150,6 @@ class TokenspeedMLABackend(MLACommonBackend):
                     f"got ({qk_nope_head_dim}, {qk_rope_head_dim}, {v_head_dim})"
                 )
         return None
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
 
 
 class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
@@ -282,8 +285,9 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.output_scale = layer._k_scale_float
 
         if self._workspace_buffer is None:
+            # Parallelism can change the runtime query head count.
             self._workspace_buffer = _get_workspace(
-                q.device, self.num_heads, self.kv_lora_rank
+                q.device, q.shape[-2], self.kv_lora_rank
             )
 
         # vLLM kv_c_and_k_pe_cache is already (num_blocks, block_size, head_size).
@@ -302,6 +306,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             output_scale=self.output_scale,
             enable_pdl=False,
             return_lse=return_lse,
+            causal_mask=attn_metadata.causal,
             causal_seqs=causal_seqs if self.dcp_world_size > 1 else None,
             cp_world=self.dcp_world_size,
             cp_rank=self.dcp_rank,

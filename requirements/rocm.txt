@@ -26,4 +26,4 @@ tilelang==0.1.10
 # Required apache-tvm-ffi matching tilelang version
 apache-tvm-ffi==0.1.10 
 # Required for faster safetensors model loading
-fastsafetensors >= 0.3.2
+fastsafetensors >= 0.3.3
