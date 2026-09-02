@@ -328,8 +328,6 @@ def warmup_qsa_mqa_paged_decode(
     for decode_query_len, num_requests in profiles:
         num_rows = decode_query_len * num_requests
         q_ptr = TritonWarmupTensor(
-            # The normed indexer Q shares the compressed cache dtype (bf16 or
-            # fp8 e4m3) so the logits kernel dots matching input dtypes.
             k_cache.dtype,
             shape=(num_rows, num_heads, head_dim),
         )
