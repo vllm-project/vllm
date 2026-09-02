@@ -63,6 +63,10 @@ def test_logprobs_tensors_tolists_with_tensor_boundaries():
 
 def test_sampling_mask_tensors_tolist():
     tensors = SamplingMaskTensors(
+        token_ids=torch.tensor(
+            [[3, 5, -1], [-1, -1, -1], [7, -1, -1]],
+            dtype=torch.int32,
+        ),
         packed_mask=torch.tensor(
             [[0b00101000], [0b00000000], [0b10000000]],
             dtype=torch.uint8,
@@ -76,6 +80,25 @@ def test_sampling_mask_tensors_tolist():
     assert result.token_ids.tolist() == [3, 5, 7]
     assert result.offsets.tolist() == [0, 2, 3]
     assert result.cu_num_generated_tokens == [0, 1, 1, 2]
+
+
+def test_sampling_mask_tensors_tolist_overflow_uses_bitmask():
+    """A row whose support exceeds ``max_num_kept`` (top-k ties) is rebuilt
+    from the exact bitmask instead of being truncated."""
+    tensors = SamplingMaskTensors(
+        token_ids=torch.tensor([[1, 4], [9, 0]], dtype=torch.int32),
+        packed_mask=torch.tensor(
+            [[0b01010010, 0b00000101], [0b00000000, 0b00000010]],
+            dtype=torch.uint8,
+        ),
+        counts=torch.tensor([5, 1], dtype=torch.int32),
+        vocab_size=16,
+    )
+
+    result = tensors.tolists(np.array([1, 1]))
+
+    assert result.token_ids.tolist() == [1, 4, 6, 8, 10, 9]
+    assert result.offsets.tolist() == [0, 5, 6]
 
 
 def test_sampling_mask_lists_to_nested_list():
@@ -102,6 +125,7 @@ def test_sampling_mask_tensors_from_logits():
             device=DEVICE_TYPE,
         ),
         num_sampled_tokens=torch.tensor([1, 0, 1], device=DEVICE_TYPE),
+        max_num_kept=2,
     )
 
     result = tensors.tolists(np.array([1, 0, 1]))
@@ -127,10 +151,29 @@ def test_sampling_mask_matches_processed_top_k_top_p_support():
     tensors = SamplingMaskTensors.from_logits(
         processed_logits,
         num_sampled_tokens=torch.tensor([1], device=DEVICE_TYPE),
+        max_num_kept=3,
     )
     result = tensors.tolists(np.array([1]))
 
     assert result.to_nested_list() == [expected_token_ids]
+
+
+def test_sampling_mask_tensors_from_logits_large_vocab():
+    """Support spanning several kernel blocks stays ascending and exact."""
+    vocab_size = 20_000
+    logits = torch.full((2, vocab_size), float("-inf"), device=DEVICE_TYPE)
+    kept = torch.tensor([0, 7, 8_191, 8_192, 12_345, vocab_size - 1])
+    logits[0, kept] = 1.0
+    logits[1, 3] = 1.0
+
+    tensors = SamplingMaskTensors.from_logits(
+        logits,
+        num_sampled_tokens=torch.tensor([1, 1], device=DEVICE_TYPE),
+        max_num_kept=8,
+    )
+    result = tensors.tolists(np.array([1, 1]))
+
+    assert result.to_nested_list() == [kept.tolist(), [3]]
 
 
 class TestLogprobsLists(TestCase):
