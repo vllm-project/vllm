@@ -202,16 +202,20 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             if coordinator is None:
                 raise ValueError("HiSparse scheduler requires a coordinator.")
             speculative_config = vllm_config.speculative_config
-            async_mtp = bool(
+            async_speculative = bool(
                 vllm_config.scheduler_config.async_scheduling
+                and speculative_config is not None
+            )
+            refines_row_mirrors = bool(
+                async_speculative
                 and speculative_config is not None
                 and speculative_config.use_multi_module_mtp()
             )
             self.connector_scheduler = HiSparseConnectorScheduler(
                 coordinator,
-                async_speculative=async_mtp,
+                async_speculative=async_speculative,
                 draft_kv_lookahead=(
-                    vllm_config.num_speculative_tokens + 1 if async_mtp else 0
+                    vllm_config.num_speculative_tokens + 1 if refines_row_mirrors else 0
                 ),
             )
         elif role == KVConnectorRole.WORKER:
