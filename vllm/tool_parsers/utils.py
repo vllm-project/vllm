@@ -149,6 +149,47 @@ def is_complete_json(input_str: str) -> bool:
         return False
 
 
+def dump_tool_arguments(arguments: Any) -> str:
+    """Serialize tool call arguments to the JSON string the API contract wants.
+
+    Some models emit `arguments` already serialized as a JSON string rather
+    than as an object. Serializing that again would double-encode it, so a
+    string that already holds a JSON object or array is passed through
+    untouched. Any other string is serialized normally, so a bare value such
+    as `hello` still reaches the client as valid JSON.
+    """
+    if isinstance(arguments, str):
+        try:
+            if isinstance(json.loads(arguments), (dict, list)):
+                return arguments
+        except JSONDecodeError:
+            pass
+    return json.dumps(arguments, ensure_ascii=False)
+
+
+def decode_json_string_prefix(raw: str) -> str | None:
+    """Decode a JSON string literal that may still be arriving.
+
+    Returns the decoded contents of `raw`, which is a complete or partial
+    JSON string literal such as `"{\\"a\\": 1}"`. While the literal is
+    incomplete only the decodable prefix is returned, so the result grows
+    monotonically as more text arrives and stays usable for streaming diffs.
+    Returns None if nothing can be decoded yet.
+    """
+    try:
+        return json.loads(raw)
+    except JSONDecodeError:
+        pass
+    try:
+        decoded = partial_json_parser.loads(raw, Allow.STR)
+    except (
+        partial_json_parser.core.exceptions.MalformedJSON,
+        JSONDecodeError,
+    ):
+        return None
+    return decoded if isinstance(decoded, str) else None
+
+
 def _is_json_finite(obj: Any) -> bool:
     """Whether *obj* can be serialized to valid JSON.
 
