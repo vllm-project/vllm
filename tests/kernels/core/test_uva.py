@@ -62,7 +62,7 @@ def test_gpu_write(device):
 @pytest.mark.parametrize("device", DEVICES)
 def test_non_pinned_cpu_tensor(device):
     # Non-pinned CPU tensors are internally copied into a pinned buffer,
-    # so the resulting XPU view reflects the values at creation time but
+    # so the resulting gpu view reflects the values at creation time but
     # is decoupled from further writes to the original `cpu_tensor`.
     torch.set_default_device(device)
     cpu_tensor = torch.arange(100, dtype=torch.int32, device="cpu").view(10, 10)
@@ -86,6 +86,7 @@ def test_non_pinned_cpu_tensor(device):
 
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU non-contiguous UVA test.")
 @pytest.mark.parametrize("pinned", [False, True])
 @pytest.mark.parametrize("device", DEVICES)
 def test_non_contiguous_strided_view(device, pinned):
