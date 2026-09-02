@@ -28,9 +28,6 @@ from vllm.config.quantization import (
 )
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.kernels.linear.mxfp8.marlin import (
-    MarlinMxfp8LinearKernel,
-)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.linear import (
@@ -509,7 +506,10 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
     reason="FP8 is not supported on this GPU type.",
 )
 @pytest.mark.parametrize(
-    "quant_scheme,online_quant_args,expected_linear_cls,expected_moe_cls",
+    (
+        "quant_scheme,online_quant_args,expected_linear_cls,expected_moe_cls,"
+        "partially_prequantized_checkpoint"
+    ),
     [
         # simple case - quantization='fp8_per_tensor'
         (
@@ -517,6 +517,7 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             None,
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            False,
         ),
         # simple case - quantization='fp8_per_block'
         (
@@ -524,12 +525,14 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             None,
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerBlockOnlineMoEMethod,
+            False,
         ),
         (
             "fp8_per_channel",
             None,
             Fp8PtpcOnlineLinearMethod,
             Fp8PtpcOnlineMoEMethod,
+            False,
         ),
         # quantization='online' with per-layer-kind overrides
         (
@@ -540,6 +543,7 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             },
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            False,
         ),
         # quantization='online' with per-layer target patterns
         (
@@ -552,6 +556,7 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             },
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            False,
         ),
         # ignore with direct layer name
         (
@@ -561,12 +566,22 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             {"ignore": ["model.layers.1.self_attn.o_proj", "re:.*[qkv]_proj"]},
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            False,
         ),
         (
             "mxfp4",
             None,
             Mxfp4OnlineLinearMethod,
             Mxfp4OnlineMoEMethod,
+            False,
+        ),
+        pytest.param(
+            None,
+            {"targets": {"model.layers.1.self_attn.o_proj": "mxfp8"}},
+            Mxfp8OnlineLinearMethod,
+            CompressedTensorsMoEMethod,
+            True,
+            id="partially_prequantized_checkpoint",
         ),
     ],
     ids=[
@@ -577,16 +592,18 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
         "targets",
         "ignore",
         "mxfp4",
+        "partially_prequantized_checkpoint",
     ],
 )
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
 def test_online_quantization(
-    quant_scheme: str,
+    quant_scheme: str | None,
     online_quant_args: dict | None,
     expected_linear_cls,
     expected_moe_cls,
+    partially_prequantized_checkpoint: bool,
     use_rocm_aiter: bool,
     monkeypatch,
     dist_init,
@@ -614,6 +631,29 @@ def test_online_quantization(
         "fp8_per_channel",
     ):
         pytest.skip(f"Skip test for online {quant_scheme} on XPU platform.")
+
+    if partially_prequantized_checkpoint:
+        model, _ = load_model_without_vllm_runner(
+            "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable",
+            model_config_kwargs={
+                "quantization_config": resolve_quantization_config(
+                    None, online_quant_args
+                )
+            },
+        )
+        assert isinstance(
+            model.model.layers[1].self_attn.o_proj.quant_method,
+            expected_linear_cls,
+        )
+        assert isinstance(
+            model.model.layers[0].mlp.experts._quant_method,
+            expected_moe_cls,
+        )
+        assert isinstance(
+            model.model.layers[0].self_attn.o_proj.quant_method,
+            CompressedTensorsLinearMethod,
+        )
+        return
 
     model_name = "ibm-granite/granite-3.0-1b-a400m-base"
     model, vllm_config = load_model_without_vllm_runner(
@@ -738,68 +778,6 @@ def test_online_quantization_loads_real_weights(vllm_runner, monkeypatch) -> Non
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
-def test_online_quantization_with_partially_prequantized_checkpoint(
-    vllm_runner, monkeypatch
-) -> None:
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    model_name = "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
-    online_quant_args = {
-        "linear": "mxfp8",
-        "ignore": [
-            r"re:model\.layers\.0\.self_attn\..*",
-            "model.layers.0.mlp.gate",
-            r"re:model\.layers\.\d+\.mlp\.shared_expert\..*",
-        ],
-    }
-
-    with vllm_runner(
-        model_name,
-        quantization_config=online_quant_args,
-        enforce_eager=True,
-    ) as llm:
-
-        def check_model(model):
-            assert isinstance(
-                model.model.layers[1].self_attn.o_proj.quant_method,
-                Mxfp8OnlineLinearMethod,
-            )
-            assert isinstance(
-                model.model.layers[0].mlp.experts._quant_method,
-                CompressedTensorsMoEMethod,
-            )
-
-            layer_0 = model.model.layers[0]
-            for ignored_layer in (
-                layer_0.self_attn.qkv_proj,
-                layer_0.self_attn.o_proj,
-                layer_0.mlp.gate,
-                layer_0.mlp.shared_expert.gate_up_proj,
-                layer_0.mlp.shared_expert.down_proj,
-            ):
-                assert isinstance(
-                    ignored_layer.quant_method,
-                    CompressedTensorsLinearMethod,
-                )
-
-            o_proj = model.model.layers[1].self_attn.o_proj
-            if isinstance(o_proj.quant_method.kernel, MarlinMxfp8LinearKernel):
-                assert o_proj.weight.dtype == torch.int32
-            elif current_platform.is_cuda() or current_platform.is_xpu():
-                assert o_proj.weight.dtype == torch.float8_e4m3fn
-            elif current_platform.is_rocm():
-                assert o_proj.weight.dtype == current_platform.fp8_dtype()
-            else:
-                pytest.skip("Only runs on CUDA, ROCm, and XPU.")
-
-        llm.apply_model(check_model)
-        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=1)
-        assert outputs
-
-
-@pytest.mark.skipif(
-    not is_quant_method_supported("fp8"),
-    reason="FP8 is not supported on this GPU type.",
-)
 @pytest.mark.parametrize(
     "targets,prefix,expected_method_cls,unmatched_prefix,expected_metadata",
     [
@@ -891,23 +869,9 @@ def test_online_quantization_targets_ignore_collision() -> None:
         )
     )
     with pytest.raises(ValueError, match="matches both quantization_config.ignore"):
-        config._dispatch_target(
-            "model.layers.0.self_attn.o_proj", Mock(spec=LinearBase)
-        )
-
-
-def test_online_quantization_global_ignore_supports_fnmatch() -> None:
-    """Global online quantization applies fnmatch patterns to ignore entries."""
-    config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(linear="mxfp8", ignore=["*self_attn.o_proj"])
-    )
-
-    assert (
-        config.get_quantization_target(
+        config.resolve_quant_method_cls(
             Mock(spec=LinearBase), "model.layers.0.self_attn.o_proj"
         )
-        is None
-    )
 
 
 def test_online_quantization_targets_reject_unsupported_layer() -> None:

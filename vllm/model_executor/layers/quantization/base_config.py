@@ -292,13 +292,13 @@ def resolve_quant_method(
     checkpoint_is_quantized = base_quant_method is not None and not isinstance(
         base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
     )
-    online_target = quant_config.online_quantization_config.get_quantization_target(
+    online_target = quant_config.online_quantization_config.resolve_quant_method_cls(
         layer, prefix
     )
     if checkpoint_is_quantized:
         if online_target is not None:
             raise ValueError(
-                f"Cannot apply requested online quantization {online_target[1]} to "
+                f"Cannot apply requested online quantization {online_target[3]} to "
                 f"pre-quantized layer {prefix}: {base_quant_method} was already "
                 "selected by the checkpoint quantization config."
             )
