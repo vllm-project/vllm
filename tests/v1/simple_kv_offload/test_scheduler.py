@@ -430,6 +430,59 @@ def test_eager_store_and_load_roundtrip() -> None:
     assert len(meta2.load_cpu_blocks) == len(meta2.load_gpu_blocks)
 
 
+def test_prompt_logprobs_skip_cpu_cache_lookup() -> None:
+    """Prompt logprobs require every prompt token to be recomputed."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks)
+    kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    simulate_store_completion(sched, meta.store_event)
+
+    retry_request_id = "req-prompt-logprobs"
+    cached_request = Request(
+        request_id=retry_request_id,
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    assert sched.get_num_new_matched_tokens(cached_request, num_computed_tokens=0) == (
+        num_blocks * BLOCK_SIZE,
+        True,
+    )
+    pending_hit = sched._pending_cpu_hits[retry_request_id]
+    pinned_blocks = [
+        block for group in pending_hit[0] for block in group if not block.is_null
+    ]
+    assert pinned_blocks
+    assert all(block.ref_cnt == 1 for block in pinned_blocks)
+
+    prompt_logprobs_request = Request(
+        request_id=retry_request_id,
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=SamplingParams(max_tokens=1, prompt_logprobs=1),
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    assert prompt_logprobs_request.skip_reading_prefix_cache
+
+    assert sched.get_num_new_matched_tokens(
+        prompt_logprobs_request, num_computed_tokens=0
+    ) == (0, False)
+    assert retry_request_id not in sched._pending_cpu_hits
+    assert all(block.ref_cnt == 0 for block in pinned_blocks)
+
+
 def test_eager_store_preserves_secondary_block_hashes() -> None:
     """CPU copies retain fine-grained hashes owned by the GPU block."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
