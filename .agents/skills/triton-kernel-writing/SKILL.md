@@ -22,7 +22,8 @@ description: Write or review Triton kernels for vLLM, with practical guidance fo
   a small, legible heuristic when workloads need different choices. Use
   `triton.autotune` only when tuning is critical to performance, such as for a
   matrix multiplication. Otherwise prioritize simple code and fast startup.
-- Put unimportant runtime scalar parameters in `do_not_specialize`, especially
+- Be careful to avoid unintended runtime JIT compilation. For example, put
+  unimportant runtime scalar parameters in `do_not_specialize`, especially
   scalars whose values may frequently alternate between values such as 0 and
   1. Do not use it for values that intentionally control compile-time code
   generation.
