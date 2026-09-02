@@ -1252,7 +1252,7 @@ def share_replayssm_ring_trackers(
 
     Layers backed by one KV-cache group use the same physical block indices and
     can therefore share cursors. Different KV-cache groups may assign different
-    block indices to the same request and must keep separate cursor tensors. For
+    block indices to the same request and must keep separate cursor tensors.
     Tracker mutation is model-owned and runs once after the step; layer forwards
     only consume the shared values.
     """

@@ -873,13 +873,9 @@ def get_mamba_prefix_cache_step_configs(
     return tests
 
 
-def _run_mamba_prefix_cache_mrv1(
+def _run_mamba_prefix_cache_mrv1_configured(
     monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
 ):
-    # This test patches the V1 model runner, so pin V1 explicitly: MoE/hybrid
-    # models like Qwen3-Next now default to the V2 runner.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    envs.disable_envs_cache()
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
     run_ref_mamba_state_in_subprocess()
@@ -938,6 +934,20 @@ def _run_mamba_prefix_cache_mrv1(
     cleanup_dist_env_and_memory()
 
 
+def _run_mamba_prefix_cache_mrv1(
+    monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
+):
+    # This test patches the V1 model runner, so pin V1 explicitly: MoE/hybrid
+    # models like Qwen3-Next now default to the V2 runner.
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+            envs.disable_envs_cache()
+            _run_mamba_prefix_cache_mrv1_configured(patch, async_scheduling)
+    finally:
+        envs.disable_envs_cache()
+
+
 @create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=False)
@@ -948,14 +958,11 @@ def test_mamba_prefix_cache_mrv1_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=True)
 
 
-def _run_mamba_prefix_cache_mrv2(
+def _run_mamba_prefix_cache_mrv2_configured(
     monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
 ):
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    envs.disable_envs_cache()
 
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as MRV2GPUModelRunner
     from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
@@ -1227,6 +1234,19 @@ def _run_mamba_prefix_cache_mrv2(
         del engine
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+
+
+def _run_mamba_prefix_cache_mrv2(
+    monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
+):
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+            envs.disable_envs_cache()
+            _run_mamba_prefix_cache_mrv2_configured(patch, async_scheduling)
+    finally:
+        envs.disable_envs_cache()
 
 
 @create_new_process_for_each_test()

@@ -190,81 +190,75 @@ def _replayssm_config(
     )
 
 
-def test_v2_replayssm_requires_flashinfer():
-    config = _replayssm_config(
-        backend=MambaBackendEnum.TRITON,
-        use_v2_model_runner=True,
-    )
-
-    with pytest.raises(ValueError, match="requires Model Runner V1"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-
-
-def test_v2_flashinfer_replayssm_is_supported():
-    config = _replayssm_config(
-        backend=MambaBackendEnum.FLASHINFER,
-        use_v2_model_runner=True,
-    )
-
-    assert VllmConfig.validate_mamba_cached_kernel(config) is config
-
-
-def test_flashinfer_replayssm_allows_align_prefix_caching():
-    config = _replayssm_config(backend=MambaBackendEnum.FLASHINFER)
-    config.cache_config.mamba_cache_mode = "align"
-
-    assert VllmConfig.validate_mamba_cached_kernel(config) is config
-
-
-def test_flashinfer_replayssm_allows_all_prefix_caching():
-    config = _replayssm_config(backend=MambaBackendEnum.FLASHINFER)
-    config.cache_config.mamba_cache_mode = "all"
-
-    assert VllmConfig.validate_mamba_cached_kernel(config) is config
-
-
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
-def test_flashinfer_replayssm_spec_decode_allows_align_prefix_caching(
-    use_v2_model_runner,
+@pytest.mark.parametrize(
+    (
+        "backend",
+        "use_v2_model_runner",
+        "mamba_cache_mode",
+        "num_speculative_tokens",
+        "replayssm_buffer_len",
+        "error_match",
+    ),
+    [
+        (MambaBackendEnum.TRITON, True, "none", 0, 16, "requires Model Runner V1"),
+        (MambaBackendEnum.FLASHINFER, True, "none", 0, 16, None),
+        (MambaBackendEnum.FLASHINFER, False, "align", 0, 16, None),
+        (MambaBackendEnum.FLASHINFER, False, "all", 0, 16, None),
+        (MambaBackendEnum.FLASHINFER, False, "align", 3, 16, None),
+        (MambaBackendEnum.FLASHINFER, True, "align", 3, 16, None),
+        (MambaBackendEnum.FLASHINFER, False, "all", 3, 16, None),
+        (MambaBackendEnum.FLASHINFER, True, "all", 3, 16, None),
+        (
+            MambaBackendEnum.TRITON,
+            False,
+            "all",
+            0,
+            16,
+            "all mode requires.*flashinfer",
+        ),
+        (
+            MambaBackendEnum.FLASHINFER,
+            False,
+            "none",
+            0,
+            17,
+            "replayssm-buffer-len <= 16",
+        ),
+    ],
+    ids=[
+        "triton-v2-rejected",
+        "flashinfer-v2",
+        "flashinfer-align",
+        "flashinfer-all",
+        "flashinfer-align-spec-v1",
+        "flashinfer-align-spec-v2",
+        "flashinfer-all-spec-v1",
+        "flashinfer-all-spec-v2",
+        "triton-all-rejected",
+        "flashinfer-buffer-too-long",
+    ],
+)
+def test_replayssm_config_matrix(
+    backend: MambaBackendEnum,
+    use_v2_model_runner: bool,
+    mamba_cache_mode: str,
+    num_speculative_tokens: int,
+    replayssm_buffer_len: int,
+    error_match: str | None,
 ):
     config = _replayssm_config(
-        backend=MambaBackendEnum.FLASHINFER,
+        backend=backend,
         use_v2_model_runner=use_v2_model_runner,
     )
-    config.num_speculative_tokens = 3
-    config.cache_config.mamba_cache_mode = "align"
+    config.cache_config.mamba_cache_mode = mamba_cache_mode
+    config.cache_config.replayssm_buffer_len = replayssm_buffer_len
+    config.num_speculative_tokens = num_speculative_tokens
 
-    assert VllmConfig.validate_mamba_cached_kernel(config) is config
-
-
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
-def test_flashinfer_replayssm_spec_decode_allows_all_prefix_caching(
-    use_v2_model_runner,
-):
-    config = _replayssm_config(
-        backend=MambaBackendEnum.FLASHINFER,
-        use_v2_model_runner=use_v2_model_runner,
-    )
-    config.num_speculative_tokens = 3
-    config.cache_config.mamba_cache_mode = "all"
-
-    assert VllmConfig.validate_mamba_cached_kernel(config) is config
-
-
-def test_triton_replayssm_rejects_all_prefix_caching():
-    config = _replayssm_config(backend=MambaBackendEnum.TRITON)
-    config.cache_config.mamba_cache_mode = "all"
-
-    with pytest.raises(ValueError, match="all mode requires.*flashinfer"):
-        VllmConfig.validate_mamba_cached_kernel(config)
-
-
-def test_flashinfer_replayssm_rejects_unsupported_buffer_length():
-    config = _replayssm_config(backend=MambaBackendEnum.FLASHINFER)
-    config.cache_config.replayssm_buffer_len = 17
-
-    with pytest.raises(ValueError, match="replayssm-buffer-len <= 16"):
-        VllmConfig.validate_mamba_cached_kernel(config)
+    if error_match is None:
+        assert VllmConfig.validate_mamba_cached_kernel(config) is config
+    else:
+        with pytest.raises(ValueError, match=error_match):
+            VllmConfig.validate_mamba_cached_kernel(config)
 
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):

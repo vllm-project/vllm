@@ -323,6 +323,25 @@ def _copy_reassigned_replayssm_slots_kernel(
         tl.store(tracker_committed + dst_slot, 0)
 
 
+def _replayssm_specialization_key(mixer: Any) -> tuple[Any, ...]:
+    ssm = mixer.kv_cache[1]
+    x_cache = mixer.kv_cache[2]
+    b_cache = mixer.kv_cache[4]
+    return (
+        ssm.dtype,
+        x_cache.dtype,
+        mixer.A.dtype,
+        ssm.size(1),
+        ssm.size(2),
+        ssm.size(3),
+        ssm.size(1) // b_cache.size(1),
+        int(mixer.replayssm_buffer_len),
+        x_cache.size(2),
+        bool(mixer.mamba_config.enable_stochastic_rounding),
+        int(mixer.mamba_config.stochastic_rounding_philox_rounds or 0),
+    )
+
+
 @dataclass
 class ReplaySSMModelContext:
     """Persistent all-layer tables for ReplaySSM post-step maintenance."""
@@ -387,37 +406,9 @@ class ReplaySSMModelContext:
         first = mixers[0]
         first_ssm = first.kv_cache[1]
         first_x = first.kv_cache[2]
-        first_b = first.kv_cache[4]
-        compatibility = (
-            first_ssm.dtype,
-            first_x.dtype,
-            first.A.dtype,
-            first_ssm.size(1),
-            first_ssm.size(2),
-            first_ssm.size(3),
-            first_ssm.size(1) // first_b.size(1),
-            int(first.replayssm_buffer_len),
-            first_x.size(2),
-            bool(first.mamba_config.enable_stochastic_rounding),
-            int(first.mamba_config.stochastic_rounding_philox_rounds or 0),
-        )
+        compatibility = _replayssm_specialization_key(first)
         for mixer in mixers[1:]:
-            ssm = mixer.kv_cache[1]
-            x_cache = mixer.kv_cache[2]
-            b_cache = mixer.kv_cache[4]
-            current = (
-                ssm.dtype,
-                x_cache.dtype,
-                mixer.A.dtype,
-                ssm.size(1),
-                ssm.size(2),
-                ssm.size(3),
-                ssm.size(1) // b_cache.size(1),
-                int(mixer.replayssm_buffer_len),
-                x_cache.size(2),
-                bool(mixer.mamba_config.enable_stochastic_rounding),
-                int(mixer.mamba_config.stochastic_rounding_philox_rounds or 0),
-            )
+            current = _replayssm_specialization_key(mixer)
             if current != compatibility:
                 raise ValueError(
                     "A single model-wide FlashInfer ReplaySSM materialization "
@@ -534,7 +525,6 @@ class ReplaySSMModelContext:
         materialize_token_counts: torch.Tensor,
         mamba_block_size: int,
         num_reqs: int,
-        materialize_possible: bool = True,
     ) -> None:
         """Commit lifecycle metadata, then materialize all layers once."""
         if num_reqs == 0:
@@ -571,13 +561,12 @@ class ReplaySSMModelContext:
             HAS_IDX_MAPPING=idx_mapping is not None,
         )
 
-        if materialize_possible:
-            self._materialize_planned(
-                self.src_slots,
-                self.dst_slots,
-                self.plan_ring_start,
-                self.plan_flush_count,
-            )
+        self._materialize_planned(
+            self.src_slots,
+            self.dst_slots,
+            self.plan_ring_start,
+            self.plan_flush_count,
+        )
 
     def copy_reassigned_slots(
         self,
@@ -1085,11 +1074,6 @@ def _replayssm_materialize_ready(mixers: list[Any]) -> bool:
         raise RuntimeError(
             "FlashInfer ReplaySSM prefix materialization requires allocated "
             "replay ring buffers and ring trackers"
-        )
-    if not mixers[0].replayssm_buffer_len:
-        raise RuntimeError(
-            "FlashInfer ReplaySSM prefix materialization requires "
-            "--replayssm-buffer-len >= 1"
         )
     return True
 

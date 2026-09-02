@@ -1002,6 +1002,11 @@ class GPUModelRunner(
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
         self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
+        self._use_modelwide_replayssm = (
+            self.cache_config.mamba_cache_mode in ("align", "all")
+            and self.cache_config.use_replayssm
+            and self.vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        )
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
         if (
             self.cache_config.mamba_cache_mode == "all"
@@ -1074,10 +1079,9 @@ class GPUModelRunner(
     def _get_mamba_bufs(self) -> mamba_utils.MambaBuffers:
         # The postprocess sub-object is also the model-level owner of
         # FlashInfer ReplaySSM trackers, including STP.
-        assert self.cache_config.mamba_cache_mode == "align" or (
-            self.cache_config.mamba_cache_mode == "all"
-            and self.cache_config.use_replayssm
-            and self.vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        assert (
+            self.cache_config.mamba_cache_mode == "align"
+            or self._use_modelwide_replayssm
         )
         if self._mamba_bufs is None:
             self._mamba_bufs = mamba_utils.MambaBuffers.create(
@@ -1089,11 +1093,7 @@ class GPUModelRunner(
                 with_postprocess_align=(
                     self.speculative_config is not None and self.model_config.is_hybrid
                 )
-                or (
-                    self.cache_config.use_replayssm
-                    and self.vllm_config.mamba_config.backend
-                    == MambaBackendEnum.FLASHINFER
-                ),
+                or self._use_modelwide_replayssm,
             )
         return self._mamba_bufs
 
@@ -1601,12 +1601,7 @@ class GPUModelRunner(
         each sequence, and a shifting is done during the next iteration
         based on the number of accepted tokens.
         """
-        modelwide_replayssm = (
-            self.cache_config.mamba_cache_mode in ("align", "all")
-            and self.cache_config.use_replayssm
-            and self.vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
-        )
-        if not modelwide_replayssm and (
+        if not self._use_modelwide_replayssm and (
             not self.speculative_config or not self.model_config.is_hybrid
         ):
             return
@@ -1617,7 +1612,10 @@ class GPUModelRunner(
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
-        if self.cache_config.mamba_cache_mode == "align" or modelwide_replayssm:
+        if (
+            self.cache_config.mamba_cache_mode == "align"
+            or self._use_modelwide_replayssm
+        ):
             # Fused GPU postprocess: state copies + per-request accepted-token
             # update without CPU-GPU sync. The metadata
             # (num_scheduled_tokens, num_draft_tokens, num_computed_tokens) is
@@ -2157,15 +2155,10 @@ class GPUModelRunner(
         # _update_states_after_model_execute for hybrid models).
         # Skipped under async scheduling (non-align): the CPU copy races with
         # the in-flight D2H copy and with input-batch row moves.
-        modelwide_replayssm = (
-            self.cache_config.mamba_cache_mode in ("align", "all")
-            and self.cache_config.use_replayssm
-            and self.vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
-        )
         needs_cpu_accepted_counts = self.num_accepted_tokens_event is not None and (
             not self.use_async_scheduling
             or self.cache_config.mamba_cache_mode == "align"
-            or modelwide_replayssm
+            or self._use_modelwide_replayssm
         )
         if needs_cpu_accepted_counts:
             assert self.num_accepted_tokens_event is not None
@@ -4439,13 +4432,10 @@ class GPUModelRunner(
             )
             pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
-            modelwide_replayssm = (
-                self.cache_config.mamba_cache_mode in ("align", "all")
-                and self.cache_config.use_replayssm
-                and self.vllm_config.mamba_config.backend
-                == MambaBackendEnum.FLASHINFER
-            )
-            if self.cache_config.mamba_cache_mode == "align" or modelwide_replayssm:
+            if (
+                self.cache_config.mamba_cache_mode == "align"
+                or self._use_modelwide_replayssm
+            ):
                 # preprocess_mamba reads req_state.num_computed_tokens (CPU)
                 # to decide copy operations, so we must apply deferred
                 # corrections before it runs.

@@ -183,7 +183,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.decode_replayssm_state_indices_d: torch.Tensor | None = None
         # ReplaySSM CUDA-graph buffers for the selected backend.
         if self.use_replayssm:
-            assert len(kv_cache_spec.replayssm_shapes) == 3
+            assert len(kv_cache_spec.replayssm_shapes) == 3, (
+                "FlashInfer ReplaySSM requires x, dt, and B ring-state tensors"
+            )
         if self.use_replayssm and not self.use_flashinfer_replayssm:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),

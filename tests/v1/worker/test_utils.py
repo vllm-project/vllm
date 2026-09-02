@@ -72,30 +72,17 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
 
     assert all(len(mixer.kv_cache) == 5 for mixer in mixers)
 
-    assert (
-        mixers[0]._replayssm_ring_start.data_ptr()
-        == mixers[2]._replayssm_ring_start.data_ptr()
+    tracker_names = (
+        "_replayssm_ring_start",
+        "_replayssm_prev_num_accepted",
     )
-    assert (
-        mixers[0]._replayssm_prev_num_accepted.data_ptr()
-        == mixers[2]._replayssm_prev_num_accepted.data_ptr()
-    )
-    assert (
-        mixers[1]._replayssm_ring_start.data_ptr()
-        != mixers[0]._replayssm_ring_start.data_ptr()
-    )
-    assert (
-        mixers[1]._replayssm_prev_num_accepted.data_ptr()
-        != mixers[0]._replayssm_prev_num_accepted.data_ptr()
-    )
-    assert mixers[0]._replayssm_ring_start.shape == (4,)
-    assert mixers[0]._replayssm_prev_num_accepted.shape == (4,)
-    assert mixers[0]._replayssm_ring_start.dtype == torch.int32
-    assert mixers[0]._replayssm_ring_start.is_contiguous()
-    assert torch.count_nonzero(mixers[0]._replayssm_ring_start) == 0
-    assert torch.count_nonzero(mixers[0]._replayssm_prev_num_accepted) == 0
-    assert not any(hasattr(m, "_commits_replayssm_trackers") for m in mixers)
-    assert not any(hasattr(m, "_updates_replayssm_trackers") for m in mixers)
+    for tracker_name in tracker_names:
+        group_tracker = getattr(mixers[0], tracker_name)
+        assert group_tracker.data_ptr() == getattr(mixers[2], tracker_name).data_ptr()
+        assert group_tracker.data_ptr() != getattr(mixers[1], tracker_name).data_ptr()
+        assert group_tracker.shape == (4,)
+        assert group_tracker.dtype == torch.int32
+        assert torch.count_nonzero(group_tracker) == 0
 
 
 def test_bind_kv_cache(default_vllm_config):

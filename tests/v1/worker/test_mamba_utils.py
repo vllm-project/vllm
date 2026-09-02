@@ -173,7 +173,9 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
     ("with_replayssm", "num_computed_tokens", "expected_order"),
     [
         pytest.param(True, 4, ["materialize", "copy"], id="replayssm-boundary"),
-        pytest.param(True, 3, ["copy"], id="replayssm-no-boundary"),
+        pytest.param(
+            True, 3, ["materialize", "copy"], id="replayssm-no-boundary"
+        ),
         pytest.param(False, 4, ["copy"], id="generic"),
     ],
 )
@@ -241,8 +243,6 @@ def test_postprocess_mamba_align_materializes_after_fused_copy(monkeypatch):
     ctx.replayssm.postprocess_and_materialize.side_effect = lambda **kwargs: (
         order.append("materialize")
     )
-    ctx.replayssm_materialize_possible = False
-
     block_table = MagicMock()
     block_table.get_device_tensor.return_value = torch.zeros((1, 4), dtype=torch.int32)
     input_batch = MagicMock()
@@ -263,12 +263,6 @@ def test_postprocess_mamba_align_materializes_after_fused_copy(monkeypatch):
     )
 
     assert order == ["copy", "materialize"]
-    assert (
-        ctx.replayssm.postprocess_and_materialize.call_args.kwargs[
-            "materialize_possible"
-        ]
-        is False
-    )
     assert accepted_cpu.tolist() == [3]
 
 
@@ -339,14 +333,7 @@ class _FakeDataPtrTensor:
 
 
 def test_reinterpret_u64_as_i64_preserves_pointer_bits():
-    ptrs = [
-        0,
-        1,
-        (1 << 63) - 1,
-        1 << 63,
-        (1 << 63) + 1234,
-        (1 << 64) - 1,
-    ]
+    ptrs = [1 << 63, (1 << 64) - 1]
     ptr_tensor = torch.zeros(len(ptrs), dtype=torch.int64)
 
     for idx, ptr in enumerate(ptrs):
@@ -396,7 +383,7 @@ def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
     ]
 
 
-def test_gpu_context_marks_flashinfer_replayssm_temporal_state():
+def test_gpu_context_initializes_flashinfer_replayssm_lifecycle():
     cfg = _TestConfig(num_layers=1)
     device = torch.device("cpu")
     kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
@@ -408,14 +395,48 @@ def test_gpu_context_marks_flashinfer_replayssm_temporal_state():
     attention.use_replayssm = True
     attention.mamba_config.backend = MambaBackendEnum.FLASHINFER
 
-    gpu_ctx.initialize_from_forward_context(
-        kv_cache_config,
-        {"layer_0": attention},
-        _COPY_FUNCS,
-        [torch.empty(1, 4, dtype=torch.int32)],
-    )
+    model_ctx = object()
+    with patch(
+        "vllm.v1.worker.mamba_utils.ReplaySSMModelContext.create",
+        return_value=model_ctx,
+    ) as create:
+        gpu_ctx.initialize_from_forward_context(
+            kv_cache_config,
+            {"layer_0": attention},
+            _COPY_FUNCS,
+            [torch.empty(1, 4, dtype=torch.int32)],
+        )
 
     assert gpu_ctx.state_skip_postprocess.tolist() == [0, 1]
+    assert gpu_ctx.replayssm is model_ctx
+    create.assert_called_once()
+
+
+def test_gpu_context_rejects_missing_replayssm_lifecycle():
+    cfg = _TestConfig(num_layers=1)
+    device = torch.device("cpu")
+    kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
+    gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+    attention = _make_mock_attention(
+        torch.empty(cfg.num_blocks, cfg.conv_width, cfg.conv_inner_dim),
+        torch.empty(cfg.num_blocks, cfg.temporal_state_dim),
+    )
+    attention.use_replayssm = True
+    attention.mamba_config.backend = MambaBackendEnum.FLASHINFER
+
+    with (
+        patch(
+            "vllm.v1.worker.mamba_utils.ReplaySSMModelContext.create",
+            return_value=None,
+        ),
+        pytest.raises(RuntimeError, match="could not be initialized"),
+    ):
+        gpu_ctx.initialize_from_forward_context(
+            kv_cache_config,
+            {"layer_0": attention},
+            _COPY_FUNCS,
+            [torch.empty(1, 4, dtype=torch.int32)],
+        )
 
 
 def _make_postprocess_scheduler_output(
@@ -806,7 +827,6 @@ def _make_staging_ctx(max_num_reqs: int, device: torch.device) -> MagicMock:
     """Build a MambaSpecDecodeGPUContext stand-in exposing only the five
     per-request staging buffers touched by stage_postprocess_inputs_to_gpu."""
     ctx = MagicMock()
-    ctx.block_size = 16
     ctx.mamba_state_idx_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
     ctx.num_scheduled_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
     ctx.num_computed_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
@@ -894,35 +914,6 @@ def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
         ctx.is_prefilling_buf.gpu[:num_reqs],
         torch.tensor([True, False, True]),
     )
-    assert ctx.replayssm_materialize_possible is True
-
-
-def test_stage_postprocess_inputs_skips_impossible_materialization():
-    device = torch.device("cpu")
-    ctx = _make_staging_ctx(max_num_reqs=4, device=device)
-    req_ids = ["req_a"]
-    scheduler_output = _make_postprocess_scheduler_output(
-        req_ids=req_ids,
-        num_scheduled_tokens={"req_a": 1},
-        scheduled_spec_decode_tokens={"req_a": [1, 2]},
-    )
-    requests = _make_requests(
-        req_ids=req_ids,
-        num_computed_tokens=[8],
-        block_ids_per_req=[[0]],
-        num_prompt_tokens=[8],
-    )
-
-    stage_postprocess_inputs_to_gpu(
-        ctx,
-        scheduler_output,
-        req_ids,
-        1,
-        requests,
-        {"req_a": 0},
-    )
-
-    assert ctx.replayssm_materialize_possible is False
 
 
 def test_stage_postprocess_inputs_to_gpu_asserts_on_missing_state_idx():

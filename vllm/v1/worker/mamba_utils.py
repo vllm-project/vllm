@@ -875,10 +875,6 @@ class MambaSpecDecodeGPUContext:
     # Persistent all-layer ReplaySSM descriptors, populated with the cache
     # addresses on first real forward. None for non-FlashInfer configurations.
     replayssm: ReplaySSMModelContext | None = None
-    # Host-side upper bound computed while staging the current batch. False
-    # means no acceptance outcome can cross an align boundary, so the native
-    # materializer launch can be skipped after tracker maintenance.
-    replayssm_materialize_possible: bool = False
 
     @classmethod
     def create(
@@ -1552,9 +1548,6 @@ def preprocess_mamba(
 
     copy_bufs.offset = 0
     num_reqs = len(input_batch.req_ids)
-    src_cols = [-1] * num_reqs
-    dst_cols = [-1] * num_reqs
-
     if fused is not None:
         if num_reqs == 0:
             return
@@ -1600,8 +1593,6 @@ def preprocess_mamba(
             fused.state_idx.np[i] = curr_state_idx
 
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
-            src_cols[i] = prev_state_idx
-            dst_cols[i] = curr_state_idx
             accept_token_bias = int(input_batch.num_accepted_tokens_cpu[i]) - 1
             if fused is not None:
                 assert accept_token_bias >= 0
@@ -1625,7 +1616,7 @@ def preprocess_mamba(
         fused.state_idx.copy_to_gpu(num_reqs)
         fused.src_col.copy_to_gpu(num_reqs)
         fused.token_bias.copy_to_gpu(num_reqs)
-        if fused.ctx.replayssm is not None and any(col >= 0 for col in src_cols):
+        if fused.ctx.replayssm is not None:
             fused.ctx.replayssm.copy_reassigned_slots(
                 idx_mapping=None,
                 src_cols=fused.src_col.gpu,
@@ -1752,7 +1743,6 @@ def postprocess_mamba_align_gpu(
             materialize_token_counts=ctx.materialize_token_counts,
             mamba_block_size=ctx.block_size,
             num_reqs=num_reqs,
-            materialize_possible=ctx.replayssm_materialize_possible,
         )
 
     # ``num_accepted_tokens_out`` is pre-initialized from
@@ -1796,8 +1786,6 @@ def stage_postprocess_inputs_to_gpu(
     computed_np = ctx.num_computed_tokens_buf.np
     draft_np = ctx.num_draft_tokens_buf.np
     prefill_np = ctx.is_prefilling_buf.np
-    materialize_possible = False
-
     for i in range(num_reqs):
         req_id = req_ids[i]
         state_idx = mamba_state_idx.get(req_id)
@@ -1815,20 +1803,6 @@ def stage_postprocess_inputs_to_gpu(
         prefill_np[i] = (
             requests[req_id].num_computed_tokens < requests[req_id].num_prompt_tokens
         )
-
-        # The actual accepted length is only known on GPU after sampling, but
-        # it cannot exceed one target token plus every scheduled draft. Skip
-        # the native model-wide launch only when even that upper bound cannot
-        # reach the next aligned checkpoint.
-        running_state_tokens = computed + scheduled - num_draft
-        max_new_computed = running_state_tokens + num_draft
-        aligned_max_new_computed = (
-            max_new_computed // ctx.block_size
-        ) * ctx.block_size
-        materialize_possible |= aligned_max_new_computed >= running_state_tokens
-
-    ctx.replayssm_materialize_possible = materialize_possible
-
     ctx.mamba_state_idx_buf.copy_to_gpu(num_reqs)
     ctx.num_scheduled_tokens_buf.copy_to_gpu(num_reqs)
     ctx.num_computed_tokens_buf.copy_to_gpu(num_reqs)

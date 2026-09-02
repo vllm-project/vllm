@@ -13,10 +13,12 @@ from ...utils import large_gpu_mark, multi_gpu_test
 try:
     from flashinfer.mamba.checkpointing_ssu import (
         CheckpointingSSURunner,
-        allocate_checkpointing_ssu_scratch,  # noqa: F401
+        allocate_checkpointing_ssu_scratch,
     )
 
-    HAS_FLASHINFER_CHECKPOINTING_SSU = callable(CheckpointingSSURunner)
+    HAS_FLASHINFER_CHECKPOINTING_SSU = callable(
+        CheckpointingSSURunner
+    ) and callable(allocate_checkpointing_ssu_scratch)
 except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
 
@@ -40,12 +42,10 @@ PROMPTS = [
     "Once upon a time, in a small village,",
 ]
 
-try:
-    from flashinfer.mamba.checkpointing_ssu import CheckpointingSSURunner
-
-    HAS_FLASHINFER_CHECKPOINTING_SSU = callable(CheckpointingSSURunner)
-except ImportError:
-    HAS_FLASHINFER_CHECKPOINTING_SSU = False
+requires_flashinfer_replayssm_materialization = pytest.mark.skipif(
+    not (HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE),
+    reason="FlashInfer ReplaySSM materialization APIs not available",
+)
 
 
 def _check_replayssm_parity(
@@ -58,39 +58,52 @@ def _check_replayssm_parity(
     require_v2: bool = False,
     monkeypatch: pytest.MonkeyPatch | None = None,
 ):
-    # Compare logprobs, not greedy ids: ReplaySSM's fp arithmetic can flip a
-    # near-tie. Baseline and ReplaySSM run at the same TP, so TP numerics are
-    # common-mode and only ReplaySSM varies.
-    if require_v2:
-        assert monkeypatch is not None
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    def run() -> None:
+        # Compare logprobs, not greedy ids: ReplaySSM's fp arithmetic can flip a
+        # near-tie. Baseline and ReplaySSM run at the same TP, so TP numerics are
+        # common-mode and only ReplaySSM varies.
+        common = dict(
+            max_model_len=1024,
+            trust_remote_code=True,
+            enable_prefix_caching=False,
+            mamba_cache_mode="none",
+            tensor_parallel_size=tensor_parallel_size,
+            mamba_backend=mamba_backend,
+        )
+        with vllm_runner(model_name, **common) as llm:
+            if require_v2:
+                assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
+            baseline = llm.generate_greedy_logprobs(
+                PROMPTS, max_tokens=32, num_logprobs=5
+            )
+        with vllm_runner(
+            model_name, use_replayssm=True, replayssm_buffer_len=16, **common
+        ) as llm:
+            if require_v2:
+                assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
+            replay = llm.generate_greedy_logprobs(
+                PROMPTS, max_tokens=32, num_logprobs=5
+            )
+
+        check_logprobs_close(
+            outputs_0_lst=baseline,
+            outputs_1_lst=replay,
+            name_0="baseline",
+            name_1=name_1,
+        )
+
+    if not require_v2:
+        run()
+        return
+
+    assert monkeypatch is not None
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+            envs.disable_envs_cache()
+            run()
+    finally:
         envs.disable_envs_cache()
-
-    common = dict(
-        max_model_len=1024,
-        trust_remote_code=True,
-        enable_prefix_caching=False,
-        mamba_cache_mode="none",
-        tensor_parallel_size=tensor_parallel_size,
-        mamba_backend=mamba_backend,
-    )
-    with vllm_runner(model_name, **common) as llm:
-        if require_v2:
-            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
-        baseline = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
-    with vllm_runner(
-        model_name, use_replayssm=True, replayssm_buffer_len=16, **common
-    ) as llm:
-        if require_v2:
-            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
-        replay = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
-
-    check_logprobs_close(
-        outputs_0_lst=baseline,
-        outputs_1_lst=replay,
-        name_0="baseline",
-        name_1=name_1,
-    )
 
 
 @pytest.mark.parametrize("model_name", MODELS)
@@ -301,73 +314,78 @@ def _check_flashinfer_replayssm_prefix_caching(
     use_v2: bool,
     tensor_parallel_size: int,
 ):
-    # ReplaySSM materializes the exact SSM state at each cacheable block
-    # boundary, so cached prefixes must match the always-materialized baseline.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2 else "0")
-    envs.disable_envs_cache()
-
-    common = dict(
-        max_model_len=8192,
-        trust_remote_code=True,
-        enable_prefix_caching=True,
-        enable_chunked_prefill=True,
-        mamba_cache_mode=mamba_cache_mode,
-        mamba_backend="flashinfer",
-        disable_log_stats=False,  # required for llm.get_metrics()
-        tensor_parallel_size=tensor_parallel_size,
-    )
-    if moe_backend is not None:
-        common["moe_backend"] = moe_backend
-    if use_ngram:
-        common["speculative_config"] = {
-            "method": "ngram",
-            "num_speculative_tokens": 3,
-            "prompt_lookup_max": 3,
-        }
-
-    with vllm_runner(model_name, **common) as llm:
-        assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is use_v2
-        baseline_block_size = llm.llm.llm_engine.vllm_config.cache_config.block_size
-        llm.generate_greedy_logprobs(
-            PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+    def run() -> None:
+        # ReplaySSM materializes the exact SSM state at each cacheable block
+        # boundary, so cached prefixes must match the always-materialized baseline.
+        common = dict(
+            max_model_len=8192,
+            trust_remote_code=True,
+            enable_prefix_caching=True,
+            enable_chunked_prefill=True,
+            mamba_cache_mode=mamba_cache_mode,
+            mamba_backend="flashinfer",
+            disable_log_stats=False,  # required for llm.get_metrics()
+            tensor_parallel_size=tensor_parallel_size,
         )
-        baseline = llm.generate_greedy_logprobs(
-            PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+        if moe_backend is not None:
+            common["moe_backend"] = moe_backend
+        if use_ngram:
+            common["speculative_config"] = {
+                "method": "ngram",
+                "num_speculative_tokens": 3,
+                "prompt_lookup_max": 3,
+            }
+
+        with vllm_runner(model_name, **common) as llm:
+            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is use_v2
+            baseline_block_size = (
+                llm.llm.llm_engine.vllm_config.cache_config.block_size
+            )
+            llm.generate_greedy_logprobs(
+                PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+            )
+            baseline = llm.generate_greedy_logprobs(
+                PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+            )
+            baseline_hits = _prefix_cache_hits(llm)
+
+        with vllm_runner(
+            model_name, use_replayssm=True, replayssm_buffer_len=16, **common
+        ) as llm:
+            assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is use_v2
+            replay_block_size = llm.llm.llm_engine.vllm_config.cache_config.block_size
+            assert replay_block_size == baseline_block_size
+            llm.generate_greedy_logprobs(
+                PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+            )
+            replay = llm.generate_greedy_logprobs(
+                PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+            )
+            replay_hits = _prefix_cache_hits(llm)
+
+        assert baseline_hits > 0
+        assert replay_hits > 0, (
+            f"ReplaySSM {mamba_cache_mode}-mode run produced no prefix-cache hits; "
+            "the shared prefix may be shorter than one mamba block, so prefix "
+            "caching is inert"
         )
-        baseline_hits = _prefix_cache_hits(llm)
-
-    with vllm_runner(
-        model_name, use_replayssm=True, replayssm_buffer_len=16, **common
-    ) as llm:
-        assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is use_v2
-        replay_block_size = llm.llm.llm_engine.vllm_config.cache_config.block_size
-        assert replay_block_size == baseline_block_size
-        llm.generate_greedy_logprobs(
-            PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+        check_logprobs_close(
+            outputs_0_lst=baseline,
+            outputs_1_lst=replay,
+            name_0=f"flashinfer_baseline_{mamba_cache_mode}_pc",
+            name_1=f"flashinfer_replayssm_{mamba_cache_mode}_pc",
         )
-        replay = llm.generate_greedy_logprobs(
-            PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
-        )
-        replay_hits = _prefix_cache_hits(llm)
 
-    assert baseline_hits > 0
-    assert replay_hits > 0, (
-        f"ReplaySSM {mamba_cache_mode}-mode run produced no prefix-cache hits; "
-        "the shared prefix may be shorter than one mamba block, so prefix "
-        "caching is inert"
-    )
-    check_logprobs_close(
-        outputs_0_lst=baseline,
-        outputs_1_lst=replay,
-        name_0=f"flashinfer_baseline_{mamba_cache_mode}_pc",
-        name_1=f"flashinfer_replayssm_{mamba_cache_mode}_pc",
-    )
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2 else "0")
+            envs.disable_envs_cache()
+            run()
+    finally:
+        envs.disable_envs_cache()
 
 
-@pytest.mark.skipif(
-    not (HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE),
-    reason="FlashInfer ReplaySSM materialization APIs not available",
-)
+@requires_flashinfer_replayssm_materialization
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize(
     ("mamba_cache_mode", "use_v2", "use_ngram"),
@@ -396,10 +414,7 @@ def test_flashinfer_replayssm_prefix_cache_tp1(
     )
 
 
-@pytest.mark.skipif(
-    not (HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE),
-    reason="FlashInfer ReplaySSM materialization APIs not available",
-)
+@requires_flashinfer_replayssm_materialization
 @large_gpu_mark(min_gb=40)
 def test_flashinfer_replayssm_all_prefix_cache_v2(vllm_runner, monkeypatch):
     _check_flashinfer_replayssm_prefix_caching(
@@ -414,10 +429,7 @@ def test_flashinfer_replayssm_all_prefix_cache_v2(vllm_runner, monkeypatch):
     )
 
 
-@pytest.mark.skipif(
-    not (HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE),
-    reason="FlashInfer ReplaySSM materialization APIs not available",
-)
+@requires_flashinfer_replayssm_materialization
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("model_name", [MAMBA2_MODEL])
 def test_flashinfer_replayssm_prefix_cache_v2_tp2(
