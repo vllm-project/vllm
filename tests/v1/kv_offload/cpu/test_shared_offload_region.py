@@ -778,12 +778,24 @@ def test_published_file_is_fully_sized(iid):
 
 def test_joining_a_differently_sized_region_fails_fast(iid):
     """A region sized by another configuration must raise an explanatory
-    error rather than block until a timeout."""
-    with (
-        _region(iid, num_blocks=4) as r,
-        pytest.raises(RuntimeError, match="different offloading configuration"),
-    ):
-        open_region_file(r.mmap_path, r.total_size_bytes + PAGE_SIZE)
+    error rather than block until a timeout, and must not keep the fd: it
+    carries the flock, so a leak here leaves the region unreclaimable."""
+    with _region(iid, num_blocks=4) as r:
+        inode = os.fstat(r.fd).st_ino
+        held = len(_fds_for_inode(inode))
+        with pytest.raises(RuntimeError, match="different offloading configuration"):
+            open_region_file(r.mmap_path, r.total_size_bytes + PAGE_SIZE)
+        assert len(_fds_for_inode(inode)) == held
+
+
+def test_open_region_file_gives_up_after_repeated_races(iid, monkeypatch):
+    """Nothing else bounds startup once a creator keeps losing the publish
+    race, so the retry loop must give up with a clear error."""
+    import vllm.utils.shm_utils as shm_utils
+
+    monkeypatch.setattr(shm_utils, "_create_region_file", lambda path, size: None)
+    with pytest.raises(TimeoutError, match="losing creation races"):
+        open_region_file(f"/dev/shm/vllm_offload_{iid}.mmap", PAGE_SIZE, timeout=0.05)
 
 
 def test_creator_failure_leaves_no_temp_file(iid, monkeypatch):

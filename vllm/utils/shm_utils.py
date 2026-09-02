@@ -16,10 +16,13 @@ import fcntl
 import glob
 import os
 import tempfile
+import time
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+_OPEN_TIMEOUT = 30.0
 
 
 def _path_backed_by_fd(path: str, fd: int) -> bool:
@@ -70,44 +73,53 @@ def _create_region_file(path: str, size: int) -> int | None:
     return fd
 
 
-def open_region_file(path: str, size: int) -> tuple[int, bool]:
+def open_region_file(
+    path: str, size: int, timeout: float = _OPEN_TIMEOUT
+) -> tuple[int, bool]:
     """Create or join the shared region file at `path`, sized `size` bytes.
 
     Returns (fd, is_creator). The fd holds a shared flock for its lifetime,
     which is what reap_orphaned_region_files keys liveness on; the caller
-    owns it and must close it.
+    owns it and must close it. Every path that does not return an fd closes
+    it, so a failure never leaves the region locked and unreclaimable.
     """
+    deadline = time.monotonic() + timeout
     while True:
+        if time.monotonic() > deadline:
+            raise TimeoutError(
+                f"Gave up opening shared region file {path} after {timeout} s "
+                f"of losing creation races"
+            )
         try:
             fd = os.open(path, os.O_RDWR)
         except FileNotFoundError:
-            fd_or_none = _create_region_file(path, size)
-            if fd_or_none is None:
+            created = _create_region_file(path, size)
+            if created is None:
                 continue
             logger.info(
                 "Created shared region file %s (%.2f MiB)", path, size / (1 << 20)
             )
-            return fd_or_none, True
+            return created, True
 
         joined = False
         try:
             fcntl.flock(fd, fcntl.LOCK_SH)
             # The name may have been reclaimed between the open and the lock.
-            joined = _path_backed_by_fd(path, fd)
-            if joined:
-                actual_size = os.fstat(fd).st_size
-                if actual_size < size:
-                    raise RuntimeError(
-                        f"Shared region file {path} is {actual_size} bytes, "
-                        f"expected at least {size}; a process is using a "
-                        f"different offloading configuration."
-                    )
+            if not _path_backed_by_fd(path, fd):
+                continue
+            actual_size = os.fstat(fd).st_size
+            if actual_size < size:
+                raise RuntimeError(
+                    f"Shared region file {path} is {actual_size} bytes, "
+                    f"expected at least {size}; a process is using a "
+                    f"different offloading configuration."
+                )
+            joined = True
         finally:
             if not joined:
                 os.close(fd)
-        if joined:
-            logger.info("Opened existing shared region file %s", path)
-            return fd, False
+        logger.info("Opened existing shared region file %s", path)
+        return fd, False
 
 
 def reap_orphaned_region_files(pattern: str) -> None:
