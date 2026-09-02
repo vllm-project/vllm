@@ -350,6 +350,8 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator = object.__new__(_TestSpeculator)
     speculator.num_speculative_steps = 4
     speculator.current_draft_step = torch.tensor(0)
+    speculator.slot_mapping_observer = None
+    speculator.host_mirror_forward_observer = None
     speculator.input_buffers = SimpleNamespace(
         positions=torch.arange(2),
         query_start_loc=torch.arange(3),
@@ -371,10 +373,58 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
         batch_desc=batch_desc,
         seq_lens_cpu_upper_bound=None,
         num_tokens_across_dp=None,
+        dummy_run=False,
     )
 
     assert generate_draft.call_count == expected_eager_calls
     assert run_fullgraph.call_count == expected_graph_replays
+
+
+@pytest.mark.parametrize(
+    "cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+)
+def test_autoregressive_mtp_finishes_each_draft_mirror_phase(monkeypatch, cg_mode):
+    speculator = object.__new__(_TestSpeculator)
+    speculator.num_speculative_steps = 4
+    speculator.current_draft_step = torch.tensor(0)
+    speculator.input_buffers = SimpleNamespace(
+        positions=torch.arange(2),
+        query_start_loc=torch.arange(3),
+    )
+    speculator.idx_mapping = torch.arange(2)
+    slot_mapping = torch.arange(2).unsqueeze(0)
+    speculator.block_tables = SimpleNamespace(
+        compute_slot_mappings=Mock(return_value=slot_mapping)
+    )
+    speculator.kv_cache_config = None
+    speculator._build_draft_attn_metadata = Mock(return_value={})
+    speculator._generate_draft = Mock()
+    speculator.decode_cudagraph_manager = SimpleNamespace(run_fullgraph=Mock())
+    speculator.draft_attn_layer_names = {"draft"}
+    speculator.slot_mapping_observer = Mock()
+    speculator.host_mirror_forward_observer = Mock()
+    monkeypatch.setattr(
+        spec_module,
+        "build_slot_mappings_by_layer",
+        lambda slot_mappings, kv_cache_config: {"draft": slot_mappings[0]},
+    )
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=cg_mode,
+        num_tokens=2,
+        num_reqs=2,
+    )
+
+    speculator._multi_step_decode(
+        num_reqs=2,
+        skip_attn=False,
+        batch_desc=batch_desc,
+        seq_lens_cpu_upper_bound=None,
+        num_tokens_across_dp=None,
+        dummy_run=False,
+    )
+
+    assert speculator.slot_mapping_observer.call_count == 3
+    assert speculator.host_mirror_forward_observer.call_count == 3
 
 
 def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(

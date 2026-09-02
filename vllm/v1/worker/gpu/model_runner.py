@@ -724,9 +724,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
-        if isinstance(self.speculator, DraftModelSpeculator):
+        if (
+            isinstance(self.speculator, DraftModelSpeculator)
+            and self.vllm_config.attention_config.hisparse_config is not None
+            and self.scheduler_config.async_scheduling
+        ):
             self.speculator.slot_mapping_observer = (
                 self.kv_connector.stage_host_mirror_mapping
+            )
+            self.speculator.host_mirror_forward_observer = (
+                self.kv_connector.finish_host_mirror_forward
             )
 
     def _init_kv_zero_meta(self) -> None:
@@ -1667,9 +1674,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output, batch_req_state, batch_desc
             )
             block_tables, slot_mappings = self.prepare_attn(input_batch)
-            self.kv_connector.stage_host_mirror_mapping(
-                slot_mappings, input_batch.num_tokens
-            )
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
@@ -1732,6 +1736,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             slot_mappings_by_layer = build_slot_mappings_by_layer(
                 slot_mappings, self.kv_cache_config
             )
+            if not dummy_run:
+                self.kv_connector.stage_host_mirror_mapping(
+                    slot_mappings_by_layer, input_batch.num_tokens
+                )
             assert block_tables is not None
             attn_groups = self.attn_groups
             if dummy_run and is_profile:

@@ -66,7 +66,7 @@ def test_hisparse_gpu_slots_select_written_rows_from_async_envelope():
     )
     source_slots = np.array([102, 103, -1, 21, 22, 23], dtype=np.int64)
 
-    assert _select_written_row_mirrors(candidates, source_slots) == (
+    assert _select_written_row_mirrors(candidates, source_slots, 0) == (
         SparseKVRowMirror((102, 502), 1002, 2),
         SparseKVRowMirror((21, 301), 2001, 3),
     )
@@ -79,38 +79,44 @@ def test_hisparse_written_rows_preserve_scheduler_page_boundaries():
     )
 
     assert _select_written_row_mirrors(
-        candidates, np.array([2, 3, 4, 5], dtype=np.int64)
+        candidates, np.array([2, 3, 4, 5], dtype=np.int64), 0
     ) == (
         SparseKVRowMirror((2,), 102, 2),
         SparseKVRowMirror((4,), 104, 2),
     )
 
 
-def test_hisparse_stages_reference_slots_on_copy_stream(monkeypatch):
-    """Async MTP must stage GPU-written slots without a sync."""
+def test_hisparse_appends_reference_slots_within_a_mirror_phase(monkeypatch):
+    """Separate context and query writes must share one mirror phase."""
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
     worker.refines_row_mirrors = True
-    worker._resident_group_id = 1
     state = _SlotMappingStaging(
         MagicMock(), MagicMock(), torch.empty(4, dtype=torch.int64)
     )
     worker._slot_mapping_staging = state
-    worker.cache_handles = []
-    worker._layer_mirror_callbacks = ()
+    handle = SimpleNamespace(runtime=SimpleNamespace(resident_source_index=1))
+    worker.cache_layer_names = ["layer"]
+    worker.cache_handles = [handle]
+    worker._layer_mirror_callbacks = (MagicMock(),)
+    worker._row_mirror_num_rows = 1
     worker._submitted_mirror_layers = set()
     main_stream = MagicMock()
     monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: main_stream)
     monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
 
     worker.stage_row_mirror_mapping(
-        torch.tensor([[1, 2, 3], [7, 8, 9]], dtype=torch.int64), 3
+        {"layer": torch.tensor([7, 8], dtype=torch.int64)}, 2
+    )
+    worker.stage_row_mirror_mapping(
+        {"layer": torch.tensor([9, 10], dtype=torch.int64)}, 2
     )
 
-    torch.testing.assert_close(state.slots[:3], torch.tensor([7, 8, 9]))
-    state.stream.wait_stream.assert_called_once_with(main_stream)
-    state.event.record.assert_called_once_with(state.stream)
-    assert state.num_tokens == 3
+    torch.testing.assert_close(state.slots, torch.tensor([7, 8, 9, 10]))
+    assert state.stream.wait_stream.call_args_list == [call(main_stream)] * 2
+    assert state.event.record.call_args_list == [call(state.stream)] * 2
+    assert state.num_tokens == 4
+    assert state.source_index == 1
 
 
 @pytest.mark.parametrize(

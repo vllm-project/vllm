@@ -302,9 +302,13 @@ class KVConnectorBase_V1(ABC):
         return
 
     def stage_host_mirror_mapping(
-        self, slot_mappings: torch.Tensor, num_tokens: int
+        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
     ) -> None:
         """Stage GPU slot mappings for host mirroring."""
+        return
+
+    def finish_host_mirror_forward(self) -> None:
+        """Finish host mirroring for a model forward."""
         return
 
     def reset_capture_state(self) -> None:
