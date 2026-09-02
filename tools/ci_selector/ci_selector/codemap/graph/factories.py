@@ -58,6 +58,9 @@ class FactoryParse:
     lazy_table_counts: dict[str, int] = field(default_factory=dict)
     # unified parser-engine module stem -> vllm/parser/<stem>.py
     parser_engine_entries: dict[str, str] = field(default_factory=dict)
+    # target file -> the table files that name it, so a member with no coverage
+    # of its own can inherit its registry's. Parser-engine entries excluded.
+    table_of: dict[str, set[str]] = field(default_factory=dict)
     claims: set[str] = field(default_factory=set)
     edges_added: int = 0
     module_attr_resolved: int = 0
@@ -152,6 +155,8 @@ def add_register_call_edges(
             target = index.resolve(module)
             graph.table_files.add(file)
             parse.register_entries[key] = target
+            if target != file:
+                parse.table_of.setdefault(target, set()).add(file)
             _claim(parse, target)
             parse.edges_added += _leaf_edges(graph, {key}, target)
 
@@ -219,6 +224,8 @@ def add_lazy_parser_table_edges(
                 parse.parser_entries[key] = target
                 parse.parser_entry_files.setdefault(key, set()).add(target)
                 parse.parser_table_counts[init_file] += 1
+                if target != init_file:
+                    parse.table_of.setdefault(target, set()).add(init_file)
                 _claim(parse, target)
                 parse.edges_added += _leaf_edges(graph, set(consts), target)
 
@@ -286,6 +293,8 @@ def add_qualname_enum_edges(
                     continue
                 found += 1
                 parse.enum_entries[member] = target
+                if target != file:
+                    parse.table_of.setdefault(target, set()).add(file)
                 _claim(parse, target)
                 parse.edges_added += _leaf_edges(graph, {member}, target)
         # Only a file that yielded entries counts as read, and per file, since
@@ -443,6 +452,8 @@ def add_lazy_export_table_edges(
                 continue
             resolved[key] = target
             parse.class_table_entries[key] = target
+            if target != file:
+                parse.table_of.setdefault(target, set()).add(file)
             _claim(parse, target)
             parse.edges_added += _leaf_edges(graph, {key}, target)
         if resolved:

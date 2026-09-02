@@ -743,8 +743,11 @@ def test_only_the_oracle_may_read_run_all_patterns():
 
     `run_all_patterns` is vLLM's hand-maintained "run everything" list, and the
     point of the analyzer is to derive that rather than inherit it. Only the
-    field, the parser that fills it, and `validate/` may touch it: a
-    selector-side read makes the comparison measure nothing.
+    field, the parser that fills it, `validate/`, and one sanctioned read may
+    touch it: the escalation branch in `_classify_buildkite`, which uses the
+    pattern only to escalate a `.buildkite` file to its pipeline's run-all,
+    never to route or drop. Any other read makes the comparison measure
+    nothing.
 
     Scanned as attribute access through the AST and not as text, so the
     docstrings explaining the deletion do not trip it.
@@ -755,6 +758,7 @@ def test_only_the_oracle_may_read_run_all_patterns():
     banned = {"run_all_patterns", "run_all_exclude_patterns"}
     allowed = {"codemap/pipeline/step.py", "codemap/pipeline/buildkite.py"}
     offenders = []
+    classify_reads = 0
     for path in sorted(root.rglob("*.py")):
         rel = path.relative_to(root).as_posix()
         if rel in allowed or rel.startswith("validate/"):
@@ -769,7 +773,16 @@ def test_only_the_oracle_may_read_run_all_patterns():
                 or getattr(node, "arg", None)
             )
             if name in banned:
+                if rel == "codemap/classify.py":
+                    classify_reads += 1
+                    continue
                 offenders.append(f"{rel}:{node.lineno}")
+    assert classify_reads == 2, (
+        "classify.py's sanctioned pattern read is exactly the escalation "
+        f"branch's pair (run_all + exclude); found {classify_reads} reads. "
+        "A new read is routing off the hand list -- the one thing this "
+        "guard exists to prevent."
+    )
     assert not offenders, (
         "the selector is reading the hand-maintained run-all list again: "
         f"{offenders}. Removing it measured BETTER (32 missed failures across "
@@ -991,9 +1004,10 @@ def test_joined_fixture_path_routes_to_consumers(state):
     assert "vllm_ci:basic-correctness" in sel.selected
 
 
-def test_optional_only_coverage_fails_open(state):
-    """A vllm/ file whose entire coverage auto-runs nowhere (optional steps
-    only) must run-all, not silently select zero auto steps."""
+def test_optional_only_coverage_inherits_its_registry(state):
+    """A registered member whose own coverage auto-runs nowhere (optional
+    steps only) inherits its registry's coverage instead of running
+    everything, and the optional step still rides along as a manual hit."""
     specimen = "vllm/distributed/weight_transfer/sparse_nccl_engine.py"
     covering = "tests/distributed/test_weight_transfer.py"
     closure = state.full.graph.reverse_closure({specimen})
@@ -1001,9 +1015,11 @@ def test_optional_only_coverage_fails_open(state):
     assert covering not in state.invoked, (
         "the covering test is now auto-invoked: pick a new optional-only specimen"
     )
+    tables = state.full.table_of().get(specimen)
+    assert tables, "specimen no longer registry-named: pick a new one"
     sel = select(state, [specimen])
-    assert "vllm_ci" in sel.run_all
-    assert "empty-closure direction" in sel.run_all["vllm_ci"]
+    assert not sel.run_all
+    assert "inheriting the coverage of registry" in sel.claims[0].detail
     assert any("2xh100-2xmi300" in s for s in sel.manual_hits)
 
 
@@ -1197,13 +1213,57 @@ def test_inert_tree_referenced_by_live_step_claims_steps(state):
     assert sid in claim.step_ids
 
 
-def test_class_table_module_keeps_zero_closure_run_all(state):
+def test_class_table_module_inherits_the_table_coverage(state):
     """medusa.py is claimed by the class-table parser but its consumers are HF
-    checkpoints, so with no test naming MedusaConfig it must still fail open run-all."""
+    checkpoints, so no test names MedusaConfig and its own closure is empty.
+    It inherits the coverage of configs/__init__.py, whose consumers are what
+    can load it."""
     assert "MedusaConfig" in state.full.factories.class_table_entries
-    sel = select(state, ["vllm/transformers_utils/configs/medusa.py"])
-    assert "vllm_ci" in sel.run_all
-    assert "empty-closure direction" in sel.run_all["vllm_ci"]
+    specimen = "vllm/transformers_utils/configs/medusa.py"
+    table = "vllm/transformers_utils/configs/__init__.py"
+    assert state.full.table_of().get(specimen) == frozenset({table})
+    sel = select(state, [specimen])
+    assert not sel.run_all
+    assert sel.claims[0].rule == "graph"
+    assert table in sel.claims[0].detail
+    table_sel = select(state, [table])
+    always = {s.step_id for p in state.pipelines for s in p.steps if s.always_runs}
+    assert set(sel.selected) <= set(table_sel.selected) | always | set(sel.manual_hits)
+
+
+@pytest.mark.drift
+def test_the_registry_table_map_holds_its_anchors(state):
+    """table_of is the one hop from a registered member back to its table.
+    Anchors pin one entry per parser family; the size floor catches the map
+    silently emptying, which would re-open the run-all hole it closed."""
+    tof = state.full.table_of()
+    anchors = {
+        "vllm/transformers_utils/configs/afmoe.py": (
+            "vllm/transformers_utils/configs/__init__.py"
+        ),
+        "vllm/v1/attention/backends/mla/cpu_mla.py": (
+            "vllm/v1/attention/backends/registry.py"
+        ),
+        "vllm/model_executor/layers/quantization/fbgemm_fp8.py": (
+            "vllm/model_executor/layers/quantization/__init__.py"
+        ),
+    }
+    missing = [
+        f"{target} -> {table}"
+        for target, table in anchors.items()
+        if table not in tof.get(target, frozenset())
+    ]
+    assert not missing, drift_message(
+        f"registry table map lost anchors: {missing}",
+        "their empty-closure members fall back to run-everything",
+        "the parser sites populating table_of in codemap/graph/factories.py",
+        "FullGraph.table_of() in codemap/graph/build.py",
+    )
+    assert len(tof) >= 300, drift_message(
+        f"registry table map collapsed to {len(tof)} entries",
+        "empty-closure registered members fall back to run-everything",
+        "the parser sites populating table_of in codemap/graph/factories.py",
+    )
 
 
 def test_zero_closure_specimen_fails_open(state):
@@ -1284,35 +1344,118 @@ def test_a_docker_file_the_build_dag_knows_does_not_run_everything(state):
         assert sel.selected, f"{path} now selects nothing, which is the unsafe way"
 
 
-def test_an_unclaimed_file_outside_docker_still_fails_open(state):
-    """The floor, and it is about scope rather than about the build graph.
-
-    `docker/` is copied into images wholesale, so the "does the graph know
-    this?" guard is trivially true for every path under it. Elsewhere the
-    escalation has to stay: other files reach that line with an answer too, and
-    letting them defer removes the floor under a run-all only the world rule
-    would then hold up. The build-map branch above the terminal narrows only
-    files the CMake walk actually maps; a .conf the build never reads keeps
-    the full run-all.
-    """
+def test_an_unclaimed_unreferenced_file_is_inert(state):
+    """A file no derived surface reaches -- no step target, key, docker COPY,
+    specific declarer, or command text names it -- selects nothing beyond the
+    floor, because no job can execute it. Files under package roots keep the
+    fail-open (see test_brand_new_file_fails_open)."""
     from ci_selector.codemap.classify import _classify
 
     path = "some_unclaimed_top_level_thing.conf"
-    assert _classify(state, path, None).run_all
+    claim = _classify(state, path, None)
+    assert claim.rule == "inert"
+    assert not claim.run_all and not claim.step_ids and not claim.test_files
 
 
 def test_unrecognized_ci_file_runs_all_pipelines(state):
+    """Root-level only: a file beside the generator configs may be generator
+    input the way .pipeline_gen_v2 is, so the catch-all stands there. Subdir
+    files rest at the floor (see the inert tests)."""
     sel = select(state, [".buildkite/some_new_infra_thing.xyz"])
     assert set(sel.run_all) == {p.config.name for p in state.pipelines}
 
 
-def test_added_test_without_owning_target_fails_open(state):
-    """An added test in a brand-new area is a new uninvoked test and must run-all,
-    never 'nothing to run' (where added-file rules hand back to direction)."""
+def test_an_added_step_yaml_escalates_its_own_pipeline(state):
+    """A step file the base did not load escalates the pipeline that will load
+    it, so a new-suite PR still runs its new steps."""
+    sel = select(state, [".buildkite/test_areas/some_brand_new_area.yaml"])
+    assert set(sel.run_all) == {"vllm_ci"}
+
+
+def test_an_added_step_yaml_escalates_every_pipeline_sharing_its_dir(state):
+    """hardware_tests/ is a job_dir of two pipelines, so an added suite there
+    must escalate both -- escalating only the first would leave the ROCm steps
+    it also creates unrun."""
+    shared = {
+        c.config.name
+        for c in state.pipelines
+        if ".buildkite/hardware_tests" in c.config.job_dirs
+    }
+    assert len(shared) >= 2, "hardware_tests no longer shared; pick a new dir"
+    sel = select(state, [".buildkite/hardware_tests/some_brand_new_suite.yaml"])
+    assert set(sel.run_all) == shared
+
+
+def test_a_generator_pattern_escalates_only_its_pipeline(state):
+    """run-amd-test.sh matches ci_config_rocm.yaml's run_all_patterns, so it
+    escalates the ROCm pipeline and nothing else, matching CI."""
+    sel = select(state, [".buildkite/scripts/hardware_ci/run-amd-test.sh"])
+    assert set(sel.run_all) == {"vllm_rocm_ci"}
+
+
+def test_a_dockerfile_executed_ci_script_rests_at_the_floor(state):
+    """check-wheel-size.py runs inside the image build, and the builds are
+    always-run, so the floor is its complete test."""
+    sel = select(state, [".buildkite/check-wheel-size.py"])
+    claim = sel.claims[0]
+    assert claim.rule == "inert" and not sel.run_all
+    assert not _non_always(sel, state)
+
+
+def test_a_consumerless_ci_script_rests_at_the_floor(state):
+    """A .buildkite subdir script no surface reaches selects the floor only."""
+    sel = select(state, [".buildkite/scripts/rerun-test.sh"])
+    claim = sel.claims[0]
+    assert claim.rule == "inert" and not sel.run_all
+    assert not _non_always(sel, state)
+
+
+def test_the_abi_audit_script_routes_to_its_step(state):
+    """check-torch-abi.py is the torch-stable-abi-audit step's own script, so
+    it routes there instead of running everything."""
+    sel = select(state, [".buildkite/check-torch-abi.py"])
+    assert not sel.run_all
+    assert any("torch-stable-abi-audit" in s for s in sel.selected)
+
+
+def test_added_test_without_owning_target_selects_the_floor(state):
+    """An added test whose directory no step sweeps selects the floor: no job
+    can run it. A step yaml added with it escalates the pipeline through the
+    job_dirs guard."""
     from ci_selector.codemap.classify import _classify
     from ci_selector.codemap.state import DiffContext
 
     path = "tests/brand_new_area/test_x.py"
+    ctx = DiffContext(base="b", head="h", status={path: "A"})
+    claim = _classify(state, path, ctx)
+    assert claim.rule == "added-test"
+    assert not claim.run_all
+    assert not claim.step_ids and not claim.test_files
+    assert "no step sweeps" in claim.detail
+
+
+def test_added_test_under_a_swept_directory_routes_to_its_steps(state):
+    """An added test under a directory a live step's command targets runs in
+    exactly those steps, existing or not -- the sweep is string-based."""
+    from ci_selector.codemap.classify import _classify
+    from ci_selector.codemap.state import DiffContext
+
+    path = "tests/basic_correctness/test_shiny_new_thing.py"
+    ctx = DiffContext(base="b", head="h", status={path: "A"})
+    claim = _classify(state, path, ctx)
+    assert claim.rule == "added-test"
+    assert claim.step_ids and not claim.run_all
+
+
+def test_added_vllm_file_with_no_head_coverage_fails_open(state):
+    """An added vllm/ .py with no registered keys and no head-side importer
+    reaching live coverage has unknown reach and fails open. Inheriting the
+    sibling directory's closure over-selects (its files sit in the import
+    cycle); diff-side import parsing is the queued sound route."""
+    from ci_selector.codemap.classify import _classify
+    from ci_selector.codemap.state import DiffContext
+
+    path = "vllm/v1/worker/gpu/sample/brand_new_helper.py"
     ctx = DiffContext(base="b", head="h", status={path: "A"})
     claim = _classify(state, path, ctx)
     assert claim.rule == "fail-open"
@@ -1862,17 +2005,12 @@ def test_release_refs_derived_and_disjoint_from_live_steps(state):
         assert not any(rel == p.config.config_file for p in state.pipelines)
 
 
-def test_unreferenced_rocm_ci_script_is_unrecognized_infra(state):
-    """A `.buildkite/` script no live step references falls to the
-    unrecognized-infra catch-all and escalates every pipeline, before any
-    release check gets to zero it.
-
-    Named for what it exercises. It used to claim to be a `classify_world`
-    control, which it never was, and would have passed with that function
-    deleted outright: the one thing a control must not do.
-    """
+def test_unreferenced_rocm_ci_script_escalates_its_own_pipeline(state):
+    """A `.buildkite/scripts/rocm/` script no live step references matches the
+    ROCm config's run_all_patterns prefix, so it escalates that pipeline only,
+    never every pipeline and never the floor."""
     sel = select(state, [".buildkite/scripts/rocm/ci-bake-rocm.sh"])
-    assert set(sel.run_all) == {p.config.name for p in state.pipelines}
+    assert set(sel.run_all) == {"vllm_rocm_ci"}
 
 
 def test_docker_input_relabel_still_run_all(state):
@@ -2194,11 +2332,12 @@ def test_a_hook_script_ci_also_runs_keeps_its_steps(state, monkeypatch):
 
 
 def test_a_tools_file_precommit_does_not_name_is_untouched(state):
-    # Narrow by construction: living under tools/ earns nothing.
+    # Narrow by construction: living under tools/ earns nothing from the
+    # lint-only rule; an unreferenced one lands on the inert floor instead.
     from ci_selector.codemap.classify import _classify
 
     claim = _classify(state, "tools/not_a_real_hook_script.py", None)
-    assert claim.rule == "fail-open"
+    assert claim.rule == "inert"
 
 
 def test_a_cycle_file_is_routed_by_colocation_and_selects_far_less(state):
@@ -2660,16 +2799,27 @@ def test_rust_file_keeps_env_keyed_steps(state):
 
 
 def test_image_union_exempt_membership():
-    """Nothing pinned this set before; every addition is a decision that a
-    rule's own answer beats the build DAG's, so force the re-read."""
-    from ci_selector.codemap.unions import _IMAGE_UNION_EXEMPT
+    """Every entry is a decision that a rule's own answer beats the build
+    graph's, so force a re-read on any change. "inert" is here so the image
+    COPY does not borrow consumer steps back onto a file proved unreferenced,
+    but stays out of _DEP_UNION_EXEMPT since a declarer disproves the veto."""
+    from ci_selector.codemap.unions import _DEP_UNION_EXEMPT, _IMAGE_UNION_EXEMPT
 
     assert (
         frozenset(
-            {"no-code", "no-hardware", "legacy-ci", "inert-ci", "release-ci", "rust"}
+            {
+                "no-code",
+                "no-hardware",
+                "legacy-ci",
+                "inert-ci",
+                "inert",
+                "release-ci",
+                "rust",
+            }
         )
         == _IMAGE_UNION_EXEMPT
     )
+    assert "inert" not in _DEP_UNION_EXEMPT
 
 
 def test_rust_reaches_hardware_image_consumers(state):

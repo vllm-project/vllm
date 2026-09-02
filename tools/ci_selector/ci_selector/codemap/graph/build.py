@@ -7,7 +7,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ...handwritten import CONFTESTS_NOT_ENGINE_STARTING, ENGINE_ENTRY_MODULES
+from ...handwritten import (
+    CONFTESTS_NOT_ENGINE_STARTING,
+    ENGINE_ENTRY_MODULES,
+    REGISTRY_FILE,
+)
 from ..repo import ModuleIndex, build_module_index
 from .assets import AssetParse, add_asset_edges
 from .cycles import ImportCycle, dominant_cycle
@@ -15,10 +19,12 @@ from .demote import DispatchParse, add_demotion_edges
 from .factories import FactoryParse, add_factory_edges
 from .imports import ImportGraph, build_graph
 from .model_registry import (
+    QUANT_INIT_FILE,
     QuantParse,
     RegistryParse,
     add_quant_method_edges,
     add_registry_edges,
+    resolve_module_name,
     string_keyed_claims,
 )
 from .platform import PlatformParse, add_platform_edges
@@ -49,6 +55,27 @@ class FullGraph:
             | self.factories.claims
             | self.dispatch.claims
         )
+
+    def table_of(self) -> dict[str, frozenset[str]]:
+        """Target file -> the table files that name it.
+
+        A registered member with no test naming its key has no in-edges; this
+        is the one hop back to the table whose consumers can load it. Merged
+        here because quant and the model registry keep separate parse results.
+        """
+        if not hasattr(self, "_table_of"):
+            merged: dict[str, set[str]] = {
+                t: set(tables) for t, tables in self.factories.table_of.items()
+            }
+            for target in self.quant.methods.values():
+                if target != QUANT_INIT_FILE:
+                    merged.setdefault(target, set()).add(QUANT_INIT_FILE)
+            for mod, _cls in self.registry.entries.values():
+                resolved = self.index.resolve(resolve_module_name(mod))
+                if resolved and resolved != REGISTRY_FILE:
+                    merged.setdefault(resolved, set()).add(REGISTRY_FILE)
+            self._table_of = {t: frozenset(s) for t, s in merged.items()}
+        return self._table_of
 
     def import_cycle(self) -> ImportCycle:
         """The dominant import cycle, computed once.

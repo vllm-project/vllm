@@ -76,11 +76,12 @@ def test_raw_reads_are_whitelisted_in_both_directions():
         if a:
             attr_reads[rel] = a
     # step_refs: the gate's own call. classify: requirements twice, the
-    # release-ci and lint-only guards, and the csrc hold, which can only keep
-    # a step.
+    # release-ci and lint-only guards, the csrc hold (which can only keep a
+    # step), and the inert veto (which can only keep run-all: a declared file
+    # must never be silenced to the floor).
     assert raw_calls == {
         "codemap/step_refs.py": 1,
-        "codemap/classify.py": 5,
+        "codemap/classify.py": 6,
         "codemap/unions.py": 1,
     }, f"raw declaration reads moved: {raw_calls}"
     assert set(attr_reads) == {

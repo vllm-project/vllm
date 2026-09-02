@@ -51,6 +51,7 @@ RULES = frozenset(
         "added-test",
         "added-benchmark",
         "added-head-closure",
+        "inert",
         "renamed",
         "rust",
         "requirements",

@@ -15,7 +15,8 @@ claims, then per file the first matching claim wins:
   added-file family -> renamed-or-copied -> rust -> requirements-file ->
   release-ci -> exclusive-family scoped fail-open -> target-coverage ->
   package-data -> native-tests -> declared-deps -> docker image-union
-  deferral -> build-map-scoped fail-open -> terminal fail-open run-all.
+  deferral -> build-map-scoped fail-open -> inert floor -> terminal
+  fail-open run-all.
 
 Then `unions.py` adds what every path owes, then preflight escalations.
 
@@ -48,6 +49,7 @@ from .claim import (
     classify_world,
     docs_only,
     is_no_code,
+    matches_source_dependency,
 )
 from .externals import DOCKER_DIR
 from .graph.model_registry import resolve_module_name
@@ -352,11 +354,14 @@ def _workdir_affinity_steps(state: RepoState, path: str) -> set[str]:
     return out
 
 
-def _steps_targeting(state: RepoState, path: str) -> set[str]:
+def _steps_targeting(state: RepoState, path: str, *, siblings: bool = True) -> set[str]:
     """Steps whose targets cover a tests-side file, five ways: a directory
     target holding it, a .py target sitting beside it, a direct data or script
     reference, workdir affinity, and for a conftest or __init__ any target
-    under its directory, since those affect everything below them."""
+    under its directory, since those affect everything below them.
+
+    siblings=False drops the beside-a-.py-target leg, which is a guess at
+    relatedness, not a reference; the inert veto needs an actual reference."""
     covering: set[str] = set()
     base = path.rsplit("/", 1)[-1]
     subtree = base in ("conftest.py", "__init__.py")
@@ -371,11 +376,15 @@ def _steps_targeting(state: RepoState, path: str) -> set[str]:
                 if subtree and t.path.startswith(dir_prefix):
                     covering.add(sid)
                     break
+                if t.path == path:
+                    # A step invoking the file itself.
+                    covering.add(sid)
+                    break
                 if not t.path.endswith(".py"):
                     if path.startswith(t.path.rstrip("/") + "/"):
                         covering.add(sid)
                         break
-                elif "/" in t.path:
+                elif siblings and "/" in t.path:
                     # The file must sit in the test's own directory or one
                     # level up. A deep descendant of a shallow parent is not a
                     # dependency of a test that merely lives there.
@@ -387,6 +396,44 @@ def _steps_targeting(state: RepoState, path: str) -> set[str]:
                         covering.add(sid)
                         break
     return covering | _workdir_affinity_steps(state, path)
+
+
+def _reached_by_nothing(state: RepoState, path: str) -> bool:
+    """True when no derived surface reaches the file: no step targets it, no
+    key routes it, no image COPYs it, no step declares it, and its path or
+    module name is in no step's command text. No job can then execute it.
+
+    The declarer check ignores the trust switch (a generator trigger must
+    never be silenced) but stays specific: the bare `vllm/` catch-all would
+    match every vllm file. The command-text needle is the path or dotted
+    module name, not a bare basename, which carries no identity."""
+    if _steps_targeting(state, path, siblings=False):
+        return False
+    if state.keys.for_file(path):
+        return False
+    if path in state.docker_inputs:
+        return False
+    if _source_dep_steps_ungated(state, path, specific_only=True):
+        return False
+    needles = {path}
+    if path.endswith(".py"):
+        needles.add(path[: -len(".py")].replace("/", "."))
+    return not any(
+        n in text for text in state.keys.searchable.values() for n in needles
+    )
+
+
+def _named_in_invoked_tests(state: RepoState, path: str) -> bool:
+    """Whether an auto-run test names the file in a string literal. The
+    searchable text excludes directory-target test literals, so a by-name
+    loader in such a test is only visible here."""
+    stem = path.rsplit("/", 1)[-1].removesuffix(".py")
+    dotted = path.removesuffix(".py").replace("/", ".")
+    lits = state.full.graph.string_literals
+    return any(
+        (found := lits.get(tf)) and (stem in found or dotted in found)
+        for tf in state.invoked
+    )
 
 
 def _classify_testside(
@@ -765,18 +812,11 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
         is_test = is_test_file(path)
         is_benchmark = path.startswith("benchmarks/")
         if is_test or is_benchmark:
-            owning = {
-                sid
-                for p in state.pipelines
-                for sid, st in p.targets.items()
-                for t in st.targets
-                if not t.path.endswith(".py")
-                and path.startswith(t.path.rstrip("/") + "/")
-            }
+            owning = _steps_targeting(state, path)
             if owning:
                 return Claim(
                     "added-test",
-                    f"{path} is new and falls under existing steps' directory targets",
+                    f"{path} is new and falls under existing steps' targets",
                     step_ids=owning,
                 )
             if is_benchmark:
@@ -786,8 +826,17 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
                     "added-benchmark",
                     f"{path} is a new standalone benchmark no CI job invokes",
                 )
-        # Last resort for an added vllm/ file the earlier rules missed. Getting
-        # here means it has no keys, so nothing is routed twice.
+            # No step's command sweeps its directory, so no job can run it. An
+            # added step yaml escalates its pipeline through the job_dirs guard.
+            return Claim(
+                "added-test",
+                f"{path} is a new test in a directory no step sweeps; "
+                "no job can run it yet",
+            )
+        # An added vllm/ file with no keys and no head closure reaching live
+        # coverage has unknown reach and fails open. Inheriting the package
+        # directory's closure was tried and over-selects (its files sit in the
+        # import cycle); diff-side import parsing is the queued sound route.
         if path.startswith("vllm/"):
             head_claim = _classify_added_head_closure(state, path, ctx)
             if head_claim is not None:
@@ -923,6 +972,17 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
                 f"families that compile it (build-map scoped to {sorted(fams)})",
                 step_ids=step_ids,
             )
+    # A file no derived surface reaches: only the always-run image builds
+    # touch it, so nothing beyond the floor can run it. Package roots are
+    # excluded because an added or ctx-less vllm/tests path lands here too and
+    # must keep the fail-open.
+    if not path.startswith(_ROOT_PREFIXES) and _reached_by_nothing(state, path):
+        return Claim(
+            "inert",
+            f"{path} is reached by no derived surface (step targets, keys, "
+            "docker inputs, declarers, command text); nothing beyond the "
+            "floor can execute it",
+        )
     src = state.docker_inputs.get(path)
     detail = (
         f"{path} is a docker-image build input ({src} COPY); the CI image is "
@@ -983,6 +1043,54 @@ def _classify_buildkite(
         return Claim("release-ci", f"{detail}; no live test-pipeline jobs")
     if is_no_code(path):
         return Claim("no-code", f"{path} routes to no Buildkite jobs")
+    # An added step yaml (loaded ones matched source_file above) escalates
+    # every pipeline whose job_dirs include it -- one dir can feed two.
+    job_dir_configs = {
+        config.name
+        for config in configs
+        if any(path.startswith(d.rstrip("/") + "/") for d in config.job_dirs)
+    }
+    if job_dir_configs:
+        return Claim(
+            "buildkite",
+            f"{path} is under the job_dirs of {sorted(job_dir_configs)}; a "
+            "step file the base did not load escalates the pipelines it joins",
+            run_all=job_dir_configs,
+        )
+    # The generator's own escalation trigger for a pipeline. Read only to
+    # escalate, never to route or drop, so the hand list stays out of both.
+    # Before the docker floor: if the generator runs everything on this file,
+    # the always-run builds are not its whole test.
+    pattern_configs = {
+        config.name
+        for config in configs
+        if any(matches_source_dependency(p, path) for p in config.run_all_patterns)
+        and not any(
+            matches_source_dependency(p, path) for p in config.run_all_exclude_patterns
+        )
+    }
+    if pattern_configs:
+        return Claim(
+            "buildkite",
+            f"{path} matches the run_all_patterns of {sorted(pattern_configs)}; "
+            "the generator escalates those pipelines on it",
+            run_all=pattern_configs,
+        )
+    if state.docker_inputs.get(path):
+        return Claim(
+            "inert",
+            f"{path} is executed at image build "
+            f"({state.docker_inputs[path]} COPY); the always-run builds "
+            "are its test",
+        )
+    # A file directly under .buildkite may be generator input; only a
+    # subdirectory file can rest at the floor.
+    if "/" in path.removeprefix(CI_DIR + "/") and _reached_by_nothing(state, path):
+        return Claim(
+            "inert",
+            f"{path} is reached by no derived surface and no generator "
+            "pattern; nothing beyond the floor can execute it",
+        )
     return Claim(
         "buildkite",
         f"{path} is unrecognized CI infra; running everything",
@@ -1000,10 +1108,13 @@ def colocation_routes(state: RepoState, path: str) -> bool:
     return claim is not None and claim.rule == "colocated-tests"
 
 
-def _classify_graph(state: RepoState, path: str) -> Claim | None:
+def _classify_graph(
+    state: RepoState, path: str, *, inherit: bool = True
+) -> Claim | None:
     """The graph rule: four separate lookups so each stays checkable. Direct
     step references, the test closure, registered-key routing, and hardware
-    tagging by name."""
+    tagging by name. `inherit=False` blocks a second hop when
+    _inherit_table_coverage recurses in."""
     if path in state.preflight.parse_error_paths:
         return Claim(
             "fail-open",
@@ -1062,6 +1173,10 @@ def _classify_graph(state: RepoState, path: str) -> Claim | None:
         and not (direct_steps & state.auto_step_ids)
         and not (key_steps & state.auto_step_ids)
     ):
+        if inherit:
+            claim = _inherit_table_coverage(state, path, direct_steps | key_steps)
+            if claim is not None:
+                return claim
         claim = _nothing_auto_runs(state, path, test_files, direct_steps | key_steps)
         if claim is not None:
             return claim
@@ -1102,6 +1217,56 @@ def _classify_graph(state: RepoState, path: str) -> Claim | None:
     return colocation._colocated_hub(state, path, claim) or claim
 
 
+def _inherit_table_coverage(
+    state: RepoState, path: str, manual_steps: set[str]
+) -> Claim | None:
+    """A registry-named file with no coverage of its own inherits the coverage
+    of the table that names it.
+
+    The registry parsers add edges only from tests to targets, so a member no
+    test names by key has no in-edges and would run everything. What can load
+    it is exactly the registry's own consumers, which the table's claim already
+    carries. One hop: any table whose own coverage is empty or run-all
+    disqualifies the inheritance, falling back to _nothing_auto_runs.
+    """
+    tables = state.full.table_of().get(path)
+    if not tables:
+        return None
+    test_files: set[str] = set()
+    step_ids: set[str] = set(manual_steps)
+    droppable: set[str] = set()
+    # A step one table holds non-droppably must stay held even if another
+    # table's leg marks it droppable, or its hardware coverage could be dropped.
+    held: set[str] = set(manual_steps)
+    inherited: list[str] = []
+    for table in sorted(tables):
+        if table == path:
+            continue
+        sub = _classify_graph(state, table, inherit=False)
+        if sub is None or sub.run_all:
+            return None
+        if not (sub.test_files & state.invoked) and not (
+            sub.step_ids & state.auto_step_ids
+        ):
+            return None
+        test_files |= sub.test_files
+        step_ids |= sub.step_ids
+        droppable |= sub.droppable_step_ids
+        held |= sub.step_ids - sub.droppable_step_ids
+        inherited.append(table)
+    if not inherited:
+        return None
+    return Claim(
+        "graph",
+        f"{path} reaches zero auto-run coverage of its own; inheriting the "
+        f"coverage of registry {', '.join(inherited)} that names it",
+        test_files=test_files,
+        step_ids=step_ids,
+        droppable_step_ids=(droppable & step_ids) - held,
+        droppable_test_files=True,
+    )
+
+
 def _nothing_auto_runs(
     state: RepoState,
     path: str,
@@ -1136,6 +1301,20 @@ def _nothing_auto_runs(
             run_all=run_all,
         )
     if path.startswith("vllm/"):
+        # Floor only when nothing at all names it, including invoked-test
+        # literals. Any name-hit keeps the fail-open for the loader shapes the
+        # graph cannot see.
+        if _reached_by_nothing(state, path) and not _named_in_invoked_tests(
+            state, path
+        ):
+            return Claim(
+                "graph",
+                f"{path} reaches zero auto-run coverage and nothing names it "
+                "(steps, keys, declarers, invoked-test literals); nothing "
+                "can run it",
+                test_files=test_files,
+                step_ids=manual_steps,
+            )
         return Claim(
             "fail-open",
             f"{path} is in the graph but reaches zero auto-run coverage "
@@ -1160,18 +1339,20 @@ def _nothing_auto_runs(
                 test_files=test_files,
                 step_ids=manual_steps,
             )
-        # A non-Python tests-side helper whose only graph presence is asset
-        # edges with no test closure: route by step-target coverage instead of
-        # run-all. One that DOES have a test closure keeps the fail-open.
+        # A non-Python helper reaching a test only through asset edges: route
+        # by step-target coverage. One with a test closure carries it below.
         if not path.endswith(".py") and not test_files:
             claim = _classify_testside(state, path, ride_along=manual_steps)
             if claim is not None:
                 return claim
+        # No live job loads this helper; its optional coverage rides along as
+        # manual hits and nothing auto-runs.
         return Claim(
-            "fail-open",
-            f"{path} is a tests/ helper with zero auto-run coverage; "
-            "running everything",
-            run_all=run_all,
+            "graph",
+            f"{path} is a tests/ helper with zero auto-run coverage; its "
+            "coverage rides along as manual hits, nothing auto-runs it",
+            test_files=test_files,
+            step_ids=manual_steps,
         )
     return None
 

@@ -63,12 +63,13 @@ def _apply_declarer_union(state: RepoState, path: str, claim: Claim) -> Claim:
 
 # Every "nothing to run" rule, plus the one rule that already read the build
 # graph and scoped its own answer. The union must not revive a path a rule
-# established runs nothing (retired yamls, release-only scripts and inert CI
-# trees all get copied into images), and must not undo the rust rule's scoping,
-# which deliberately dropped the borrowed images. A separate set from
-# _DEP_UNION_EXEMPT on purpose.
+# established runs nothing (retired yamls, release-only scripts, inert CI
+# trees and inert files all get copied into images), and must not undo the
+# rust rule's scoping, which deliberately dropped the borrowed images. A
+# separate set from _DEP_UNION_EXEMPT on purpose: "inert" stays out of that
+# one, since a declarer is the evidence that disproves the veto.
 _IMAGE_UNION_EXEMPT = frozenset(
-    {"no-code", "no-hardware", "legacy-ci", "inert-ci", "release-ci", "rust"}
+    {"no-code", "no-hardware", "legacy-ci", "inert-ci", "inert", "release-ci", "rust"}
 )
 
 

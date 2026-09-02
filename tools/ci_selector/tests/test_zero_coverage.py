@@ -86,8 +86,24 @@ def _mini_state():
     return state, step.step_id
 
 
-def test_vllm_zero_coverage_fails_open():
+def test_vllm_zero_coverage_unreferenced_selects_nothing():
+    """A vllm file with an empty closure that nothing names -- no step text,
+    key, specific declarer, or invoked-test literal -- cannot be run by any
+    job, so it selects the floor."""
     state, _sid = _mini_state()
+    claim = _classify_graph(state, "vllm/foo.py")
+    assert claim.rule == "graph" and not claim.run_all
+    assert not claim.step_ids and "nothing can run it" in claim.detail
+
+
+def test_vllm_zero_coverage_named_in_commands_keeps_fail_open():
+    """The same empty-closure file keeps the run-all once any step's command
+    text names its module -- the fail-open is for loaders the graph cannot
+    see."""
+    from ci_selector.codemap.registered_names import KeyIndex
+
+    state, sid = _mini_state()
+    state.keys = KeyIndex(searchable={sid: "python -m vllm.foo --check"})
     claim = _classify_graph(state, "vllm/foo.py")
     assert claim.rule == "fail-open" and claim.run_all == {"p"}
     assert "empty-closure direction" in claim.detail
@@ -100,10 +116,13 @@ def test_orphan_test_selects_nothing():
     assert not claim.step_ids and "orphan" in claim.detail
 
 
-def test_orphan_helper_fails_open():
+def test_orphan_helper_selects_the_floor():
+    """A tests/ helper with zero auto-run coverage has no live job that loads
+    it; its coverage rides along as manual hits instead of escalating."""
     state, _sid = _mini_state()
     claim = _classify_graph(state, "tests/orphan/helper.py")
-    assert claim.rule == "fail-open" and claim.run_all == {"p"}
+    assert claim.rule == "graph" and not claim.run_all
+    assert "nothing auto-runs it" in claim.detail
 
 
 def test_legacy_only_helper_selects_nothing_with_note():
@@ -113,12 +132,14 @@ def test_legacy_only_helper_selects_nothing_with_note():
     assert "legacy" in claim.detail
 
 
-def test_nonpy_helper_with_asset_test_closure_keeps_fail_open():
-    """The `not test_files` guard: a non-.py file reaching a test (asset edge)
-    that auto-runs nowhere must keep fail-open, not route by target coverage."""
+def test_nonpy_helper_with_asset_test_closure_carries_it():
+    """The `not test_files` guard still skips target-coverage routing for a
+    non-.py file whose asset edge reaches a test, but the zero-auto answer is
+    the floor carrying that closure, not run-all."""
     state, _sid = _mini_state()
     claim = _classify_graph(state, "tests/orphan/data.yaml")
-    assert claim.rule == "fail-open" and claim.run_all == {"p"}
+    assert claim.rule == "graph" and not claim.run_all
+    assert claim.test_files
 
 
 def test_installable_package_routes_by_haystack():
