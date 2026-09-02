@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -268,6 +268,9 @@ class SchedulerOutput:
 
     # Used for adjusting acceptance rate calculation.
     num_invalid_spec_tokens: dict[str, int] | None = None
+
+    # Optimistic output positions whose acceptance has not reached the scheduler.
+    num_output_placeholders: dict[str, int] = field(default_factory=dict)
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None

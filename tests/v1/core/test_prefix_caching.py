@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -18,6 +19,9 @@ from vllm.distributed.kv_events import (
     AllBlocksCleared,
     BlockRemoved,
     BlockStored,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+    HiSparseConnectorScheduler,
 )
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -250,6 +254,35 @@ def test_hisparse_builds_dma_row_mirrors_across_pages():
         host_blocks[1].block_id * HISPARSE_BLOCK_SIZE,
     ]
     assert [mirror.num_rows for mirror in mirrors] == [2, 2]
+
+
+def test_hisparse_async_speculation_mirrors_uncertain_position_range():
+    """Unresolved drafts must not leave gaps in the eager host mirror."""
+    coordinator = MagicMock(host_group_id=0)
+    coordinator.take_block_table_updates.return_value = {}
+    coordinator.build_offload_command.return_value = None
+    coordinator.build_row_mirrors.return_value = ()
+    scheduler = HiSparseConnectorScheduler(
+        coordinator,
+        async_speculative=True,
+    )
+    scheduler_output = SimpleNamespace(
+        block_table_updates=None,
+        kv_cache_block_copies=None,
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            new_block_ids=[],
+            req_ids=["request"],
+            num_computed_tokens=[103],
+        ),
+        num_scheduled_tokens={"request": 4},
+        num_output_placeholders={"request": 3},
+    )
+
+    metadata = scheduler.build_connector_meta(scheduler_output)
+
+    coordinator.build_row_mirrors.assert_called_once_with((("request", 100, 7),))
+    assert metadata.row_mirrors_from_resident
 
 
 def test_hisparse_row_mirrors_keep_pending_pages_current():
