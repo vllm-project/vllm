@@ -25,6 +25,7 @@ Internal data classes:
 """
 
 import enum
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -42,6 +43,8 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.data.base import (
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.protocol import (
     EC_CONNECTOR_VERSION,
+    EXPECTED_NACKS,
+    RETRYABLE_NACKS,
     XferAck,
     XferReq,
     XferStatus,
@@ -287,13 +290,19 @@ class ProducerSession:
         if req.compatibility_hash != self._compat_hash:
             logger.warning("EC: incompatible compat hash for mm_hash=%s", req.mm_hash)
             return XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_INCOMPAT)
-        grant = self._cache.pin_if_ready(req.mm_hash)
-        if grant is None:
-            logger.warning(
-                "EC: mm_hash=%s not ready in local cache; NACKing", req.mm_hash
+        entry = self._cache.pin_if_ready(req.mm_hash)
+        if entry is None or not entry.ready:
+            status = (
+                XferStatus.NACK_MISSING if entry is None else XferStatus.NACK_NOT_READY
             )
-            return XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_MISSING)
-        block_indices = list(grant)
+            logger.log(
+                logging.INFO if status in EXPECTED_NACKS else logging.WARNING,
+                "EC: mm_hash=%s not serveable in local cache (%s); NACKing",
+                req.mm_hash,
+                status.name,
+            )
+            return XferAck(mm_hash=req.mm_hash, status=status)
+        block_indices = list(entry.block_ids)
         key = f"{req.session_id}:{req.mm_hash}"
         self._active_xfers[key] = ProducerXfer(
             mm_hash=req.mm_hash,
@@ -358,7 +367,7 @@ class ConsumerSessionResults:
     tombstoned: set[str]  # free blocks + prevent retry this step
     quarantined: set[str]  # timed-out, DMA still running: prevent retry
     # but DO NOT free blocks — session holds them
-    cancelled: set[str]  # free blocks, allow retry (peer down)
+    retryable: set[str]  # free blocks, allow another attempt (not ready, peer down)
     settled: list[tuple[str, list[int]]]  # (mm_hash, block_indices) quarantine cleared
 
 
@@ -400,7 +409,7 @@ class ConsumerSession:
 
         self._completed: set[str] = set()
         self._tombstoned: set[str] = set()
-        self._cancelled: set[str] = set()
+        self._retryable: set[str] = set()
         self._settled: list[tuple[str, list[int]]] = []
 
         self._encoder = msgspec.msgpack.Encoder()
@@ -480,7 +489,7 @@ class ConsumerSession:
 
         if ack.status != XferStatus.OK:
             logger.log(
-                20 if ack.status == XferStatus.NACK_MISSING else 30,
+                logging.INFO if ack.status in EXPECTED_NACKS else logging.WARNING,
                 "EC: NACK %s from %s:%d for mm_hash=%s",
                 ack.status.name,
                 self._addr[0],
@@ -488,7 +497,13 @@ class ConsumerSession:
                 ack.mm_hash,
             )
             del self._xfers[ack.mm_hash]
-            self._tombstoned.add(ack.mm_hash)
+            # The producer announced this encoding and its save is still in
+            # flight, so another attempt on a later step can be granted. Every
+            # other NACK is terminal for this mm_hash.
+            if ack.status in RETRYABLE_NACKS:
+                self._retryable.add(ack.mm_hash)
+            else:
+                self._tombstoned.add(ack.mm_hash)
             return
 
         try:
@@ -545,7 +560,7 @@ class ConsumerSession:
         for mm_hash, xfer in list(self._xfers.items()):
             if xfer.transfer_handle is None:
                 xfer.cancel()
-                self._cancelled.add(mm_hash)
+                self._retryable.add(mm_hash)
             else:
                 self._quarantined.append(xfer)
                 self._newly_quarantined.add(mm_hash)
@@ -557,13 +572,13 @@ class ConsumerSession:
             completed=self._completed,
             tombstoned=self._tombstoned,
             quarantined=self._newly_quarantined,
-            cancelled=self._cancelled,
+            retryable=self._retryable,
             settled=self._settled,
         )
         self._completed = set()
         self._tombstoned = set()
         self._newly_quarantined = set()
-        self._cancelled = set()
+        self._retryable = set()
         self._settled = []
         return results
 

@@ -36,7 +36,7 @@ class _FakeResults:
         self.completed = set()
         self.tombstoned = set()
         self.quarantined = set()
-        self.cancelled = set()
+        self.retryable = set()
         self.settled = []
 
 
@@ -187,6 +187,41 @@ def test_tombstoned_read_discards_and_blocks_retry(monkeypatch):
     # Step 3: tombstone was consumed, so a fresh transfer starts again.
     assert s.ensure_cache_available(req, 0) is False
     assert "h1" in s._in_flight
+    s.shutdown()
+
+
+def test_retryable_read_re_requests_without_admitting(monkeypatch):
+    """A not-ready NACK defers the request and re-requests the read.
+
+    Unlike a tombstone it never admits the request, because an admitted request
+    whose media was rewritten away upstream has no embedding and no way to
+    recompute one.
+    """
+    s = _consumer_sched(monkeypatch)
+    fake = _FakeSession()
+
+    def _fake_start(mm_hash, info, size):
+        entry = s._cache.alloc(mm_hash, 1)
+        assert entry is not None
+        fake.started.append(mm_hash)
+        return True
+
+    monkeypatch.setattr(s, "_start_xfer", _fake_start)
+    req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
+
+    assert s.ensure_cache_available(req, 0) is False
+    s.build_connector_meta(scheduler_output=None)
+
+    # Producer's save has not landed: retryable, not tombstoned.
+    fake._results.retryable.add("h1")
+    s._sessions[("h", 1)] = fake
+
+    # The entry is released and the read re-issued in the same step, so the
+    # request stays deferred rather than being admitted unfetched.
+    assert s.ensure_cache_available(req, 0) is False
+    assert "h1" in s._in_flight
+    assert "h1" not in s._tombstones
+    assert fake.started.count("h1") == 2
     s.shutdown()
 
 

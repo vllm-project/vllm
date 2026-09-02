@@ -340,11 +340,14 @@ class ECCPUScheduler:
                 "EC consumer: NIXL xfer mm_hash=%s quarantined; DMA still running",
                 mm_hash,
             )
-        for mm_hash in r.cancelled:
+        for mm_hash in r.retryable:
+            # No tombstone: dropping every trace of the attempt is what lets
+            # the next admit pass re-issue the read as if it were the first.
             self._in_flight.discard(mm_hash)
             self._cache.discard(mm_hash)
             logger.debug(
-                "EC consumer: NIXL xfer mm_hash=%s cancelled (peer down)", mm_hash
+                "EC consumer: NIXL xfer mm_hash=%s retryable; will re-request",
+                mm_hash,
             )
         for mm_hash, _block_indices in r.settled:
             self._cache.discard(mm_hash)
@@ -473,8 +476,9 @@ class ECCPUScheduler:
             # Announce even if the save's GPU->mmap copy hasn't been
             # confirmed complete yet: a not-ready entry can't be evicted, so
             # it will still be here by the time a consumer's XferReq arrives.
-            # pin_if_ready NACKs (NACK_MISSING) if it's still not ready then,
-            # and the consumer falls back to local recompute.
+            # A read arriving before the save lands is NACKed NACK_NOT_READY,
+            # which the consumer retries on a later step rather than treating
+            # as a miss.
             size_bytes = (
                 feature.mm_position.length * self._hidden_dim * self._element_size
             )

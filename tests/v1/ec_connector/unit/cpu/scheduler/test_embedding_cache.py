@@ -365,12 +365,12 @@ def test_discard_rejects_absent_key():
 # ── pin_if_ready ─────────────────────────────────────────────────────────────
 
 
-def test_pin_if_ready_pins_and_returns_blocks():
+def test_pin_if_ready_pins_and_returns_entry():
     cache = EmbeddingCache(num_blocks=4)
     cache.alloc("h", 2)
     cache.mark_ready("h")
-    blocks = cache.pin_if_ready("h")
-    assert blocks is not None and len(blocks) == 2
+    entry = cache.pin_if_ready("h")
+    assert entry is not None and entry.ready and len(entry.block_ids) == 2
     assert cache.alloc("h2", 4) is None  # pinned ⇒ not evictable
 
 
@@ -379,7 +379,11 @@ def test_pin_if_ready_none_when_absent():
     assert cache.pin_if_ready("nope") is None
 
 
-def test_pin_if_ready_none_when_not_ready():
+def test_pin_if_ready_returns_unpinned_entry_when_not_ready():
+    """The producer needs "present but not ready" told apart from "absent":
+    the first is NACKed as retryable, the second as a miss."""
     cache = EmbeddingCache(num_blocks=4)
     cache.alloc("h", 1)  # not-ready
-    assert cache.pin_if_ready("h") is None
+    entry = cache.pin_if_ready("h")
+    assert entry is not None and not entry.ready
+    assert cache.alloc("h2", 4) is None  # not-ready ⇒ still not evictable

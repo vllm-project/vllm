@@ -27,6 +27,14 @@ class XferStatus(enum.IntEnum):
     NACK_INCOMPAT = 2  # peer-compatibility hash mismatch
     NACK_VERSION = 3  # connector wire-version mismatch
     NACK_INTERNAL = 4  # producer hit an unexpected error
+    NACK_NOT_READY = 5  # announced, but its GPU->mmap save has not landed yet
+
+
+# The producer expects a retryable condition to clear on its own, so the
+# consumer re-requests the read rather than giving up on the encoding.
+RETRYABLE_NACKS = frozenset((XferStatus.NACK_NOT_READY,))
+# Ordinary outcomes rather than signs of a broken peer.
+EXPECTED_NACKS = RETRYABLE_NACKS | {XferStatus.NACK_MISSING}
 
 
 class XferReq(  # type: ignore[call-arg]

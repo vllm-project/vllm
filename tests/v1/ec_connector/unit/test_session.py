@@ -127,12 +127,14 @@ def test_producer_session_grant_nacks_missing_entry():
     assert ack.status == XferStatus.NACK_MISSING
 
 
-def test_producer_session_grant_nacks_not_ready_entry():
+def test_producer_session_grant_nacks_not_ready_entry_as_retryable():
+    """An announced entry whose save is still in flight is distinguished from a
+    miss, so the consumer retries instead of falling back to local compute."""
     cache = EmbeddingCache(num_blocks=8)
     cache.alloc("h1", 2)  # not ready
     s = _make_producer_session(cache)
     ack = s._grant_or_nack(_xfer_req(mm_hash="h1"))
-    assert ack.status == XferStatus.NACK_MISSING
+    assert ack.status == XferStatus.NACK_NOT_READY
 
 
 def test_producer_session_grant_nacks_version_mismatch():
@@ -434,6 +436,21 @@ def test_consumer_session_poll_nack_goes_to_tombstoned():
     assert not results.completed
 
 
+def test_consumer_session_poll_not_ready_nack_goes_to_retryable():
+    """A not-ready NACK must not tombstone: tombstoning admits the request with
+    no embedding, which is fatal once the media has been rewritten away."""
+    import msgspec
+
+    s = _make_consumer_session()
+    s.start_xfer("h1", [0, 1], deadline=time.monotonic() + 10)
+    nack = XferAck(mm_hash="h1", status=XferStatus.NACK_NOT_READY)
+    s.poll([msgspec.msgpack.encode(nack)], time.monotonic())
+    results = s.take_results()
+    assert "h1" in results.retryable
+    assert not results.tombstoned
+    assert not results.completed
+
+
 def test_consumer_session_take_results_clears_state():
     s = _make_consumer_session()
     s.start_xfer("h1", [0, 1], deadline=time.monotonic() - 1)
@@ -449,5 +466,5 @@ def test_consumer_session_on_peer_down_cancels_waiting_ack():
     s.start_xfer("h1", [0, 1], deadline=time.monotonic() + 60)
     s.on_peer_down()
     results = s.take_results()
-    assert "h1" in results.cancelled
+    assert "h1" in results.retryable
     assert not results.tombstoned
