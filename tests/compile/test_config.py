@@ -160,6 +160,9 @@ def test_use_cudagraphs(
 ):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    # This test pins the torch.compile path; breakable cudagraphs
+    # (default-on) replace compilation when no mode is explicitly set.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
 
     compilation_config = {
         "cudagraph_capture_sizes": [100],
@@ -249,7 +252,10 @@ def test_torch_compile_disable(vllm_runner, monkeypatch):
         pass
 
 
-def test_splitting_ops_dynamic():
+def test_splitting_ops_dynamic(monkeypatch):
+    # Splitting ops are only populated on the torch.compile path; pin
+    # breakable cudagraphs (default-on) off so the default config compiles.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
     # Default config
     config = VllmConfig()
     # Default V1 config leaves cudagraph mode unset; splitting ops are only

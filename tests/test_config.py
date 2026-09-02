@@ -239,36 +239,23 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
 
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
-    """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
-    MRV1 paths and off breakable cudagraphs by default."""
-    from vllm.config.vllm import (
-        ROCM_DEFAULT_MRV1_ARCHITECTURES,
-        default_breakable_cudagraph_architectures,
-    )
+    """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their
+    compiled MRV1 paths."""
+    from vllm.config.vllm import ROCM_DEFAULT_MRV1_ARCHITECTURES
     from vllm.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
-    # The lookup is lru_cached against a fixed platform.
-    default_breakable_cudagraph_architectures.cache_clear()
-    try:
-        assert "DeepseekV32ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-        assert "DeepseekV4ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-        assert "GlmMoeDsaForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
+    assert "DeepseekV32ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
+    assert "DeepseekV4ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
+    assert "GlmMoeDsaForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
 
-        breakable_architectures = default_breakable_cudagraph_architectures()
-        assert "DeepseekV32ForCausalLM" not in breakable_architectures
-        assert "DeepseekV32MTPModel" not in breakable_architectures
-        assert "GlmMoeDsaForCausalLM" not in breakable_architectures
-
-        # The carve-out takes effect via the runner-selection property
-        # (warning_once args must be hashable for its lru_cache).
-        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-        config = SimpleNamespace(
-            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"])
-        )
-        assert VllmConfig.use_v2_model_runner.fget(config) is False
-    finally:
-        default_breakable_cudagraph_architectures.cache_clear()
+    # The carve-out takes effect via the runner-selection property
+    # (warning_once args must be hashable for its lru_cache).
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"])
+    )
+    assert VllmConfig.use_v2_model_runner.fget(config) is False
 
 
 @pytest.mark.parametrize(
@@ -286,14 +273,13 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     from vllm.compilation.breakable_cudagraph import (
         is_breakable_cudagraph_enabled,
     )
-    from vllm.config.vllm import default_breakable_cudagraph_architectures
     from vllm.platforms import current_platform
 
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
-    default_breakable_cudagraph_architectures.cache_clear()
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
 
     model_config = SimpleNamespace(
         model=model,
@@ -314,9 +300,6 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     )
     config._dflash_needs_multi_kv_group = lambda: False
     config._get_v2_model_runner_unsupported_features = lambda: []
-    config._uses_breakable_cudagraph_by_default = lambda: (
-        VllmConfig._uses_breakable_cudagraph_by_default(config)
-    )
 
     try:
         assert VllmConfig.use_v2_model_runner.fget(config)
@@ -326,44 +309,85 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         assert config.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
     finally:
         os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
-        default_breakable_cudagraph_architectures.cache_clear()
 
 
-@pytest.mark.parametrize(
-    ("architecture", "is_rocm", "expected"),
-    [
-        ("DeepseekV32ForCausalLM", False, True),
-        ("DeepseekV32ForCausalLM", True, False),
-        ("DeepseekV32MTPModel", False, True),
-        ("DeepseekV32MTPModel", True, False),
-        ("GlmMoeDsaForCausalLM", False, True),
-        ("GlmMoeDsaForCausalLM", True, False),
-    ],
-)
-def test_dsa_breakable_cudagraph_platform_default(
-    monkeypatch, architecture, is_rocm, expected
-):
-    from vllm.config.vllm import default_breakable_cudagraph_architectures
+def test_breakable_cudagraph_default_on_opt_out(monkeypatch):
+    """VLLM_USE_BREAKABLE_CUDAGRAPH defaults to on for CUDA (all
+    architectures); setting it to 0 opts out."""
+    import vllm.envs as envs
     from vllm.platforms import current_platform
 
-    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
-    default_breakable_cudagraph_architectures.cache_clear()
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(architectures=[architecture]),
-        compilation_config=CompilationConfig(),
-    )
-    config._uses_breakable_cudagraph_by_default = lambda: (
-        VllmConfig._uses_breakable_cudagraph_by_default(config)
-    )
+    envs.disable_envs_cache()
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
 
-    try:
-        assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected
-        if expected:
-            assert config.compilation_config.mode == CompilationMode.NONE
-    finally:
-        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
-        default_breakable_cudagraph_architectures.cache_clear()
+    def make_config():
+        return SimpleNamespace(
+            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"]),
+            compilation_config=CompilationConfig(),
+        )
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    config = make_config()
+    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is True
+    assert config.compilation_config.mode == CompilationMode.NONE
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+    config = make_config()
+    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is False
+    assert config.compilation_config.mode is None
+
+
+def test_breakable_cudagraph_default_off_on_other_platforms(monkeypatch):
+    """Off CUDA, breakable does not default on: on platforms without CUDA
+    graph support (e.g. CPU) it would only disable torch.compile, and on ROCm
+    it currently regresses performance. An explicit env opt-in is still
+    honored."""
+    import vllm.envs as envs
+    from vllm.platforms import current_platform
+
+    envs.disable_envs_cache()
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+
+    def make_config():
+        return SimpleNamespace(
+            model_config=None,
+            compilation_config=CompilationConfig(),
+        )
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    config = make_config()
+    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is False
+    assert config.compilation_config.mode is None
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    config = make_config()
+    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is True
+    assert config.compilation_config.mode == CompilationMode.NONE
+
+
+def test_breakable_cudagraph_yields_to_explicit_compilation(monkeypatch):
+    """Breakable cudagraphs (default-on) yield when a compilation mode is
+    explicitly set; setting both explicitly is a startup error."""
+    import vllm.envs as envs
+
+    envs.disable_envs_cache()
+
+    def make_config():
+        return SimpleNamespace(
+            model_config=None,
+            compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE),
+        )
+
+    # Default-on, but an explicitly requested compilation mode wins.
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    config = make_config()
+    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is False
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+
+    # Explicitly enabling both is contradictory: rejected at config time.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    with pytest.raises(ValueError, match="conflicts with the explicitly"):
+        VllmConfig._maybe_enable_breakable_cudagraph(make_config())
 
 
 @pytest.mark.parametrize(
@@ -1894,8 +1918,14 @@ def test_is_prefix_caching_supported(
         ("inductor", ["none", "-fused_layernorm"], False),
     ],
 )
-def test_is_custom_op_enabled(backend: str, custom_ops: list[str], expected: bool):
+def test_is_custom_op_enabled(
+    backend: str, custom_ops: list[str], expected: bool, monkeypatch
+):
     """Test that is_custom_op_enabled works correctly."""
+    # Pin breakable cudagraphs (default-on) off: with no explicit
+    # compilation mode it forces CompilationMode.NONE, which flips the
+    # custom-op base default this test pins for the compiled path.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
     config = VllmConfig(
         compilation_config=CompilationConfig(backend=backend, custom_ops=custom_ops)
     )
@@ -1988,8 +2018,13 @@ def test_validate_mamba_align_subblock_prefill():
         ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O3),
     ],
 )
-def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
+def test_vllm_config_defaults(
+    model_id, compilation_config, optimization_level, monkeypatch
+):
     """Test that optimization-level defaults are correctly applied."""
+    # These cases exercise the torch.compile-based default path; pin
+    # breakable cudagraphs (default-on) off, as it changes the defaults.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
 
     model_config = None
     if model_id is not None:
@@ -2071,7 +2106,7 @@ def test_vllm_config_callable_defaults():
     not current_platform.support_static_graph_mode(),
     reason="Explicit overrides may be force-overwritten without static graph support.",
 )
-def test_vllm_config_explicit_overrides():
+def test_vllm_config_explicit_overrides(monkeypatch):
     """Test that explicit property overrides work correctly with callable defaults.
 
     When users explicitly set configuration properties, those values
@@ -2079,6 +2114,10 @@ def test_vllm_config_explicit_overrides():
     optimization levels.
     """
     from vllm.config.compilation import PassConfig
+
+    # Pin breakable cudagraphs (default-on) off: it changes the default
+    # compilation mode this test asserts on.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
 
     quantized_model = ModelConfig("RedHatAI/Llama-3.2-1B-FP8")
     moe_model = ModelConfig("deepseek-ai/DeepSeek-V2-Lite")
@@ -2172,9 +2211,13 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
 
 
-def test_fusion_pass_op_priority():
+def test_fusion_pass_op_priority(monkeypatch):
     """This test checks that custom op enablement & IR op priority
     correctly control default fusions"""
+    # Pin breakable cudagraphs (default-on) off: it forces
+    # CompilationMode.NONE when no compilation mode is explicitly set,
+    # which skips the inductor fusion defaults this test pins.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
 
     # Default config, O2, rms_norm+quant fusion disabled
     cfg1 = VllmConfig()

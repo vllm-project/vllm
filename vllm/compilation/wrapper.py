@@ -78,7 +78,10 @@ class TorchCompileWithNoGuardsWrapper:
         self._compile_prefix = compile_prefix
         self._is_encoder = is_encoder
 
-        vllm_config = get_current_vllm_config()
+        # Prefer the instance's own config (set by the support_torch_compile
+        # __init__ before this call); a component with an explicit
+        # compilation config must not silently use the global current one.
+        vllm_config = getattr(self, "vllm_config", None) or get_current_vllm_config()
         self.vllm_config = vllm_config
         mode = vllm_config.compilation_config.mode
         self.layerwise_nvtx_tracing_enabled = (
@@ -90,10 +93,11 @@ class TorchCompileWithNoGuardsWrapper:
         backend = vllm_config.compilation_config.init_backend(
             vllm_config, prefix=compile_prefix, is_encoder=is_encoder
         )
-        options = {}
 
         if isinstance(backend, str) and backend == "inductor":
             options = vllm_config.compilation_config.inductor_compile_config
+        else:
+            options = {}
 
         self.first_compile = True
         self.evaluate_guards = (

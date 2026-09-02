@@ -489,6 +489,13 @@ def test_apc_single_prompt(
     except ValueError:
         pass
 
+    # Compare on the compiled path: an APC hit legitimately computes from
+    # restored state instead of a full prefill, and under uncompiled kernel
+    # numerics the tiny test models' resulting divergence can exceed the
+    # top-N logprob tolerance. These tests target APC semantics, not kernel
+    # numerics.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+
     compare_operator: Callable = (
         check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
     )
@@ -552,6 +559,13 @@ def test_apc_single_prompt_block_align_alignment(
         model_info.check_transformers_version(on_fail="skip")
     except ValueError:
         pass
+
+    # Compare on the compiled path: an APC hit legitimately computes from
+    # restored state instead of a full prefill, and under uncompiled kernel
+    # numerics the tiny test models' resulting divergence can exceed the
+    # top-N logprob tolerance. These tests target APC semantics, not kernel
+    # numerics.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
 
     compare_operator: Callable = (
         check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
@@ -634,6 +648,13 @@ def test_apc_multiple_prompts_all_cached_outputs(
     except ValueError:
         pass
 
+    # Compare on the compiled path: an APC hit legitimately computes from
+    # restored state instead of a full prefill, and under uncompiled kernel
+    # numerics the tiny test models' resulting divergence can exceed the
+    # top-N logprob tolerance. These tests target APC semantics, not kernel
+    # numerics.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+
     compare_operator: Callable = (
         check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
     )
@@ -702,6 +723,13 @@ def test_apc_multiple_prompts_block_align_alignment(
         model_info.check_transformers_version(on_fail="skip")
     except ValueError:
         pass
+
+    # Compare on the compiled path: an APC hit legitimately computes from
+    # restored state instead of a full prefill, and under uncompiled kernel
+    # numerics the tiny test models' resulting divergence can exceed the
+    # top-N logprob tolerance. These tests target APC semantics, not kernel
+    # numerics.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
 
     compare_operator: Callable = (
         check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
@@ -787,6 +815,13 @@ def test_apc_multiple_prompts_partial_cached_outputs(
         model_info.check_transformers_version(on_fail="skip")
     except ValueError:
         pass
+
+    # Compare on the compiled path: an APC hit legitimately computes from
+    # restored state instead of a full prefill, and under uncompiled kernel
+    # numerics the tiny test models' resulting divergence can exceed the
+    # top-N logprob tolerance. These tests target APC semantics, not kernel
+    # numerics.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
 
     compare_operator: Callable = (
         check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore

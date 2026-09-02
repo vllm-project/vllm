@@ -13,6 +13,7 @@ from typing import Any
 
 import torch
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config_or_none
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -43,6 +44,7 @@ class QkNormPolicy(IntEnum):
     NORM_THEN_ROPE = 2
 
 
+@eager_break_during_capture
 def hpc_rope_norm_forward(
     qkv: torch.Tensor,
     output: torch.Tensor,

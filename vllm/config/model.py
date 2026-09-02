@@ -1002,10 +1002,14 @@ class ModelConfig:
         # If 'hf_config is not hf_text_config' it's a nested config, i.e. multimodal
         cls += "MultiModal" if self.hf_config is not self.hf_text_config else ""
         cls += "MoE" if self.is_moe else ""
-        # Check if the architecture we're wrapping has defaults
+        # Check if the architecture we're wrapping has defaults. Derived
+        # sub-model configs (VllmConfig.with_hf_config on e.g. a multimodal
+        # model's text config) can have no architectures.
         runner = None
         task = None
-        if defaults := try_match_architecture_defaults(self.architectures[0]):
+        if self.architectures and (
+            defaults := try_match_architecture_defaults(self.architectures[0])
+        ):
             _, (runner, task) = defaults
         # User specified value take precedence
         if self.runner != "auto":

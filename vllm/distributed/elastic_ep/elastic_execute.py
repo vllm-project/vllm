@@ -5,13 +5,14 @@ import weakref
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed import P2POp
 
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.wrapper import reset_compile_wrapper
@@ -400,12 +401,30 @@ class ElasticEPScalingExecutor:
         self._staged_moe_quant_methods.clear()
 
     def _release_cuda_graphs(self) -> None:
-        if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
-            wrapper = self.worker.model_runner.model
-            wrapper.concrete_cudagraph_entries = {}
-
-        elif isinstance(self.worker.model_runner.model, UBatchWrapper):
+        if isinstance(self.worker.model_runner.model, UBatchWrapper):
             raise RuntimeError("DBO is not yet supported in elastic EP")
+
+        # Drop all of this engine's captured graphs, including the breakable
+        # piecewise graphs nested inside the FULL wrapper and any drafter
+        # wrappers. A stale graph replayed after scale-up reads the old
+        # (freed) workspace and pre-reshuffle expert weights.
+        CUDAGraphWrapper.clear_all_graphs(self.worker.vllm_config)
+        BreakableCUDAGraphWrapper.clear_all_graphs(self.worker.vllm_config)
+
+        # With every graph released, the shared graph pool's use_count drops
+        # to 0 and the allocators destroy it; re-capturing into the stale
+        # handle trips c10's create_or_incref_pool assert. Swap in a fresh
+        # global pool and rebind this engine's wrappers to it.
+        from vllm.platforms import current_platform
+
+        new_pool = current_platform.graph_pool_handle()
+        type(current_platform)._global_graph_pool = new_pool
+        compilation_config = self.worker.vllm_config.compilation_config
+        wrappers: list[Any] = list(CUDAGraphWrapper._all_instances)
+        wrappers.extend(BreakableCUDAGraphWrapper._all_instances)
+        for wrapper in wrappers:
+            if wrapper.compilation_config is compilation_config:
+                wrapper.graph_pool = new_pool
 
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):

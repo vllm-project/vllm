@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import os
-import weakref
 
 import pytest
 
@@ -10,6 +9,7 @@ from tests.utils import wait_for_gpu_memory_to_clear
 from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CUDAGraphMode
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -51,6 +51,61 @@ for backend_config in other_backend_configs:
     model_backends_full_cudagraph.append(("Qwen/Qwen2-1.5B-Instruct", backend_config))
 
 
+BATCH_SIZE_MAX_TOKENS_CASES = [
+    (1, 10),
+    (7, 10),
+    (16, 10),
+    (25, 10),
+    (32, 10),
+    (45, 10),
+    (64, 10),
+    (123, 10),
+    (8, 5),
+    (8, 30),
+]
+
+
+def _generate_all_cases(llm: LLM) -> dict[tuple[int, int], list[str]]:
+    outputs = {}
+    for batch_size, max_tokens in BATCH_SIZE_MAX_TOKENS_CASES:
+        prompts = ["the quick brown fox"] * batch_size
+        # Use purely greedy decoding to avoid top-p truncation sensitivity
+        # that can amplify tiny numeric differences across runtimes.
+        sampling_params = SamplingParams(
+            temperature=0.0, max_tokens=max_tokens, top_p=1.0
+        )
+        responses = llm.generate(prompts, sampling_params)
+        outputs[(batch_size, max_tokens)] = [
+            response.outputs[0].text.lower() for response in responses
+        ]
+    return outputs
+
+
+def _run_all_cases(model: str, **llm_kwargs) -> dict[tuple[int, int], list[str]]:
+    """Build an LLM, generate outputs for every case, and tear it down.
+
+    Owns the LLM's lifetime so no reference outlives the shutdown: the engine
+    runs in-process (see env_vars in llm_pair), where GC alone does not
+    release its GPU memory.
+    """
+    llm = LLM(
+        model=model,
+        gpu_memory_utilization=0.43,
+        trust_remote_code=True,
+        max_model_len=1024,
+        max_num_seqs=128,
+        generation_config="vllm",
+        seed=42,
+        **llm_kwargs,
+    )
+    try:
+        return _generate_all_cases(llm)
+    finally:
+        llm.llm_engine.engine_core.shutdown()
+        del llm
+        cleanup_dist_env_and_memory()
+
+
 @pytest.fixture(scope="class")
 def llm_pair(request):
     model, backend_config, use_inductor_graph_partition = request.param
@@ -79,35 +134,32 @@ def llm_pair(request):
         # Force native sampler to avoid potential nondeterminism in FlashInfer
         # when per-request generators are not used in V1.
         "VLLM_USE_FLASHINFER_SAMPLER": "0",
+        # Run the engines in-process so each generate() batches all requests
+        # deterministically. With the multiprocess engine, the core busy loop
+        # starts prefilling while requests are still arriving over ZMQ, so
+        # requests land in timing-dependent prefill waves with different
+        # padded batch shapes. The resulting (legitimate) batch-shape numeric
+        # differences flip greedy near-ties, breaking the exact-match
+        # comparison between the two LLMs at larger batch sizes.
+        "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
     }
+    # Run the two engines one at a time, generating all cases' outputs up
+    # front: in-process engines share process-global state (e.g. the workspace
+    # manager singleton), so a second live engine would invalidate addresses
+    # baked into the first engine's CUDA graphs.
     with temporary_environ(env_vars):
-        full = LLM(
-            model=model,
-            gpu_memory_utilization=0.43,
-            trust_remote_code=True,
-            max_model_len=1024,
-            max_num_seqs=128,
+        full_outputs = _run_all_cases(
+            model,
             compilation_config=CompilationConfig(**backend_config.comp_config),
-            generation_config="vllm",
-            seed=42,
         )
-        piecewise = LLM(
-            model=model,
-            gpu_memory_utilization=0.43,
-            trust_remote_code=True,
-            max_model_len=1024,
-            max_num_seqs=128,
+        piecewise_outputs = _run_all_cases(
+            model,
             compilation_config=CompilationConfig(
                 cudagraph_mode=CUDAGraphMode.PIECEWISE
             ),
-            generation_config="vllm",
-            seed=42,
         )
 
-    # PyTest caches the fixture values so we use weakref.proxy to enable GC
-    yield weakref.proxy(full), weakref.proxy(piecewise)
-    del full
-    del piecewise
+    yield full_outputs, piecewise_outputs
 
     wait_for_gpu_memory_to_clear(
         devices=[0],
@@ -124,51 +176,29 @@ def llm_pair(request):
     ],
     indirect=True,
 )
+# The llm_pair fixture already cleans up after its engines; the autouse
+# cleanup_fixture's per-test cleanup_dist_env_and_memory() is redundant here.
+@pytest.mark.skip_global_cleanup
 class TestFullCUDAGraph:
     """
-    Use a class such that an llm pair is constructed once for all
+    Use a class such that the llm_pair outputs are computed once for all
     batch_size/max_tokens combinations and released immediately after.
-
-    Module-scope fixtures would stick around the whole time,
-    meaning there would be multiple LLM instances hogging memory simultaneously.
     """
 
     @pytest.mark.parametrize(
         ("batch_size", "max_tokens"),
-        [
-            (1, 10),
-            (7, 10),
-            (16, 10),
-            (25, 10),
-            (32, 10),
-            (45, 10),
-            (64, 10),
-            (123, 10),
-            (8, 5),
-            (8, 30),
-        ],
+        BATCH_SIZE_MAX_TOKENS_CASES,
     )
-    def test_full_cudagraph(self, batch_size, max_tokens, llm_pair: tuple[LLM, LLM]):
+    def test_full_cudagraph(self, batch_size, max_tokens, llm_pair):
         """
         Test various batch sizes and max_tokens to ensure that the
         full cudagraph compilation works for padded cases too.
         """
-
-        full_cudagraph_llm, piecewise_llm = llm_pair
-
-        prompts = ["the quick brown fox"] * batch_size
-        # Use purely greedy decoding to avoid top-p truncation sensitivity
-        # that can amplify tiny numeric differences across runtimes.
-        sampling_params = SamplingParams(
-            temperature=0.0, max_tokens=max_tokens, top_p=1.0
-        )
-
-        piecewise_responses = piecewise_llm.generate(prompts, sampling_params)
-        full_responses = full_cudagraph_llm.generate(prompts, sampling_params)
+        full_outputs, piecewise_outputs = llm_pair
+        case = (batch_size, max_tokens)
 
         # Check that all responses are the same
-        for piecewise_res, full_res in zip(piecewise_responses, full_responses):
-            assert (
-                piecewise_res.outputs[0].text.lower()
-                == full_res.outputs[0].text.lower()
-            )
+        for piecewise_text, full_text in zip(
+            piecewise_outputs[case], full_outputs[case]
+        ):
+            assert piecewise_text == full_text

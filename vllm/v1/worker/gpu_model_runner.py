@@ -23,7 +23,7 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import (
     BreakableCUDAGraphWrapper,
-    is_breakable_cudagraph_enabled,
+    uses_breakable_cudagraph,
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
@@ -3381,22 +3381,23 @@ class GPUModelRunner(
     def get_model(self) -> nn.Module:
         if not hasattr(self, "model"):
             raise ValueError("Cannot get model before model has been initialized")
-        if isinstance(
-            self.model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
+        model = self.model
+        # get raw model out of (possibly nested) cudagraph wrappers.
+        while isinstance(
+            model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
         ):
-            # get raw model out of the cudagraph wrapper.
-            return self.model.unwrap()
-        return self.model
+            model = model.unwrap()
+        return model
 
     def get_draft_model(self) -> nn.Module | None:
         drafter = getattr(self, "drafter", None)
         if drafter is None:
             return None
         model = getattr(drafter, "model", None)
-        if isinstance(
+        while isinstance(
             model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
         ):
-            return cast(nn.Module, model.unwrap())
+            model = model.unwrap()
         return cast(nn.Module | None, model)
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
@@ -5510,27 +5511,41 @@ class GPUModelRunner(
         # for other compilation modes, cudagraph behavior is controlled by
         # CudagraphWrapper and CudagraphDispatcher of vllm.
 
-        # wrap the model with full cudagraph wrapper if needed.
+        # wrap the model with cudagraph wrappers if needed.
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
-        if (
-            is_breakable_cudagraph_enabled()
-            and cudagraph_mode != CUDAGraphMode.NONE
+        # Breakable cudagraphs replace only the torch.compile-based
+        # PIECEWISE path; FULL cudagraphs (if any) are still applied on top
+        # via CUDAGraphWrapper below.
+        use_breakable = (
+            uses_breakable_cudagraph(self.compilation_config)
+            and cudagraph_mode.has_piecewise_cudagraphs()
             and not self.parallel_config.use_ubatching
-        ):
+        )
+        if use_breakable:
             self.model = BreakableCUDAGraphWrapper(self.model, self.vllm_config)
             drafter = getattr(self, "drafter", None)
             if drafter is not None and hasattr(drafter, "model"):
                 drafter.model = BreakableCUDAGraphWrapper(
                     drafter.model, self.vllm_config
                 )
-        elif (
+        if (
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
             self.model = CUDAGraphWrapper(
                 self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
             )
+            if use_breakable:
+                # Keep the drafter graphed for FULL dispatches; it has no
+                # torch.compile piecewise graphs when breakable is used.
+                drafter = getattr(self, "drafter", None)
+                if drafter is not None and hasattr(drafter, "model"):
+                    drafter.model = CUDAGraphWrapper(
+                        drafter.model,
+                        self.vllm_config,
+                        runtime_mode=CUDAGraphMode.FULL,
+                    )
         elif self.parallel_config.use_ubatching:
             if cudagraph_mode.has_full_cudagraphs():
                 self.model = UBatchWrapper(
@@ -6630,8 +6645,8 @@ class GPUModelRunner(
         if current_platform.is_rocm():
             # Drop captured graphs before distributed teardown. On ROCm, delayed
             # graph destruction can surface HSA faults in the next engine startup.
-            CUDAGraphWrapper.clear_all_graphs()
-            BreakableCUDAGraphWrapper.clear_all_graphs()
+            CUDAGraphWrapper.clear_all_graphs(self.vllm_config)
+            BreakableCUDAGraphWrapper.clear_all_graphs(self.vllm_config)
             self.encoder_cudagraph_manager = None
         self.compilation_config.static_forward_context.clear()
         self.model = None  # type: ignore[assignment]
@@ -6753,9 +6768,18 @@ class GPUModelRunner(
         profiling_pool = current_platform.graph_pool_handle()
         encoder_profiling_pool = current_platform.graph_pool_handle()
         original_pools: dict[int, Any] = {}
-        all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
-            BreakableCUDAGraphWrapper._all_instances
-        )
+        # Only touch wrappers belonging to this engine; other engines may
+        # coexist in the same process (e.g. in-process engines in tests).
+        # compilation_config identity is the engine tag: derived configs
+        # (VllmConfig.with_hf_config) are distinct VllmConfig instances that
+        # share the engine's compilation_config.
+        wrapper_instances: list[Any] = list(CUDAGraphWrapper._all_instances)
+        wrapper_instances.extend(BreakableCUDAGraphWrapper._all_instances)
+        all_wrappers = [
+            instance
+            for instance in wrapper_instances
+            if instance.compilation_config is self.compilation_config
+        ]
         for instance in all_wrappers:
             original_pools[id(instance)] = instance.graph_pool
             instance.graph_pool = profiling_pool
@@ -6846,13 +6870,10 @@ class GPUModelRunner(
                     )
         finally:
             set_cudagraph_capturing_enabled(False)
-            CUDAGraphWrapper.clear_all_graphs()
-            BreakableCUDAGraphWrapper.clear_all_graphs()
+            CUDAGraphWrapper.clear_all_graphs(self.vllm_config)
+            BreakableCUDAGraphWrapper.clear_all_graphs(self.vllm_config)
             if encoder_cudagraph_manager is not None:
                 encoder_cudagraph_manager.clear()
-            all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
-                BreakableCUDAGraphWrapper._all_instances
-            )
             for instance in all_wrappers:
                 if id(instance) in original_pools:
                     instance.graph_pool = original_pools[id(instance)]

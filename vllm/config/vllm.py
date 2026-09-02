@@ -72,40 +72,6 @@ ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
     {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM", "GlmMoeDsaForCausalLM"}
 )
 
-DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
-    {
-        "DeepseekV32MTPModel",
-        "DeepseekV32ForCausalLM",
-        "DeepseekV4ForCausalLM",
-        "DeepSeekV4MTPModel",
-        "Dots3NoteForCausalLM",
-        "Dots3NoteMTPModel",
-        "GlmMoeDsaForCausalLM",
-        "HYV4ForCausalLM",
-        "HYV4MTPModel",
-        "InklingForCausalLM",
-        "InklingForConditionalGeneration",
-        "KimiK3ForConditionalGeneration",
-        "KimiK3MTPModel",
-        "KimiLinearForCausalLM",
-        "MiniMaxM3SparseForCausalLM",
-        "MiniMaxM3SparseForConditionalGeneration",
-    }
-)
-
-
-@lru_cache
-def default_breakable_cudagraph_architectures() -> frozenset[str]:
-    """Architectures defaulting to breakable CUDA graphs on this platform."""
-    from vllm.platforms import current_platform
-
-    if current_platform.is_rocm():
-        # Breakable CUDA graphs currently regress performance on ROCm, so no
-        # architecture opts in by default here. Users can still force it with
-        # VLLM_USE_BREAKABLE_CUDAGRAPH=1.
-        return frozenset()
-    return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
-
 
 class OptimizationLevel(IntEnum):
     """Optimization level enum."""
@@ -703,30 +669,32 @@ class VllmConfig:
         num_sliding = sum(lt == "sliding_attention" for lt in layer_types)
         return 0 < num_sliding < len(layer_types)
 
-    def _uses_breakable_cudagraph_by_default(self) -> bool:
-        model_config = self.model_config
-        if model_config is None:
-            return False
-
-        architectures = set(model_config.architectures)
-        return bool(architectures & default_breakable_cudagraph_architectures())
-
     def _maybe_enable_breakable_cudagraph(self) -> bool:
-        if (
-            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
-            and self._uses_breakable_cudagraph_by_default()
-        ):
-            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-            logger.info_once(
-                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
-                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
-            )
-
-        from vllm.compilation.breakable_cudagraph import (
-            is_breakable_cudagraph_enabled,
+        # Breakable cudagraphs are on by default, but yield when
+        # compilation was explicitly enabled: an explicitly-set compilation
+        # mode implies the torch.compile-based piecewise path instead.
+        explicitly_compiled = (
+            self.compilation_config.mode is not None
+            and self.compilation_config.mode != CompilationMode.NONE
         )
+        enabled_env = envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+        if enabled_env and explicitly_compiled:
+            raise ValueError(
+                "VLLM_USE_BREAKABLE_CUDAGRAPH=1 conflicts with the explicitly "
+                f"set compilation mode {self.compilation_config.mode}: "
+                "breakable cudagraphs replace torch.compile-based "
+                "compilation. Either set VLLM_USE_BREAKABLE_CUDAGRAPH=0 or "
+                "drop the explicit compilation mode."
+            )
+        if enabled_env is not None:
+            enabled = enabled_env
+        else:
+            # None (unset) means default-on unless compilation is explicit,
+            # and only on CUDA.
+            # On ROCm, breakable cudagraphs currently regress performance.
+            from vllm.platforms import current_platform
 
-        enabled = is_breakable_cudagraph_enabled()
+            enabled = not explicitly_compiled and current_platform.is_cuda()
         if enabled:
             self.compilation_config.mode = CompilationMode.NONE
         return enabled
@@ -1473,7 +1441,7 @@ class VllmConfig:
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
-            and not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+            and not breakable_cudagraph_enabled
         ):
             logger.info_once(
                 "Cudagraph mode %s is not compatible with compilation mode %s."
@@ -1718,7 +1686,7 @@ class VllmConfig:
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
                 assert (
                     self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                    or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+                    or breakable_cudagraph_enabled
                 ), (
                     "Compilation mode should be CompilationMode.VLLM_COMPILE "
                     "when cudagraph_mode piecewise cudagraphs is used, "

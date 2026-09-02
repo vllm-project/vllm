@@ -92,7 +92,12 @@ class TestCudagraphDispatcher:
             ("PIECEWISE", CompilationMode.VLLM_COMPILE, True),
         ],
     )
-    def test_dispatcher(self, cudagraph_mode_str, compilation_mode, lora_config):
+    def test_dispatcher(
+        self, cudagraph_mode_str, compilation_mode, lora_config, monkeypatch
+    ):
+        # These cases exercise the compiled-piecewise dispatcher paths;
+        # pin breakable cudagraphs (now default-on) off.
+        monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
         # Setup dispatcher
         comp_config = CompilationConfig(
             cudagraph_mode=cudagraph_mode_str,
