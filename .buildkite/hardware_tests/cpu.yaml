@@ -48,34 +48,29 @@ steps:
       pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
       pytest -x -v -s tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp"
 
-# Spec decode unit tests that run on CPU without a GPU. The unlisted files in
-# tests/v1/spec_decode/ either skip or fail without CUDA, or need HF model
-# assets, and stay covered by .buildkite/test_areas/spec_decode.yaml.
+# Spec decode paths that are CPU-specific: the C++ kernels CPUModelRunner
+# swaps in for the Triton ones, the ngram proposer, and draft sampling on the
+# platform device. The rest of tests/v1/spec_decode/ is platform-independent
+# and already runs in .buildkite/test_areas/spec_decode.yaml.
 - label: CPU-Spec Decode Tests
   key: cpu-spec-decode-tests
   depends_on: []
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
+  - csrc/cpu/spec_decode_utils.cpp
+  - vllm/utils/cpu_triton_utils.py
   - vllm/v1/spec_decode/
   - vllm/v1/worker/cpu_model_runner.py
-  - csrc/cpu/spec_decode_utils.cpp
-  - tests/v1/spec_decode/
+  - tests/v1/spec_decode/test_cpu_spec_decode_kernels.py
+  - tests/v1/spec_decode/test_ngram.py
+  - tests/v1/spec_decode/test_llm_base_proposer_sampling.py
   commands:
     - |
-      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 15m "
+      pytest -x -v -s tests/v1/spec_decode/test_cpu_spec_decode_kernels.py
       pytest -x -v -s tests/v1/spec_decode/test_ngram.py
-      pytest -x -v -s tests/v1/spec_decode/test_dynamic_sd.py
-      pytest -x -v -s tests/v1/spec_decode/test_llm_base_proposer.py
-      pytest -x -v -s tests/v1/spec_decode/test_llm_base_proposer_sampling.py
-      pytest -x -v -s tests/v1/spec_decode/test_request_acceptance.py
-      pytest -x -v -s tests/v1/spec_decode/test_synthetic_rejection_sampler_utils.py
-      pytest -x -v -s tests/v1/spec_decode/test_backup_token_async_spec.py
-      pytest -x -v -s tests/v1/spec_decode/test_adaptive_verification.py
-      pytest -x -v -s tests/v1/spec_decode/test_dflash2.py
-      pytest -x -v -s tests/v1/spec_decode/test_dflash_causality.py
-      pytest -x -v -s tests/v1/spec_decode/test_dspark_topk.py
-      pytest -x -v -s tests/v1/spec_decode/test_eagle_draft_attn_metadata.py"
+      pytest -x -v -s tests/v1/spec_decode/test_llm_base_proposer_sampling.py"
 
 # Note: SDE can't be downloaded from CI host because of AWS WAF
 # - label: CPU-Compatibility Tests
