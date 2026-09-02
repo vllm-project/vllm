@@ -111,7 +111,7 @@ class WorkerSentinel:
             tp_group = get_tp_group()
             _reinit_cpu_group(
                 tp_group,
-                "127.0.0.1",
+                self.worker.parallel_config.master_addr,
                 params["new_tp_group_port"],
                 tp_group.rank_in_group,
                 tp_group.world_size,
