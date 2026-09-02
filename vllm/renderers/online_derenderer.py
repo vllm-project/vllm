@@ -5,7 +5,6 @@ from typing import Any
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.base.protocol import (
-    DeltaFunctionCall,
     DeltaMessage,
     ToolCall,
 )
@@ -414,15 +413,22 @@ class OnlineDerenderer:
         cannot be serialized into `DerenderStreamState`, so each call
         builds a fresh parser and replays every prior output token through
         `parse_delta` (discarding the result) before processing this
-        chunk's tokens for real. This makes the emission for chunk *k*
-        exactly what chunk *k+1*'s replay would reconstruct. The output is
-        therefore independent of how the client chunks the generated stream.
+        chunk's tokens for real.
 
-        Tokens are fed one at a time (uniform per-token granularity) through
-        a fresh incremental detokenizer with special tokens preserved
-        (``skip_special_tokens=False``), so the parser sees markers like
-        ``</think>`` or ``<tool_call>`` exactly as the generate streaming
-        path does.
+        Replay is fed one token at a time through a fresh incremental
+        detokenizer with special tokens preserved (``skip_special_tokens=
+        False``), since `DerenderStreamState` only carries a flat
+        `output_token_ids` list and not the original per chunk boundaries
+        those tokens arrived in. This makes replay's parser state
+        reconstruction independent of how the client chunked prior calls.
+
+        The current chunk's tokens by contrast are fed to `parse_delta`
+        in a single call using their own `token_ids`/text as given, i.e.
+        the same granularity `generate_chunk` arrived with. This matches
+        the standard (non derender) streaming path which calls
+        `parse_delta` once per engine step with that step's full
+        `delta_token_ids` (more than one token under e.g. speculative
+        decoding) rather than one call per token.
         """
         tokenizer = self.renderer.get_tokenizer()
 
@@ -450,27 +456,27 @@ class OnlineDerenderer:
         # correctly. Discarded once the call returns.
         detok_state = DerenderStreamState()
 
-        def _feed(token_ids: list[int], finished: bool) -> DeltaMessage | None:
+        def _replay(token_ids: list[int]) -> None:
+            """Feed prior output tokens through `parse_delta` one at a
+            time discarding the result. Only reconstructs parser state and
+            never `finished` since that only applies to the current chunk.
+            """
             nonlocal detok_state
-            accumulated: DeltaMessage | None = None
-            last = len(token_ids) - 1
-            for i, tok_id in enumerate(token_ids):
+            for tok_id in token_ids:
                 text, detok_state = self._detokenize_delta(
                     tokenizer, [tok_id], detok_state, skip_special_tokens=False
                 )
-                delta = parser.parse_delta(
+                parser.parse_delta(
                     text,
                     [tok_id],
                     chat_request,
                     prompt_token_ids=prompt_token_ids,
-                    finished=finished and i == last,
+                    finished=False,
                 )
-                accumulated = _merge_delta_messages(accumulated, delta)
-            return accumulated
 
         # Replay history to reconstruct parser state. The result is thrown
         # away and only the current chunk's emission goes to the client.
-        _feed(state.output_token_ids, finished=False)
+        _replay(state.output_token_ids)
 
         stream_choices: list[ChatCompletionResponseStreamChoice] = []
         output_token_ids = list(state.output_token_ids)
@@ -490,7 +496,19 @@ class OnlineDerenderer:
             is_finished = choice.finish_reason is not None
 
             if delta_tids:
-                delta_message = _feed(delta_tids, finished=is_finished)
+                # One parse_delta call for the whole chunk (producer
+                # granularity), not one per token. See the granularity note
+                # in this method's docstring.
+                text, detok_state = self._detokenize_delta(
+                    tokenizer, delta_tids, detok_state, skip_special_tokens=False
+                )
+                delta_message = parser.parse_delta(
+                    text,
+                    delta_tids,
+                    chat_request,
+                    prompt_token_ids=prompt_token_ids,
+                    finished=is_finished,
+                )
             elif is_finished:
                 # Finish only chunk (no new tokens). Still flush any
                 # buffered tool call arguments.
@@ -720,48 +738,6 @@ class OnlineDerenderer:
             usage=usage,
         )
         return chunk, updated_state
-
-
-def _merge_delta_messages(
-    accumulated: DeltaMessage | None, new: DeltaMessage | None
-) -> DeltaMessage | None:
-    """Merge one per-token `parse_delta` result into a per chunk accumulator.
-
-    `content`/`reasoning` concatenate. For `tool_calls`, an incoming
-    delta that carries an `id` or a function `name` starts a new entry.
-    Otherwise its `function.arguments` are concatenated onto the existing
-    entry with the matching `index`.
-    """
-    if new is None:
-        return accumulated
-    if accumulated is None:
-        accumulated = DeltaMessage()
-
-    if new.content:
-        accumulated.content = (accumulated.content or "") + new.content
-    if new.reasoning:
-        accumulated.reasoning = (accumulated.reasoning or "") + new.reasoning
-
-    for tc in new.tool_calls:
-        starts_new_call = tc.id is not None or (
-            tc.function is not None and tc.function.name is not None
-        )
-        existing = (
-            None
-            if starts_new_call
-            else next((t for t in accumulated.tool_calls if t.index == tc.index), None)
-        )
-        if existing is None:
-            accumulated.tool_calls.append(tc)
-            continue
-        if existing.function is None:
-            existing.function = DeltaFunctionCall()
-        if tc.function is not None and tc.function.arguments:
-            existing.function.arguments = (
-                existing.function.arguments or ""
-            ) + tc.function.arguments
-
-    return accumulated
 
 
 def _parse_token_id_placeholder(token: str) -> int | None:

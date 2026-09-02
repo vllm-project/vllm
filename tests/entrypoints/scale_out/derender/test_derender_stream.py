@@ -42,12 +42,54 @@ from vllm.utils import random_uuid
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
+def _merge_fake_deltas(
+    accumulated: DeltaMessage | None, new: DeltaMessage | None
+) -> DeltaMessage | None:
+    """Fold one token's worth of `_FakeParser` output into a per call
+    accumulator, the same way a real parser merges multiple tokens'
+    effects into the single `DeltaMessage` it returns per `parse_delta`
+    call.
+    """
+    if new is None:
+        return accumulated
+    if accumulated is None:
+        accumulated = DeltaMessage()
+
+    if new.content:
+        accumulated.content = (accumulated.content or "") + new.content
+    if new.reasoning:
+        accumulated.reasoning = (accumulated.reasoning or "") + new.reasoning
+
+    for tc in new.tool_calls:
+        starts_new_call = tc.id is not None or (
+            tc.function is not None and tc.function.name is not None
+        )
+        existing = (
+            None
+            if starts_new_call
+            else next((t for t in accumulated.tool_calls if t.index == tc.index), None)
+        )
+        if existing is None:
+            accumulated.tool_calls.append(tc)
+            continue
+        if existing.function is None:
+            existing.function = DeltaFunctionCall()
+        if tc.function is not None and tc.function.arguments:
+            existing.function.arguments = (
+                existing.function.arguments or ""
+            ) + tc.function.arguments
+
+    return accumulated
+
+
 class _FakeParser(Parser):
     """Deterministic `Parser` stub for unit testing the replay/merge/pin
     mechanics of `OnlineDerenderer._derender_chat_stream_parsed` in
     isolation from any real reasoning/tool parser's markup grammar.
 
-    Keys purely off `delta_token_ids[0]` and ignores `delta_text`:
+    Processes every id in `delta_token_ids` in order and folds their
+    effects into one `DeltaMessage`, like a real parser handling a
+    multi-token delta in a single call. Ignores `delta_text`:
 
     - `TOOL_START` opens a new tool call at index 0 (id + name).
     - `TOOL_ARG` appends one `"a"` to that tool call's arguments.
@@ -77,7 +119,14 @@ class _FakeParser(Parser):
         if not delta_token_ids:
             return DeltaMessage(content="FLUSH") if finished else None
 
-        tok = delta_token_ids[0]
+        accumulated: DeltaMessage | None = None
+        for tok in delta_token_ids:
+            accumulated = _merge_fake_deltas(
+                accumulated, self._parse_one_token(tok, request)
+            )
+        return accumulated
+
+    def _parse_one_token(self, tok: int, request) -> DeltaMessage | None:
         if tok == self.TOOL_START:
             return DeltaMessage(
                 tool_calls=[
@@ -576,8 +625,14 @@ class TestDerenderChatStreamParsed:
 
     @pytest.mark.asyncio
     async def test_chunking_invariance(self, parsed_derenderer):
-        """1 token per chunk vs a single whole chunk assemble identically
-        which is the property the per-token replay granularity is meant to buy."""
+        """1 token per chunk vs a single whole chunk assemble identically.
+
+        The live chunk is fed to `parse_delta` at its own (producer)
+        granularity, while replayed history is always fed one token at a
+        time (see `_derender_chat_stream_parsed`'s docstring). This proves
+        that choice doesn't change the assembled output for a well behaved
+        incremental parser: each call's effects fold together the same way
+        regardless of how many tokens land in one call vs. many."""
         token_ids = [
             _FakeParser.REASON,
             _FakeParser.REASON,
