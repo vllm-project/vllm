@@ -303,6 +303,10 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
     return (major, minor)
 
 
+def get_gcn_arch() -> str:
+    return _GCN_ARCH
+
+
 def on_gfx1x() -> bool:
     return _ON_GFX1X and not _ON_CDNA
 
