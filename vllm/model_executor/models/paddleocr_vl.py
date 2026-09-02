@@ -68,7 +68,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45 import Ernie4_5ForCausalLM
@@ -1136,10 +1136,17 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         siglip_position_ids.append(image_position_ids)
         cu_seqlens.append(cu_seqlens[-1] + numel)
 
-        # Both are built on the host; stage them over non-blocking.
-        siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
-            pixel_values.device, non_blocking=True
-        )
+        # Both are built on the host; concat straight into a pinned buffer
+        # so the H2D copy stays non-blocking.
+        siglip_position_ids = torch.concat(
+            siglip_position_ids,
+            dim=0,
+            out=torch.empty(
+                sum(t.numel() for t in siglip_position_ids),
+                dtype=torch.int64,
+                pin_memory=PIN_MEMORY,
+            ),
+        ).to(pixel_values.device, non_blocking=True)
         cu_seqlens = async_tensor_h2d(
             cu_seqlens, dtype=torch.int32, device=pixel_values.device
         )

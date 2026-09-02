@@ -606,8 +606,8 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
                 seq_len, batch_size, chunk_size_nc, left_chunk_nc
             )
             if device.type != "cpu":
-                enc_streaming_mask_nc = enc_streaming_mask_nc.contiguous().to(
-                    device, non_blocking=True
+                enc_streaming_mask_nc = async_tensor_h2d(
+                    enc_streaming_mask_nc.contiguous(), device
                 )
             if masks is not None:
                 hs_mask_nc = masks & enc_streaming_mask_nc
