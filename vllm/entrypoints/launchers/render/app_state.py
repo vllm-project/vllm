@@ -51,7 +51,11 @@ async def init_render_app_state(
     # in the entrypoint via `create_structured_outputs_config`) and any
     # model-specific default applied by `verify_and_update_config`
     # (e.g. "openai_gptoss" for gpt_oss), matching the main API server.
-    reasoning_parser = vllm_config.structured_outputs_config.reasoning_parser
+    # Keep `args.reasoning_parser` as the first source so callers that build
+    # a VllmConfig without that merge still honor an explicit flag.
+    reasoning_parser = (
+        args.reasoning_parser or vllm_config.structured_outputs_config.reasoning_parser
+    )
 
     state.online_renderer = OnlineRenderer(
         model_config=vllm_config.model_config,

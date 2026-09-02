@@ -1945,9 +1945,11 @@ class EngineArgs:
     def create_structured_outputs_config(self) -> StructuredOutputsConfig:
         """Merge frontend parser flags into the structured outputs config.
 
-        Model-specific defaults (e.g. gpt_oss -> "openai_gptoss") are applied
-        later by `verify_and_update_config` only when the resolved value is
-        still empty, so explicit CLI flags take precedence.
+        Mutates `self.structured_outputs_config` in place and returns it
+        (not a copy). Model-specific defaults (e.g. gpt_oss ->
+        "openai_gptoss") are applied later by `verify_and_update_config`
+        only when the resolved value is still empty, so explicit CLI flags
+        take precedence.
         """
         if self.reasoning_parser:
             self.structured_outputs_config.reasoning_parser = self.reasoning_parser
