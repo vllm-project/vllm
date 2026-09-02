@@ -194,23 +194,25 @@ def _make_mamba_spec(
     buffer_len: int,
     mamba_backend: MambaBackendEnum,
     num_speculative_tokens: int = 0,
+    mamba_cache_mode: str = "none",
 ) -> MambaSpec:
     ring_buffer_len = buffer_len + (
         1 + num_speculative_tokens
         if mamba_backend == MambaBackendEnum.FLASHINFER
         else 0
     )
-    shapes = (
-        (1, 1),
-        (1, 1, 1),
+    replayssm_shapes = (
         (1, ring_buffer_len, 1),
         (1, ring_buffer_len),
         (1, ring_buffer_len, 1),
     )
     return MambaSpec(
         block_size=BLOCK_SIZE,
-        shapes=shapes,
-        dtypes=(torch.float32,),
+        shapes=((1, 1), (1, 1, 1)),
+        dtypes=(torch.float32,) * 2,
+        replayssm_shapes=replayssm_shapes,
+        replayssm_dtypes=(torch.float32,) * 3,
+        mamba_cache_mode=mamba_cache_mode,
     )
 
 
@@ -236,24 +238,25 @@ def _create_replayssm_builder(
             num_speculative_tokens=num_speculative_tokens,
         )
     return MockMambaBuilder(
-        _make_mamba_spec(buffer_len, mamba_backend, num_speculative_tokens),
+        _make_mamba_spec(
+            buffer_len,
+            mamba_backend,
+            num_speculative_tokens,
+            mamba_cache_mode,
+        ),
         ["layer0"],
         vllm_config,
         DEVICE,
     )
 
 
-def _build(
-    builder: MockMambaBuilder,
-    case: ReplaySSMBuildCase,
-    num_accepted_tokens: torch.Tensor | None = None,
-):
+def _build(builder: MockMambaBuilder, case: ReplaySSMBuildCase):
     batch = BatchSpec(seq_lens=case.seq_lens, query_lens=case.query_lens)
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
         is_prefilling=torch.tensor(case.is_prefilling, dtype=torch.bool),
         replayssm_decode_base_cpu=torch.tensor(case.decode_base, dtype=torch.int32),
     )
-    return builder.build(0, common, num_accepted_tokens=num_accepted_tokens)
+    return builder.build(0, common)
 
 
 @pytest.mark.parametrize(
@@ -338,3 +341,56 @@ def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
     assert second_indices is not None
     assert second_indices.data_ptr() == first_ptr
     assert torch.equal(second_indices, second.state_indices_tensor_d[:, 0])
+
+
+def test_flashinfer_replayssm_all_uses_last_scheduled_state_page():
+    builder = _create_replayssm_builder(
+        16,
+        mamba_cache_mode="all",
+        mamba_backend=MambaBackendEnum.FLASHINFER,
+        num_speculative_tokens=3,
+    )
+    builder.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+    metadata = _build(
+        builder,
+        ReplaySSMBuildCase(
+            seq_lens=[34, 50],
+            query_lens=[1, 1],
+            is_prefilling=[False, False],
+            decode_base=[33, 49],
+            buffer_len=16,
+            expected_write_pos=[],
+            expected_is_flush=[],
+            mamba_cache_mode="all",
+        ),
+    )
+
+    assert metadata.replayssm_state_indices_d is not None
+    assert metadata.block_idx_last_scheduled_token is not None
+    live_cols = metadata.block_idx_last_scheduled_token[:2].to(torch.int64)
+    expected = metadata.state_indices_tensor_d.gather(
+        1, live_cols.unsqueeze(1)
+    ).squeeze(1)
+    assert torch.equal(metadata.replayssm_state_indices_d, expected)
+    assert not torch.equal(expected, metadata.state_indices_tensor_d[:, 0])
+
+
+def test_flashinfer_replayssm_scratch_metadata_fresh_decode():
+    checkpointing_ssu = pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
+    if not hasattr(checkpointing_ssu, "allocate_checkpointing_ssu_scratch"):
+        pytest.skip("FlashInfer does not expose ReplaySSM scratch allocation")
+
+    builder = _create_replayssm_builder(16, mamba_backend=MambaBackendEnum.FLASHINFER)
+    case = REPLAYSSM_BUILD_CASES["fresh_decode"]
+    meta = _build(builder, case)
+
+    assert meta.write_pos_d is None
+    assert meta.is_flush_d is None
+    assert meta.bc_pre_scratch is None
+    assert meta.replayssm_scratch is not None
+    assert [tensor.shape for tensor in meta.replayssm_scratch] == [
+        (1, 1, 32, 8),
+        (1, 1, 16),
+        (1, 1, 32, 8),
+    ]

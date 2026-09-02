@@ -857,6 +857,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype, ...]
+    replayssm_shapes: tuple[tuple[int, ...], ...] = ()
+    replayssm_dtypes: tuple[torch.dtype, ...] = ()
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
@@ -868,11 +870,22 @@ class MambaSpec(KVCacheSpec):
     # rank holds the full state (e.g. the replicated PLE conv state).
     tp_replicated: bool = False
 
+    def __post_init__(self) -> None:
+        if len(self.replayssm_shapes) != len(self.replayssm_dtypes):
+            raise ValueError("ReplaySSM shapes and dtypes must have equal length")
+
     @property
     def state_content_size_bytes(self) -> int:
         return sum(
             prod(shape) * get_dtype_size(dtype)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
+        )
+
+    @property
+    def replayssm_size_bytes(self) -> int:
+        return sum(
+            prod(shape) * get_dtype_size(dtype)
+            for (shape, dtype) in zip(self.replayssm_shapes, self.replayssm_dtypes)
         )
 
     @property
@@ -919,6 +932,8 @@ class MambaSpec(KVCacheSpec):
             and spec.num_speculative_blocks == self.num_speculative_blocks
             and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
             and spec.page_size_bytes == self.page_size_bytes
+            and spec.replayssm_shapes == self.replayssm_shapes
+            and spec.replayssm_dtypes == self.replayssm_dtypes
             and spec.tp_replicated == self.tp_replicated
             for spec in kv_cache_specs.values()
         )

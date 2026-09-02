@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
@@ -89,15 +90,26 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu = torch.ones(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
-        # Pre-copy "align" prefix-cache state (V2). The migration of each
-        # request's mamba state across block boundaries runs as a fused GPU
-        # kernel reusing the postprocess copy machinery, so the per-step src
-        # columns and the running state_idx are kept GPU-resident.
+        self._is_prefilling_gpu = torch.zeros(
+            self.max_num_reqs, dtype=torch.bool, device=self.device
+        )
+        # Pre-copy prefix-cache state (V2). The migration of each request's
+        # mamba state across block boundaries runs as a fused GPU kernel reusing
+        # the postprocess copy machinery, so the per-step src columns and the
+        # running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
+        self._use_flashinfer_replayssm = (
+            self.cache_config.use_replayssm is True
+            and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        )
+        self._mamba_lifecycle_mode = self._align_mode or (
+            self.cache_config.mamba_cache_mode == "all"
+            and self._use_flashinfer_replayssm
+        )
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
-        if self._align_mode:
+        if self._mamba_lifecycle_mode:
             self._mamba_state_idx_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
@@ -111,15 +123,21 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
             self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
+            self._mamba_kv_cache_config: KVCacheConfig | None = None
+            self._mamba_block_tables: tuple[torch.Tensor, ...] | None = None
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
-        if self._align_mode:
+        if self._mamba_lifecycle_mode:
             # Seed the running state block from the resumed/prefilled position.
+            state_block_size = self.cache_config.block_size
+            if self.cache_config.mamba_cache_mode == "all":
+                state_block_size = self.cache_config.mamba_block_size
+                assert state_block_size is not None
             self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
+                (new_req_data.num_computed_tokens - 1) // state_block_size
             )
 
     def _get_mamba_group_info(
@@ -144,6 +162,8 @@ class MambaHybridModelState(DefaultModelState):
         mamba_group_ids: list[int],
         block_tables: tuple[torch.Tensor, ...],
     ) -> MambaSpecDecodeGPUContext:
+        self._mamba_kv_cache_config = kv_cache_config
+        self._mamba_block_tables = block_tables
         if self._mamba_state_copy_funcs is None:
             mamba_groups = get_mamba_groups(kv_cache_config)
             mamba_types = {spec.mamba_type for spec in mamba_groups}
@@ -187,13 +207,13 @@ class MambaHybridModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
         num_computed_tokens: torch.Tensor,
     ) -> None:
-        """Migrate each request's mamba state across block boundaries before the
-        forward (V1 align semantics, done on GPU). Runs on real batches only
-        (dummy DP/profiling runs skip preprocess_state), and before
+        """Migrate each request's mamba state across block boundaries before
+        the forward (V1 lifecycle semantics, done on GPU). Runs on real batches
+        only (dummy DP/profiling runs skip preprocess_state), and before
         ``prepare_attn`` gathers ``num_accepted_tokens``, so the boundary reset
         is visible to the forward kernels.
         """
-        if not self._align_mode:
+        if not self._mamba_lifecycle_mode:
             return
         num_reqs = input_batch.num_reqs
         if num_reqs == 0:
@@ -221,6 +241,13 @@ class MambaHybridModelState(DefaultModelState):
             BLOCK_SIZE=block,
             MAMBA_BLOCK_SIZE=mamba_spec.block_size,
         )
+        if ctx.replayssm is not None:
+            ctx.replayssm.copy_reassigned_slots(
+                idx_mapping=input_batch.idx_mapping,
+                src_cols=self._mamba_src_col_gpu,
+                dst_cols=self._mamba_state_idx_gpu,
+                num_reqs=num_reqs,
+            )
         ctx.run_fused_precopy(
             num_reqs,
             self._mamba_state_idx_gpu,
@@ -258,6 +285,7 @@ class MambaHybridModelState(DefaultModelState):
         is_prefilling[: input_batch.num_reqs] = torch.from_numpy(
             input_batch.is_prefilling_np
         )
+        self._is_prefilling_gpu[:num_reqs].copy_(is_prefilling, non_blocking=True)
         # During CUDAGraph capture, num_decode_draft_tokens_cpu and num_accepted_tokens
         # are created by attn_metadata_builder.build_for_cudagraph_capture, so we only
         # compute them during actual (non-capture) forward execution.
@@ -339,6 +367,8 @@ class MambaHybridModelState(DefaultModelState):
         idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+        is_prefilling: torch.Tensor | None = None,
     ) -> None:
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
@@ -371,12 +401,11 @@ class MambaHybridModelState(DefaultModelState):
         if not num_reqs:
             return
 
-        # Align: save the running state to the block-aligned position when
-        # spec-decode acceptance leaves the sequence non-block-aligned (mirrors
-        # the V1 align postprocess). num_computed_tokens already holds the
-        # post-step advanced count.
+        # Save the running state at a crossed block boundary when spec-decode
+        # acceptance leaves the sequence non-block-aligned. num_computed_tokens
+        # already holds the post-step advanced count.
         if (
-            self._align_mode
+            self._mamba_lifecycle_mode
             and num_computed_tokens is not None
             and self._mamba_ctx is not None
         ):
@@ -387,6 +416,40 @@ class MambaHybridModelState(DefaultModelState):
                 num_computed_tokens,
                 idx_mapping,
             )
+            # Must match the condition that sets ``state_skip_postprocess``:
+            # the fused kernel skips the temporal copy for every FlashInfer
+            # ReplaySSM layer, so the materializer has to cover every one of
+            # them. Gating this on spec decode would drop the SSM state on any
+            # non-spec boundary where src_col != dst_col. Rows that need no
+            # work carry the -1 src_col sentinel and cost nothing.
+            if self._use_flashinfer_replayssm:
+                replayssm = self._mamba_ctx.replayssm
+                assert replayssm is not None
+                if query_start_loc is None:
+                    raise RuntimeError(
+                        "ReplaySSM postprocess requires the query_start_loc from "
+                        "the forward that produced this acceptance"
+                    )
+                if is_prefilling is None:
+                    is_prefilling = self._is_prefilling_gpu[:num_reqs]
+                replayssm.postprocess_and_materialize(
+                    idx_mapping=idx_mapping,
+                    query_metadata=query_start_loc,
+                    query_is_cumulative=True,
+                    num_computed_tokens=num_computed_tokens,
+                    num_computed_is_after=True,
+                    # run_fused_postprocess_align can reset the live buffer to
+                    # one for the next step. Its persistent snapshot still
+                    # contains the acceptance produced by this forward.
+                    num_accepted_tokens=self._mamba_ctx.num_accepted_tokens_out,
+                    is_prefilling=is_prefilling,
+                    live_cols=self._mamba_state_idx_gpu,
+                    materialize_src_cols=self._mamba_ctx.materialize_src_cols,
+                    materialize_dst_cols=self._mamba_ctx.materialize_dst_cols,
+                    materialize_token_counts=(self._mamba_ctx.materialize_token_counts),
+                    mamba_block_size=self._mamba_ctx.block_size,
+                    num_reqs=num_reqs,
+                )
 
 
 @triton.jit

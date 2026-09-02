@@ -152,6 +152,8 @@ class ModelState(ABC):
         idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor,
         num_computed_tokens: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+        is_prefilling: torch.Tensor | None = None,
     ) -> None:
         return None
 
