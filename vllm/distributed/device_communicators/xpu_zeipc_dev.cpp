@@ -12,7 +12,8 @@
 // One kernel per collective does everything the CUDA custom all-reduce does
 // with Signal/RankSignals: publish the local chunk into the peer-visible
 // staging buffer, handshake through per-workgroup flags, reduce.  The host
-// only enqueues; it never blocks on the peer.
+// only enqueues; it never blocks on the peer.  The all-gather kernel is the
+// same protocol without the reduction.
 //
 // The kernel is graph-capture safe: it is submitted to whatever queue the
 // caller passes (the one currently recording, if any), and it carries no
@@ -32,7 +33,8 @@ namespace {
 
 namespace syclex = sycl::ext::oneapi::experimental;
 
-sycl::kernel* g_k[3] = {nullptr, nullptr, nullptr};
+// ar_bf16, ar_f16, ar_f32, ag
+sycl::kernel* g_k[4] = {nullptr, nullptr, nullptr, nullptr};
 
 const char* kKernelSource = R"CLC(
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
@@ -90,7 +92,7 @@ inline void handshake(volatile __global atomic_uint* lflags,
    peer's seq+1 signal, which the peer sends only after its own kernel seq
    (every read of this rank's slot included) finished on its in-order
    queue. */
-#define AR_BODY(REDV, REDS)                                              \
+#define SEQ_PROLOGUE                                                     \
   size_t wg = get_group_id(0);                                           \
   size_t lid = get_local_id(0);                                          \
   __local uint lseq;                                                     \
@@ -105,7 +107,10 @@ inline void handshake(volatile __global atomic_uint* lflags,
   peer_stage += (seq & 1) * slot;                                        \
   size_t start = wg * chunk;                                             \
   size_t end = min(n, start + chunk);                                    \
-  size_t ls = get_local_size(0);                                         \
+  size_t ls = get_local_size(0);
+
+#define AR_BODY(REDV, REDS)                                              \
+  SEQ_PROLOGUE                                                           \
   size_t vend = start + ((end - start) / 8) * 8;                         \
   for (size_t i = start + lid * 8; i < vend; i += ls * 8)                \
     vstore8(vload8(0, input + i), 0, my_stage + i);                      \
@@ -156,6 +161,41 @@ __kernel void ar_f32(__global float* dst, __global const float* input,
                   dst + i),
           dst[i] = input[i] + peer_stage[i])
 }
+
+/* 2-rank all-gather along dim 0 of a contiguous input: pure placement, so
+   it works on bytes and serves every dtype.  Phase 1 stages the local
+   chunk for the peer and copies it into this rank's slice of dst; phase 2
+   copies the peer's staged chunk into the peer's slice.  Same
+   per-workgroup handshake and double buffer as the all-reduce, on its own
+   slots, flags and counters. */
+__kernel void ag(__global uchar* dst, __global const uchar* input,
+                 __global uchar* my_stage, __global const uchar* peer_stage,
+                 volatile __global atomic_uint* lflags,
+                 volatile __global atomic_uint* pflags,
+                 __global uint* counters, ulong n, ulong chunk, ulong slot,
+                 ulong my_off, ulong peer_off) {
+  SEQ_PROLOGUE
+  size_t vend = start + ((end - start) / 16) * 16;
+  __global uchar* mine = dst + my_off;
+  __global uchar* theirs = dst + peer_off;
+  for (size_t i = start + lid * 16; i < vend; i += ls * 16) {
+    uchar16 v = vload16(0, input + i);
+    vstore16(v, 0, my_stage + i);
+    vstore16(v, 0, mine + i);
+  }
+  if (lid == 0)
+    for (size_t i = vend; i < end; i++) {
+      uchar v = input[i];
+      my_stage[i] = v;
+      mine[i] = v;
+    }
+  work_group_barrier(CLK_GLOBAL_MEM_FENCE);
+  handshake(lflags, pflags, seq);
+  for (size_t i = start + lid * 16; i < vend; i += ls * 16)
+    vstore16(vload16(0, peer_stage + i), 0, theirs + i);
+  if (lid == 0)
+    for (size_t i = vend; i < end; i++) theirs[i] = peer_stage[i];
+}
 )CLC";
 
 // init(queue_ptr) -> None ; compiles the kernels for the queue's context.
@@ -172,10 +212,10 @@ PyObject* py_init(PyObject*, PyObject* args) {
     static auto kb =
         syclex::build(src, syclex::properties{syclex::build_options{
                                std::vector<std::string>{"-cl-std=CL3.0"}}});
-    static sycl::kernel ks[3] = {kb.ext_oneapi_get_kernel("ar_bf16"),
-                                 kb.ext_oneapi_get_kernel("ar_f16"),
-                                 kb.ext_oneapi_get_kernel("ar_f32")};
-    for (int i = 0; i < 3; i++) g_k[i] = &ks[i];
+    static sycl::kernel ks[4] = {
+        kb.ext_oneapi_get_kernel("ar_bf16"), kb.ext_oneapi_get_kernel("ar_f16"),
+        kb.ext_oneapi_get_kernel("ar_f32"), kb.ext_oneapi_get_kernel("ag")};
+    for (int i = 0; i < 4; i++) g_k[i] = &ks[i];
   } catch (const std::exception& e) {
     PyErr_Format(PyExc_RuntimeError, "kernel setup failed: %s", e.what());
     return nullptr;
@@ -220,8 +260,46 @@ PyObject* py_launch(PyObject*, PyObject* args) {
   Py_RETURN_NONE;
 }
 
+// launch_ag(queue_ptr, dst, input, my_stage, peer_stage, lflags, pflags,
+//           counters, n, chunk, slot, my_off, peer_off, nwg, wgsize) -> None
+// Byte-granular all-gather launch; same queue and staging conventions as
+// launch().  my_off/peer_off are the byte offsets of the two rank slices
+// in dst.
+PyObject* py_launch_ag(PyObject*, PyObject* args) {
+  unsigned long long qp, dst, in, ms, ps, lf, pf, ctr, n, chunk, slot, moff,
+      poff;
+  int nwg, wgsize;
+  if (!PyArg_ParseTuple(args, "KKKKKKKKKKKKKii", &qp, &dst, &in, &ms, &ps, &lf,
+                        &pf, &ctr, &n, &chunk, &slot, &moff, &poff, &nwg,
+                        &wgsize))
+    return nullptr;
+  try {
+    reinterpret_cast<sycl::queue*>(qp)->submit([&](sycl::handler& h) {
+      h.set_arg(0, reinterpret_cast<void*>(dst));
+      h.set_arg(1, reinterpret_cast<void*>(in));
+      h.set_arg(2, reinterpret_cast<void*>(ms));
+      h.set_arg(3, reinterpret_cast<void*>(ps));
+      h.set_arg(4, reinterpret_cast<void*>(lf));
+      h.set_arg(5, reinterpret_cast<void*>(pf));
+      h.set_arg(6, reinterpret_cast<void*>(ctr));
+      h.set_arg(7, (uint64_t)n);
+      h.set_arg(8, (uint64_t)chunk);
+      h.set_arg(9, (uint64_t)slot);
+      h.set_arg(10, (uint64_t)moff);
+      h.set_arg(11, (uint64_t)poff);
+      h.parallel_for(sycl::nd_range<1>((size_t)nwg * wgsize, (size_t)wgsize),
+                     *g_k[3]);
+    });
+  } catch (const std::exception& e) {
+    PyErr_Format(PyExc_RuntimeError, "launch_ag failed: %s", e.what());
+    return nullptr;
+  }
+  Py_RETURN_NONE;
+}
+
 PyMethodDef methods[] = {{"init", py_init, METH_VARARGS, nullptr},
                          {"launch", py_launch, METH_VARARGS, nullptr},
+                         {"launch_ag", py_launch_ag, METH_VARARGS, nullptr},
                          {nullptr, nullptr, 0, nullptr}};
 
 struct PyModuleDef mod = {PyModuleDef_HEAD_INIT, "vllm_xpu_zeipc_dev", nullptr,

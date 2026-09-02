@@ -58,13 +58,29 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
     # 340us, 8 MiB 696us; oneCCL 350us, 998us, 2053us).
     _DEV_SLOT_BYTES = 8 << 20
 
-    # Appended to the parent's exported staging region, in this order: the
-    # kernel's own pair of staging slots, one page of per-workgroup
+    # All-gather capacity. The input is this rank's shard, half the size
+    # of the all-reduce input at the same token count: T x hidden bytes for
+    # the hidden-state gathers (4 MiB at 512 x 8192), num_reqs x vocab
+    # bytes for the drafter's captured logits gather (248 KB at one
+    # sequence and a 248k vocab).
+    # The kernel beats oneCCL at every size up to the slot (measured bf16,
+    # peer bytes: 16 KiB 10.6us vs 40.7us, 1 MiB 87.6us vs 315.9us, 4 MiB
+    # 338us vs 1225us), so eager dispatch has no crossover: kernel up to
+    # the slot, oneCCL above. A copy-engine path would win from 128 KiB up
+    # (14.6us vs 16.2us; 52us vs 88us at 1 MiB) but there is none for
+    # all-gather and those sizes only occur in prefill.
+    _AG_SLOT_BYTES = 4 << 20
+
+    # Appended to the parent's exported staging region, in this order: a
+    # pair of staging slots for the all-reduce kernel, a pair for the
+    # all-gather kernel, then per kernel one page of per-workgroup
     # handshake flags (uint32 each on its own cache line, written by the
-    # peer), one page of per-workgroup sequence counters (same indexing,
-    # written only by this rank's kernels).
+    # peer) and one page of per-workgroup sequence counters (same indexing,
+    # written only by this rank's kernels). The two kernels share nothing:
+    # each has its own slots and its own counter, so their interleaving
+    # needs no reasoning.
     _PAGE_BYTES = 4096
-    _EXTRA_SHARED_BYTES = 2 * _DEV_SLOT_BYTES + 2 * _PAGE_BYTES
+    _EXTRA_SHARED_BYTES = 2 * _DEV_SLOT_BYTES + 2 * _AG_SLOT_BYTES + 4 * _PAGE_BYTES
 
     def __init__(
         self,
@@ -78,6 +94,7 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
             cpu_group, device, device_group, unique_name, use_all2all=use_all2all
         )
         self._dev_ready = False
+        self._ag_ready = False
         try:
             self._open_dev()
         except Exception:
@@ -106,15 +123,24 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
             # and counters are monotonic sequence numbers and must start
             # below any seq the kernels will use.
             slots_off = 2 * self.MAX_BYTES
-            flags_off = slots_off + 2 * self._DEV_SLOT_BYTES
+            ag_slots_off = slots_off + 2 * self._DEV_SLOT_BYTES
+            flags_off = ag_slots_off + 2 * self._AG_SLOT_BYTES
             counters_off = flags_off + self._PAGE_BYTES
+            ag_flags_off = counters_off + self._PAGE_BYTES
+            ag_counters_off = ag_flags_off + self._PAGE_BYTES
             self._stage[flags_off:].zero_()
             torch.xpu.synchronize()
-            self._dev_slots = self._stage.data_ptr() + slots_off
-            self._peer_dev_slots = self._peer_stage + slots_off
-            self._my_flags = self._stage.data_ptr() + flags_off
-            self._peer_flags = self._peer_stage + flags_off
-            self._counters = self._stage.data_ptr() + counters_off
+            mine, peer = self._stage.data_ptr(), self._peer_stage
+            self._dev_slots = mine + slots_off
+            self._peer_dev_slots = peer + slots_off
+            self._my_flags = mine + flags_off
+            self._peer_flags = peer + flags_off
+            self._counters = mine + counters_off
+            self._ag_slots = mine + ag_slots_off
+            self._peer_ag_slots = peer + ag_slots_off
+            self._ag_my_flags = mine + ag_flags_off
+            self._ag_peer_flags = peer + ag_flags_off
+            self._ag_counters = mine + ag_counters_off
             ok = True
         except Exception:
             logger.warning(
@@ -142,8 +168,26 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
                 self.unique_name,
                 exc_info=True,
             )
+        if not self._all_ranks_ok(ok):
+            return
+        self._dev_ready = True
+
+        # The all-gather kernel is separately optional: if only it fails,
+        # the all-reduce path stays and all_gather degrades to oneCCL.
+        ok = False
+        try:
+            t = torch.full((64,), float(self.rank_in_group + 1), device=self.device)
+            out = self._dev_all_gather(t, 0)
+            torch.xpu.synchronize()
+            ok = bool((out[:64] == 1.0).all()) and bool((out[64:] == 2.0).all())
+        except Exception:
+            logger.warning(
+                "device-sync all-gather smoke test failed for %s",
+                self.unique_name,
+                exc_info=True,
+            )
         if self._all_ranks_ok(ok):
-            self._dev_ready = True
+            self._ag_ready = True
 
     @staticmethod
     def _load_dev_ext():
@@ -169,11 +213,11 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
 
     _DTYPE_CODE = {torch.bfloat16: 0, torch.float16: 1, torch.float32: 2}
 
-    def _launch_cfg(self, numel: int) -> tuple[int, int]:
+    def _launch_cfg(self, numel: int, vec: int = 8) -> tuple[int, int]:
         # Both ranks must compute the identical grid (numel matches by
-        # collective contract); chunk is 8-aligned for the vector loop.
+        # collective contract); chunk is aligned to the vector width.
         nwg = max(1, min(self._MAX_WGS, (numel + 2047) // 2048))
-        chunk = (((numel + nwg - 1) // nwg) + 7) // 8 * 8
+        chunk = (((numel + nwg - 1) // nwg) + vec - 1) // vec * vec
         return (numel + chunk - 1) // chunk, chunk
 
     def _dev_all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
@@ -202,6 +246,62 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
             self._WG_SIZE,
         )
         return output
+
+    def _dev_all_gather(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
+        if not input_.is_contiguous():
+            input_ = input_.contiguous()
+        input_size = input_.size()
+        output = torch.empty(
+            (2 * input_size[0],) + input_size[1:],
+            dtype=input_.dtype,
+            device=input_.device,
+        )
+        nbytes = input_.nbytes
+        if nbytes:
+            nwg, chunk = self._launch_cfg(nbytes, vec=16)
+            self._dev_ext.launch_ag(
+                torch.xpu.current_stream().sycl_queue,
+                output.data_ptr(),
+                input_.data_ptr(),
+                self._ag_slots,
+                self._peer_ag_slots,
+                self._ag_my_flags,
+                self._ag_peer_flags,
+                self._ag_counters,
+                nbytes,
+                chunk,
+                self._AG_SLOT_BYTES,
+                self.rank_in_group * nbytes,
+                (1 - self.rank_in_group) * nbytes,
+                nwg,
+                self._WG_SIZE,
+            )
+        # Same concat-then-move layout as the base class.
+        output = output.reshape((2,) + input_size).movedim(0, dim)
+        return output.reshape(
+            input_size[:dim] + (2 * input_size[dim],) + input_size[dim + 1 :]
+        )
+
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        if dim < 0:
+            dim += input_.dim()
+        if self._ag_ready and input_.nbytes <= self._AG_SLOT_BYTES:
+            return self._dev_all_gather(input_, dim)
+        if not torch.xpu.is_current_stream_capturing():
+            return super().all_gather(input_, dim)
+        # oneCCL rejects graph recording; see all_reduce.
+        if not self._ag_ready:
+            reason = "device-sync all-gather unavailable"
+        else:
+            reason = (
+                f"{input_.nbytes} bytes exceeds the {self._AG_SLOT_BYTES} "
+                "byte staging slot; lower max_cudagraph_capture_size (or "
+                "max_num_seqs), or set VLLM_XPU_ENABLE_XPU_GRAPH=0"
+            )
+        raise RuntimeError(
+            f"XPU custom all-gather ({self.unique_name}) cannot be "
+            f"graph-captured: {reason}"
+        )
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dev_ok = self._dev_ready and input_.dtype in self._SUPPORTED_DTYPES
