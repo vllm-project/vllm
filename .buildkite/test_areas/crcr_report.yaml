@@ -1,6 +1,6 @@
 group: CRCR Report
 depends_on:
-  - image-build
+  - image-build-cpu
 steps:
   - label: ":satellite: Report nightly results to CRCR"
     key: crcr-report
@@ -8,5 +8,6 @@ steps:
     soft_fail: true
     allow_dependency_failure: true
     timeout_in_minutes: 15
+    device: cpu-small
     commands:
       - bash /vllm-workspace/.buildkite/scripts/crcr-report.sh
