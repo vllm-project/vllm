@@ -17,6 +17,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.moe_output import (
     UnfinalizedMoEOutput,
 )
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
+    RoutingSimulator,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -508,6 +511,27 @@ class TrtLlmNvFp4ExpertsMonolithic(
     ) -> bool:
         return router_logits_dtype in [torch.bfloat16, torch.float32]
 
+    @staticmethod
+    def _simulate_routing(
+        routing_method_type: RoutingMethodType,
+        router_logits: torch.Tensor,
+        e_score_correction_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        router_logits = RoutingSimulator.simulate_monolithic_logits(
+            router_logits=router_logits,
+            strategy_name=envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY,
+        )
+        if routing_method_type in (
+            RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.MiniMax2,
+        ):
+            assert e_score_correction_bias is not None
+            e_score_correction_bias = torch.zeros_like(e_score_correction_bias)
+        else:
+            e_score_correction_bias = None
+
+        return router_logits, e_score_correction_bias
+
     def apply(
         self,
         hidden_states: torch.Tensor,
@@ -566,22 +590,11 @@ class TrtLlmNvFp4ExpertsMonolithic(
         )
 
         if is_simulated:
-            from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (  # noqa: E501
-                RoutingSimulator,
+            router_logits, e_score_correction_bias = self._simulate_routing(
+                routing_method_type,
+                router_logits,
+                e_score_correction_bias,
             )
-
-            router_logits = RoutingSimulator.simulate_monolithic_logits(
-                router_logits=router_logits,
-                strategy_name=envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY,
-            )
-            if routing_method_type in (
-                RoutingMethodType.DeepSeekV3,
-                RoutingMethodType.MiniMax2,
-            ):
-                assert e_score_correction_bias is not None
-                e_score_correction_bias = torch.zeros_like(e_score_correction_bias)
-            else:
-                e_score_correction_bias = None
 
         # Invoke kernel.
         # NOTE: Activation padding and output
