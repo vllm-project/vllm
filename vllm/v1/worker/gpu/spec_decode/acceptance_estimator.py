@@ -3,11 +3,6 @@
 
 import torch
 
-from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
-from vllm.distributed.parallel_state import (
-    get_tp_group,
-    model_parallel_is_initialized,
-)
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_max_and_sumexp,
@@ -29,7 +24,6 @@ _INIT_BIAS = -0.2
 def _accumulate_kernel(
     info_ptr,
     grad_ptr,
-    totals_ptr,
     idx_mapping_ptr,
     num_sampled_ptr,
     num_rejected_ptr,
@@ -47,12 +41,11 @@ def _accumulate_kernel(
     req_state_block = tl.load(idx_mapping_ptr + req_block, mask=req_mask, other=0).to(
         tl.int64
     )
-    req_state_block = tl.maximum(req_state_block, 0)
 
-    # num_sampled is accepted + 1 bonus.
     num_sampled = tl.load(num_sampled_ptr + req_block, mask=req_mask, other=0).to(
         tl.int64
     )
+    # Subtract bonus token.
     num_accepted = tl.maximum(num_sampled - 1, 0)
     num_rejected = tl.load(num_rejected_ptr + req_block, mask=req_mask, other=0).to(
         tl.int64
@@ -70,67 +63,61 @@ def _accumulate_kernel(
         other=0.0,
     ).to(tl.float32)
 
+    # The accepted tokens and the first rejected draft token (if one exists) are
+    # "observed" and given labels.
     observed = req_mask & (step <= num_accepted) & (step < num_admitted)
-    mask = tl.where(observed, 1.0, 0.0)
     label = tl.where(step < num_accepted, 1.0, 0.0)
-    w = pred * (1.0 - pred) * mask
-    resid = (label - pred) * mask
+    w = tl.where(observed, pred * (1.0 - pred), 0.0)
+    resid = tl.where(observed, label - pred, 0.0)
 
-    # Weighted normal-equation pieces for the design row x = [feature, e_k]: the
-    # information matrix XtWX and the score Xt(y - p). The slope is shared across
-    # positions, so XtWX is an arrowhead whose slope-slope entry sum(w*feature^2)
-    # and slope score sum(resid*feature) are single totals; only the coupling
-    # sum(w*feature), the intercept block sum(w), and the intercept score
-    # sum(resid) are per position. Keeping those two as scalars rather than per
-    # position is what lets _refit_kernel skip the per-position 2x2 solves.
-    xtwx_01 = tl.sum(w * feature, axis=0)
-    xtwx_11 = tl.sum(w, axis=0)
-    xtr_1 = tl.sum(resid, axis=0)
-    count = tl.sum(mask, axis=0)
-    # This program owns position `step`, so these are plain read-modify-writes.
-    tl.store(info_ptr + step * 2 + 0, tl.load(info_ptr + step * 2 + 0) + xtwx_01)
-    tl.store(info_ptr + step * 2 + 1, tl.load(info_ptr + step * 2 + 1) + xtwx_11)
-    tl.store(grad_ptr + step, tl.load(grad_ptr + step) + xtr_1)
+    # This block's contribution to the normal equations for design row
+    # x = [feature, eₖ]: the XᵀWX entries aₖ, bₖ, cₖ and the Xᵀr entries g₀ₖ, g₁ₖ.
+    # aₖ and g₀ₖ are partials of scalars shared by every position, which
+    # _refit_kernel sums.
+    a_k = tl.sum(w * feature * feature, axis=0)
+    b_k = tl.sum(w * feature, axis=0)
+    c_k = tl.sum(w, axis=0)
+    g0_k = tl.sum(resid * feature, axis=0)
+    g1_k = tl.sum(resid, axis=0)
+    count = tl.sum(tl.where(observed, 1.0, 0.0), axis=0)
+    tl.store(info_ptr + step * 3 + 0, tl.load(info_ptr + step * 3 + 0) + a_k)
+    tl.store(info_ptr + step * 3 + 1, tl.load(info_ptr + step * 3 + 1) + b_k)
+    tl.store(info_ptr + step * 3 + 2, tl.load(info_ptr + step * 3 + 2) + c_k)
+    tl.store(grad_ptr + step * 2 + 0, tl.load(grad_ptr + step * 2 + 0) + g0_k)
+    tl.store(grad_ptr + step * 2 + 1, tl.load(grad_ptr + step * 2 + 1) + g1_k)
     tl.store(counts_ptr + step, tl.load(counts_ptr + step) + count)
-    # The totals are shared by every program, so they need real atomics. Their
-    # summation order varies between runs, which perturbs the coefficients in the
-    # last bits only; ranks are reconciled by the all-reduce in `step` either way.
-    tl.atomic_add(totals_ptr + 0, tl.sum(w * feature * feature, axis=0), sem="relaxed")
-    tl.atomic_add(totals_ptr + 1, tl.sum(resid * feature, axis=0), sem="relaxed")
 
 
 @triton.jit
 def _refit_kernel(
-    coef_ptr,
-    coef_stride,
+    slope_ptr,
+    intercepts_ptr,
     info_ptr,
     info_row_stride,
     grad_ptr,
-    totals_ptr,
+    grad_row_stride,
     counts_ptr,
     NUM_SPECULATIVE_STEPS: tl.constexpr,
     L2: tl.constexpr,
     DAMPING: tl.constexpr,
-    INV_TP: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     k = tl.arange(0, BLOCK)
     mask = k < NUM_SPECULATIVE_STEPS
 
-    # Per position: the slope/intercept coupling sum(w*feature) and the intercept
-    # block sum(w), plus the intercept score sum(y - p).
-    b = tl.load(info_ptr + k * info_row_stride + 0, mask=mask, other=0.0)
-    c = tl.load(info_ptr + k * info_row_stride + 1, mask=mask, other=0.0) + L2
-    g1 = tl.load(grad_ptr + k, mask=mask, other=0.0)
+    # Load the stats accumulated over this round to solve (XᵀWX + λI) Δθ = Xᵀr.
+    a_k = tl.load(info_ptr + k * info_row_stride + 0, mask=mask, other=0.0)
+    b_k = tl.load(info_ptr + k * info_row_stride + 1, mask=mask, other=0.0)
+    c_k = tl.load(info_ptr + k * info_row_stride + 2, mask=mask, other=0.0) + L2
+    a = tl.sum(a_k, axis=0) + L2
+    g0_k = tl.load(grad_ptr + k * grad_row_stride + 0, mask=mask, other=0.0)
+    g1_k = tl.load(grad_ptr + k * grad_row_stride + 1, mask=mask, other=0.0)
+    g0 = tl.sum(g0_k, axis=0)
     n = tl.load(counts_ptr + k, mask=mask, other=0.0)
-    # Shared by every position: the slope's own information and score. The ridge
-    # lands once on the slope and once per intercept, which is the L2 penalty for
-    # the NUM_SPECULATIVE_STEPS + 1 parameters actually being fit.
-    a = tl.load(totals_ptr + 0) + L2
-    g0 = tl.load(totals_ptr + 1)
 
-    w = tl.load(coef_ptr + k, mask=mask, other=0.0)
-    bias = tl.load(coef_ptr + coef_stride + k, mask=mask, other=0.0)
+    # Load the current shared slope and per-position intercepts.
+    w = tl.load(slope_ptr)
+    bias = tl.load(intercepts_ptr + k, mask=mask, other=0.0)
 
     # Profiling the intercepts out of the arrowhead leaves
     #     step_w = (g0 - sum_k b_k*g1_k/c_k) / (a - sum_k b_k^2/c_k),
@@ -139,40 +126,41 @@ def _refit_kernel(
     # data-poor position barely moves the slope while still receiving it -- which
     # is what gives the deep positions a usable slope at all: they see too few
     # observations per round to fit two parameters, but an intercept alone is
-    # well determined. The ridge keeps c_k >= L2, and Cauchy-Schwarz gives
-    # b_k^2 <= a_k*c_k, so the denominator is >= L2 and never degenerate.
-    shrink = tl.where(mask, b * b / c, 0.0)
-    coupling = tl.where(mask, b * g1 / c, 0.0)
-    den = a - tl.sum(shrink, axis=0)
-    step_w = (g0 - tl.sum(coupling, axis=0)) / den
+    # well determined. The ridge keeps c_k >= L2, so these divisions stay finite
+    # where a position has no observations, and with Cauchy-Schwarz's
+    # b_k^2 <= a_k*c_k it puts the denominator at >= L2, never degenerate.
+    shrink = b_k * b_k / c_k
+    coupling = b_k * g1_k / c_k
+    denom = a - tl.sum(shrink, axis=0)
+    step_w = (g0 - tl.sum(coupling, axis=0)) / denom
 
-    # The slope learns from every position, so it is damped by the round's total
-    # sample count rather than any single position's.
-    total_n = tl.sum(tl.where(mask, n, 0.0), axis=0)
-    step_w = step_w * total_n / (total_n + DAMPING)
-    w_now = tl.sum(tl.where(k == 0, w, 0.0), axis=0)  # shared: read once
+    # The slope learns from every position, so it is damped by the round's
+    # total sample count.
+    total_n = tl.sum(n, axis=0)
+    step_w *= total_n / (total_n + DAMPING)
     # Mask out NaNs and steps that would drive the slope negative.
-    w_ok = (step_w == step_w) & (w_now + step_w >= 0.0)
-    step_w = tl.where(w_ok, step_w, 0.0)
-    new_w = tl.where(mask, w_now + step_w, 0.0)
+    step_w = tl.where((step_w == step_w) & (w + step_w >= 0.0), step_w, 0.0)
+    # Update the shared slope.
+    new_w = w + step_w
 
-    # Intercept conditioned on the pooled slope, damped by its own count: a
-    # position nobody reached this round has n = 0 and so holds still.
-    step_b = (g1 - b * step_w) / c * n / (n + DAMPING)
-    new_b = tl.where(mask & (step_b == step_b), bias + step_b, bias)
+    # Update the per-position intercepts.
+    step_bias = (g1_k - b_k * step_w) / c_k
+    # Damp by the position's sample count.
+    step_bias *= n / (n + DAMPING)
+    # Mask out NaNs.
+    step_bias = tl.where(step_bias == step_bias, step_bias, 0.0)
+    new_bias = bias + step_bias
 
-    # The slope is shared, but it is stored once per position so that `predict`
-    # can index weight and bias by draft step alike.
-    tl.store(coef_ptr + k, new_w * INV_TP, mask=mask)
-    tl.store(coef_ptr + coef_stride + k, new_b * INV_TP, mask=mask)
+    tl.store(slope_ptr, new_w)
+    tl.store(intercepts_ptr + k, new_bias, mask=mask)
 
-    # Start the next round clean: each refit fits its own window, which is also
-    # what lets the estimator track workload drift.
+    # Start the round clean by clearing the per-round statistics.
     tl.store(info_ptr + k * info_row_stride + 0, 0.0, mask=mask)
     tl.store(info_ptr + k * info_row_stride + 1, 0.0, mask=mask)
-    tl.store(grad_ptr + k, 0.0, mask=mask)
+    tl.store(info_ptr + k * info_row_stride + 2, 0.0, mask=mask)
+    tl.store(grad_ptr + k * grad_row_stride + 0, 0.0, mask=mask)
+    tl.store(grad_ptr + k * grad_row_stride + 1, 0.0, mask=mask)
     tl.store(counts_ptr + k, 0.0, mask=mask)
-    tl.store(totals_ptr + tl.arange(0, 2), tl.zeros((2,), tl.float32))
 
 
 @triton.jit
@@ -239,8 +227,8 @@ def _predict_kernel(
     pred_stride,
     conf_ptr,
     conf_stride,
-    coef_ptr,
-    coef_stride,
+    slope_ptr,
+    intercepts_ptr,
     local_max_ptr,
     local_max_stride,
     local_sumexp_ptr,
@@ -318,8 +306,8 @@ def _predict_kernel(
     tl.store(features_ptr + req_state_idx * features_stride + step, feature)
 
     # Predict the acceptance probability from the feature and current coefficients.
-    weight = tl.load(coef_ptr + step)
-    bias = tl.load(coef_ptr + coef_stride + step)
+    weight = tl.load(slope_ptr)
+    bias = tl.load(intercepts_ptr + step)
     prob = tl.sigmoid(weight * feature + bias)
     tl.store(pred_ptr + req_state_idx * pred_stride + step, prob)
     tl.store(conf_ptr + batch_idx * conf_stride + step, prob)
@@ -362,59 +350,54 @@ class OnlineAcceptanceEstimator:
         self.device = device
         self._steps_since_refit = 0
         self._refits = 0
-        self._tp_size = (
-            get_tp_group().world_size if model_parallel_is_initialized() else 1
-        )
 
         # Coefficients, read inside the captured graph: update in place, never
-        # reallocate. A zero slope with a bias matching a plausible acceptance
-        # rate makes the initial estimate uniform, which still lets the cost
-        # model size the budget.
-        # Packed as [weight, bias] rows so the cross-rank all-reduce is a single
-        # collective, and predict() a single pointer.
-        # The trailing dimension is rounded up to a multiple of 4 floats so the
-        # cross-rank all-reduce below is legal: FlashInfer's fused all-reduce,
-        # the default since #52998, requires it, and num_speculative_steps
-        # generally is not (5 for DeepSeek-V4-Flash). Every kernel masks its
-        # accesses to the real columns, so the padding stays zero and adds
-        # nothing to the sum.
-        self.coefficients = torch.zeros(
-            2, -(-num_speculative_steps // 4) * 4, dtype=torch.float32, device=device
+        # reallocate.
+        self.slope = torch.full((1,), _INIT_SLOPE, dtype=torch.float32, device=device)
+        self.intercepts = torch.full(
+            (num_speculative_steps,), _INIT_BIAS, dtype=torch.float32, device=device
         )
-        self.coefficients[0, :num_speculative_steps].fill_(_INIT_SLOPE)
-        self.coefficients[1, :num_speculative_steps].fill_(_INIT_BIAS)
 
         # Holds logit(max q), which is used as the feature for the logistic.
         # Stored in stable slots keyed by persistent request-state index.
         self.features = torch.zeros(
             max_num_reqs, num_speculative_steps, dtype=torch.float32, device=device
         )
-        # Predictions made at draft time, in the same stable slots as the features
-        # they came from, because the label that grades them only arrives on the
-        # next step, by which point the batch has been reordered. Used to derive
-        # the IRLS weight and residual.
+        # Holds the predictions made at draft time. Stored in stable slots keyed
+        # by the persistent request-state index.
         self.predictions = torch.zeros(
             max_num_reqs, num_speculative_steps, dtype=torch.float32, device=device
         )
 
-        # Per-round Newton-IRLS statistics, cleared after each refit. With design
-        # row x = [feature, e_k], info accumulates w*x*x^T and grad (y - p)*x.
-        # Sharing one slope across positions makes that an arrowhead matrix, so
-        # only the coupling sum(w*feature) and the intercept block sum(w) are
-        # per position, alongside the intercept score sum(y - p).
+        # Per-round Newton-IRLS statistics, cleared after each refit. Used to
+        # solve (XᵀWX + λI) Δθ = Xᵀr, where Δθ is the coefficients update that
+        # steps toward minimizing log-loss over the samples collected this round.
+        #
+        # Columns [aₖ, bₖ, cₖ] are each position's contribution to the XᵀWX
+        # arrowhead:
+        #   ⎡ a    b₀   b₁ … bₙ₋₁ ⎤
+        #   ⎢ b₀   c₀             ⎥
+        #   ⎢ b₁        c₁        ⎥
+        #   ⎢ ⋮            ⋱      ⎥
+        #   ⎣ bₙ₋₁           cₙ₋₁ ⎦
+        # bₖ and cₖ are per position, but a = Σₖ aₖ is one scalar shared by all
+        # of them.
         self.info = torch.zeros(
+            num_speculative_steps, 3, dtype=torch.float32, device=device
+        )
+        # Columns [g₀ₖ, g₁ₖ] are each position's contribution to the Xᵀr vector:
+        #   ⎡ g₀    ⎤
+        #   ⎢ g₁₀   ⎥
+        #   ⎢ g₁₁   ⎥
+        #   ⎢  ⋮    ⎥
+        #   ⎣ g₁ₙ₋₁ ⎦
+        # As above, g₁ₖ is per position and g₀ = Σₖ g₀ₖ is shared.
+        self.grad = torch.zeros(
             num_speculative_steps, 2, dtype=torch.float32, device=device
         )
-        self.grad = torch.zeros(
-            num_speculative_steps, dtype=torch.float32, device=device
-        )
-        # The arrowhead's shared entries: the slope's own information
-        # sum(w*feature^2) and its score sum((y - p)*feature), summed over every
-        # position rather than kept per position.
-        self.totals = torch.zeros(2, dtype=torch.float32, device=device)
-        # Number of graded drafts per position in the current round, zeroed at each
-        # refit. _refit_kernel damps by n / (n + DAMPING_OBSERVATIONS): every intercept
-        # by its own count, the shared slope by the round's total.
+        # Number of graded drafts per position in the current round, zeroed after
+        # each refit. _refit_kernel uses this to damp coefficient updates by:
+        # n / (n + DAMPING_OBSERVATIONS)
         self.counts = torch.zeros(
             num_speculative_steps, dtype=torch.float32, device=device
         )
@@ -430,7 +413,6 @@ class OnlineAcceptanceEstimator:
         _accumulate_kernel[(self.num_speculative_steps,)](
             self.info,
             self.grad,
-            self.totals,
             idx_mapping,
             num_sampled,
             num_rejected,
@@ -451,24 +433,18 @@ class OnlineAcceptanceEstimator:
         # Fit the coefficients to the accumulated statistics gathered over the
         # course of the last REFIT_INTERVAL steps.
         _refit_kernel[(1,)](
-            self.coefficients,
-            self.coefficients.stride(0),
+            self.slope,
+            self.intercepts,
             self.info,
             self.info.stride(0),
             self.grad,
-            self.totals,
+            self.grad.stride(0),
             self.counts,
             NUM_SPECULATIVE_STEPS=self.num_speculative_steps,
             L2=self.L2,
             DAMPING=self.DAMPING_OBSERVATIONS,
-            INV_TP=1.0 / self._tp_size,
             BLOCK=triton.next_power_of_2(self.num_speculative_steps),
         )
-        if self._tp_size > 1:
-            # All-reduce so that all ranks hold identical coefficients. _refit_kernel
-            # already scaled them by 1/tp_size, so this sum is the mean.
-            self.coefficients.copy_(tensor_model_parallel_all_reduce(self.coefficients))
-
         self._refits += 1
 
     def predict(
@@ -507,8 +483,8 @@ class OnlineAcceptanceEstimator:
             self.predictions.stride(0),
             confidence_probs,
             confidence_probs.stride(0),
-            self.coefficients,
-            self.coefficients.stride(0),
+            self.slope,
+            self.intercepts,
             local_max,
             local_max.stride(0),
             local_sumexp,

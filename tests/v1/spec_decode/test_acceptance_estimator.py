@@ -27,9 +27,9 @@ VOCAB_SIZE = 2048
 
 def _make_estimator(device: torch.device) -> OnlineAcceptanceEstimator:
     estimator = OnlineAcceptanceEstimator(MAX_NUM_REQS, NUM_STEPS, device)
-    # Distinct per-position coefficients, so reading the wrong column shows up.
-    estimator.coefficients[0] = torch.tensor([0.3, 0.5, 0.7, 0.9], device=device)
-    estimator.coefficients[1] = torch.tensor([1.5, 1.0, 0.5, 0.0], device=device)
+    # Distinct per-position intercepts, so reading the wrong one shows up.
+    estimator.slope.fill_(0.7)
+    estimator.intercepts[:] = torch.tensor([1.5, 1.0, 0.5, 0.0], device=device)
     return estimator
 
 
@@ -50,10 +50,8 @@ def _expected_probs(
     top = scaled.max(dim=-1)
     rest = scaled.scatter(1, top.indices[:, None], float("-inf"))
     feature = (top.values - torch.logsumexp(rest, dim=-1)).clamp(-40.0, 40.0)
-    weight, bias = estimator.coefficients[0], estimator.coefficients[1]
-    return torch.sigmoid(
-        weight[steps].double() * feature + bias[steps].double()
-    ).float()
+    weight, bias = estimator.slope, estimator.intercepts
+    return torch.sigmoid(weight.double() * feature + bias[steps].double()).float()
 
 
 @pytest.mark.parametrize("tokens_per_req", [1, NUM_STEPS])
@@ -143,7 +141,7 @@ def _drive_round(estimator, features, num_accepted, slots):
     """Feed one step's graded drafts through predict's buffers into `step`."""
     estimator.features[slots.long()] = features
     estimator.predictions[slots.long()] = torch.sigmoid(
-        estimator.coefficients[0] * features + estimator.coefficients[1]
+        estimator.slope * features + estimator.intercepts
     )
     estimator.step(
         slots,
@@ -178,8 +176,7 @@ def test_refit_recovers_a_shared_slope_and_per_position_intercepts():
         num_accepted[accepted.all(dim=1)] = NUM_STEPS
         _drive_round(estimator, features, num_accepted, slots)
 
-    slope, bias = estimator.coefficients[0], estimator.coefficients[1]
-    assert torch.allclose(slope, slope[0]), "the slope must be shared"
+    slope, bias = estimator.slope, estimator.intercepts
     torch.testing.assert_close(
         slope[0], torch.tensor(true_slope, device=device), atol=0.1, rtol=0
     )
@@ -197,7 +194,8 @@ def test_refit_survives_a_position_with_no_observations():
     estimator = OnlineAcceptanceEstimator(REFIT_NUM_REQS, NUM_STEPS, device)
     estimator.REFIT_INTERVAL = 5
     slots = torch.arange(REFIT_NUM_REQS, device=device, dtype=torch.int32)
-    before = estimator.coefficients.clone()
+    before_slope = estimator.slope.clone()
+    before_intercepts = estimator.intercepts.clone()
 
     # Every request is rejected at position 1, so positions 2+ are never graded.
     num_accepted = torch.ones(REFIT_NUM_REQS, device=device)
@@ -205,11 +203,12 @@ def test_refit_survives_a_position_with_no_observations():
         features = torch.rand(REFIT_NUM_REQS, NUM_STEPS, device=device) * 8.0
         _drive_round(estimator, features, num_accepted, slots)
 
-    assert estimator.coefficients.isfinite().all()
-    assert not torch.equal(estimator.coefficients[0], before[0]), "slope never moved"
+    assert estimator.slope.isfinite().all()
+    assert estimator.intercepts.isfinite().all()
+    assert not torch.equal(estimator.slope, before_slope), "slope never moved"
     # Positions 2 and 3 were never observed, so their intercepts must be untouched.
     torch.testing.assert_close(
-        estimator.coefficients[1][2:], before[1][2:], rtol=0, atol=0
+        estimator.intercepts[2:], before_intercepts[2:], rtol=0, atol=0
     )
 
 
@@ -227,18 +226,23 @@ def test_step_damping_scales_with_the_evidence():
 
     def refit_with(scale):
         estimator = OnlineAcceptanceEstimator(MAX_NUM_REQS, NUM_STEPS, device)
-        estimator.info[:, 0] = 0.0  # sum(w*margin): no slope/intercept coupling
-        estimator.info[:, 1] = 1.0 * scale  # sum(w)
-        estimator.grad[:] = 0.5 * scale  # sum(y - p)
-        estimator.totals[0] = 30.0 * scale  # sum(w*margin^2)
-        estimator.totals[1] = 2.0 * scale  # sum((y - p)*margin)
+        estimator.info[:, 1] = 0.0  # sum(w*margin): no slope/intercept coupling
+        estimator.info[:, 2] = 1.0 * scale  # sum(w)
+        estimator.grad[:, 1] = 0.5 * scale  # sum(y - p)
+        # The slope's information and score are accumulated as per-position
+        # partials that the refit sums, so spread each total over the positions.
+        estimator.info[:, 0] = 30.0 * scale / NUM_STEPS  # sum(w*margin^2)
+        estimator.grad[:, 0] = 2.0 * scale / NUM_STEPS  # sum((y - p)*margin)
         estimator.counts[:] = per_position_n * scale
         estimator._steps_since_refit = estimator.REFIT_INTERVAL - 1
-        before = estimator.coefficients.clone()
+        before_slope = estimator.slope.clone()
+        before_intercepts = estimator.intercepts.clone()
         empty = torch.zeros(0, dtype=torch.int32, device=device)
         estimator.step(empty, empty, empty)
-        delta = estimator.coefficients - before
-        return delta[0][0].item(), delta[1][0].item()
+        return (
+            (estimator.slope - before_slope)[0].item(),
+            (estimator.intercepts - before_intercepts)[0].item(),
+        )
 
     for scale in (1.0, 10.0, 100.0):
         total_n = per_position_n * scale * NUM_STEPS
