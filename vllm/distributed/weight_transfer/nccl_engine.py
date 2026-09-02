@@ -5,7 +5,7 @@
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from typing_extensions import Self
@@ -26,6 +26,7 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
+    worker_init_payload,
     worker_init_process_group,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
@@ -56,6 +57,13 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     The sender opens its endpoint as NCCL rank 0, so it needs no `rank_offset`.
     `world_size` is the full trainer+worker NCCL group size. `rank` (from
     `TrainerInitInfo`) identifies this trainer process; rank 0 is the sender.
+
+    The trainer joins over a TCPStore rendezvous (`master_address` +
+    `master_port`). Torch-free trainers (e.g. JAX) that cannot join a TCPStore
+    mint an `ncclUniqueId` themselves and drive rank 0 out of band; they ship a
+    `nccl_unique_id_b64` payload straight to the inference workers'
+    `init_weight_transfer_engine` (see `NCCLWeightTransferInitInfo`) rather than
+    going through this engine.
 
     `packed` / buffer sizes are the transfer's wire params. The trainer
     propagates them to the worker at `trainer_init` so the two sides cannot
@@ -226,21 +234,6 @@ class NCCLWeightTransferEngine(
             # Clean up the communicator by removing the reference
             self.model_update_group = None
 
-    @staticmethod
-    def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
-        """Removed. Use the stateful `NCCLTrainerWeightTransferEngine` instead.
-
-        Transitional stub kept only to satisfy the (still abstract)
-        `WeightTransferEngine.trainer_send_weights`; that member is dropped from
-        the worker ABC once every backend has migrated to the trainer engine.
-        """
-        raise NotImplementedError(
-            "The static NCCL trainer path has been replaced by "
-            "NCCLTrainerWeightTransferEngine. Build it via "
-            "WeightTransferTrainerFactory.trainer_init(NCCLTrainerInitInfo(...), "
-            "client=..., source=...) and drive it with send_weights()."
-        )
-
 
 class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerInitInfo]):
     """Trainer-side NCCL weight transfer engine.
@@ -316,7 +309,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         # open the trainer endpoint (rank 0); both sides must rendezvous together.
         with ThreadPoolExecutor(max_workers=1) as exe:
             future = exe.submit(
-                engine.client.init_weight_transfer_engine, asdict(worker_init_info)
+                engine.client.init_weight_transfer_engine,
+                worker_init_payload(worker_init_info),
             )
             engine.model_update_group = open_trainer_endpoint(init_info)
             future.result()  # surface any inference-side init error

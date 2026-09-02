@@ -85,17 +85,20 @@ significantly reduce the attack surface for these types of abuse.
 Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP
 redirects from being followed to bypass domain restrictions.
 
-### 5. **Restrict Media Decode Sizes:**
+### 5. **Restrict Media Download and Decode Sizes:**
 
-Compressed media files can expand into gigabytes of memory during decoding. vLLM
-enforces decode-size limits to prevent out-of-memory denial of service:
+Remote media responses and compressed media files can expand into gigabytes of
+memory. vLLM enforces download and decode-size limits to prevent out-of-memory
+denial of service:
 
 | Environment Variable | Default | Description |
 | --- | --- | --- |
+| `VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB` | `256` | Maximum size in MB for a single remote media response. Oversized responses are rejected while streaming before the full body is materialized in memory. |
 | `VLLM_MAX_IMAGE_PIXELS` | `178956970` (~179M pixels) | Maximum decoded image size in pixels. Images exceeding this are rejected before raster memory is allocated. Default matches PIL's built-in 2x decompression-bomb threshold (~680 MB for RGB). |
-| `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum filesize in MB for a single audio file. |
+| `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum compressed filesize in MB for a single audio file. Enforced on all audio inputs (multimodal chat URLs, speech-to-text uploads, data: URLs, and local file paths) before decoding begins. |
 | `VLLM_MAX_AUDIO_DECODE_DURATION_S` | `600` | Maximum decoded audio duration in seconds. Prevents compressed audio from expanding into gigabytes of float32 PCM. |
 | `VLLM_MAX_AUDIO_DECODE_BYTES` | `268435456` (256 MiB) | Maximum float32 PCM bytes that audio decoding may allocate. Guards against sample-rate forgery where an inflated header sample rate bypasses the duration guard while the actual frame count causes a multi-GiB allocation. |
+| `VLLM_MAX_EMBED_DECODE_BYTES` | `2147483648` (2 GiB) | Maximum bytes a client-supplied embedding payload (`prompt_embeds`, `image_embeds`, `audio_embeds`, `video_embeds`) may allocate once densified. A sparse tensor carries its own declared shape, so a payload of a few hundred bytes can expand into hundreds of GiB. Checked before `to_dense()`, so the memory is never allocated. Set to `0` to disable. |
 
 Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
@@ -155,15 +158,16 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 - `/v1/models` - List available models
 - `/v1/chat/completions` - Chat completions
 - `/v1/chat/completions/batch` - Batch chat completions
-- `/v1/chat/completions/render` - Render chat completion requests
-- `/v1/chat/completions/derender` - Derender chat completion requests
+- `/v1/chat/completions/render` - Render chat completion requests (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
+- `/v1/chat/completions/derender` - Derender chat completion requests (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
 - `/v1/completions` - Text completions
-- `/v1/completions/render` - Render completion requests
-- `/v1/completions/derender` - Derender completion requests
+- `/v1/completions/render` - Render completion requests (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
+- `/v1/completions/derender` - Derender completion requests (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
 - `/v1/embeddings` - Generate embeddings
 - `/v1/audio/transcriptions` - Audio transcription
 - `/v1/audio/translations` - Audio translation
 - `/v1/messages` - Anthropic-compatible messages API
+- `/v1/messages/render` - Render Anthropic-compatible messages (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
 - `/v1/messages/count_tokens` - Count tokens for Anthropic messages
 - `/v1/responses` - Create a response
 - `/v1/responses/{response_id}` - Retrieve a response
@@ -172,7 +176,8 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 - `/v1/rerank` - Reranking API
 - `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
-- `/inference/v1/generate` - Generate completions
+- `/inference/v1/generate` - Generate completions (available when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or with `--tokens-only` unless explicitly disabled)
+- `/cohere/v2/chat/render` - Render Cohere Chat v2 requests (requires both `VLLM_ENABLE_COHERE_API=1` and `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`)
 - `/v2/embed` - Cohere Embed API
 - `/v2/rerank` - Cohere Rerank API
 
@@ -200,11 +205,11 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
-- `/abort_requests` - Abort in-flight requests (only when `--tokens-only` is also set)
+- `/abort_requests` - Abort in-flight requests (available with `--tokens-only` unless `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=0`)
 
 **Utility endpoints:**
 
-- `/tokenize` - Tokenize text
+- `/tokenize` - Tokenize text (not disabled by `VLLM_ENABLE_SCALE_OUT_ENDPOINTS`)
 - `/detokenize` - Detokenize tokens
 - `/health` - Health check
 - `/ping` - SageMaker health check
@@ -345,7 +350,7 @@ vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` en
 
 ## gRPC Interface
 
-vLLM provides an optional gRPC Generate service on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
+vLLM provides optional gRPC `Inference` and `Control` services on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
 
 **Warning:** The gRPC interface is **insecure by default** — it does not implement authentication, authorization, or encryption. It should be considered a private, internal interface intended for use only between co-located services within a trusted network. Do not expose the gRPC port to the public internet or untrusted clients. If you enable the gRPC interface, protect it via network-level access controls such as firewall rules, network segmentation, or deployment on an isolated private network.
 
@@ -354,8 +359,9 @@ vLLM provides an optional gRPC Generate service on a separate TCP port, enabled 
 An attacker who can reach the gRPC port can:
 
 1. **Run arbitrary inference** via the `Generate` and `GenerateStream` RPCs without any credentials
-2. **Consume GPU and compute resources** by submitting unbounded generation requests
-3. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
+2. **Mutate engine state** by pausing generation, sleeping the engine, or initiating configured RL weight updates through the `Control` service
+3. **Consume GPU and compute resources** by submitting unbounded generation requests
+4. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
 
 ### Recommendations
 
@@ -529,6 +535,91 @@ ensure that only trusted principals can submit work to the cluster:
 - Use Ray's TLS authentication to restrict cluster membership.
 - Place the Ray cluster on an isolated network segment.
 - Do not expose the Ray client port or dashboard to untrusted networks.
+
+## Prefix Cache Timing Side-Channel Mitigation (Cache Salting)
+
+### Background
+
+Prefix caching reuses KV cache blocks across requests that share a common prompt prefix. In multi-tenant deployments, that reuse is a timing side channel ([CVE-2025-46570](https://github.com/vllm-project/vllm/security/advisories/GHSA-4qjh-9fv9-r85r)).
+
+An attacker sharing the same backend can measure differences in Time to First Token (TTFT) to infer whether a guessed prompt prefix matches another user's cached prompt: when the prefix is already cached, prefill is faster. Research has shown this signal is nearly perfectly distinguishable (ROC AUC of 0.99) at prefix lengths of just 8 tokens. See [Leaking Secrets from Prefix Caches](https://arxiv.org/html/2411.18191v1) for details.
+
+### Cache Salting
+
+vLLM accepts an optional `cache_salt` parameter on requests. The salt is mixed into the hash of the first KV cache block, so only requests carrying the same salt can share cached prefix blocks. See [Automatic Prefix Caching](../design/prefix_caching.md) for the implementation details.
+
+`cache_salt` is accepted by the OpenAI-compatible chat completions, completions, responses, and pooling (embeddings, classification, scoring) endpoints, and by the Anthropic `/v1/messages` endpoint.
+
+#### Usage with the OpenAI Python client
+
+```python
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    extra_body={
+        "cache_salt": "per-user-or-per-tenant-secret",
+    },
+)
+```
+
+#### Usage with a raw request
+
+```json
+{
+  "model": "meta-llama/Llama-3-8b",
+  "messages": [
+    {"role": "user", "content": "Hello"}
+  ],
+  "cache_salt": "per-user-or-per-tenant-secret"
+}
+```
+
+### How to choose a salt value
+
+Treat the salt as a secret. An attacker who can guess or obtain the salt used by another tenant can still mount the timing attack against that tenant, so use random values that are long enough to be unpredictable (e.g. 43 base64 characters, 256 bits) rather than predictable identifiers such as a user name or account ID.
+
+Scope the salt to the isolation boundary you need:
+
+- **Per-user isolation**: A unique random salt per user prevents any cross-user cache inference.
+- **Per-group sharing**: A shared random salt for users who are allowed to benefit from each other's cached prefixes, such as users within the same organization.
+- **No salt**: Omitting `cache_salt` preserves the default behavior where all requests can share cached prefixes. This is appropriate for single-tenant deployments or when prefix privacy is not a concern.
+
+### Recommendations
+
+- **Multi-tenant deployments**: Set `cache_salt` on every request, using a secret scoped to the tenant boundary you want to enforce.
+- **Single-tenant deployments**: Cache salting is unnecessary and can be omitted to maximize cache hit rates.
+- Salting reduces cache efficiency, since cached blocks are only reusable by requests with the same salt. Choose the granularity of your salt values to balance privacy against performance.
+
+## Multimodal Media UUID Security
+
+### Background
+
+Multimodal content parts (`image_url`, `input_audio`, `video`, `image_embeds`, `audio_embeds`, `vision_chunk`) accept an optional `uuid` field. When provided, vLLM uses this value as the cache identity for the media item instead of hashing the raw media bytes. This avoids re-hashing large media payloads on repeated requests and is the primary mechanism for client-side cache control of multimodal inputs.
+
+### Client Responsibility
+
+**It is the client's responsibility to generate UUIDs that cannot be guessed by others.** Use cryptographically random values — for example, UUIDv4 via Python's `uuid.uuid4()` — rather than sequential counters, short strings, or predictable identifiers such as filenames or user IDs.
+
+### Multi-Tenant Risk
+
+In multi-tenant deployments where multiple callers share the same vLLM server, two callers who present the same `uuid` for different media will share a single cache entry. The media from whichever request arrives first is served to both, which means:
+
+- **Integrity**: A later caller's media is silently discarded and replaced by the earlier caller's cached output.
+- **Confidentiality**: A caller who deliberately reuses another caller's UUID receives output derived from that caller's media.
+
+This applies to the multimodal processor cache, the encoder output cache, and the prefix cache block hashes. Clients must ensure UUID uniqueness across all callers on the same server.
+
+### Extra Protection with `cache_salt`
+
+For additional cross-tenant isolation, set `cache_salt` on each request (see [Prefix Cache Timing Side-Channel Mitigation](#prefix-cache-timing-side-channel-mitigation-cache-salting) above). The salt is mixed into the prefix cache block hashes, so requests with different salts cannot share cached prefix blocks even if UUIDs collide.
+
+`cache_salt` is opt-in and not passed by default.
+
+### Recommendations
+
+- **Multi-tenant deployments**: Always generate cryptographically random UUIDs per media item. Additionally, set `cache_salt` to a per-tenant secret for defense in depth.
+- **Single-tenant deployments**: Ensure UUIDs are unique per distinct media content. `cache_salt` is unnecessary when there is no cross-tenant threat.
+- **Default behavior**: Omitting `uuid` entirely preserves the default content-hash-based identity, which is safe against this class of collision but requires hashing the media bytes on every request.
 
 ## Reporting Security Vulnerabilities
 

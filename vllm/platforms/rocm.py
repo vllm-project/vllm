@@ -520,6 +520,7 @@ class RocmPlatform(Platform):
         "deepseek_v4_fp8",
         "compressed-tensors",
         "fbgemm_fp8",
+        "inc",
         "quark",
         "mxfp4",
         "mxfp8",
@@ -545,6 +546,10 @@ class RocmPlatform(Platform):
         # Import ROCm-specific extension
         with contextlib.suppress(ImportError):
             import vllm._rocm_C  # noqa: F401
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
@@ -623,23 +628,38 @@ class RocmPlatform(Platform):
         if selected_backend is not None:
             try:
                 backend_class = selected_backend.get_class()
-                invalid_reasons = backend_class.validate_configuration(
+                sel_invalid_reasons = backend_class.validate_configuration(
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
             except ImportError:
-                invalid_reasons = ["ImportError"]
-            if invalid_reasons:
-                raise ValueError(
-                    f"Selected backend {selected_backend} is not valid for "
-                    f"this configuration. Reason: {invalid_reasons}"
-                )
-            else:
+                sel_invalid_reasons = ["ImportError"]
+            if not sel_invalid_reasons:
                 logger.info_once(
                     "Using %s backend (selected via --attention-backend).",
                     selected_backend.name,
                 )
                 return selected_backend.get_path()
+            # Only tolerate the mismatch for turboquant_* KV-cache layers:
+            # boundary layers keep the native dtype (served by the selected
+            # backend) while turboquant_* layers need TURBOQUANT, so no single
+            # --attention-backend can serve every layer. For any other dtype
+            # the explicit selection is genuinely invalid -> fail loud.
+            kv_dtype = attn_selector_config.kv_cache_dtype
+            if not (kv_dtype is not None and str(kv_dtype).startswith("turboquant")):
+                raise ValueError(
+                    f"Selected backend {selected_backend} is not valid for "
+                    f"this configuration. Reason: {sel_invalid_reasons}"
+                )
+            # NOTE: pass a str (not the list) -- info_once hashes its args.
+            logger.info_once(
+                "Selected backend %s is incompatible with this turboquant "
+                "layer (%s); using the auto-selected per-layer backend. "
+                "Reason: %s",
+                selected_backend.name,
+                attn_selector_config.attn_type,
+                str(sel_invalid_reasons),
+            )
 
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.
@@ -880,23 +900,17 @@ class RocmPlatform(Platform):
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
 
-        if compilation_config.cudagraph_mode.has_full_cudagraphs():
-            # decode context parallel does not support full cudagraphs
-            if parallel_config.decode_context_parallel_size > 1:
-                logger.warning_once(
-                    "Decode context parallel (DCP) is enabled, which is "
-                    "incompatible with full CUDA graphs. "
-                    "Overriding cudagraph_mode to PIECEWISE."
-                )
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        if (
+            compilation_config.cudagraph_mode.has_full_cudagraphs()
+            and parallel_config.prefill_context_parallel_size > 1
+        ):
             # prefill context parallel do not support full cudagraphs
-            elif parallel_config.prefill_context_parallel_size > 1:
-                logger.warning_once(
-                    "Prefill context parallel (PCP) is enabled, which is "
-                    "incompatible with full CUDA graphs. "
-                    "Overriding cudagraph_mode to PIECEWISE."
-                )
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            logger.warning_once(
+                "Prefill context parallel (PCP) is enabled, which is "
+                "incompatible with full CUDA graphs. "
+                "Overriding cudagraph_mode to PIECEWISE."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"

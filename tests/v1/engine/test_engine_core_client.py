@@ -335,10 +335,48 @@ def test_apply_ready_response_syncs_block_size():
             max_num_seqs=256,
             max_num_batched_tokens=8192,
             instance_id="test-instance",
+            supports_lora=False,
+            max_loras=0,
         )
     )
     client._apply_ready_response(payload)
     assert client.vllm_config.cache_config.block_size == 1056
+
+
+def test_apply_ready_response_syncs_mamba_block_size():
+    import msgspec
+
+    client = object.__new__(MPClient)
+    client.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
+        model_config=SimpleNamespace(max_model_len=8192),
+    )
+    client.stats_update_address = None
+
+    payload = msgspec.msgpack.encode(
+        EngineCoreReadyResponse(
+            max_model_len=8192,
+            num_gpu_blocks=100,
+            block_size=1056,
+            dp_stats_address=None,
+            dtype="bfloat16",
+            vllm_version="test",
+            world_size=1,
+            data_parallel_size=1,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=1,
+            data_parallel_rank=0,
+            max_num_seqs=256,
+            max_num_batched_tokens=8192,
+            instance_id="test-instance",
+            supports_lora=False,
+            max_loras=0,
+            mamba_block_size=1056,
+        )
+    )
+    client._apply_ready_response(payload)
+    assert client.vllm_config.cache_config.mamba_block_size == 1056
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):
@@ -1066,6 +1104,7 @@ def test_kv_cache_events(
         model=model_name,
         enforce_eager=True,
         enable_prefix_caching=True,
+        prefix_cache_retention_interval=None,
         block_size=block_size,
     )
     engine_args.kv_events_config = publisher_config
@@ -1290,8 +1329,10 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         )
 
         mock_executor.get_kv_cache_specs.return_value = [{"default": mock_spec}]
+        mock_executor.get_supported_kv_cache_layouts.return_value = [["LBNHC"]]
         mock_executor.determine_available_memory.return_value = [1024 * 1024 * 1024]
         mock_executor.initialize_from_config.return_value = None
+        mock_executor.supports_draft_weight_updates.return_value = False
 
         return mock_executor
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any, NamedTuple, TypedDict, TypeGuard
+from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, TypeGuard
 
 import regex as re
 import xgrammar as xgr
@@ -16,7 +16,7 @@ except ImportError as e:
     raise ImportError(
         "The Cohere reasoning parser requires the `cohere_melody` "
         "package, which is not installed. Install it with:\n"
-        "    pip install cohere_melody"
+        "    pip install 'cohere-melody>=0.11.1'"
     ) from e
 
 
@@ -25,19 +25,19 @@ from vllm.entrypoints.cohere.cohere_chat_message import (
     CitationSource,
     CohereDeltaMessage,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 REPLACEMENT_CHAR = "\ufffd"
 
@@ -132,7 +132,7 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
         tool_dictionary[tool_name] = f"{tool_name} ::= {tool_name}root\n{tool_grammar}"
     # Emitted grammar shape:
     #   root  ::= tools
-    #   tools ::= ws "[" ws tool ws ("," ws tool)* ws "]" ws
+    #   tools ::= ws "[" ws tool (ws "," ws tool)* ws "]" ws
     #   ws    ::= (" " | "\t" | "\n")*
     #   tool  ::= <tool_a> | <tool_b> | ...         (one alternative per input)
     #   <tool_x>     ::= <tool_x>root               (per-tool xgrammar rules)
@@ -140,7 +140,7 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
     tool_alternatives = "tool ::= " + " | ".join(tool_dictionary.keys())
     tool_rules = "\n    ".join(tool_dictionary.values())
     grammar = f"""root ::= tools
-    tools ::= ws "[" ws tool ws ("," ws tool)*  ws "]" ws
+    tools ::= ws "[" ws tool (ws "," ws tool)* ws "]" ws
     ws    ::= (" " | "\\t" | "\\n")*
     {tool_alternatives}
     {tool_rules}
@@ -681,25 +681,12 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         return request
 
 
-# melody's streaming filter only buffers a partial ``<co: ...>`` citation
-# across ``write_decoded`` calls when ``stream_non_grounded_answer`` is
-# set: otherwise, the moment an opening ``<co`` is seen without a
-# closing ``</co: ...>`` in the same delta, the filter emits the partial
-# marker bytes verbatim as plain content. In vLLM's streaming path the
-# parser is fed one token (1-4 chars) per call, so an unbuffered filter
-# will leak ``<co: 0>``-style markers into ``delta.content`` and never
-# emit a ``FilterCitation`` for them. Enabling the flag flips the
-# partial-match branch in melody's ``parse_citations`` (see
-# ``src/parsing/citations_filter.rs``) to ``return (None, 0)`` -- i.e.
-# keep buffering -- which lets a full citation eventually resolve.
-# Non-streaming (unary) parsing receives the whole output in one call so
-# the flag is a no-op there and we leave ``unary_opts`` alone.
 class CohereCommand3ReasoningParser(BaseCohereCommandReasoningParser):
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(
             tokenizer,
             *args,
-            streaming_opts=PyFilterOptions().cmd3().stream_non_grounded_answer(),
+            streaming_opts=PyFilterOptions().cmd3().no_tools(),
             unary_opts=PyFilterOptions().cmd3().no_tools(),
             **kwargs,
         )
@@ -710,7 +697,7 @@ class CohereCommand4ReasoningParser(BaseCohereCommandReasoningParser):
         super().__init__(
             tokenizer,
             *args,
-            streaming_opts=PyFilterOptions().cmd4().stream_non_grounded_answer(),
+            streaming_opts=PyFilterOptions().cmd4().no_tools(),
             unary_opts=PyFilterOptions().cmd4().no_tools(),
             **kwargs,
         )

@@ -19,8 +19,6 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     dsv4_tokenizer = copy.copy(tokenizer)
 
     added_vocab = tokenizer.get_added_vocab()
-    added_vocab_size = len(added_vocab)
-    tokenizer_vocab_size = tokenizer.vocab_size
 
     class _DeepseekV4Tokenizer(tokenizer.__class__):  # type: ignore
         def apply_chat_template(
@@ -77,9 +75,6 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 
         def num_special_tokens_to_add(self) -> int:
             return len(self.encode(""))
-
-        def __len__(self) -> int:
-            return tokenizer_vocab_size + added_vocab_size
 
         def get_added_vocab(self) -> dict[str, int]:
             return added_vocab.copy()

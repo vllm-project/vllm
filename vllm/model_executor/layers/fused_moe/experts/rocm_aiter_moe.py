@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -28,6 +29,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
 )
+
+if TYPE_CHECKING:
+    from aiter import ActivationType
 
 
 class QuantMethod(IntEnum):
@@ -240,7 +244,7 @@ def rocm_aiter_fused_experts(
     moe_config: FusedMoEConfig,
     activation: MoEActivation = MoEActivation.SILU,
     apply_router_weight_on_input: bool = False,
-    expert_map: torch.Tensor | None = None,
+    expert_mask: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
     a1q_scale: torch.Tensor | None = None,
     num_local_tokens: torch.Tensor | None = None,
@@ -253,6 +257,7 @@ def rocm_aiter_fused_experts(
 
     # Gate/up interleave hint; only the SWIGLUOAI activations override it.
     activation_interleave = None
+    activation_method: ActivationMethod | ActivationType
     if activation == MoEActivation.SILU:
         activation_method = ActivationMethod.SILU
     elif activation == MoEActivation.GELU:
@@ -266,12 +271,12 @@ def rocm_aiter_fused_experts(
         activation_method = rocm_aiter_ops.get_aiter_activation_type("situ")
     else:
         raise ValueError(f"Unsupported activation: {activation}")
+    if activation_method is None:
+        raise ValueError(f"AITER does not support activation: {activation}")
 
     # All AITER Fused MoE kernels are expecting the following datatypes
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
-
-    expert_mask = expert_map if expert_map is not None else None
 
     # w8a8 per-channel quantization
     if (
@@ -420,6 +425,8 @@ def rocm_aiter_fused_experts(
 
 
 class AiterExperts(mk.FusedMoEExpertsModular):
+    consumes_expert_mask = True
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         # When paired with MoRI, the prepare/finalize handles FP8
@@ -484,6 +491,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
+            MoEActivation.SITU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
@@ -550,7 +558,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             topk_ids=topk_ids,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            expert_map=expert_map,
+            expert_mask=expert_map,
             quant_config=self.quant_config,
             moe_config=self.moe_config,
             a1q_scale=a1q_scale,

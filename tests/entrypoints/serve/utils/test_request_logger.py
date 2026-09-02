@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 from unittest.mock import MagicMock, patch
 
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -27,10 +28,10 @@ def test_request_logger_log_outputs():
         mock_logger.info.assert_called_once()
         call_args = mock_logger.info.call_args.args
         assert "Generated response %s%s" in call_args[0]
+        assert "output_token_ids" not in call_args[0]
         assert call_args[1] == "test-123"
         assert call_args[3] == "Hello, world!"
-        assert call_args[4] == [1, 2, 3, 4]
-        assert call_args[5] == "stop"
+        assert call_args[4] == "stop"
 
 
 def test_request_logger_log_outputs_streaming_delta():
@@ -56,8 +57,7 @@ def test_request_logger_log_outputs_streaming_delta():
         assert call_args[1] == "test-456"
         assert call_args[2] == " (streaming delta)"
         assert call_args[3] == "Hello"
-        assert call_args[4] == [1]
-        assert call_args[5] is None
+        assert call_args[4] is None
 
 
 def test_request_logger_log_outputs_streaming_complete():
@@ -83,8 +83,7 @@ def test_request_logger_log_outputs_streaming_complete():
         assert call_args[1] == "test-789"
         assert call_args[2] == " (streaming complete)"
         assert call_args[3] == "Complete response"
-        assert call_args[4] == [1, 2, 3]
-        assert call_args[5] == "length"
+        assert call_args[4] == "length"
 
 
 def test_request_logger_log_outputs_with_truncation():
@@ -117,9 +116,35 @@ def test_request_logger_log_outputs_with_truncation():
         assert len(logged_output) == 10
 
         # Check that token IDs were truncated to first 10 tokens
-        logged_token_ids = call_args[0][4]
+        mock_logger.debug.assert_called_once()
+        logged_token_ids = mock_logger.debug.call_args.args[3]
         assert logged_token_ids == list(range(10))
         assert len(logged_token_ids) == 10
+
+
+def test_request_logger_log_output_token_ids_require_debug():
+    mock_logger = MagicMock()
+    mock_logger.isEnabledFor.side_effect = lambda level: level >= logging.INFO
+
+    with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
+        request_logger = RequestLogger(max_log_len=4)
+
+        request_logger.log_outputs(
+            request_id="test-no-token-ids",
+            outputs="Test output",
+            output_token_ids=[1, 2, 3],
+            finish_reason="stop",
+        )
+
+        mock_logger.info.assert_called_once()
+        assert mock_logger.info.call_args.args == (
+            "Generated response %s%s: output: %r, finish_reason: %s",
+            "test-no-token-ids",
+            "",
+            "Test",
+            "stop",
+        )
+        mock_logger.debug.assert_not_called()
 
 
 def test_request_logger_log_outputs_none_values():
@@ -144,8 +169,7 @@ def test_request_logger_log_outputs_none_values():
         assert "Generated response %s%s" in call_args[0]
         assert call_args[1] == "test-none"
         assert call_args[3] == "Test output"
-        assert call_args[4] is None
-        assert call_args[5] == "stop"
+        assert call_args[4] == "stop"
 
 
 def test_request_logger_log_outputs_empty_output():
@@ -170,8 +194,7 @@ def test_request_logger_log_outputs_empty_output():
         assert "Generated response %s%s" in call_args[0]
         assert call_args[1] == "test-empty"
         assert call_args[3] == ""
-        assert call_args[4] == []
-        assert call_args[5] == "stop"
+        assert call_args[4] == "stop"
 
 
 def test_request_logger_log_outputs_integration():
@@ -245,4 +268,4 @@ def test_streaming_complete_logs_full_text_content():
         # Verify other parameters
         assert call_args[1] == "test-streaming-full-text"
         assert call_args[2] == " (streaming complete)"
-        assert call_args[5] == "streaming_complete"
+        assert call_args[4] == "streaming_complete"

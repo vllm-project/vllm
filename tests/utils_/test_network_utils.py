@@ -8,6 +8,7 @@ import zmq
 
 from vllm.utils import network_utils
 from vllm.utils.network_utils import (
+    get_file_store_init_method,
     get_open_port,
     get_open_ports_list,
     get_tcp_uri,
@@ -17,6 +18,13 @@ from vllm.utils.network_utils import (
     split_host_port,
     split_zmq_path,
 )
+
+
+def test_get_file_store_init_method_is_unique():
+    init_methods = {get_file_store_init_method() for _ in range(2)}
+
+    assert len(init_methods) == 2
+    assert all(method.startswith("file://") for method in init_methods)
 
 
 def _call_with_timeout(func, timeout: float = 10.0):

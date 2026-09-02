@@ -498,7 +498,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         set_default_quant_scales(self, register_buffer=True)
         # Indexer side-cache dtype, mirroring --kv-cache-dtype for the main
         # cache (--attention-config '{"indexer_kv_dtype": ...}').
-        self.indexer_kv_dtype = vllm_config.attention_config.indexer_kv_dtype
+        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+            "bf16"
+        )
 
         # Shared top-k buffer: the indexer writes the selected blocks into it and
         # the attend impl reads them back (so nothing crosses the eager break as a
@@ -562,6 +564,15 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
 
+    def _allocate_query_fp8(self, qkv: torch.Tensor) -> torch.Tensor | None:
+        if not getattr(self.impl, "use_cutlass_decode", False):
+            return None
+        return torch.empty(
+            (qkv.shape[0], self.q_size),
+            dtype=torch.float8_e4m3fn,
+            device=qkv.device,
+        )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -596,16 +607,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         q = qkv.new_empty((num_tokens, self.q_size))
-        use_msa_decode = self.impl.should_use_msa_decode(self.layer_name)
-        query_fp8 = (
-            torch.empty(
-                (num_tokens, self.q_size),
-                dtype=torch.float8_e4m3fn,
-                device=qkv.device,
-            )
-            if use_msa_decode
-            else None
-        )
+        query_fp8 = self._allocate_query_fp8(qkv)
         # index_q matches the index-K cache dtype (e4m3 for the fp8 score path);
         # the fused kernel emits fp8 directly when this buffer is e4m3.
         index_q = qkv.new_empty(
@@ -1057,6 +1059,9 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
 
@@ -1269,6 +1274,9 @@ class MiniMaxM3SparseForConditionalGeneration(
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
+
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.language_model.compute_logits_local(hidden_states)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.language_model.get_expert_mapping()
