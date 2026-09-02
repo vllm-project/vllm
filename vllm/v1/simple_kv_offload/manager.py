@@ -5,6 +5,7 @@
 import contextlib
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
@@ -100,6 +101,36 @@ class StoreRequestState:
     finished: bool = False
 
 
+class _StoreAdmission(Enum):
+    READY = auto()
+    NULL_BLOCK = auto()
+    NOT_HASHED = auto()
+    IN_FLIGHT = auto()
+    ALREADY_CACHED = auto()
+
+
+@dataclass
+class BoundaryStoreStats:
+    """Cumulative counters for boundary hand-off stores.
+
+    Every branch that declines a hand-off is silent by design: the boundary is
+    simply not offloaded and a later request misses. Without counters the only
+    symptom is a lower cache hit rate with nothing in the logs, so each decline
+    reason is counted and exposed through
+    ``SimpleCPUOffloadConnector.get_boundary_store_stats()``. Reset by
+    ``reset()``; not otherwise cleared.
+    """
+
+    published: int = 0
+    stored: int = 0
+    dropped_cpu_full: int = 0
+    dropped_request_gone: int = 0
+    skipped_already_cached: int = 0
+    skipped_in_flight: int = 0
+    dropped_null_block: int = 0
+    dropped_not_hashed: int = 0
+
+
 class SimpleCPUOffloadScheduler:
     """Scheduler-side manager for CPU offloading."""
 
@@ -166,6 +197,7 @@ class SimpleCPUOffloadScheduler:
             pcp_world_size=1,
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
+            allow_partial_hash_hits=not lazy_offload,
         )
         self.group_block_sizes = self.cpu_coordinator.group_block_sizes
         # FA group's own resolved block_size; divides scheduler_block_size (the
@@ -182,10 +214,13 @@ class SimpleCPUOffloadScheduler:
         # the worker reports completions by event index, not request id.
         self._load_event_to_reqs: dict[int, list[str]] = {}
 
-        # Pending (cpu_hit_blocks, hit_length) tuples from find_longest_cache_hit,
-        # kept pinned via touch() while awaiting update_state_after_alloc().
+        # Pending (cpu_hit_blocks, hit_length, num_computed_tokens) tuples from
+        # find_longest_cache_hit, kept pinned via touch() while awaiting
+        # update_state_after_alloc(). ``num_computed_tokens`` is the local
+        # prefix the hit was resolved against; the load path needs it to place
+        # external blocks and must not re-derive it from block metadata.
         self._pending_cpu_hits: dict[
-            str, tuple[tuple[list[KVCacheBlock], ...], int]
+            str, tuple[tuple[list[KVCacheBlock], ...], int, int]
         ] = {}
 
         # Store metadata
@@ -212,6 +247,7 @@ class SimpleCPUOffloadScheduler:
         # Event counters
         self._load_event_counter: int = 0
         self._store_event_counter: int = 0
+        self.boundary_store_stats = BoundaryStoreStats()
 
         # For TP/PP: track partial store completions across steps.
         # Events must be reported by all world_size workers before considered complete.
@@ -293,6 +329,20 @@ class SimpleCPUOffloadScheduler:
         if stale := self._pending_cpu_hits.pop(request.request_id, None):
             self._free_pending_cpu_hit(stale)
 
+        if num_computed_tokens % self.block_size != 0:
+            # Transfers are whole-block copies, so an external suffix cannot
+            # start in the middle of a destination block. When the GPU-side
+            # coordinator also serves fine-grained hits, the local prefix can
+            # land on a hash boundary that is not a scheduler-block boundary;
+            # such a request keeps its local hit and skips the external one.
+            logger.warning_once(
+                "SimpleCPU external lookup requires scheduler-block-aligned "
+                "local tokens, got %d tokens with scheduler block size %d.",
+                num_computed_tokens,
+                self.block_size,
+            )
+            return 0, False
+
         num_skipped_hashes = num_computed_tokens // self.hash_block_size
         remaining_hashes = request.block_hashes[num_skipped_hashes:]
 
@@ -315,6 +365,7 @@ class SimpleCPUOffloadScheduler:
             self._pending_cpu_hits[request.request_id] = (
                 cpu_hit_blocks,
                 hit_length,
+                num_computed_tokens,
             )
             return hit_length, True
         return 0, False
@@ -368,19 +419,20 @@ class SimpleCPUOffloadScheduler:
             )
             return
 
-        cpu_hit_blocks_full, _ = pending
+        cpu_hit_blocks_full, _, num_computed_tokens = pending
 
-        # ``num_external_tokens`` is LCM-aligned (checked per-group below),
-        # so this counts whole scheduler-aligned chunks of incoming tokens.
-        num_blocks_to_load = num_external_tokens // self.block_size
-        assert num_blocks_to_load > 0
-        num_cached_fa_blocks = sum(
-            blk.block_hash is not None for blk in blocks.blocks[self.fa_gidx]
+        assert num_computed_tokens % self.block_size == 0, (
+            "SimpleCPU external loads must start at a scheduler-block boundary"
         )
-        num_computed_tokens = num_cached_fa_blocks * self.fa_block_size
+        # Fine-grained hits are hash-block aligned, not group-block aligned, so
+        # the per-group block count below rounds up instead of dividing exactly.
+        # Hash alignment is still required: it is what makes the accepted
+        # external suffix start on a boundary every group can address.
+        assert num_external_tokens % self.hash_block_size == 0, (
+            f"num_external_tokens={num_external_tokens} is not aligned to "
+            f"hash_block_size={self.hash_block_size}"
+        )
 
-        # Build transfer pairs across all groups.
-        total_computed_tokens = num_computed_tokens + num_external_tokens
         # The scheduler may have accepted fewer blocks than
         # get_num_new_matched_tokens() reported.
         # (e.g. due to token budget in test_partial_gpu_prefix_plus_cpu_load).
@@ -389,11 +441,7 @@ class SimpleCPUOffloadScheduler:
         cpu_hit_blocks: list[list[KVCacheBlock]] = []
         for g in range(num_groups):
             g_block_size = self.group_block_sizes[g]
-            assert num_external_tokens % g_block_size == 0, (
-                f"num_external_tokens={num_external_tokens} not aligned to "
-                f"group {g} block_size={g_block_size}"
-            )
-            n_take_g = num_external_tokens // g_block_size
+            n_take_g = cdiv(num_external_tokens, g_block_size)
             cpu_hit_blocks.append(cpu_hit_blocks_full[g][:n_take_g])
 
         gpu_block_ids: list[int] = []
@@ -406,12 +454,8 @@ class SimpleCPUOffloadScheduler:
             if n_ext_g == 0:
                 continue
 
-            # Number of blocks in the computed range for this group.
             g_block_size = self.group_block_sizes[g]
-            n_computed_g = cdiv(total_computed_tokens, g_block_size)
-
-            # Back-trace: ext blocks sit at the tail of the computed range.
-            gpu_ext_start = n_computed_g - n_ext_g
+            gpu_ext_start = num_computed_tokens // g_block_size
             group_gpu_ids = block_ids_by_group[g]
 
             for i, cpu_blk in enumerate(cpu_blocks_g):
@@ -605,6 +649,72 @@ class SimpleCPUOffloadScheduler:
         num_groups = len(self.cpu_kv_cache_config.kv_cache_groups)
         # Dedup against blocks already scheduled.
         in_flight = self._in_flight_store_gpu_blocks
+        num_free = cpu_block_pool.get_num_free_blocks()
+
+        block_state = scheduler_output.kv_connector_block_state
+        boundary_offloads = (
+            block_state.boundary_state_offloads if block_state is not None else {}
+        )
+        stats = self.boundary_store_stats
+        preempted_req_ids = scheduler_output.preempted_req_ids or ()
+        for req_id, entries in boundary_offloads.items():
+            # The scheduler drains handoffs without filtering by request
+            # liveness. A request that finished or was preempted in this step
+            # is giving up its blocks, which may already have been reallocated
+            # to another request; reading them would publish unrelated KV under
+            # a valid hash. Drop conservatively, as the mooncake store does.
+            store_state = self._reqs_to_store.get(req_id)
+            if (
+                store_state is None
+                or store_state.finished
+                or req_id in preempted_req_ids
+                or req_id in scheduler_output.finished_req_ids
+            ):
+                stats.published += len(entries)
+                stats.dropped_request_gone += len(entries)
+                continue
+            scheduled_for_req = False
+            # ``boundary_tokens`` is not needed here: the cache key comes from
+            # the handed-off block itself, not from the offered boundary.
+            for _, gpu_block_id, _ in entries:
+                stats.published += 1
+                gpu_block = gpu_block_pool.blocks[gpu_block_id]
+                admission = self._classify_store_candidate(gpu_block)
+                if admission is _StoreAdmission.NULL_BLOCK:
+                    stats.dropped_null_block += 1
+                    continue
+                if admission is _StoreAdmission.NOT_HASHED:
+                    stats.dropped_not_hashed += 1
+                    continue
+                if admission is _StoreAdmission.IN_FLIGHT:
+                    stats.skipped_in_flight += 1
+                    continue
+                if admission is _StoreAdmission.ALREADY_CACHED:
+                    stats.skipped_already_cached += 1
+                    continue
+                if num_free <= 0:
+                    stats.dropped_cpu_full += 1
+                    logger.warning_once(
+                        "SimpleCPU dropped a boundary-state handoff because "
+                        "the CPU block pool is full; this boundary will not be retried."
+                    )
+                    continue
+                cpu_block = cpu_block_pool.get_new_blocks(1)[0]
+                merged_gpu_block_ids.append(gpu_block_id)
+                merged_cpu_block_ids.append(cpu_block.block_id)
+                if merged_block_meta is not None:
+                    # Keep the metadata list index-parallel with the block ids.
+                    # The hand-off block's own hashes are resolved at completion,
+                    # so there is nothing to capture here; emit the event without
+                    # a payload, as the size-mismatch fallback already does.
+                    merged_block_meta.append({})
+                in_flight.add(gpu_block_id)
+                gpu_block_pool.touch([gpu_block])
+                num_free -= 1
+                stats.stored += 1
+                scheduled_for_req = True
+            if scheduled_for_req:
+                req_ids.append(req_id)
 
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             state = self._reqs_to_store.get(req_id)
@@ -632,7 +742,7 @@ class SimpleCPUOffloadScheduler:
                 self._select_eager_blocks_to_store(state, block_ids_by_group)
             )
 
-            # --- Phase 2: Batch allocate CPU blocks ---
+            # Batch allocate the CPU destinations.
             n_to_alloc = len(gpu_block_ids)
             if n_to_alloc > 0:
                 cpu_blocks_alloc = cpu_block_pool.get_new_blocks(n_to_alloc)
@@ -685,12 +795,27 @@ class SimpleCPUOffloadScheduler:
         )
         request = state.request
         confirmed_tokens = request.num_computed_tokens - request.num_output_placeholders
-        aligned_tokens = confirmed_tokens // self.block_size * self.block_size
+        # Truncate to the granularity a lookup can actually land on. With
+        # fine-grained hits that is hash_block_size; otherwise hits only land on
+        # the scheduler block (the group LCM). Using the LCM unconditionally
+        # would drop whole blocks that sit between the last LCM boundary and a
+        # reachable fine-grained boundary, so the other groups would hold that
+        # boundary and this one would not, and the joint hybrid lookup would
+        # reconcile to zero.
+        store_alignment = (
+            self.hash_block_size
+            if self.cpu_coordinator.enable_partial_hash_hits
+            else self.block_size
+        )
+        aligned_tokens = confirmed_tokens // store_alignment * store_alignment
         num_free = self.cpu_block_pool.get_num_free_blocks()
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
             if len(gpu_block_ids) >= num_free:
                 break
+            group_manager = self.cpu_coordinator.single_type_managers[g]
+            if not group_manager.has_positionally_stable_blocks:
+                continue
             # FIXME (yifan): handle CPU cache eviction, where
             # num_stored_blocks can be stale and omit evicted blocks in
             # the middle of the request.
@@ -708,15 +833,9 @@ class SimpleCPUOffloadScheduler:
             start = state.num_stored_blocks[g]
             for i, gpu_block_id in enumerate(group_gpu_ids[start:ready], start=start):
                 gpu_block = self._gpu_block_pool.blocks[gpu_block_id]
-                if gpu_block.is_null or gpu_block.block_hash is None:
-                    advanced_per_group[g] += 1
-                    continue
                 if (
-                    gpu_block_id in self._in_flight_store_gpu_blocks
-                    or self.cpu_block_pool.cached_block_hash_to_block.get_one_block(
-                        gpu_block.block_hash
-                    )
-                    is not None
+                    self._classify_store_candidate(gpu_block)
+                    is not _StoreAdmission.READY
                 ):
                     advanced_per_group[g] += 1
                     continue
@@ -783,6 +902,25 @@ class SimpleCPUOffloadScheduler:
                     block_meta.append(meta_by_hash)
 
         return gpu_block_ids, advanced_per_group, block_meta
+
+    def _classify_store_candidate(self, gpu_block: "KVCacheBlock") -> _StoreAdmission:
+        if gpu_block.is_null:
+            return _StoreAdmission.NULL_BLOCK
+        if gpu_block.block_hash is None:
+            return _StoreAdmission.NOT_HASHED
+        if gpu_block.block_id in self._in_flight_store_gpu_blocks:
+            return _StoreAdmission.IN_FLIGHT
+        if (
+            self.cpu_block_pool.cached_block_hash_to_block.get_one_block(
+                gpu_block.block_hash
+            )
+            is not None
+        ):
+            return _StoreAdmission.ALREADY_CACHED
+        return _StoreAdmission.READY
+
+    def get_boundary_store_stats(self) -> BoundaryStoreStats:
+        return replace(self.boundary_store_stats)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Handle async transfer completions from worker.
@@ -1020,9 +1158,11 @@ class SimpleCPUOffloadScheduler:
         self._in_flight_store_gpu_blocks.update(gpu_ids)
         gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
 
-    def _free_pending_cpu_hit(self, pending: tuple) -> None:
+    def _free_pending_cpu_hit(
+        self, pending: tuple[tuple[list["KVCacheBlock"], ...], int, int]
+    ) -> None:
         """Release the temporary CPU block pin taken in get_num_new_matched_tokens()."""
-        cpu_hit_blocks, _ = pending
+        cpu_hit_blocks, _hit_length, _num_computed_tokens = pending
         blocks_to_free = [
             blk for grp in cpu_hit_blocks for blk in grp if not blk.is_null
         ]
@@ -1123,6 +1263,7 @@ class SimpleCPUOffloadScheduler:
             if event_idx in self._abandoned_store_event_to_blocks
         }
         self._cursor = None
+        self.boundary_store_stats = BoundaryStoreStats()
         # NOTE: _load_event_counter / _store_event_counter are not
         # reset as they are monotonic and must stay ahead of the workers
         # high-water marks to avoid event index collisions

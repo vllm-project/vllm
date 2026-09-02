@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import pytest
@@ -32,6 +33,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.output import (
     CachedRequestData,
+    KVConnectorBlockState,
     NewRequestData,
     SchedulerOutput,
 )
@@ -2220,3 +2222,461 @@ def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
         *(b.block_id for b in attention_blocks),
         *(b.block_id for b in mamba_blocks),
     }
+
+
+def test_dcp_mixed_cache_loads_fine_grained_external_hit() -> None:
+    """Map a fine-grained external suffix after a nonzero local prefix."""
+    hash_block_size = BLOCK_SIZE
+    mamba_block_size = 4 * BLOCK_SIZE
+    local_tokens = 4 * BLOCK_SIZE
+    # Span two Mamba blocks and end partially in the second one. This exercises
+    # both cdiv(external_tokens, mamba_block_size) > 1 and the partial tail.
+    external_tokens = 6 * BLOCK_SIZE
+    total_cached_tokens = local_tokens + external_tokens
+    fix = _make_hybrid_attention_mamba_scheduler(
+        num_cpu_blocks=32,
+        num_gpu_blocks=32,
+        block_size=mamba_block_size,
+        hash_block_size=hash_block_size,
+        dcp_world_size=2,
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    assert external_tokens % mamba_block_size != 0
+    assert sched.cpu_coordinator.enable_partial_hash_hits
+
+    producer = _make_cp_request(num_blocks=10, virtual_block_size=hash_block_size)
+    attention_blocks = _allocate_cp_gpu_blocks(
+        gpu_pool,
+        producer,
+        num_blocks=5,
+        virtual_block_size=2 * BLOCK_SIZE,
+        group_id=0,
+    )
+    mamba_blocks = gpu_pool.get_new_blocks(3)
+    gpu_pool.cache_full_blocks(
+        request=producer,
+        blocks=mamba_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=mamba_block_size,
+        kv_cache_group_id=1,
+    )
+    gpu_pool.cache_partial_block(
+        request=producer,
+        block=mamba_blocks[2],
+        num_tokens=total_cached_tokens,
+        kv_cache_group_id=1,
+        block_size=mamba_block_size,
+    )
+    producer_blocks = KVCacheBlocks(blocks=(attention_blocks, mamba_blocks))
+    sched.update_state_after_alloc(producer, producer_blocks, num_external_tokens=0)
+
+    # Positional scanning stores append-only FA blocks. Mamba align blocks use
+    # exact handoffs for every retained boundary, including the partial tail.
+    store_output = make_scheduler_output(
+        {producer.request_id: total_cached_tokens},
+        new_reqs={producer.request_id: producer_blocks.get_block_ids()},
+    )
+    store_output.kv_connector_block_state = KVConnectorBlockState(
+        block_ids={},
+        boundary_state_offloads={
+            producer.request_id: [
+                (1, mamba_blocks[0].block_id, mamba_block_size),
+                (1, mamba_blocks[1].block_id, 2 * mamba_block_size),
+                (1, mamba_blocks[2].block_id, total_cached_tokens),
+            ]
+        },
+    )
+    store_meta = sched.build_connector_meta(store_output)
+    # The exact handoffs land in the step they arrive; the append-only FA scan
+    # picks its blocks up once the scheduler has committed the tokens.
+    assert set(store_meta.store_gpu_blocks) == {
+        block.block_id for block in mamba_blocks
+    }
+    simulate_store_completion(sched, store_meta.store_event)
+    producer.num_computed_tokens = total_cached_tokens
+    fa_meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {producer.request_id: 1},
+            cached_req_new_blocks={producer.request_id: None},
+        )
+    )
+    assert set(fa_meta.store_gpu_blocks) == {
+        block.block_id for block in attention_blocks
+    }
+    simulate_store_completion(sched, fa_meta.store_event)
+
+    consumer = Request(
+        request_id="req-dcp-mixed-fine-load",
+        prompt_token_ids=producer.prompt_token_ids,
+        sampling_params=producer.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=producer._block_hasher,
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(
+        consumer, num_computed_tokens=local_tokens
+    )
+    assert hit_tokens == external_tokens
+    assert is_async is True
+    pending_blocks, pending_tokens, _ = sched._pending_cpu_hits[consumer.request_id]
+    assert pending_tokens == external_tokens
+    assert len(pending_blocks[1]) == 2
+    assert pending_blocks[1][0].is_null
+    assert not pending_blocks[1][1].is_null
+
+    local_attention = attention_blocks[:2]
+    local_mamba = mamba_blocks[:1]
+    load_blocks = KVCacheBlocks(
+        blocks=(
+            local_attention + gpu_pool.get_new_blocks(3),
+            local_mamba + gpu_pool.get_new_blocks(2),
+        )
+    )
+    sched.update_state_after_alloc(
+        consumer,
+        load_blocks,
+        num_external_tokens=hit_tokens,
+    )
+    load_meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {consumer.request_id: 1},
+            new_reqs={consumer.request_id: load_blocks.get_block_ids()},
+        )
+    )
+    assert load_meta.load_gpu_blocks == [
+        *(block.block_id for block in load_blocks.blocks[0][2:5]),
+        load_blocks.blocks[1][2].block_id,
+    ]
+    assert len(load_meta.load_cpu_blocks) == 4
+
+
+def test_finished_eager_store_caches_fa_partial_tail_for_hybrid_hit() -> None:
+    """A finished non-LCM prompt needs the FA partial tail in CPU too."""
+    hash_block_size = BLOCK_SIZE
+    mamba_block_size = BLOCK_SIZE
+    attention_block_size = 4 * BLOCK_SIZE
+    dcp_world_size = 2
+    scheduler_block_size = attention_block_size * dcp_world_size
+    total_cached_tokens = 5 * hash_block_size
+    fix = _make_hybrid_attention_mamba_scheduler(
+        num_cpu_blocks=32,
+        num_gpu_blocks=32,
+        attention_block_size=attention_block_size,
+        block_size=mamba_block_size,
+        scheduler_block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+        dcp_world_size=dcp_world_size,
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    assert sched.fa_block_size == scheduler_block_size
+    assert total_cached_tokens % sched.fa_block_size != 0
+
+    producer = _make_cp_request(num_blocks=5, virtual_block_size=hash_block_size)
+    attention_blocks = gpu_pool.get_new_blocks(1)
+    gpu_pool.cache_partial_block(
+        request=producer,
+        block=attention_blocks[0],
+        num_tokens=total_cached_tokens,
+        kv_cache_group_id=0,
+        block_size=scheduler_block_size,
+    )
+    mamba_blocks = gpu_pool.get_new_blocks(5)
+    gpu_pool.cache_full_blocks(
+        request=producer,
+        blocks=mamba_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=5,
+        kv_cache_group_id=1,
+        block_size=mamba_block_size,
+    )
+    producer_blocks = KVCacheBlocks(blocks=(attention_blocks, mamba_blocks))
+    sched.update_state_after_alloc(producer, producer_blocks, num_external_tokens=0)
+
+    store_output = make_scheduler_output(
+        {producer.request_id: total_cached_tokens},
+        new_reqs={producer.request_id: producer_blocks.get_block_ids()},
+    )
+    store_output.kv_connector_block_state = KVConnectorBlockState(
+        block_ids={},
+        boundary_state_offloads={
+            producer.request_id: [
+                (1, mamba_blocks[4].block_id, total_cached_tokens),
+            ]
+        },
+    )
+    store_meta = sched.build_connector_meta(store_output)
+    simulate_store_completion(sched, store_meta.store_event)
+
+    producer.num_computed_tokens = total_cached_tokens
+    sched.request_finished_all_groups(producer, producer_blocks.get_block_ids())
+    finish_meta = sched.build_connector_meta(make_scheduler_output({}))
+    assert attention_blocks[0].block_id in finish_meta.store_gpu_blocks
+    simulate_store_completion(sched, finish_meta.store_event)
+
+    consumer = Request(
+        request_id="req-finished-partial-tail-load",
+        prompt_token_ids=producer.prompt_token_ids,
+        sampling_params=producer.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=producer._block_hasher,
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(
+        consumer, num_computed_tokens=0
+    )
+    assert hit_tokens == total_cached_tokens
+    assert is_async is True
+
+
+def test_external_lookup_rejects_misaligned_local_prefix(caplog_vllm) -> None:
+    scheduler_block_size = 4 * BLOCK_SIZE
+    fix = _make_hybrid_attention_mamba_scheduler(block_size=scheduler_block_size)
+
+    request = _make_cp_request(num_blocks=2, virtual_block_size=scheduler_block_size)
+    # The ``vllm`` logger sets propagate=False, so plain ``caplog`` can observe
+    # nothing; ``caplog_vllm`` re-enables propagation for the duration.
+    with caplog_vllm.at_level(logging.WARNING):
+        hit_tokens, is_async = fix.scheduler.get_num_new_matched_tokens(
+            request, num_computed_tokens=BLOCK_SIZE
+        )
+
+    assert (hit_tokens, is_async) == (0, False)
+    assert "requires scheduler-block-aligned local tokens" in caplog_vllm.text
+
+
+def test_fine_grained_external_hits_require_eager_offload() -> None:
+    hash_block_size = BLOCK_SIZE
+    scheduler_block_size = 4 * BLOCK_SIZE
+
+    eager = _make_hybrid_attention_mamba_scheduler(
+        block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+    )
+    lazy = _make_hybrid_attention_mamba_scheduler(
+        block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+        lazy=True,
+    )
+
+    assert eager.scheduler.cpu_coordinator.enable_partial_hash_hits
+    assert not lazy.scheduler.cpu_coordinator.enable_partial_hash_hits
+
+
+def test_eager_store_does_not_scan_mamba_blocks_positionally() -> None:
+    """Mamba stores must use exact handoffs, not historical block positions."""
+    block_size = 4 * BLOCK_SIZE
+    fix = _make_hybrid_attention_mamba_scheduler(
+        num_cpu_blocks=16, num_gpu_blocks=24, block_size=block_size
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    attention_manager, mamba_manager = sched.cpu_coordinator.single_type_managers
+    assert attention_manager.has_positionally_stable_blocks
+    assert not mamba_manager.has_positionally_stable_blocks
+
+    req = _make_cp_request(num_blocks=2, virtual_block_size=block_size)
+    attn_blocks = _allocate_cp_gpu_blocks(
+        gpu_pool, req, 2, virtual_block_size=block_size, group_id=0
+    )
+    gpu_blocks = gpu_pool.get_new_blocks(2)
+    gpu_blocks[1].set_block_hash(make_block_hash_with_group_id(req.block_hashes[1], 1))
+    kv_blocks = KVCacheBlocks(blocks=(attn_blocks, gpu_blocks))
+    req.num_computed_tokens = 0
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+
+    output = make_scheduler_output(
+        {req.request_id: 2 * block_size},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    output.kv_connector_block_state = KVConnectorBlockState(
+        block_ids={},
+        boundary_state_offloads={
+            req.request_id: [(1, gpu_blocks[1].block_id, 2 * block_size)]
+        },
+    )
+    meta1 = sched.build_connector_meta(output)
+    assert meta1.store_event >= 0
+    # Only the exact handoff lands this step. build_connector_meta runs before
+    # the scheduler commits this step's tokens, so the positional scan has
+    # nothing confirmed yet.
+    assert set(meta1.store_gpu_blocks) == {gpu_blocks[1].block_id}
+    assert sched._reqs_to_store[req.request_id].num_stored_blocks == [0, 0]
+    simulate_store_completion(sched, meta1.store_event)
+
+    # Next step the attention blocks are confirmed and scanned positionally. A
+    # later hash update still must not make the mamba align snapshot a valid
+    # source; the explicit boundary-handoff tests cover the supported path.
+    gpu_blocks[0].set_block_hash(make_block_hash_with_group_id(req.block_hashes[0], 1))
+    req.num_computed_tokens = 2 * block_size
+    meta2 = sched.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: 1},
+            cached_req_new_blocks={req.request_id: None},
+        )
+    )
+    assert set(meta2.store_gpu_blocks) == {block.block_id for block in attn_blocks}
+    assert sched._reqs_to_store[req.request_id].num_stored_blocks == [2, 0]
+    simulate_store_completion(sched, meta2.store_event)
+
+    # Nothing further: mamba align is never picked up positionally.
+    meta3 = sched.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: 1},
+            cached_req_new_blocks={req.request_id: None},
+        )
+    )
+    assert meta3.store_event == -1
+    assert meta3.store_gpu_blocks == []
+    assert sched._reqs_to_store[req.request_id].num_stored_blocks == [2, 0]
+
+
+def test_eager_store_scans_mamba_all_blocks_positionally() -> None:
+    """Mamba all-mode retains positional identity and needs no handoff."""
+    block_size = 4 * BLOCK_SIZE
+    fix = _make_hybrid_attention_mamba_scheduler(
+        num_cpu_blocks=16,
+        num_gpu_blocks=24,
+        block_size=block_size,
+        mamba_cache_mode="all",
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    attention_manager, mamba_manager = sched.cpu_coordinator.single_type_managers
+    assert attention_manager.has_positionally_stable_blocks
+    assert mamba_manager.has_positionally_stable_blocks
+
+    req = _make_cp_request(num_blocks=2, virtual_block_size=block_size)
+    attention_blocks = _allocate_cp_gpu_blocks(
+        gpu_pool, req, 2, virtual_block_size=block_size, group_id=0
+    )
+    mamba_blocks = _allocate_cp_gpu_blocks(
+        gpu_pool, req, 2, virtual_block_size=block_size, group_id=1
+    )
+    kv_blocks = KVCacheBlocks(blocks=(attention_blocks, mamba_blocks))
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+
+    # build_connector_meta runs before the scheduler commits this step's
+    # tokens, so the positional scan picks the blocks up on the next step.
+    first = sched.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: 2 * block_size},
+            new_reqs={req.request_id: kv_blocks.get_block_ids()},
+        )
+    )
+    assert first.store_gpu_blocks == []
+    req.num_computed_tokens = 2 * block_size
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: 1},
+            cached_req_new_blocks={req.request_id: None},
+        )
+    )
+
+    assert set(meta.store_gpu_blocks) == {
+        *(block.block_id for block in attention_blocks),
+        *(block.block_id for block in mamba_blocks),
+    }
+    assert sched._reqs_to_store[req.request_id].num_stored_blocks == [2, 2]
+
+
+@pytest.mark.parametrize("gone_via", ["preempted", "finished", "unregistered"])
+def test_boundary_handoff_dropped_for_departing_request(gone_via: str) -> None:
+    """Handoffs for a request leaving this step must not be read.
+
+    The scheduler drains boundary handoffs without filtering by request
+    liveness, so a preempted or finished request can still offer block IDs.
+    Those blocks are being released and may already back another request, so
+    copying them would publish unrelated KV under a valid hash.
+    """
+    block_size = 4 * BLOCK_SIZE
+    fix = _make_hybrid_attention_mamba_scheduler(
+        num_cpu_blocks=16, num_gpu_blocks=24, block_size=block_size
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    req = _make_cp_request(num_blocks=2, virtual_block_size=block_size)
+    attn_blocks = _allocate_cp_gpu_blocks(
+        gpu_pool, req, 2, virtual_block_size=block_size, group_id=0
+    )
+    mamba_blocks = gpu_pool.get_new_blocks(2)
+    mamba_blocks[1].set_block_hash(
+        make_block_hash_with_group_id(req.block_hashes[1], 1)
+    )
+    kv_blocks = KVCacheBlocks(blocks=(attn_blocks, mamba_blocks))
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+
+    output = make_scheduler_output(
+        {req.request_id: 2 * block_size},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    output.kv_connector_block_state = KVConnectorBlockState(
+        block_ids={},
+        boundary_state_offloads={
+            req.request_id: [(1, mamba_blocks[1].block_id, 2 * block_size)]
+        },
+    )
+    if gone_via == "preempted":
+        output.preempted_req_ids = {req.request_id}
+    elif gone_via == "finished":
+        output.finished_req_ids = {req.request_id}
+    else:
+        sched._reqs_to_store.pop(req.request_id)
+
+    meta = sched.build_connector_meta(output)
+
+    # The exact-handoff block is never a store source for a departing request.
+    assert mamba_blocks[1].block_id not in meta.store_gpu_blocks
+    stats = sched.get_boundary_store_stats()
+    assert stats.dropped_request_gone == 1
+    assert stats.stored == 0
+
+
+def test_boundary_handoff_keeps_block_meta_index_parallel() -> None:
+    """Boundary stores must extend block_meta alongside the block ids.
+
+    ``_process_store_completion`` indexes ``block_meta`` by position, so a
+    boundary handoff that appends only block ids shortens the list, trips its
+    length assertion and shifts every following entry's metadata.
+    """
+    block_size = 4 * BLOCK_SIZE
+    fix = _make_hybrid_attention_mamba_scheduler(
+        num_cpu_blocks=16,
+        num_gpu_blocks=24,
+        block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    assert sched.enable_kv_cache_events
+
+    req = _make_cp_request(num_blocks=2, virtual_block_size=block_size)
+    attn_blocks = _allocate_cp_gpu_blocks(
+        gpu_pool, req, 2, virtual_block_size=block_size, group_id=0
+    )
+    mamba_blocks = gpu_pool.get_new_blocks(2)
+    mamba_blocks[1].set_block_hash(
+        make_block_hash_with_group_id(req.block_hashes[1], 1)
+    )
+    kv_blocks = KVCacheBlocks(blocks=(attn_blocks, mamba_blocks))
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+
+    output = make_scheduler_output(
+        {req.request_id: 2 * block_size},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    output.kv_connector_block_state = KVConnectorBlockState(
+        block_ids={},
+        boundary_state_offloads={
+            req.request_id: [(1, mamba_blocks[1].block_id, 2 * block_size)]
+        },
+    )
+
+    gpu_ids, cpu_ids, _, block_meta = sched.prepare_store_specs(output)
+    assert mamba_blocks[1].block_id in gpu_ids
+    assert block_meta is not None
+    assert len(block_meta) == len(gpu_ids) == len(cpu_ids)
