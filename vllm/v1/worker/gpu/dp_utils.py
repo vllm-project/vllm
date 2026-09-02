@@ -7,12 +7,14 @@ from dataclasses import dataclass, replace
 import torch
 import torch.distributed as dist
 
+from vllm.config import ParallelConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
+from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
 
 
 @dataclass(frozen=True)
@@ -45,38 +47,110 @@ def sync_cudagraph_and_dp_padding(
     dp_rank: int,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
+    parallel_config: ParallelConfig | None = None,
+    allow_ubatching: bool = False,
+    uniform_decode: bool = False,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """
     Coordinates the batch descriptor and DP padding across all ranks.
+
+    `parallel_config` is only needed to decide whether to microbatch, so callers
+    that never do (`allow_ubatching=False`) can leave it out.
 
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(4, dp_size, dtype=torch.int32, device="cpu")
+    tensor = torch.zeros(5, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
+    tensor[4][dp_rank] = int(allow_ubatching)
     dist.all_reduce(tensor, group=group)
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
     uniform_token_counts_across_dp = tensor[2]
     max_query_lens_across_dp = tensor[3]
+    allow_ubatching_across_dp = tensor[4]
 
-    # If ranks disagree on the uniform token count, or its 0 (means None) set to None
-    synced_uniform_token_count: int | None = int(uniform_token_counts_across_dp[0])
-    if synced_uniform_token_count == 0 or not torch.all(
-        uniform_token_counts_across_dp == synced_uniform_token_count
-    ):
-        synced_uniform_token_count = None
+    synced_uniform_token_count = _synced_uniform_token_count(
+        uniform_token_counts_across_dp
+    )
 
     if torch.all(num_tokens_across_dp == 0).item():
         synced_desc = BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE, num_tokens=0, num_reqs=0
         )
         return synced_desc, None
+
+    if bool(torch.all(allow_ubatching_across_dp == 1).item()):
+        # This rank voted too, so it asked for microbatching itself.
+        assert parallel_config is not None
+        # The group is a uniform decode only if every rank runs the same uniform
+        # query length as this one, which this rank already compared against its
+        # own decode length. That length is identical group-wide, so every rank
+        # comes to the same answer here.
+        uniform_decode_across_dp = uniform_decode and bool(
+            torch.all(
+                uniform_token_counts_across_dp == (uniform_token_count or 0)
+            ).item()
+        )
+        should_ubatch = check_ubatch_thresholds(
+            parallel_config,
+            # The thresholds only grow with the token count, so holding the
+            # smallest rank to them is the same as holding every rank to them.
+            int(num_tokens_across_dp.min().item()),
+            uniform_decode=uniform_decode_across_dp,
+        )
+    else:
+        should_ubatch = False
+
+    if should_ubatch:
+        # Microbatching is all-or-nothing: every rank has to split, because the
+        # expert all-to-all is collective, and every rank has to run the same
+        # number of tokens so each can assume the others' microbatches are the
+        # same size. A rank with too few tokens to fill every microbatch pads
+        # into them and does no work there, the same way a dummy run does.
+        ubatch_num_tokens = int(num_tokens_across_dp.max().item())
+        assert parallel_config is not None
+        num_ubatches = get_num_ubatches(parallel_config)
+        if cudagraph_manager is not None:
+            # Try a captured FULL graph for this shape, the same dispatch the
+            # non-ubatched path below uses. It has to be asked with the synced
+            # uniform token count, because for backends that only support
+            # uniform batches (MLA) the FULL graphs -- microbatched ones
+            # included -- are the uniform-decode ones. `dispatch` falls back to
+            # a NONE descriptor when nothing matches (no graph captured for
+            # this shape, or eager-only mode), so microbatched steps run
+            # whether or not a graph exists.
+            ubatch_desc = cudagraph_manager.dispatch(
+                num_reqs,
+                ubatch_num_tokens,
+                synced_uniform_token_count,
+                num_active_loras=num_active_loras,
+                num_ubatches=num_ubatches,
+            )
+            # Dispatch rounds the token count up to the captured size, and
+            # every rank has to run what the graph expects.
+            ubatch_num_tokens = ubatch_desc.num_tokens
+        else:
+            # cudagraph_manager is only None during the profile run, where
+            # every rank runs eager.
+            ubatch_desc = BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=ubatch_num_tokens,
+                num_reqs=num_reqs,
+                num_ubatches=num_ubatches,
+            )
+        return ubatch_desc, DPSyncState(
+            num_tokens_across_dp=torch.full_like(
+                num_tokens_across_dp, ubatch_num_tokens
+            ),
+            uniform_token_count=synced_uniform_token_count,
+            eager=ubatch_desc.cg_mode == CUDAGraphMode.NONE,
+        )
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min().item()))
 
@@ -129,6 +203,19 @@ def sync_cudagraph_and_dp_padding(
     )
 
 
+def _synced_uniform_token_count(
+    uniform_token_counts_across_dp: torch.Tensor,
+) -> int | None:
+    """The uniform token count all ranks share, or None if they disagree.
+
+    0 is how a rank encodes None in the all-reduce.
+    """
+    count = int(uniform_token_counts_across_dp[0].item())
+    if count == 0 or not torch.all(uniform_token_counts_across_dp == count):
+        return None
+    return count
+
+
 def dispatch_cg_and_sync_dp(
     cudagraph_manager: CudaGraphManager | None,
     num_reqs: int,
@@ -139,6 +226,9 @@ def dispatch_cg_and_sync_dp(
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
+    parallel_config: ParallelConfig | None = None,
+    allow_ubatching: bool = False,
+    uniform_decode: bool = False,
     dp_sync: DPSyncState | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
@@ -227,4 +317,7 @@ def dispatch_cg_and_sync_dp(
         dp_rank,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
+        parallel_config=parallel_config,
+        allow_ubatching=allow_ubatching,
+        uniform_decode=uniform_decode,
     )
