@@ -40,6 +40,7 @@ from vllm.multimodal.video_decoders.pynvvideocodec import (
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
+from vllm.utils.import_utils import _PlaceholderModuleAttr
 
 from .utils import (
     create_edit_list_trimmed_video,
@@ -1509,8 +1510,11 @@ def test_unusable_torchcodec_falls_back_to_placeholder(exc):
         with patch.object(builtins, "__import__", fake_import):
             reloaded = importlib.reload(module)
 
-        # The placeholder defers the failure to use time.
-        with pytest.raises(ModuleNotFoundError):
-            reloaded.VideoDecoder()
+            # The guard swallowed the failure and bound the placeholder rather
+            # than letting the exception escape the import. Assert that here
+            # instead of calling the placeholder: its __getattr__ re-imports
+            # torchcodec for real, so the error a call raises depends on
+            # whether the host has a working torchcodec installed.
+            assert isinstance(reloaded.VideoDecoder, _PlaceholderModuleAttr)
     finally:
         importlib.reload(module)
