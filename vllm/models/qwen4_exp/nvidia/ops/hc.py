@@ -197,7 +197,6 @@ def _hc_combine_kernel(
     stride_out,
     HC_DIM: tl.constexpr,
     HC: tl.constexpr,
-    HAS_INJECTION: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     launch_pdl: tl.constexpr,
 ) -> None:
@@ -216,18 +215,19 @@ def _hc_combine_kernel(
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
 
-    if HAS_INJECTION:
+    if inj_ptr is not None:
         inj = tl.load(inj_ptr + row * stride_inj + offs_hc, mask_hc, other=0.0)
-    block = tl.load(block_ptr + row * stride_block + offs_inner, mask_inner, 0.0)
+    block = tl.load(
+        block_ptr + row * stride_block + offs_inner, mask_inner, other=0.0
+    ).to(tl.float32)[None, :]
     res = tl.load(res_ptr + row * stride_res + offs, mask, other=0.0)
 
     # Keeping HC as a broadcast dimension is faster here than four separate
     # residual load/store sequences.
-    if HAS_INJECTION:
+    if inj_ptr is not None:
         scale = 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)
-    else:
-        scale = tl.full([HC_PAD], 1.0, tl.float32)
-    out = res.to(tl.float32) + block.to(tl.float32)[None, :] * scale[:, None]
+        block *= scale[:, None]
+    out = res.to(tl.float32) + block
 
     if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
@@ -250,7 +250,6 @@ def _hc_combine(
         assert injection_logits.shape == (N, hc_count)
         assert injection_logits.stride(1) == 1
 
-    injection_ptr = injection_logits if injection_logits is not None else residual
     stride_injection = injection_logits.stride(0) if injection_logits is not None else 0
 
     out = residual.new_empty(residual.shape)
@@ -258,7 +257,7 @@ def _hc_combine(
     _hc_combine_kernel[(N, triton.cdiv(hc_dim, BLOCK_SIZE))](
         block_output,
         residual,
-        injection_ptr,
+        injection_logits,
         out,
         block_output.stride(0),
         residual.stride(0),
@@ -266,8 +265,7 @@ def _hc_combine(
         out.stride(0),
         hc_dim,
         hc_count,
-        HAS_INJECTION=injection_logits is not None,
-        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_SIZE,
         launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return out
@@ -288,36 +286,26 @@ def _hc_combine_norm_kernel(
     stride_y,
     HC_DIM: tl.constexpr,
     HC: tl.constexpr,
-    HAS_INJECTION: tl.constexpr,
     W_SHARED: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     launch_pdl: tl.constexpr,
 ) -> None:
-    if HAS_INJECTION:
-        row = tl.program_id(0)
-        stream = tl.program_id(1)
-        HC_PAD: tl.constexpr = triton.next_power_of_2(HC)
-        NUM_TILES: tl.constexpr = triton.cdiv(HC_DIM, BLOCK_SIZE)
-        NUM_TILES_PAD: tl.constexpr = triton.next_power_of_2(NUM_TILES)
-        offs_hc = tl.arange(0, HC_PAD)
-        mask_hc = offs_hc < HC
-        tile_ids = tl.arange(0, NUM_TILES_PAD)
-        offs_inner = tile_ids[:, None] * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[None, :]
-        mask_inner = offs_inner < HC_DIM
-        offs = stream * HC_DIM + offs_inner
-        # Shared norm weights repeat across streams; per-branch weights use the
-        # same flattened HC layout as the residual.
-        w_offs = offs_inner if W_SHARED else offs
-    else:
-        pid = tl.program_id(0)
-        row = pid // HC
-        stream = pid % HC
-        UNIT_BLOCK_SIZE: tl.constexpr = triton.next_power_of_2(HC_DIM)
-        offs_inner = tl.arange(0, UNIT_BLOCK_SIZE)
-        mask_inner = offs_inner < HC_DIM
-        offs = stream * HC_DIM + offs_inner
-        w_offs = offs_inner if W_SHARED else offs
+    HC_PAD: tl.constexpr = triton.next_power_of_2(HC)
+    NUM_TILES: tl.constexpr = triton.cdiv(HC_DIM, BLOCK_SIZE)
+    NUM_TILES_PAD: tl.constexpr = triton.next_power_of_2(NUM_TILES)
+
+    row = tl.program_id(0)
+    stream = tl.program_id(1)
+    offs_hc = tl.arange(0, HC_PAD)
+    mask_hc = offs_hc < HC
+    tile_ids = tl.arange(0, NUM_TILES_PAD)
+    offs_inner = tile_ids[:, None] * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[None, :]
+    mask_inner = offs_inner < HC_DIM
+    offs = stream * HC_DIM + offs_inner
+    # Shared norm weights repeat across streams; per-branch weights use the
+    # same flattened HC layout as the residual.
+    w_offs = offs_inner if W_SHARED else offs
 
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
@@ -325,53 +313,37 @@ def _hc_combine_norm_kernel(
     # Start the uncached residual load first, then issue the other combine
     # loads before consuming any of them.
     res = tl.load(res_ptr + row * stride_res + offs, mask_inner, other=0.0)
-    if HAS_INJECTION:
+    if inj_ptr is not None:
         inj = tl.load(inj_ptr + row * stride_inj + offs_hc, mask_hc, other=0.0)
     block = tl.load(
         block_ptr + row * stride_block + offs_inner,
         mask_inner,
         other=0.0,
-    )
-    if HAS_INJECTION:
+    ).to(tl.float32)
+    if inj_ptr is not None:
         inj = 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)
         scale = tl.sum(tl.where(offs_hc == stream, inj, 0.0))
-    else:
-        scale = 1.0
+        block *= scale
     # Round the materialized combine result before normalization. This matches
     # the unfused combine -> RMSNorm boundary.
-    out = (res.to(tl.float32) + block.to(tl.float32) * scale).to(
-        out_ptr.dtype.element_ty
-    )
+    out = (res.to(tl.float32) + block).to(out_ptr.dtype.element_ty)
+    tl.store(out_ptr + row * stride_out + offs, out, mask=mask_inner)
 
-    if HAS_INJECTION:
-        tl.store(out_ptr + row * stride_out + offs, out, mask=mask_inner)
-        out = out.to(tl.float32)
-        # Keep the two-axis reduction: flattening the padded tile is ~40% slower
-        # at decode sizes.
-        sum_sq = tl.sum(tl.sum(out * out, axis=1), axis=0)
-        rrms = tl.rsqrt(sum_sq / HC_DIM + EPS)
+    out = out.to(tl.float32)
+    # Keep the two-axis reduction: flattening the padded tile is ~40% slower
+    # at decode sizes.
+    sum_sq = tl.sum(tl.sum(out * out, axis=1), axis=0)
+    rrms = tl.rsqrt(sum_sq / HC_DIM + EPS)
 
-        if launch_pdl:
-            tl.extra.cuda.gdc_launch_dependents()
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
 
-        # Loading the weight earlier helps decode but keeps the tile live across
-        # the reduction and regresses larger batches, so defer it to the norm.
-        w = tl.load(w_ptr + w_offs, mask_inner, other=0.0)
-        y = out * rrms
-        y += y * w.to(tl.float32)
-        tl.store(y_ptr + row * stride_y + offs, y, mask_inner)
-    else:
-        w = tl.load(w_ptr + w_offs, mask_inner, other=0.0)
-        out_fp32 = out.to(tl.float32)
-        rrms = tl.rsqrt(tl.sum(out_fp32 * out_fp32) / HC_DIM + EPS)
-        y = out_fp32 * rrms
-        y += y * w.to(tl.float32)
-
-        if launch_pdl:
-            tl.extra.cuda.gdc_launch_dependents()
-
-        tl.store(out_ptr + row * stride_out + offs, out, mask_inner)
-        tl.store(y_ptr + row * stride_y + offs, y, mask_inner)
+    # Loading the weight earlier helps decode but keeps the tile live across
+    # the reduction and regresses larger batches, so defer it to the norm.
+    w = tl.load(w_ptr + w_offs, mask_inner, other=0.0)
+    y = out * rrms
+    y += y * w.to(tl.float32)
+    tl.store(y_ptr + row * stride_y + offs, y, mask_inner)
 
 
 def _hc_combine_norm(
@@ -394,17 +366,15 @@ def _hc_combine_norm(
     assert norm_weight.is_contiguous()
     assert norm_weight.numel() in (hc_dim, DIM)
 
-    injection_ptr = injection_logits if injection_logits is not None else residual
     stride_injection = injection_logits.stride(0) if injection_logits is not None else 0
 
     out = residual.new_empty(residual.shape)
     y = residual.new_empty(residual.shape)
     BLOCK_SIZE = 512
-    grid = (N, hc_count) if injection_logits is not None else (N * hc_count,)
-    _hc_combine_norm_kernel[grid](
+    _hc_combine_norm_kernel[(N, hc_count)](
         block_output,
         residual,
-        injection_ptr,
+        injection_logits,
         norm_weight,
         out,
         y,
@@ -415,7 +385,6 @@ def _hc_combine_norm(
         y.stride(0),
         hc_dim,
         hc_count,
-        HAS_INJECTION=injection_logits is not None,
         W_SHARED=norm_weight.numel() == hc_dim,
         EPS=eps,
         BLOCK_SIZE=BLOCK_SIZE,
