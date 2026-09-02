@@ -19,10 +19,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.simple_kv_offload.cuda_mem_ops import (
-    HOST_REGISTER_CHUNK_BYTES,
-    pin_tensor,
-)
+from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
 logger = init_logger(__name__)
 
@@ -237,10 +234,11 @@ def allocate_hisparse_host_pools(
         populate_only_on_creator=True,
     )
     try:
-        region.pinned_addresses = pin_tensor(
-            region.base_tensor,
-            max_chunk_bytes=HOST_REGISTER_CHUNK_BYTES,
-        )
+        # Register in a single call: cuMemcpyBatchAsync rejects any copy
+        # descriptor that spans two adjacent cudaHostRegister registrations
+        # (CUDA_ERROR_INVALID_VALUE), and spill/mirror descriptors are not
+        # aligned to chunk boundaries.
+        region.pinned_addresses = pin_tensor(region.base_tensor)
         region.is_pinned = True
         pools = [
             region.create_next_canonical_view(size).view(-1) for size in tensor_sizes
